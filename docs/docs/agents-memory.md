@@ -1,7 +1,7 @@
 ---
 order: 3
 title: Memory
-description: '智能体使用 Memory 来维护交互中的上下文。LLM 是无状态的，不会在调用之间保留信息，因此智能体需要 Memory 来跟踪消息历史记录并调用相关信息。'
+description: ' Agent 使用 Memory 来维护交互中的上下文。LLM 是无状态的，不会在调用之间保留信息，因此 Agent 需要 Memory 来跟踪消息历史记录并调用相关信息。'
 keywords: [Mastra, AI, Agents, Memory]
 toc: content
 group:
@@ -11,16 +11,16 @@ group:
 
 # 记忆 Memory
 
-智能体使用 Memory 来维护交互中的上下文。LLM 是无状态的，不会在调用之间保留信息，因此智能体需要 Memory 来跟踪消息历史记录并调用相关信息。
+ Agent 使用 Memory 来维护交互中的上下文。LLM 是无状态的，不会在调用之间保留信息，因此 Agent 需要 Memory 来跟踪消息历史记录并调用相关信息。
 
-Mastra 智能体可以配置为存储消息历史记录，并使用可选的工作记忆（Working Memory）来维护最近的上下文或语义召回（semantic recall）以根据语义检索过去的消息。
+Mastra Agents 可以配置为存储消息历史记录，并使用可选的工作记忆（Working Memory）来维护最近的上下文或语义召回（semantic recall）以根据语义检索过去的消息。
 
 ## 何时使用 Memory
 
-当你的智能体需要进行多轮对话（涉及引用先前交流内容、召回用户偏好或会话早期的事实，或在对话中逐步构建上下文）时，请启用记忆功能。对于单轮请求（每次交互独立），则无需启用记忆功能。
+当你的 Agent 需要进行多轮对话（涉及引用先前交流内容、召回用户偏好或会话早期的事实，或在对话中逐步构建上下文）时，请启用记忆功能。对于单轮请求（每次交互独立），则无需启用记忆功能。
 
 :::warn
-单轮会话的智能体想不到有什么实际应用场景，所以记忆功能是智能体的核心出装才对，并不是可选项。
+单轮会话的 Agent 想不到有什么实际应用场景，所以记忆功能是 Agent 的核心出装才对，并不是可选项。
 :::
 
 ## 设置记忆
@@ -37,7 +37,7 @@ memory 需要存储提供程序来持久化消息历史记录，包括用户消�
 
 ## 配置 Memory
 
-**1、通过创建一个 Memory 实例并将其传递给智能体的 `memory` 选项来启用：**
+**1、通过创建一个 Memory 实例并将其传递给 Agent 的 `memory` 选项来启用：**
 
 ```ts
 // src/mastra/agents/memory-agent.ts
@@ -59,7 +59,7 @@ export const memoryAgent = new Agent({
 访问 [Memory Class](https://mastra.ai/reference/v1/memory/memory-class) 获取完整的配置选项。
 :::
 
-**2、向你的主 Mastra 实例添加存储提供程序，以在所有已配置的智能体重启用内存功能：**
+**2、向你的主 Mastra 实例添加存储提供程序，以在所有已配置的 Agent 重启用内存功能：**
 
 ```ts
 // src/mastra/index.ts
@@ -78,7 +78,7 @@ export const mastra = new Mastra({
 访问 [libSQL Storage](https://mastra.ai/reference/v1/storage/libsql) 获取完整的配置选项。
 :::
 
-或者，可以将存储直接添加到智能体的 memory 中以保持数据分离，你也可以为每个智能体使用不同的提供程序：
+或者，可以将存储直接添加到 Agent 的 memory 中以保持数据分离，你也可以为每个 Agent 使用不同的提供程序：
 
 ```ts
 // src/mastra/agents/memory-agent.ts
@@ -100,12 +100,12 @@ export const memoryAgent = new Agent({
 
 ## 消息历史记录
 
-同时包含一个 `memory`、`resource` 和 `thread` 对象，用于在智能体期间跟踪消息历史记录。
+同时包含一个 `memory`、`resource` 和 `thread` 对象，用于在 Agent 期间跟踪消息历史记录。
 
 - `resource`：用户或实体的稳定标识符
 - `thread`：用于隔离特定对话或会话的标识符。
 
-这些字段告知智能体在何处存储或检索上下文，从而在整个对话过程中实现持久化、支持线程的记忆管理。
+这些字段告知 Agent 在何处存储或检索上下文，从而在整个对话过程中实现持久化、支持线程的记忆管理。
 
 ```ts
 const response = await memoryAgent.generate(
@@ -118,7 +118,7 @@ const response = await memoryAgent.generate(
 );
 ```
 
-要调用存储在 memory 中的信息，请使用与原始对话相同的 `resource` 和 `thread` 值调用该智能体。
+要调用存储在 memory 中的信息，请使用与原始对话相同的 `resource` 和 `thread` 值调用该 Agent 。
 
 ```ts
 const response = await memoryAgent.generate("What's my favorite color?", {

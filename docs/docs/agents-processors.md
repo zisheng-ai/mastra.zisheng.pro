@@ -1,7 +1,7 @@
 ---
 order: 6
 title:  处理器
-description: 'Mastra 中的智能体网络通过协调多个智能体、工作流和工具，处理那些事前未明确定义、但可从用户消息或上下文中推断出的任务。'
+description: 'Mastra 中的 Agent 网络通过协调多个 Agent 、工作流和工具，处理那些事前未明确定义、但可从用户消息或上下文中推断出的任务。'
 keywords: [Mastra, AI, Agents, Tools, Network]
 toc: content
 group:
@@ -9,7 +9,7 @@ group:
   order: 2
 ---
 
-处理器在消息通过智能体时对其进行转换、验证或控制。它们在智能体执行管道中的特定点执行，允许你在输入到达语言模型前修改输入，或者在输出返回给用户之前修改它们。
+处理器在消息通过 Agent 时对其进行转换、验证或控制。它们在 Agent 执行管道中的特定点执行，允许你在输入到达语言模型前修改输入，或者在输出返回给用户之前修改它们。
 
 处理器配置：
 
@@ -25,7 +25,7 @@ group:
 使用处理器可以：
 
 - 规范化或验证用户输入
-- 为你的智能体添加护栏机制（Guardrails）
+- 为你的 Agent 添加护栏机制（Guardrails）
 - 检测并防止提示注入或越狱尝试
 - 出于安全或合规性考虑的适度内容
 - 转换消息（例如，翻译语言、过滤工具调用）
@@ -35,9 +35,9 @@ group:
 
 Mastra 包括多个用于常见用例的处理器。你还可以根据应用程序的特定要求创建自定义处理器。
 
-## 将处理器添加到智能体
+## 将处理器添加到 Agent 
 
-导入并实例化处理器，然后将 `inputProcessors` 或 `outputProcessors` 数组传递给智能体：
+导入并实例化处理器，然后将 `inputProcessors` 或 `outputProcessors` 数组传递给 Agent ：
 
 ```ts
 // src/mastra/agents/moderated-agent.ts
@@ -75,7 +75,7 @@ inputProcessors: [
 
 ### 启用 Memory
 
-当智能体启用 memory 时，memory 处理器会自动添加到管道中：
+当 Agent 启用 memory 时，memory 处理器会自动添加到管道中：
 
 **输出处理器：**
 
@@ -136,7 +136,7 @@ export class CustomInputProcessor implements Processor {
 该 `processInput` 方法接收：
 
 - `message`：`user` 和 `assistant` 的消息（不是 system 消息）
-- `systemMessages`：所有系统消息（智能体指令、 memory 上下文、用户提供的系统提示）
+- `systemMessages`：所有系统消息（ Agent 指令、 memory 上下文、用户提供的系统提示）
 - `messageList`：高级用例的完整 MessageList 实例
 - `abort`：停止处理并提前返回的函数
 - `requestContext`：执行元数据，例如：`threadId` 和 `resourceId`
@@ -185,7 +185,7 @@ export class SystemTrimmer implements Processor {
 
 ### 使用 `processInputStep` 进行每步处理
 
-在智能体开始时运行一次 `processInput`，在智能体循环的每个步骤运行 `processInputStep`（包括工具调用延续）。这使得每步配置更改成为可能，例如动态模型切换或工具选择修改。
+在 Agent 开始时运行一次 `processInput`，在 Agent 循环的每个步骤运行 `processInputStep`（包括工具调用延续）。这使得每步配置更改成为可能，例如动态模型切换或工具选择修改。
 
 ```ts
 // src/mastra/processors/step-processor.ts
@@ -218,7 +218,7 @@ export class DynamicModelProcessor implements Processor {
 
 `processInputStep` 方法接收：
 
-- `stepNumber`：智能体循环中的当前步骤（从 0 开始的索引）
+- `stepNumber`： Agent 循环中的当前步骤（从 0 开始的索引）
 - `steps`：之前步骤的结果
 - `messages`：当前消息快照（只读）
 - `systemMessages`：当前系统消息（只读）
@@ -464,7 +464,7 @@ const agent = new Agent({
 });
 ```
 
-当智能体注册到 Mastra 时，处理器工作流会自动注册为工作流，允许你在 [Studio](docs/studio) 中查看和调试它们。
+当 Agent 注册到 Mastra 时，处理器工作流会自动注册为工作流，允许你在 [Studio](docs/studio) 中查看和调试它们。
 
 ## 重试机制
 
@@ -506,4 +506,4 @@ const agent = new Agent({
 - 只适用于 `processOutputStep` 和 `processInputStep` 方法
 - 重播该步骤，并将中止原因添加为 LLM 的上下文
 - 通过 `retryCount` 参数跟踪重试计数
-- 尊重智能体的 `maxProcessorRetries` 限制
+- 尊重 Agent 的 `maxProcessorRetries` 限制

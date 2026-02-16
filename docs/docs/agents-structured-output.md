@@ -1,7 +1,7 @@
 ---
 order: 4
 title: 结构化输出
-description: '结构化输出让智能体返回和定义的 schema 格式匹配的对象，而不是一个文本'
+description: '结构化输出让 Agent 返回和定义的 schema 格式匹配的对象，而不是一个文本'
 keywords: [Mastra, AI, Agents, Tools]
 toc: content
 group:
@@ -11,15 +11,15 @@ group:
 
 # 结构化输出
 
-结构化输出允许智能体返回符合 schema 定义的对象，而非文本。schema 告诉模型应生成哪些字段，而模型则确保最终结果符合该结构。
+结构化输出允许 Agent 返回符合 schema 定义的对象，而非文本。schema 告诉模型应生成哪些字段，而模型则确保最终结果符合该结构。
 
 ## 何时使用结构化输出
 
-当需要智能体返回 JSON 对象而非字符串时，请使用结构化输出。明确定义的字段能简化数据提取流程，便于你为 API 调用、UI 渲染或应用程序逻辑提取所需的值。
+当需要 Agent 返回 JSON 对象而非字符串时，请使用结构化输出。明确定义的字段能简化数据提取流程，便于你为 API 调用、UI 渲染或应用程序逻辑提取所需的值。
 
 ## 定义 schema
 
-智能体可以通过 Zod 或 JSON Schema 定义预期输出，返回结构化数据。强烈推荐使用 Zod，因其提供 TypeScript 类型推断和运行时验证；而当需要语言无关的格式时，JSON Schema 则更为实用。
+ Agent 可以通过 Zod 或 JSON Schema 定义预期输出，返回结构化数据。强烈推荐使用 Zod，因其提供 TypeScript 类型推断和运行时验证；而当需要语言无关的格式时，JSON Schema 则更为实用。
 
 :::code-group
 ```ts [Zod]
@@ -120,9 +120,9 @@ for await (const chunk of stream.textStream) {
 }
 ```
 
-## 结构化智能体
+## 结构化 Agent 
 
-当你的主智能体不擅长生成结构化输出时，可以给 `structuredOutput` 提供一个 `model`。此时，Mastra 会在后台调用第二个代理，从主智能体的自然语言响应中提取结构化数据。这将触发两次大语言模型调用：一次用于生成响应，另一次将响应转换为结构化对象。虽然会增加延迟和成本，但能显著提升复杂结构化任务的准确性。
+当你的主 Agent 不擅长生成结构化输出时，可以给 `structuredOutput` 提供一个 `model`。此时，Mastra 会在后台调用第二个代理，从主 Agent 的自然语言响应中提取结构化数据。这将触发两次大语言模型调用：一次用于生成响应，另一次将响应转换为结构化对象。虽然会增加延迟和成本，但能显著提升复杂结构化任务的准确性。
 
 ```ts
 import { z } from "zod";
@@ -183,7 +183,7 @@ console.log(response.object);
 
 ### 采用独立的结构化模型
 
-当 `model` 被提供给 `structuredOutput` 属性时，Mastra 会使用一个独立的内部代理来处理结构化输出。主智能体将负责所有步骤（包括工具调用），而结构化输出模型仅在输出模型结构化输出的生成。
+当 `model` 被提供给 `structuredOutput` 属性时，Mastra 会使用一个独立的内部代理来处理结构化输出。主 Agent 将负责所有步骤（包括工具调用），而结构化输出模型仅在输出模型结构化输出的生成。
 
 ```ts
 const response = await testAgent.generate("Tell me about TypeScript.", {

@@ -28,7 +28,7 @@ group:
           <ul>
             <li>
               agents
-              <small>定义和配置你的智能体 - 它们的行为、目标和工具。</small>
+              <small>定义和配置你的 Agent  - 它们的行为、目标和工具。</small>
               <ul>
                 <li>weather-agent.ts</li>
               </ul>
@@ -42,21 +42,21 @@ group:
             </li>
             <li>
               workflows
-              <small>定义将智能体和工具编排在一起的多步骤工作流程。</small>
+              <small>定义将 Agent 和工具编排在一起的多步骤工作流程。</small>
               <ul>
                 <li>weather-workflow.ts</li>
               </ul>
             </li>
             <li>
               scorers
-              <small>（可选）定义评分器以评估智能体随时间的表现</small>
+              <small>（可选）定义评分器以评估 Agent 随时间的表现</small>
               <ul>
                 <li>weather-scorer.ts</li>
               </ul>
             </li>
             <li>
               mcp
-              <small>（可选）实现自定义 MCP 服务器以与外部智能体共享你的工具</small>
+              <small>（可选）实现自定义 MCP 服务器以与外部 Agent 共享你的工具</small>
               <ul></ul>
             </li>
             <li>
@@ -69,12 +69,12 @@ group:
         <li>index.ts<small>你可以在其中配置和初始化 Mastra 的中心入口点。</small></li>
       </ul>
     </li>
-    <li>.env.example<small>环境变量模板 - 复制并重命名以 .env 添加模型提供商的密钥。</small></li>
+    <li>.env.example<small>环境变量模板 - 复制并重命名以 .env 添加模型 Provider 的密钥。</small></li>
     <li>package.json<small>定义项目元数据、依赖项和可用的 npm 脚本。</small></li>
     <li>tsconfig.json<small>配置 TypeScript 选项，例如路径别名、编译器设置和构建输出。</small></li>
   </ul>
 </Tree>
 
 :::info
-使用预定义文件作为模板。复制并调整它们以快速创建你自己的智能体、工具、工作流程等。
+使用预定义文件作为模板。复制并调整它们以快速创建你自己的 Agent 、工具、工作流程等。
 :::

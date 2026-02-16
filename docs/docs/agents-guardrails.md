@@ -1,7 +1,7 @@
 ---
 order: 7
 title: 护栏
-description: '智能体使用处理器对输入和输出应用护栏。它们在每次交互之前或之后运行，让你可以在用户和智能体之间传递信息时查看、转换或组织信息。'
+description: ' Agent 使用处理器对输入和输出应用护栏。它们在每次交互之前或之后运行，让你可以在用户和 Agent 之间传递信息时查看、转换或组织信息。'
 keywords: [Mastra, AI, Agents, Tools, Network, Guardrails]
 toc: content
 group:
@@ -9,7 +9,7 @@ group:
   order: 2
 ---
 
-智能体使用处理器对输入和输出应用护栏。它们在每次交互之前或之后运行，让你可以在用户和智能体之间传递信息时查看、转换或阻止信息。
+ Agent 使用处理器对输入和输出应用护栏。它们在每次交互之前或之后运行，让你可以在用户和 Agent 之间传递信息时查看、转换或阻止信息。
 
 处理器可以配置为：
 
@@ -22,9 +22,9 @@ group:
 
 使用处理器进行内容审核、提示注入预防、响应清理、消息转换和其他与安全相关的控制。Mastra 为常见用例提供了多个内置输入和输出处理器。
 
-## 将处理器添加到智能体
+## 将处理器添加到 Agent 
 
-导入并实例化相应的处理器类，然后通过 `inputProcessors` 或 `outputProcessors` 选项将其传入智能体的配置中：
+导入并实例化相应的处理器类，然后通过 `inputProcessors` 或 `outputProcessors` 选项将其传入 Agent 的配置中：
 
 ```ts
 // src/mastra/agents/moderated-agent.ts
@@ -342,7 +342,7 @@ export const privateAgent = new Agent({
 
 档处理阻塞请求时，代理仍会成功返回，而不会抛出错误。要处理阻塞的请求，请检查响应中是否 `tripwire`
 
-例如，如果智能体使用 `strategy: "block"` 和 `PIIDetector`，并且请求包含信用卡号，则该请求将被阻止，并且响应将包含触发信息。
+例如，如果 Agent 使用 `strategy: "block"` 和 `PIIDetector`，并且请求包含信用卡号，则该请求将被阻止，并且响应将包含触发信息。
 
 #### `.generate()` 示例
 

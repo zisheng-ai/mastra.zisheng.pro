@@ -13,11 +13,11 @@ group:
 
 创建一个新的 Mastra 项目，或将 Mastra 与你喜欢的框架集成以开始构建。
 
-`npm create mastra` 命令式构建第一个智能体的最快方法。它会引导你完成设置并生成一个示例智能体，你可以立即在 [Studio](/docs/studio) 中运行和调整。当你准备好时，你随时可以将 Mastra 与你的框架或 UI 集成。
+`npm create mastra` 命令式构建第一个 Agent 的最快方法。它会引导你完成设置并生成一个示例 Agent ，你可以立即在 [Studio](/docs/studio) 中运行和调整。当你准备好时，你随时可以将 Mastra 与你的框架或 UI 集成。
 
 ## 开始之前
 
-- 你需要一个模型提供商的 API 密钥。国内的同学建议使用硅基流动，它支持几乎所有的模型提供商。
+- 你需要一个模型 Provider 的 API 密钥。国内的同学建议使用硅基流动，它支持几乎所有的模型 Provider 。
 
 ## 手动安装
 
@@ -90,7 +90,7 @@ touch .env
 SILICONFLOW_API_KEY=<your-api-key>
 ```
 
-本指南使用硅基流动，它支持大部分世面上的模型。但你可以使用任何受支持的模型提供商，包括 OpenAI、Anthropic、Gemini 等。
+本指南使用硅基流动，它支持大部分世面上的模型。但你可以使用任何受支持的模型 Provider ，包括 OpenAI、Anthropic、Gemini 等。
 
 ### 4、创建 `wether-tool.ts` 文件：
 
@@ -121,7 +121,7 @@ export const weatherTool = createTool({
 });
 ```
 
-> 我们在此对 `weatherTool` 进行了简化，你可以在 [给智能体一个工具](/docs/agents-using-tools) 中查看完整的天气工具。
+> 我们在此对 `weatherTool` 进行了简化，你可以在 [给 Agent 一个工具](/docs/agents-using-tools) 中查看完整的天气工具。
 
 ### 5、创建 `weather-agent.ts`
 
@@ -181,12 +181,12 @@ npm run dev
 
 ## 脚手架安装
 
-你可以在机器上的任何位置运行 `npm create mastra@beta`，出现提示时，选择提供商并输入你的密钥。
+你可以在机器上的任何位置运行 `npm create mastra@beta`，出现提示时，选择 Provider 并输入你的密钥。
 
-这将为你的项目创建一个新目录，其中 `src/mastra` 文件夹包含天气智能体示例和以下文件：
+这将为你的项目创建一个新目录，其中 `src/mastra` 文件夹包含天气 Agent 示例和以下文件：
 
 - `index.ts`：Mastra 配置，包括 memory
 - `tools/weather-tool.ts`：获取给定位置天气的工具
 - `agents/weather-agent.ts`：带有使用该工具提示的天气代理
 
-> 你可以使用带有 `--no-example` [标志](https://mastra.ai/reference/v1/cli/create-mastra#cli-flags) 的 `create mastra` 命令来跳过天气智能体示例或者 `--template` 从特定[模版](https://mastra.ai/templates)开始。
+> 你可以使用带有 `--no-example` [标志](https://mastra.ai/reference/v1/cli/create-mastra#cli-flags) 的 `create mastra` 命令来跳过天气 Agent 示例或者 `--template` 从特定[模版](https://mastra.ai/templates)开始。

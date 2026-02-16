@@ -1,7 +1,7 @@
 ---
 order: 5
-title: 智能体网络
-description: 'Mastra 中的智能体网络通过协调多个智能体、工作流和工具，处理那些事前未明确定义、但可从用户消息或上下文中推断出的任务。'
+title: Agents 网络
+description: 'Mastra 中的 Agent 网络通过协调多个 Agent 、工作流和工具，处理那些事前未明确定义、但可从用户消息或上下文中推断出的任务。'
 keywords: [Mastra, AI, Agents, Tools, Network]
 toc: content
 group:
@@ -9,7 +9,7 @@ group:
   order: 2
 ---
 
-Mastra 中的智能体网络通过协调多个智能体、工作流和工具，处理那些事前未明确定义、但可从用户消息或上下文中推断出的任务。定义路由代理（即已配置其他智能体、工作流和工具的 Mastra 智能体）利用大语言模型（LLM）解析请求，并决定调用哪些基本组件（子智能体、工作流或工具）、调用顺序以及数据传输方式。
+Mastra 中的 Agent 网络通过协调多个 Agent 、工作流和工具，处理那些事前未明确定义、但可从用户消息或上下文中推断出的任务。定义路由代理（即已配置其他 Agent 、工作流和工具的 Mastra Agents）利用大语言模型（LLM）解析请求，并决定调用哪些基本组件（子 Agent 、工作流或工具）、调用顺序以及数据传输方式。
 
 ## 何时使用网络
 
@@ -17,15 +17,15 @@ Mastra 中的智能体网络通过协调多个智能体、工作流和工具，�
 
 ## 核心原则
 
-Mastra 智能体网络遵循以下原则运行：
+Mastra Agents 网络遵循以下原则运行：
 
 - 使用 `.network()` 时需要 Memory，用于存储任务历史记录并判断任务何时完成。
 - 基于描述选择基本组件。清晰具体的描述有助于优化路由。对于工作流和工具，输入 schema 有助于在运行时确定正确的输入。
-- 若多个基本功能存在重叠，智能体将优先选择更具体的基元，通过结合 schema 和描述来决定运行哪个基元。
+- 若多个基本功能存在重叠， Agent 将优先选择更具体的基元，通过结合 schema 和描述来决定运行哪个基元。
 
-## 创建智能体网络
+## 创建 Agent 网络
 
-智能体网络围绕顶级路由智能体构建，该智能体将任务委派给其配置中定义的智能体、工作流和工具。路由智能体的内存配置通过 `memory` 选项实现，而 `instruction` 则定义智能体的路由行为。
+ Agent 网络围绕顶级路由 Agent 构建，该 Agent 将任务委派给其配置中定义的 Agent 、工作流和工具。路由 Agent 的内存配置通过 `memory` 选项实现，而 `instruction` 则定义 Agent 的路由行为。
 
 ```ts
 // src/mastra/agents/routing-agent.ts
@@ -70,11 +70,11 @@ export const routingAgent = new Agent({
 
 ## 为网络基本组件编写描述
 
-配置 Mastra 智能体网络时，每个基本组件（代理、工作流或工具）都需要清晰的描述，以帮助路由决定使用哪个。路由智能体使用每个基本组件的描述和 schema 来确定它的作用以及如何使用它。清晰的描述和明确定义的输入和输出模式可提高路由准确性。
+配置 Mastra Agents 网络时，每个基本组件（代理、工作流或工具）都需要清晰的描述，以帮助路由决定使用哪个。路由 Agent 使用每个基本组件的描述和 schema 来确定它的作用以及如何使用它。清晰的描述和明确定义的输入和输出模式可提高路由准确性。
 
-### 智能体说明
+### Agents 说明
 
-网络中的每个智能体都应该明确 `description` 以说明该智能体的作用。
+网络中的每个 Agent 都应该明确 `description` 以说明该 Agent 的作用。
 
 ```ts
 // src/mastra/agents/research-agent.ts
@@ -119,11 +119,11 @@ export const weatherTool = createTool({
 });
 ```
 
-## 调用智能体网络
+## 调用 Agent 网络
 
-使用带用户消息的 `.network()` 调用 Mastra 智能体。该方法返回一个事件流，你可以对其进行迭代以跟踪执行进度并检索最终结果。
+使用带用户消息的 `.network()` 调用 Mastra Agents。该方法返回一个事件流，你可以对其进行迭代以跟踪执行进度并检索最终结果。
 
-## 智能体示例
+## Agents 示例
 
 在此示例中，网络解释消息并将请求路由到和 `researchAgent` 和 `writingAgent` 以生成完整的响应。
 
@@ -140,7 +140,7 @@ for await (const chunk of result) {
 }
 ```
 
-### 智能体输出
+### Agent 输出
 
 在请求期间会发出下面的 `chunk.type` 事件：
 
@@ -161,7 +161,7 @@ network-execution-event-step-finish
 
 ## 工作流示例
 
-在此示例中，路由智能体识别消息中的城市名称并运行 `cityWorkflow`。该工作流定义了调用 `researchAgent` 来收集事实，然后调用 `writingAgent` 来生成最终文本的步骤。
+在此示例中，路由 Agent 识别消息中的城市名称并运行 `cityWorkflow`。该工作流定义了调用 `researchAgent` 来收集事实，然后调用 `writingAgent` 来生成最终文本的步骤。
 
 ```ts
 const result = await routingAgent.network(
@@ -194,7 +194,7 @@ network-execution-event-step-finish
 
 ## 工具示例
 
-在本示例中，路由智能体跳过 `researchAgent`、`writingAgent` 和 `weatherTool` 来完成任务。
+在本示例中，路由 Agent 跳过 `researchAgent`、`writingAgent` 和 `weatherTool` 来完成任务。
 
 ```ts
 const result = await routingAgent.network("What's the weather in London?");

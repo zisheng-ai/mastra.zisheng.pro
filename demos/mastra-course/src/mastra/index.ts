@@ -10,7 +10,7 @@ import { toolCallAppropriatenessScorer, completenessScorer, translationScorer } 
 export const mastra = new Mastra({
   // 工作流
   workflows: { weatherWorkflow },
-  // 智能体
+  // Agents
   agents: { weatherAgent },
   // 评测
   scorers: { toolCallAppropriatenessScorer, completenessScorer, translationScorer },
