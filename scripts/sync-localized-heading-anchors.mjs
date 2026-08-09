@@ -165,7 +165,7 @@ for (const contentRoot of contentRoots) {
 const plans = []
 
 for (const locale of locales) {
-  const summary = { pages: 0, headings: 0, changed: 0, added: 0, normalized: 0, skipped: 0 }
+  const summary = { pages: 0, headings: 0, changed: 0, added: 0, normalized: 0, removedH1: 0, skipped: 0 }
   for (const contentRoot of contentRoots) {
     const targetRoot = path.join(projectRoot, localeTargets[locale][contentRoot.name])
     const targetFiles = await listContentFiles(targetRoot, contentRoot.recursive)
@@ -192,7 +192,7 @@ for (const locale of locales) {
       }
 
       summary.pages += 1
-      summary.headings += sourceHeadings.length
+      summary.headings += sourceHeadings.filter(heading => heading.depth > 1).length
       if (sourceHeadings.length !== targetHeadings.length) {
         errors.push(
           `${locale}/${contentRoot.name}/${relativeFile}: heading count ${sourceHeadings.length} != ${targetHeadings.length}`,
@@ -204,6 +204,7 @@ for (const locale of locales) {
       const targetLines = targetContent.split(/\r?\n/)
       let added = 0
       let normalized = 0
+      let removedH1 = 0
       let pageFailed = false
 
       for (let index = 0; index < sourceHeadings.length; index += 1) {
@@ -216,15 +217,25 @@ for (const locale of locales) {
           pageFailed = true
           continue
         }
+        const lineIndex = targetHeading.line - 1
+        const targetLine = targetLines[lineIndex]
+        const existingAnchor = explicitHeadingId(targetLine)
+
+        // Docusaurus does not create autolink anchors for H1 headings. Keep
+        // their localized IDs so generated page metadata is not polluted.
+        if (sourceHeading.depth === 1) {
+          if (existingAnchor?.syntax === 'mdx-comment' && existingAnchor.id === sourceHeading.id) {
+            targetLines[lineIndex] = targetLine.replace(existingAnchor.match, '').trimEnd()
+            removedH1 += 1
+          }
+          continue
+        }
+
         if (!sourceHeading.id) {
           warnings.push(`${contentRoot.name}/${relativeFile}:${sourceHeading.line}: empty English heading ID`)
           summary.skipped += 1
           continue
         }
-
-        const lineIndex = targetHeading.line - 1
-        const targetLine = targetLines[lineIndex]
-        const existingAnchor = explicitHeadingId(targetLine)
         if (existingAnchor) {
           if (existingAnchor.id !== sourceHeading.id) {
             errors.push(
@@ -241,7 +252,7 @@ for (const locale of locales) {
         added += 1
       }
 
-      if (pageFailed || added + normalized === 0) continue
+      if (pageFailed || added + normalized + removedH1 === 0) continue
       const nextContent = targetLines.join(eol)
       let verifiedHeadings
       try {
@@ -252,6 +263,7 @@ for (const locale of locales) {
       }
       for (let index = 0; index < sourceHeadings.length; index += 1) {
         const expectedId = sourceHeadings[index].id
+        if (sourceHeadings[index].depth === 1) continue
         if (expectedId && verifiedHeadings[index]?.id !== expectedId) {
           errors.push(
             `${locale}/${contentRoot.name}/${relativeFile}: verified ID ${verifiedHeadings[index]?.id ?? '<missing>'} != ${expectedId}`,
@@ -265,10 +277,11 @@ for (const locale of locales) {
       summary.changed += 1
       summary.added += added
       summary.normalized += normalized
+      summary.removedH1 += removedH1
     }
   }
   console.log(
-    `${locale}: ${summary.pages} pages, ${summary.headings} headings, ${summary.changed} pages need changes, ${summary.added} anchors to add, ${summary.normalized} to normalize, ${summary.skipped} skipped`,
+    `${locale}: ${summary.pages} pages, ${summary.headings} headings, ${summary.changed} pages need changes, ${summary.added} anchors to add, ${summary.normalized} to normalize, ${summary.removedH1} H1 anchors to remove, ${summary.skipped} skipped`,
   )
 }
 

@@ -50,7 +50,7 @@ const config: Config = {
   // locale-specific paths.
   i18n: {
     defaultLocale: 'en',
-    locales: ['zh-CN', 'en', 'zh-TW', 'zh-HK', 'ja'],
+    locales: ['zh-CN', 'en', 'ja', 'zh-TW', 'zh-HK'],
     localeConfigs: {
       'zh-CN': {
         label: '简体中文',

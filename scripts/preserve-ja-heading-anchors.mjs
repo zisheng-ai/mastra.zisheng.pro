@@ -101,6 +101,39 @@ function addId(line, id) {
   return `${line.trimEnd()} {/* #${id} */}`
 }
 
+function fencedLineNumbers(content) {
+  const lines = new Set()
+  const pattern = /```[^\n]*\n[\s\S]*?```/g
+  let match
+  while ((match = pattern.exec(content))) {
+    const start = content.slice(0, match.index).split(/\r?\n/).length
+    const end = start + match[0].split(/\r?\n/).length - 1
+    for (let line = start; line <= end; line += 1) lines.add(line)
+  }
+  return lines
+}
+
+function restoreFencedCode(source, target) {
+  const pattern = /```[^\n]*\n[\s\S]*?```/g
+  const sourceBlocks = [...source.matchAll(pattern)]
+  const targetBlocks = [...target.matchAll(pattern)]
+  if (sourceBlocks.length !== targetBlocks.length) {
+    throw new Error(`fenced code block count differs (${sourceBlocks.length} English, ${targetBlocks.length} Japanese)`)
+  }
+
+  let content = target
+  let restored = 0
+  for (let index = targetBlocks.length - 1; index >= 0; index -= 1) {
+    if (sourceBlocks[index][0] === targetBlocks[index][0]) continue
+    const targetBlock = targetBlocks[index]
+    content = `${content.slice(0, targetBlock.index)}${sourceBlocks[index][0]}${content.slice(
+      targetBlock.index + targetBlock[0].length,
+    )}`
+    restored += 1
+  }
+  return { content, restored }
+}
+
 const plans = []
 const errors = []
 const summary = []
@@ -122,10 +155,18 @@ for (const contentRoot of contentRoots) {
       continue
     }
 
-    const [sourceContent, targetContent] = await Promise.all([
+    const [sourceContent, rawTargetContent] = await Promise.all([
       fs.readFile(sourceFile, 'utf8'),
       fs.readFile(targetFile, 'utf8'),
     ])
+    let targetContent
+    let restoredCode
+    try {
+      ;({ content: targetContent, restored: restoredCode } = restoreFencedCode(sourceContent, rawTargetContent))
+    } catch (error) {
+      errors.push(`${contentRoot.name}/${relativeFile}: ${error instanceof Error ? error.message : String(error)}`)
+      continue
+    }
     let sourceHeadings
     let targetHeadings
     try {
@@ -137,6 +178,11 @@ for (const contentRoot of contentRoots) {
       errors.push(error instanceof Error ? error.message : String(error))
       continue
     }
+
+    const sourceFenceLines = fencedLineNumbers(sourceContent)
+    const targetFenceLines = fencedLineNumbers(targetContent)
+    sourceHeadings = sourceHeadings.filter(heading => !sourceFenceLines.has(heading.line))
+    targetHeadings = targetHeadings.filter(heading => !targetFenceLines.has(heading.line))
 
     if (sourceHeadings.length !== targetHeadings.length) {
       errors.push(`${contentRoot.name}/${relativeFile}: heading count differs`)
@@ -167,14 +213,18 @@ for (const contentRoot of contentRoots) {
       }
     }
 
-    if (failed || pageChanges === 0) continue
+    if (failed || (pageChanges === 0 && restoredCode === 0)) continue
     const nextContent = lines.join(eol)
     try {
-      const verified = await parseHeadings(nextContent, targetFile)
+      const verified = (await parseHeadings(nextContent, targetFile)).filter(
+        heading => !targetFenceLines.has(heading.line),
+      )
       for (let index = 0; index < sourceHeadings.length; index += 1) {
         if (!sourceHeadings[index].id) continue
         if (verified[index]?.id !== sourceHeadings[index].id) {
-          errors.push(`${contentRoot.name}/${relativeFile}: heading ${index + 1} anchor verification failed`)
+          errors.push(
+            `${contentRoot.name}/${relativeFile}: heading ${index + 1} anchor verification failed (${verified[index]?.id ?? '<missing>'}, expected ${sourceHeadings[index].id})`,
+          )
           failed = true
         }
       }
