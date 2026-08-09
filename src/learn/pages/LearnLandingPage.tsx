@@ -1,6 +1,8 @@
 import { useMemo } from 'react'
 import Head from '@docusaurus/Head'
 import Link from '@docusaurus/Link'
+import { useLocation } from '@docusaurus/router'
+import useDocusaurusContext from '@docusaurus/useDocusaurusContext'
 import type { Lesson } from '../types'
 import { useLocalizedLearnContent } from '../localization'
 import { useSharedLearnStorage } from '../hooks/LearnStorageContext'
@@ -25,8 +27,12 @@ function useModules(lessons: Lesson[]) {
 function LandingContent() {
   const { course, isSimplifiedChinese, isTaiwanChinese, isHongKongChinese, isJapanese, isLocalized } =
     useLocalizedLearnContent()
+  const { siteConfig } = useDocusaurusContext()
+  const location = useLocation()
   const { storage } = useSharedLearnStorage()
   const modules = useModules(course.lessons)
+  const pageUrl = new URL(location.pathname, siteConfig.url).toString()
+  const ogImageUrl = new URL('/img/og-image.png', siteConfig.url).toString()
 
   return (
     <>
@@ -37,21 +43,18 @@ function LandingContent() {
         />
         <meta property="og:description" content={course.description} />
         <meta property="og:type" content="website" />
-        <meta
-          property="og:image"
-          content={`https://mastra.ai/api/og/blog?title=${encodeURIComponent(course.title)}&author=${encodeURIComponent(isSimplifiedChinese ? '免费完整课程' : isTaiwanChinese || isHongKongChinese ? '免費完整課程' : isJapanese ? '無料フルコース' : 'Free Full Course')}`}
-        />
-        <meta name="author" content="Guil Hernandez" />
+        <meta property="og:url" content={pageUrl} />
         <script type="application/ld+json">
           {JSON.stringify({
             '@context': 'https://schema.org',
             '@type': 'Course',
             name: course.title,
             description: course.description,
+            url: pageUrl,
             provider: {
               '@type': 'Organization',
-              name: 'Mastra',
-              url: 'https://mastra.ai',
+              name: 'Mastra Documentation Community',
+              url: siteConfig.url,
             },
             isAccessibleForFree: true,
             offers: {
@@ -64,22 +67,6 @@ function LandingContent() {
               '@type': 'CourseInstance',
               courseMode: 'online',
               courseWorkload: 'PT90M',
-              instructor: {
-                '@type': 'Person',
-                name: 'Guil Hernandez',
-                url: 'https://www.linkedin.com/in/guiljh/',
-                image: 'https://mastra.ai/img/guil-hernandez.jpg',
-                jobTitle: 'Developer Educator',
-                description: isSimplifiedChinese
-                  ? '拥有十余年软件开发与教学经验，课程已服务超过 50 万名学习者。'
-                  : isTaiwanChinese
-                    ? '擁有十年以上軟體開發與教學經驗，課程已服務超過 50 萬名學習者。'
-                    : isHongKongChinese
-                      ? '具備超過十年建立和教授軟件的經驗，課程已有超過 50 萬名學員使用。'
-                      : isJapanese
-                        ? 'ソフトウェア開発と教育に 10 年以上携わり、50 万人を超える学習者にコースを提供。'
-                        : 'Over a decade building and teaching software, with courses used by 500,000+ learners.',
-              },
             },
           })}
         </script>
@@ -139,8 +126,10 @@ function LandingContent() {
 
 export default function LearnLandingPage() {
   const { course } = useLocalizedLearnContent()
+  const { siteConfig } = useDocusaurusContext()
+  const ogImageUrl = new URL('/img/og-image.png', siteConfig.url).toString()
   return (
-    <LearnLayout title={course.title} description={course.description}>
+    <LearnLayout title={course.title} description={course.description} image={ogImageUrl}>
       <LandingContent />
     </LearnLayout>
   )

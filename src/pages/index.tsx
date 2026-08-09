@@ -1,6 +1,8 @@
 import Head from '@docusaurus/Head'
 import Link from '@docusaurus/Link'
+import { useLocation } from '@docusaurus/router'
 import Translate, { translate } from '@docusaurus/Translate'
+import useDocusaurusContext from '@docusaurus/useDocusaurusContext'
 import Layout from '@theme/Layout'
 import {
   Activity,
@@ -388,22 +390,53 @@ function ProductPreview() {
 }
 
 export default function Home(): ReactNode {
+  const { siteConfig } = useDocusaurusContext()
+  const location = useLocation()
+  const title = translate({ id: 'homepage.meta.title', message: 'Build AI agents' })
+  const description = translate({
+    id: 'homepage.meta.description',
+    message:
+      'Build, observe, and improve production AI agents with Mastra, the open-source TypeScript agent framework.',
+  })
+  const canonicalUrl = new URL(location.pathname, siteConfig.url).toString()
+  const siteName = translate({ id: 'homepage.structuredData.siteName', message: 'Mastra documentation community' })
+  const structuredData = [
+    {
+      '@context': 'https://schema.org',
+      '@type': 'WebSite',
+      '@id': `${siteConfig.url}/#website`,
+      name: siteName,
+      url: siteConfig.url,
+      description,
+    },
+    {
+      '@context': 'https://schema.org',
+      '@type': 'WebPage',
+      name: title,
+      description,
+      url: canonicalUrl,
+      isPartOf: { '@id': `${siteConfig.url}/#website` },
+    },
+    {
+      '@context': 'https://schema.org',
+      '@type': 'FAQPage',
+      mainEntity: faqs.map(faq => ({
+        '@type': 'Question',
+        name: faq.question,
+        acceptedAnswer: { '@type': 'Answer', text: faq.answer },
+      })),
+    },
+  ]
+
   return (
-    <Layout
-      title={translate({ id: 'homepage.meta.title', message: 'Build AI agents' })}
-      description={translate({
-        id: 'homepage.meta.description',
-        message:
-          'Build, observe, and improve production AI agents with Mastra, the open-source TypeScript agent framework.',
-      })}
-      noFooter
-      wrapperClassName={styles.layout}
-    >
+    <Layout title={title} description={description} noFooter wrapperClassName={styles.layout}>
       <Head>
+        <meta property="og:type" content="website" />
         <meta
           property="og:title"
           content={translate({ id: 'homepage.meta.ogTitle', message: 'Build AI agents with Mastra' })}
         />
+        <script type="application/ld+json">{JSON.stringify(structuredData)}</script>
         <meta
           property="og:description"
           content={translate({
@@ -751,7 +784,7 @@ export default function Home(): ReactNode {
                 </h2>
                 <p>
                   <Translate id="homepage.faq.description">
-                    Find implementation details in the current official documentation included with this site.
+                    Find implementation details in the current documentation included with this site.
                   </Translate>
                 </p>
                 <ArrowLink href="/docs">

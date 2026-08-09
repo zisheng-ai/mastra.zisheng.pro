@@ -5,6 +5,7 @@
 import fs from 'fs-extra'
 import path from 'path'
 import { generateMarkdownList, getBaseUrl, getSidebarLocations, parseSidebarFile } from './sidebars-handler'
+import type { ResolvedOptions } from './options'
 
 export interface RouteEntry {
   route: string
@@ -15,13 +16,13 @@ export interface RouteEntry {
 /**
  * Generate the root llms.txt file with links to all individual files
  */
-export async function generateRootLlmsTxt(outDir: string, siteDir: string): Promise<void> {
-  let output = ROOT_LLMS_PREFIX_BLOCK + '\n\n'
+export async function generateRootLlmsTxt(outDir: string, siteDir: string, options: ResolvedOptions): Promise<void> {
+  let output = `# ${options.siteTitle}\n\n> ${options.siteDescription}\n\nBelow is a list of all available documentation pages.\n\n`
 
   for (const sidebar of getSidebarLocations(siteDir)) {
     try {
       const items = await parseSidebarFile(sidebar.path)
-      const baseUrl = getBaseUrl(sidebar.id)
+      const baseUrl = getBaseUrl(sidebar.id, options.siteUrl)
       const condensedCategories = sidebar.condensedCategories || []
 
       output += `## ${sidebar.id}\n\n`
@@ -42,9 +43,3 @@ export async function writeLlmsTxt(outputPath: string, content: string, prefix =
   await fs.ensureDir(path.dirname(outputPath))
   await fs.writeFile(outputPath, `${prefix}${content}`, 'utf-8')
 }
-
-const ROOT_LLMS_PREFIX_BLOCK = `# Mastra
-
-> Mastra is a framework for building AI-powered applications and agents with a modern TypeScript stack. It includes everything you need to go from early prototypes to production-ready applications. Mastra integrates with frontend and backend frameworks like React, Next.js, and Node, or you can deploy it anywhere as a standalone server. It's the easiest way to build, tune, and scale reliable AI products.
-
-Below is a list of all available documentation pages.`

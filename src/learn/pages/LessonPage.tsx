@@ -1,6 +1,7 @@
 import { useState, useEffect, lazy, Suspense, useMemo } from 'react'
 import { useLocation } from '@docusaurus/router'
 import useBaseUrl from '@docusaurus/useBaseUrl'
+import useDocusaurusContext from '@docusaurus/useDocusaurusContext'
 import Head from '@docusaurus/Head'
 import MDXContent from '@theme/MDXContent'
 import { cn } from '@site/src/lib/utils'
@@ -150,6 +151,7 @@ function MarkAsCompleteButton({
 
 export default function LessonPage() {
   const { course, isSimplifiedChinese, isTaiwanChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
+  const { siteConfig } = useDocusaurusContext()
   const location = useLocation()
   const learnBasePath = useBaseUrl('/learn/')
   const slug = location.pathname.startsWith(learnBasePath)
@@ -166,27 +168,16 @@ export default function LessonPage() {
   const seoTitle = lesson.seo?.title ?? `${lesson.title} | Mastra`
   const seoDescription = lesson.seo?.description ?? lesson.preview.intro
 
-  const ogImageUrl = new URL('https://mastra.ai/api/og/blog')
-  ogImageUrl.searchParams.set('title', lesson.title)
-  ogImageUrl.searchParams.set(
-    'author',
-    isSimplifiedChinese
-      ? '跟随 Guil 使用 TypeScript 构建你的第一个 AI Agent'
-      : isTaiwanChinese
-        ? '跟著 Guil 使用 TypeScript 建立你的第一個 AI Agent'
-        : isHongKongChinese
-          ? '跟隨 Guil 使用 TypeScript 建立你的第一個 AI Agent'
-          : isJapanese
-            ? 'Guil と TypeScript で最初の AI Agent を構築'
-            : 'Build Your First AI Agent in TypeScript with Guil',
-  )
+  const pageUrl = new URL(location.pathname, siteConfig.url).toString()
+  const ogImageUrl = new URL('/img/og-image.png', siteConfig.url).toString()
 
   return (
-    <LearnLayout title={seoTitle} description={seoDescription}>
+    <LearnLayout title={seoTitle} description={seoDescription} image={ogImageUrl}>
       <Head>
         <meta property="og:title" content={seoTitle} />
         <meta property="og:description" content={seoDescription} />
-        <meta property="og:image" content={ogImageUrl.toString()} />
+        <meta property="og:image" content={ogImageUrl} />
+        <meta property="og:url" content={pageUrl} />
         {lesson.youtubeId && (
           <>
             <meta property="og:type" content="video.other" />
@@ -197,16 +188,17 @@ export default function LessonPage() {
                 '@type': 'VideoObject',
                 name: lesson.title,
                 description: seoDescription,
-                thumbnailUrl: ogImageUrl.toString(),
+                thumbnailUrl: ogImageUrl,
                 uploadDate: lesson.publishedDate,
                 embedUrl: `https://www.youtube.com/embed/${lesson.youtubeId}`,
                 contentUrl: `https://www.youtube.com/watch?v=${lesson.youtubeId}`,
                 duration: `PT${lesson.durationMin}M`,
                 publisher: {
                   '@type': 'Organization',
-                  name: 'Mastra',
-                  url: 'https://mastra.ai',
+                  name: 'Mastra Documentation Community',
+                  url: siteConfig.url,
                 },
+                url: pageUrl,
               })}
             </script>
           </>

@@ -50,14 +50,14 @@ export type SidebarsConfig = {
 /**
  * Get the base URL for a documentation section
  */
-export function getBaseUrl(sectionId: string): string {
+export function getBaseUrl(sectionId: string, siteUrl: string): string {
   const baseUrls: Record<string, string> = {
-    Docs: 'https://mastra.ai/docs',
-    Models: 'https://mastra.ai/models',
-    Guides: 'https://mastra.ai/guides',
-    Reference: 'https://mastra.ai/reference',
+    Docs: '/docs',
+    Models: '/models',
+    Guides: '/guides',
+    Reference: '/reference',
   }
-  return baseUrls[sectionId] || 'https://mastra.ai'
+  return new URL(baseUrls[sectionId] || '/', siteUrl).toString().replace(/\/$/, '')
 }
 
 /**
@@ -92,17 +92,14 @@ function getDocId(item: SidebarItem): string | null {
 }
 
 /**
- * Build the sibling markdown URL for an "index" doc.
+ * Build the llms.txt URL for an "index" doc.
  *
  * The index doc maps to the section's own route. With trailingSlash: false the
- * sibling file is "<route>.md", except the site root ("/") whose file is
- * "index.md". For a nested section baseUrl already carries the path segment
- * (e.g. ".../docs"), so the sibling is "${baseUrl}.md". For the root section
- * baseUrl is the bare origin, so the sibling is "${baseUrl}/index.md".
+ * Every built route publishes a sibling llms.txt file. A section index maps to
+ * the section's own `llms.txt` file.
  */
-function indexMarkdownUrl(baseUrl: string): string {
-  const hasPathSegment = new URL(baseUrl).pathname !== '/'
-  return hasPathSegment ? `${baseUrl}.md` : `${baseUrl}/index.md`
+function indexLlmsTxtUrl(baseUrl: string): string {
+  return `${baseUrl}/llms.txt`
 }
 
 /**
@@ -112,7 +109,7 @@ function findCategoryOverviewUrl(items: SidebarItem[], baseUrl: string): string 
   for (const item of items) {
     const docId = getDocId(item)
     if (docId && (docId.endsWith('/index') || docId === 'index')) {
-      return `${baseUrl}/${docId}.md`
+      return docId === 'index' ? indexLlmsTxtUrl(baseUrl) : `${baseUrl}/${docId}/llms.txt`
     }
   }
   return null
@@ -135,8 +132,8 @@ export function generateMarkdownList(
     const docId = getDocId(item)
 
     if (typeof item === 'string' || item.type === 'doc') {
-      // It's a doc item - link to the page's sibling markdown file
-      const url = docId === 'index' ? indexMarkdownUrl(baseUrl) : `${baseUrl}/${docId}.md`
+      // It's a doc item - link to the page's sibling llms.txt file
+      const url = docId === 'index' ? indexLlmsTxtUrl(baseUrl) : `${baseUrl}/${docId}/llms.txt`
       output += `${indent}- [${label}](${url})\n`
     } else if (item.type === 'category') {
       // Check if this category should be condensed to just its overview link

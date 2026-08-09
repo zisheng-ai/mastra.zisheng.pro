@@ -4,6 +4,7 @@ import prismMastraLight from './src/theme/prism-mastra-light.js'
 import remarkModelTokens from './src/plugins/remark-model-tokens'
 import type { Config } from '@docusaurus/types'
 import type { ThemeConfig } from '@docusaurus/preset-classic'
+import type { CreateSitemapItemsFn, CreateSitemapItemsParams, SitemapItem } from '@docusaurus/plugin-sitemap/lib/types'
 import type { AlgoliaPluginOptions } from '@mastra/docusaurus-plugin-algolia'
 import type { KapaPluginOptions } from '@mastra/docusaurus-plugin-kapa'
 
@@ -18,6 +19,31 @@ const ADMONITIONS_CONFIG = {
 const SITE_URL = process.env.SITE_URL ?? 'https://mastra.zisheng.pro'
 const IS_PRODUCTION_DEPLOYMENT = process.env.DEPLOY_ENV === 'production' || process.env.VERCEL_ENV === 'production'
 const GA_ID = IS_PRODUCTION_DEPLOYMENT ? (process.env.GA_ID ?? 'G-XSL4QXVXDB') : undefined
+
+function createLocalizedSitemapItems({
+  defaultCreateSitemapItems,
+  routes,
+  siteConfig,
+}: CreateSitemapItemsParams & { defaultCreateSitemapItems: CreateSitemapItemsFn }): Promise<SitemapItem[]> {
+  return defaultCreateSitemapItems({ routes, siteConfig }).then(items => {
+    const localeBaseUrls = Object.values(siteConfig.i18n.localeConfigs ?? {}).map(locale => locale.baseUrl ?? '/')
+
+    return items.flatMap(item => {
+      const pathname = new URL(item.url).pathname
+      const routePath = localeBaseUrls.reduce((path, baseUrl) => {
+        const basePath = baseUrl.replace(/\/$/, '')
+        return basePath && (path === basePath || path.startsWith(`${basePath}/`))
+          ? path.slice(basePath.length) || '/'
+          : path
+      }, pathname)
+
+      return localeBaseUrls.map(baseUrl => ({
+        ...item,
+        url: new URL(`${baseUrl.replace(/\/$/, '')}${routePath}`, siteConfig.url).toString(),
+      }))
+    })
+  })
+}
 
 // The Kapa "Ask AI" chat requires an integrationId at build time. Only
 // register the theme when both credentials are available — e.g. locally and
@@ -45,9 +71,8 @@ const config: Config = {
   favicon: '/img/favicon.ico',
   url: SITE_URL,
   baseUrl: '/',
-  // Keep English as the canonical upstream source while publishing Simplified
-  // Chinese at the root URL. Other locales remain available under
-  // locale-specific paths.
+  // Simplified Chinese is published at the root URL. Other locales are
+  // published under locale-specific paths and self-canonicalize.
   i18n: {
     defaultLocale: 'en',
     locales: ['zh-CN', 'en', 'ja', 'zh-TW', 'zh-HK'],
@@ -157,7 +182,7 @@ const config: Config = {
       require.resolve('./src/plugins/docusaurus-plugin-llms-txt'),
       {
         siteUrl: SITE_URL,
-        siteTitle: 'Mastra',
+        siteTitle: 'Mastra Documentation Community',
         excludeRoutes: ['/404'],
       },
     ],
@@ -232,12 +257,19 @@ const config: Config = {
           priority: 0.5,
           ignorePatterns: ['/tags/**'],
           filename: 'sitemap.xml',
+          createSitemapItems: createLocalizedSitemapItems,
         },
       },
     ],
   ],
   themeConfig: {
     image: 'img/og-home.png',
+    metadata: [
+      {
+        name: 'robots',
+        content: 'max-image-preview:large, max-snippet:-1, max-video-preview:-1',
+      },
+    ],
     colorMode: {
       respectPrefersColorScheme: true,
     },

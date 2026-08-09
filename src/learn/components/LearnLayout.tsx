@@ -11,10 +11,11 @@ type LearnLayoutProps = {
   children: ReactNode
   title?: string
   description?: string
+  image?: string
   className?: string
 }
 
-function LearnLayoutInner({ children, title, description, className }: LearnLayoutProps) {
+function LearnLayoutInner({ children, title, description, image, className }: LearnLayoutProps) {
   const { course, isSimplifiedChinese, isTaiwanChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
   const { storage } = useSharedLearnStorage()
 
@@ -25,6 +26,7 @@ function LearnLayoutInner({ children, title, description, className }: LearnLayo
         (isSimplifiedChinese ? '学习' : isTaiwanChinese || isHongKongChinese ? '學習' : isJapanese ? '学ぶ' : 'Learn')
       }
       description={description ?? course.description}
+      image={image}
     >
       <LearnMobileSidebar lessons={course.lessons} storage={storage} />
       <div className="learn-layout-flex">

@@ -26,8 +26,8 @@ export default function Layout(props: Props): ReactNode {
 
   const location = useLocation()
   const { siteConfig } = useDocusaurusContext()
-  const cleanPath = location.pathname.replace(/^\/ja(\/|$)/, '/')
-  const canonicalUrl = `${siteConfig.url}${cleanPath}`
+  const canonicalUrl = new URL(location.pathname, siteConfig.url).toString()
+  const isNotFoundPage = /^\/404(?:\.html)?\/?$/.test(location.pathname)
 
   return (
     <LayoutProvider>
@@ -35,6 +35,7 @@ export default function Layout(props: Props): ReactNode {
 
       <Head>
         <link rel="canonical" href={canonicalUrl} />
+        {isNotFoundPage && <meta name="robots" content="noindex" />}
       </Head>
 
       <SkipToContent />
