@@ -63,5 +63,6 @@ Before finishing:
 
 1. Compare headings, lists, tables, admonitions, links, code fences, and MDX tags against the English source for missing or extra structure.
 2. Search the changed files for altered model tokens, code identifiers, and accidental cross-locale vocabulary.
-3. Run the narrowest relevant repository checks. For a documentation batch, prefer `pnpm validate` and `pnpm lint:prose`; run `pnpm build` when routing, MDX structure, or shared configuration changes.
-4. Report any source ambiguity, untranslated intentional text, skipped generated content, or checks that could not run.
+3. After translating headings, run `pnpm i18n:anchors` so localized headings retain the English source anchor IDs, then run `pnpm i18n:anchors:check` to detect drift.
+4. Run the narrowest relevant repository checks. For a documentation batch, prefer `pnpm validate` and `pnpm lint:prose`; run `pnpm build` when routing, MDX structure, or shared configuration changes.
+5. Report any source ambiguity, untranslated intentional text, skipped generated content, or checks that could not run.
