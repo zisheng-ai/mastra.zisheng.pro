@@ -104,6 +104,24 @@ run('rsync', [
   `${repositoryRoot}/`,
 ])
 
+// The Vercel project previously built a Dumi site into `dist`. Keep the
+// standalone Docusaurus output settings after every upstream docs sync.
+const vercelConfigPath = path.join(repositoryRoot, 'vercel.json')
+const vercelConfig = JSON.parse(fs.readFileSync(vercelConfigPath, 'utf8'))
+fs.writeFileSync(
+  vercelConfigPath,
+  `${JSON.stringify(
+    {
+      ...vercelConfig,
+      buildCommand: 'pnpm build',
+      installCommand: 'pnpm install --frozen-lockfile',
+      outputDirectory: 'build',
+    },
+    null,
+    2,
+  )}\n`,
+)
+
 fs.copyFileSync(path.join(upstreamRoot, 'LICENSE.md'), path.join(repositoryRoot, 'LICENSE.md'))
 const syncedDate = new Date().toISOString().slice(0, 10)
 fs.writeFileSync(
