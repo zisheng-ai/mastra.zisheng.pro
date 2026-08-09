@@ -1,0 +1,113 @@
+---
+title: "環境 | Mastra platform"
+description: 同じMastraプロジェクトを、URL、環境変数、リージョン、データベースが分離されたproduction、staging、preview環境で実行します。
+---
+
+# 環境
+
+すべてのplatformプロジェクトには、1つ以上の環境が含まれます。
+
+環境とは、固有のURL、環境変数、デプロイ履歴を持つ、分離されたデプロイ先です。環境ごとに独自の[ホステッドデータベース](/docs/mastra-platform/database)を持つこともできます。
+
+環境を使用すると、1つのプロジェクト内で同じコードベースの`production`、`staging`、previewバージョンを実行できます。
+
+最初の[`mastra deploy`](/docs/mastra-platform/deploy)で`production`環境が作成されます。CLIを使用するか、まだ存在しない名前にデプロイして、環境を追加できます。
+
+## 環境を作成する
+
+環境を明示的に作成します。
+
+```bash
+mastra env create staging
+```
+
+または、デプロイ時に確認プロンプトを表示して作成します。
+
+```bash
+mastra deploy --env staging
+```
+
+`mastra env create`のデフォルトは`staging`タイプです。`--type`を渡すと`staging`または`preview`を明示的に設定でき、`--region`を渡すと環境を実行する場所を選択できます。
+
+```bash
+mastra env create eu-preview --type preview --region eu
+```
+
+各プロジェクトには、最初のデプロイで作成される`production`環境が1つだけあります。リージョンは作成時に固定されます。環境に接続されたデータベースは、その環境のリージョン付近に自動配置され、Observabilityデータは対応するデータレジデンシーゾーンの取り込みリージョンにルーティングされます。対応リージョン、データベースの配置、Observabilityのコロケーションについては、[リージョン](/docs/mastra-platform/regions)を参照してください。プロジェクトごとの環境数はプランによって異なります。
+
+## 環境の一覧を表示する
+
+```bash
+mastra env list
+```
+
+出力には、各環境の名前、リージョン、アクティブなデプロイの状態、接続されたデータベースによって注入された管理対象の環境変数が表示されます。CIで機械可読な出力を得るには、`--json`を渡します。
+
+すべての`mastra env`コマンドは、`MASTRA_PROJECT_ID`、`--project`フラグ、最初のデプロイで書き込まれた`.mastra-project.json`ファイルの順にプロジェクトを解決します。プロジェクトディレクトリから実行すれば、プロジェクト名を指定する必要はありません。
+
+## 環境変数
+
+環境は、次の3つのスコープから変数を解決します。
+
+- **管理変数**: 接続された[ホステッドデータベース](/docs/mastra-platform/database)によって注入されます（例: `TURSO_DATABASE_URL`）。platformが定義するため、編集できません。
+- **環境スコープ変数**: ダッシュボードを通じて1つの環境に保存されます。staging用とproduction用サービスのAPIキーなど、環境ごとに異なる値に使用します。
+- **プロジェクトスコープ変数**: プロジェクトに保存され、すべての環境で共有されます。
+
+環境スコープ変数とプロジェクトスコープ変数を合わせたものが、[デプロイ](/docs/mastra-platform/deploy#environment-variables)ページで説明する保存変数です。
+
+変数はデプロイの開始時に適用されます。完全な再デプロイを行わず、変更した変数を実行中のサービスに適用するには、次を実行します。
+
+```bash
+mastra env restart staging
+```
+
+環境のデプロイで実際に使用される変数一式を確認するには、環境スコープとプロジェクトスコープの値をマージし、管理変数を名前付きで含めたローカルenvファイルとして取得します。
+
+```bash
+mastra env vars pull staging --output .env.staging
+```
+
+管理変数の値はデプロイ時に注入され、ファイルには書き込まれません。名前だけのコメントとして表示されます。
+
+:::note
+環境変数で管理対象データベースの変数を上書きすることはできません。環境を別のデータベースに接続するには、代わりに[環境スコープのデータベース](/docs/mastra-platform/database#attach-with-the-cli)を接続してください。
+:::
+
+## デプロイ履歴
+
+すべての環境のデプロイを一覧表示するか、1つの環境に絞り込みます。
+
+```bash
+mastra env deploys
+mastra env deploys staging
+```
+
+各行には、デプロイの状態、環境、タイムスタンプ、現在アクティブなデプロイが表示されます。デプロイは**queued → uploading → building → deploying → running**の順に遷移し、新しいバージョンがトラフィックを処理し始めたときにのみ、platformは**running**と報告します。
+
+## 環境のデータを分離する
+
+ホステッドデータベースは、デフォルトで1つの環境をスコープとするため、productionとstagingはそれぞれ独自のデータベースを読み書きします。
+
+```bash
+mastra env db create production --kind turso --name my-project-production-db
+mastra env db create staging --kind turso --name my-project-staging-db
+```
+
+すべての環境で1つのデータベースを共有する場合は、代わりに`--shared`を指定して接続します: `mastra env db create --kind turso --shared`。
+
+環境で使用できるデータベースは、Providerごとに1つだけです。同じProviderの共有（`--shared`）データベースがすでにプロジェクトにある場合、環境スコープのデータベースを接続しようとすると変数名の競合により拒否されるため、先に`mastra env db delete`で共有データベースを削除してください。データベースを削除すると、Provider上のデータベースとその全データが破棄されるため、保持する必要があるデータはエクスポートしてください。スコープの詳細については、[ホステッドデータベース](/docs/mastra-platform/database)を参照してください。
+
+## 環境を削除する
+
+```bash
+mastra env delete staging
+```
+
+CLIは削除前に確認を求めます。環境を削除すると、そのデプロイと保存変数も削除されます。
+
+## 関連情報
+
+- [デプロイ](/docs/mastra-platform/deploy)
+- [リージョン](/docs/mastra-platform/regions)
+- [ホステッドデータベース](/docs/mastra-platform/database)
+- [`mastra env` CLIリファレンス](/reference/cli/mastra#mastra-env)

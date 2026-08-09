@@ -1,0 +1,142 @@
+---
+title: "Quick Checks | Evals"
+description: "Agent の出力テキストと Tool の使用状況を高速かつ決定論的に検証する、LLM 不要のマイクロ Scorer。"
+packages:
+  - "@mastra/evals"
+---
+
+# Quick Checks
+
+Quick Checks は、「出力に X が含まれる」や「Agent が Tool Y を呼び出した」といった一般的な検証に使える、組み合わせ可能なマイクロ Scorer です。LLM は不要で即座に実行され、ほかの Scorer と同じ `scorers: [...]` 配列に追加できます。
+
+## Quick Checks を使用する場面
+
+高速で決定論的な検証が必要な場合に Quick Checks を使用します。
+
+- 出力テキストに特定の文字列が含まれる、または含まれないことを検証する
+- Agent が特定の Tool を呼び出した、または呼び出していないことを確認する
+- Tool 呼び出しの順序と回数制限を検証する
+- コストのかからないバイナリチェックで CI パイプラインを Gate する
+- LLM ベースの Scorer と組み合わせて多層的に評価する
+
+主観的または意味的な評価には、代わりに [LLM ベースの Scorer](/docs/evals/built-in-scorers)を使用してください。
+
+## クイックスタート
+
+```typescript title="src/evals/weather-checks.ts"
+import { checks } from '@mastra/evals/checks'
+import { runEvals } from '@mastra/core/evals'
+import { weatherAgent } from '../agents'
+
+const result = await runEvals({
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  target: weatherAgent,
+  scorers: [checks.includes('Brooklyn'), checks.calledTool('get_weather'), checks.noToolErrors()],
+})
+
+console.log(result.scores)
+// { 'check-includes': 1, 'check-called-tool': 1, 'check-no-tool-errors': 1 }
+```
+
+## 利用可能なチェック
+
+Quick Checks は次のカテゴリに分類されます。
+
+### テキストチェック
+
+これらの Scorer は Agent のテキスト出力を評価します。
+
+| チェック | 動作 | スコア |
+| - | - | - |
+| `checks.includes(str)` | 出力に部分文字列が含まれる | 1 または 0 |
+| `checks.excludes(str)` | 出力に部分文字列が含まれない | 1 または 0 |
+| `checks.equals(str)` | 出力が文字列と完全に一致する | 1 または 0 |
+| `checks.matches(regex)` | 出力が正規表現に一致する | 1 または 0 |
+| `checks.similarity(str)` | 文字列との Dice 係数による類似度 | 0～1（`threshold` を指定した場合はバイナリ） |
+
+### Tool 呼び出しチェック
+
+これらの Scorer は Agent の実行における Tool の使用状況を評価します。
+
+| チェック | 動作 | スコア |
+| - | - | - |
+| `checks.calledTool(name)` | Tool が N 回以上呼び出された | 1 または 0 |
+| `checks.didNotCall(name)` | Tool が呼び出されなかった | 1 または 0 |
+| `checks.toolOrder([...])` | Tool が想定した順序で呼び出された | 1 または 0 |
+| `checks.maxToolCalls(n)` | Tool 呼び出しの合計が N 回以下である | 1 または 0 |
+| `checks.usedNoTools()` | Tool がまったく呼び出されなかった | 1 または 0 |
+| `checks.noToolErrors()` | どの Tool 呼び出しでもエラーが発生しなかった | 1 または 0 |
+
+## チェックと LLM Scorer の組み合わせ
+
+1 回の `runEvals` 呼び出しで、チェックと LLM ベースの Scorer を組み合わせられます。決定論的な Gate にはチェックを、定性的な評価には LLM Scorer を使用します。
+
+```typescript title="src/evals/layered-eval.ts"
+import { checks } from '@mastra/evals/checks'
+import { createFaithfulnessScorer } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+import { myAgent } from '../agents'
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'What is the weather in Brooklyn?',
+      context: ['Brooklyn weather data: sunny, 72°F'],
+    },
+  ],
+  target: myAgent,
+  scorers: [
+    // Deterministic checks (instant, free)
+    checks.includes('Brooklyn'),
+    checks.calledTool('get_weather'),
+    checks.excludes('error'),
+    checks.noToolErrors(),
+
+    // LLM-based scorer (semantic, costs tokens)
+    createFaithfulnessScorer({ model: '__GATEWAY_OPENAI_MODEL_MINI__' }),
+  ],
+})
+```
+
+## Live Scoring でのチェックの使用
+
+継続的に監視するには、チェックを Agent に追加します。
+
+```typescript title="src/agents/weather-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { checks } from '@mastra/evals/checks'
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: 'Answer weather questions using the get_weather tool.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { get_weather: weatherTool },
+  scorers: {
+    noErrors: {
+      scorer: checks.noToolErrors(),
+      sampling: { type: 'ratio', rate: 1 },
+    },
+    mentionCity: {
+      scorer: checks.includes('Brooklyn'),
+      sampling: { type: 'ratio', rate: 0.5 },
+    },
+  },
+})
+```
+
+## チェックの仕組み
+
+各チェックは、`preprocess` ステップと `generateScore` ステップを持つ標準の `createScorer()` インスタンスです。ほかの Scorer と同じ[4ステップのパイプライン](/docs/evals/custom-scorers#the-four-step-pipeline)に従います。
+
+1. **preprocess**: Agent の実行から関連データ（テキストコンテンツ、Tool 呼び出し）を抽出して正規化する
+1. **generateScore**: 前処理済みの結果をスコア（通常はバイナリの 1 または 0）に変換する
+
+チェックでは `analyze` と `generateReason` のステップを省略し、LLM を呼び出さないため、マイクロ秒単位で実行されます。各チェックのすべてのパラメーターとオプションを含む完全な API については、[Quick Checks リファレンス](/reference/evals/checks)を参照してください。
+
+## 関連情報
+
+- [Quick Checks リファレンス](/reference/evals/checks)
+- [組み込み Scorer](/docs/evals/built-in-scorers)
+- [カスタム Scorer](/docs/evals/custom-scorers)
+- [`runEvals()` リファレンス](/reference/evals/run-evals)

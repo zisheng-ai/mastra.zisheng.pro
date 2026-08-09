@@ -1,0 +1,215 @@
+---
+title: "スケジュール | 長時間実行エージェント"
+description: "cron スケジュールでエージェントを実行し、任意でスレッドへの配信やライフサイクルフックを使いながら、定期的なプロンプトを届けます。"
+packages:
+  - "@mastra/core"
+  - "@mastra/client-js"
+---
+
+# スケジュール
+
+**追加バージョン:** `@mastra/core@1.50.0`
+
+:::experimental
+
+この機能はベータ版です。API が安定するまでは、メジャーバージョンの更新なしに破壊的変更が行われる可能性があります。
+
+:::
+
+スケジュールは cron の周期に従ってエージェントを実行します。実行のたびに、Mastra はプロンプトをエージェントへ送信します。送信方法は、スレッドへの[シグナル](/docs/long-running-agents/signals)、またはスレッドを使わない [`agent.generate()`](/reference/agents/generate) の実行です。日次サマリー、定期チェック、会話への予定されたリマインドなど、繰り返し行うエージェントの処理にスケジュールを使用します。
+
+スケジュールは永続化されるため、再起動や再デプロイ後も保持されます。実行時には、作成・読み取り・更新・削除（CRUD）の標準インターフェースである [`mastra.schedules`](/reference/schedules/overview) を通じて管理します。同じインターフェースで[ワークフローのスケジュール](/docs/workflows/scheduled-workflows)も管理できます（ワークフローをスケジュールするには、`agentId` の代わりに `workflowId` を渡します）。
+
+:::note
+
+スケジュールには、schedules ドメインを実装した[ストレージ](/docs/storage/overview)アダプターが必要です。対応アダプターと API の動作については、[`mastra.schedules` リファレンス](/reference/schedules/overview)を参照してください。
+
+:::
+
+## クイックスタート
+
+次のスケジュールは、`pinger` エージェントを1時間ごとに実行します。スレッドを使用しないため、各実行は独立した `agent.generate()` の実行になります。
+
+```typescript title="src/mastra/schedules.ts"
+import { Mastra } from '@mastra/core'
+import { Agent } from '@mastra/core/agent'
+import { LibSQLStore } from '@mastra/libsql'
+
+const pinger = new Agent({
+  id: 'pinger',
+  name: 'Pinger',
+  instructions: 'Report the current system status in one sentence.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const mastra = new Mastra({
+  agents: { pinger },
+  storage: new LibSQLStore({ id: 'mastra-storage', url: 'file:./mastra.db' }),
+})
+
+await mastra.schedules.create({
+  agentId: 'pinger',
+  cron: '0 * * * *',
+  prompt: 'Give me a status update.',
+})
+```
+
+Mastra はスケジュールが初めて作成されたときにスケジューラーを起動し、指定した cron に従ってエージェントを実行します。
+
+## 実行間隔
+
+スケジュールは cron 式に従って実行されます。`cron` フィールドには標準の5、6、または7項目の cron 式を指定でき、スケジュールの作成時または更新時に検証されます。
+
+`@hourly`、`@daily`、`@weekly`、`@monthly`、`@midnight` などの `croner` ニックネームも使用できます。曜日と時刻を組み合わせる場合は、cron フィールドを直接記述します。
+
+```typescript
+// Every weekday at 9am
+await mastra.schedules.create({
+  agentId: 'pinger',
+  cron: '0 9 * * 1-5',
+  prompt: 'Start-of-day check.',
+})
+```
+
+実行時刻がホストのロケールに依存しないようにするには、`timezone` に `America/New_York` などの IANA タイムゾーンを設定します。省略した場合、cron はホストのローカルタイムゾーンに基づいて解釈されます。
+
+より読みやすく cron を組み立てるには、[`cron-time-generator`](https://www.npmjs.com/package/cron-time-generator) などのユーザーランドビルダーを使用し、その出力を `cron` に渡せます。
+
+## スレッドなしとスレッドありのスケジュール
+
+エージェントのスケジュールは、`threadId` を渡すかどうかによって、次の2つのモードのいずれかで実行されます。
+
+### スレッドなし
+
+`threadId` がない場合、各実行は独立した `agent.generate()` の実行になります。会話スレッドには何も書き込まれません。これは最もシンプルなモードであり、会話コンテキストを必要としないステータス確認、レポート、その他の処理に適しています。
+
+### スレッドあり
+
+`threadId` がある場合、スケジュールはそのスレッドに[シグナル](/docs/long-running-agents/signals)を送信し、プロンプトをエージェントの会話に追加します。スレッドありのスケジュールでは、`threadId` とともに `resourceId` も必要です。
+
+```typescript title="src/mastra/schedules.ts"
+await mastra.schedules.create({
+  agentId: 'pinger',
+  cron: '0 9 * * *',
+  prompt: 'Summarize anything new since yesterday.',
+  threadId: 'thread-123',
+  resourceId: 'user-456',
+})
+```
+
+スレッドありのスケジュールでは、シグナルの種類、XML タグ、タグ属性、アクティブ時またはアイドル時の配信動作など、シグナルの動作を制御する追加フィールドを指定できます。これらは [`agent.sendSignal()`](/docs/long-running-agents/signals) が受け付けるオプションに対応し、スケジュールとともに永続化できるよう JSON シリアライズ可能なまま保持されます。
+
+これらのフィールドには `threadId` が必要です。スレッドあり入力の完全な形式については、[エージェントスケジュール入力リファレンス](/reference/schedules/overview#createinput)を参照してください。
+
+```typescript
+await mastra.schedules.create({
+  agentId: 'pinger',
+  cron: '0 9 * * *',
+  prompt: 'Summarize anything new since yesterday.',
+  threadId: 'thread-123',
+  resourceId: 'user-456',
+  tagName: 'check-in', // renders as <check-in>…</check-in>
+  attributes: { source: 'cron' },
+  ifActive: { behavior: 'discard' }, // skip if the thread is mid-stream
+  ifIdle: {
+    behavior: 'wake', // wake the agent if the thread is idle
+    streamOptions: { requestContext: { locale: 'en-US' } },
+  },
+})
+```
+
+`providerOptions` は実行のたびにシグナルのペイロードへマージされ、スレッドありとスレッドなしの両方のスケジュールに適用されます。
+
+## スケジュールの管理
+
+すべてのスケジュール操作には `mastra.schedules` を使用します。このサービスでは、スケジュールの作成、読み取り、更新、一時停止、再開、手動実行、削除ができます。
+
+```typescript
+const schedule = await mastra.schedules.create({
+  agentId: 'pinger',
+  cron: '0 * * * *',
+  prompt: 'Status check.',
+})
+
+await mastra.schedules.pause(schedule.id)
+await mastra.schedules.resume(schedule.id)
+await mastra.schedules.run(schedule.id) // Fire once now, off-schedule
+```
+
+`pause` と `resume` の状態は永続化されます。`run` は実行間隔に影響を与えず、スケジュールを即座に1回実行します。メソッドの完全な一覧、フィルター、パッチフィールドについては、[`mastra.schedules` リファレンス](/reference/schedules/overview)を参照してください。
+
+### ワークフローのスケジュール
+
+同じサービスを使用して、エージェントではなくワークフローを実行するスケジュールも作成できます。`workflowId` とワークフロー用のフィールドを渡します。
+
+```typescript
+await mastra.schedules.create({
+  workflowId: 'daily-report',
+  cron: '0 9 * * *',
+  inputData: { userId: 'system' },
+})
+```
+
+この方法で作成したワークフロースケジュールは、`createWorkflow` の宣言的な `schedule` フィールドとは独立しています。宣言形式と Studio の表示については、[スケジュール済みワークフロー](/docs/workflows/scheduled-workflows)を参照してください。
+
+### カスタム ID
+
+後で検索、更新、削除するための予測可能な識別子が必要な場合は、`id` を渡します。
+
+```typescript
+await mastra.schedules.create({
+  id: 'nightly-summary',
+  agentId: 'pinger',
+  cron: '0 9 * * *',
+  prompt: 'Summarize anything new since yesterday.',
+})
+```
+
+ID の正規化規則と重複 ID の動作については、[`create(input)` リファレンス](/reference/schedules/overview#createinput)を参照してください。
+
+### クライアントからの操作
+
+同じ操作は、`/api/schedules` ルートを通じて `@mastra/client-js` からも利用できるため、別プロセスや UI からスケジュールを管理できます。クライアントメソッドの一覧については、[client-js のエージェントスケジュールリファレンス](/reference/client-js/agents#agent-schedules)を参照してください。
+
+## ライフサイクルフック
+
+フックを使用すると、実行時のパラメーターを算出したり、実行結果に応じて処理したりするなど、エージェントスケジュールのライフサイクルにおける重要な時点でコードを実行できます。`Mastra` コンストラクターの `schedules` で設定します。フックは、すべてのエージェントのスケジュールに対して実行される単一のフラットなまとまりです。各フックのコンテキストには実行対象の `agentId` が含まれるため、エージェントごとに異なる動作が必要な場合は、この値で分岐します。フックは `Mastra` レベルにあるため、コードで定義したエージェントと保存済みエージェントの両方に適用されます。
+
+```typescript title="src/mastra/index.ts"
+const mastra = new Mastra({
+  agents: { pinger },
+  storage: new LibSQLStore({ id: 'mastra-storage', url: 'file:./mastra.db' }),
+  schedules: {
+    prepare: async ({ agentId, schedule, trigger }) => {
+      // Return overrides, null to skip this fire, or undefined for defaults
+      return { prompt: `Status as of ${trigger.firedAt.toISOString()}` }
+    },
+    onFinish: async ({ agentId, outcome, runId }) => {
+      // Runs on any non-error, non-abort outcome
+    },
+    onError: async ({ agentId, phase, error }) => {
+      // Runs when prepare, the signal, or the agent run threw
+    },
+    onAbort: async ({ agentId, runId }) => {
+      // Runs when the run was aborted mid-stream
+    },
+  },
+})
+```
+
+フックは次のとおりです。
+
+- `prepare`: 実行前に呼び出されます。`prompt` や `threadId` などの実行時パラメーターを上書きするオブジェクトを返します。実行をスキップするには `null`、保存済みの既定値を使用するには `undefined` を返します。
+- `onFinish`: エラーでも中断でもない終端状態に達した各トリガーにつき1回呼び出されます。
+- `onError`: `prepare` またはシグナルでエラーが発生した後に呼び出されます。エージェントの実行が失敗した場合にも呼び出されます。
+- `onAbort`: 実行がストリームの途中で中断されたときに呼び出されます。
+
+すべてのフックコンテキストには、`schedule` と `trigger` に加えて、スケジュールが実行したエージェントを示す `agentId` が含まれます。
+
+フック内の例外は捕捉され、ログに記録されます。ワーカーの処理経路を変更したり、別のフックを呼び出したりすることはありません。
+
+## 関連情報
+
+- [`mastra.schedules`](/reference/schedules/overview): スケジュールの作成と管理に関する API リファレンス。
+- [シグナル](/docs/long-running-agents/signals): スレッドありのスケジュールで使用される配信メカニズム。
+- [スケジュール済みワークフロー](/docs/workflows/scheduled-workflows): ワークフロー定義で cron スケジュールを宣言します。

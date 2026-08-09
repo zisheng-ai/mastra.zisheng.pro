@@ -1,0 +1,128 @@
+---
+title: "Goal | 長時間実行 Agent"
+description: 実行ループ内で達成を判定される永続的な目標を Agent に設定し、Goal の達成または実行予算の消費まで処理を継続させる方法を説明します。
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+---
+
+# Goal
+
+**追加バージョン：** `@mastra/core@1.42.0`
+
+:::experimental
+
+Goals 機能はベータ段階です。ベータを終了するまでは、マイナーバージョンで破壊的変更が行われる可能性があります。
+
+:::
+
+Goal は、スレッド単位で永続化される目標です。判定モデルが達成済みと判断するか、実行予算を使い切るまで、Agent がループの反復をまたいで取り組み続ける常設の指示として機能します。
+
+目標はスレッドの状態に保存されるため、再読み込み後も維持されます。また、実行中のターンの途中で新しいメッセージが届いた場合でも、ループ内で評価されます。
+
+Goals は [`isTaskComplete`](/docs/capabilities/subagents) と同じ仕組みを基盤にしています。LLM-as-judge が反復ごとに Agent の出力を採点し、ループを継続するかどうかを制御します。違いは、Goal が**永続的**であり（呼び出しごとに渡すのではなくスレッドの状態に保存される）、`stream()` ごとのオプションではなく `Agent` のメソッドで設定、更新される点です。
+
+## Goal を使用する場面
+
+成功条件を呼び出しのたびに指定し直すことなく、多数の反復やメッセージをまたいで Agent に単一の目標へ取り組ませたい場合に Goal を使用します。
+
+- 判定モデルが完了と判断するまで Agent が追求すべき常設の目標。
+- 実行途中のメッセージをまたいで継続すべき処理（実行中の処理に届いたメッセージも、引き続き Goal に照らして判定されます）。
+- スレッドの再読み込みやプロセスの再起動後も維持する必要がある目標。
+
+単一の `stream()` 呼び出し内で一度だけ完了判定を行う場合は、代わりに [`isTaskComplete`](/docs/capabilities/subagents) を使用します。
+
+## クイックスタート
+
+Goals には、設定済みの[ストレージ](/docs/storage/overview)バックエンドと Memory によって管理されるスレッドが必要です。Agent に `goal` 設定を追加し、スレッドの目標を設定します。Goal を機能させるには判定モデルが必要です。
+
+```typescript title="src/mastra/agents/worker.ts" {8-11}
+import { Agent } from '@mastra/core/agent'
+
+const worker = new Agent({
+  id: 'worker',
+  name: 'worker',
+  instructions: 'You complete software tasks end to end.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory,
+  goal: {
+    judge: '__GATEWAY_OPENAI_MODEL_MINI__',
+    maxRuns: 50,
+  },
+})
+
+// Set the durable objective for a thread.
+await worker.setObjective('Add and test a /health endpoint', {
+  threadId,
+  resourceId,
+})
+
+// The objective is judged each iteration until it's complete or maxRuns is hit.
+const stream = await worker.stream('Start working on the goal', {
+  memory: { thread: threadId, resource: resourceId },
+})
+```
+
+`goal` 設定は state-signal projection を自動登録するため、追加設定なしでモデルのコンテキストに現在の目標が `<current-objective>` として常に表示されます。
+
+## Goal ステップの仕組み
+
+Goal ステップは、Agent の実行ループ内で `isTaskComplete` の直後に実行されます。実際の回答候補が生成されると、目標に照らして会話を採点し、ループを制御します。
+
+- **未達成で予算が残っている** → ループを継続します。評価ごとのフィードバックが注入され、Agent が処理を反復します。
+- **達成済み** → ループを停止し、目標を `done` にします。
+- **予算を消費済み**（`runsUsed >= maxRuns`）→ ループを停止し、目標を `paused` にします。続行するには `maxRuns` を増やしてから目標を再開します。
+
+このステップは `isTaskComplete` と同じゲーティングに従い、バックグラウンドタスク、Tool ループの途中、Working Memory のみの反復では何も行いません。
+
+**判定モデルが有効化スイッチです。** 目標ごとのオーバーライドと Agent の `goal.judge` のどちらからも判定モデルを解決できない場合、Goal ステップは採点も予算の消費も行わず、`goal` チャンクも出力しません。
+
+有効な設定は、目標ごとのレコード値 → Agent の `goal` 設定 → 組み込みのデフォルト（`maxRuns` は `50`、判定プロンプトはデフォルト値）の順で解決されます。
+
+デフォルトでは、目標が達成されていれば `1`、そうでなければ `0` を返す組み込みの LLM-as-judge Scorer を使用します。判定をカスタマイズするには、`goal.scorer` で独自の Scorer を指定します。
+
+```typescript title="src/mastra/agents/worker.ts"
+const worker = new Agent({
+  id: 'worker',
+  name: 'worker',
+  instructions: 'You complete software tasks end to end.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory,
+  goal: {
+    // A resolver function lets you inject provider credentials and read the
+    // current judge selection at runtime; returning `undefined` keeps the
+    // goal step a no-op.
+    judge: ({ requestContext }) => resolveJudgeModel(requestContext),
+    maxRuns: 30,
+    prompt: 'Only mark the goal complete when tests pass.',
+  },
+})
+```
+
+評価のたびに型付きの `goal` ストリームチャンク（`GoalEvaluationPayload`：`objective`、`iteration`、`maxRuns`、`passed`、`status`、`results`、`reason`、`duration`、`timedOut`、`maxRunsReached`、`suppressFeedback`）が出力されるため、UI で実行途中の Goal の進捗を表示できます。
+
+## 目標を管理する
+
+`Agent` のメソッドを使用してスレッドの目標を制御します。実行が Memory によって管理されていない場合は、いずれも何も行いません（ストレージと `threadId` が必要です）。
+
+```typescript title="src/mastra/objective.ts"
+// Read the current objective record.
+const record = await worker.getObjective({ threadId })
+
+// Update options on the active objective (only provided fields are written;
+// unset fields fall back to the agent's `goal` config).
+await worker.updateObjectiveOptions({ threadId, maxRuns: 100 })
+
+// Drop the objective.
+await worker.clearObjective({ threadId })
+```
+
+目標レコードには、実際に取り組んだ時間を表示する UI 向けに、任意の `activeDurationMs` 値が含まれます。Mastra は Agent がアクティブな目標に取り組んでいる間にこの値を増加させ、実行の終了時または Tool の承認待ちになった時点でチェックポイントを保存します。値がない場合はゼロを表し、この時間は Goal が作成されてからの経過時間ではなく Agent の実行時間を測定します。
+
+`setObjective` / `updateObjectiveOptions` で設定した目標ごとの値は Agent の `goal` 設定より優先され、その優先関係はスレッドの状態に保存されます。Goal チャンクの完全な形式については、[ChunkType リファレンスの `GoalEvaluationPayload`](/reference/streaming/ChunkType)を参照してください。
+
+## 関連項目
+
+- [Supervisor Agent](/docs/capabilities/subagents)：`isTaskComplete` と rubric Scorer
+- [Signal Provider](/docs/long-running-agents/signal-providers)：目標をコンテキストに投影する仕組み
+- [Memory ストレージ](/docs/storage/overview)：Goals に必要なストレージバックエンド

@@ -1,0 +1,154 @@
+---
+title: "Memory を使用した Evals | Evals"
+description: "thread スコープの Observational Memory を含む、Memory 対応 Agent に対して、runEvals と Dataset の実験を使用して Scorer を実行します。"
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+---
+
+# Memory を使用した Evals
+
+Observational Memory を含め、`thread` スコープの Memory を使用する Agent には、実行時にスレッド ID が必要です。スレッド ID を指定せずに Eval が Agent を呼び出すと、次のエラーが表示されます。
+
+```
+ObservationalMemory (scope: 'thread') requires a threadId, but none was found in RequestContext or MessageList.
+```
+
+このページでは、Memory 対応 Agent に対して Mastra Evals を実行する3つの有効な方法、それぞれがサポートする内容、選択の基準について説明します。3つの方法すべてを実行できる完全な再現例は、[`examples/evals-with-memory`](https://github.com/mastra-ai/mastra/tree/main/examples/evals-with-memory) にあります。
+
+## アプローチの選び方
+
+| 目的 | アプローチ |
+| - | - |
+| すべての項目で1つの会話を共有する | [グローバルな `targetOptions.memory` を指定した `runEvals`](#shared-thread-with-runevals) |
+| 項目ごとに独立したスレッドを使用する、CI に適したループ | [項目ごとの `runEvals`](#per-item-threads-with-runevals) |
+| 保存済みの `Dataset` を使用した項目ごとのスレッド | [インラインタスクを指定した `dataset.startExperiment`](#dataset-experiments-with-an-inline-task) |
+
+`RequestContext` に `MastraMemory` を事前設定する方法は、Agent に Memory を渡す方法として**サポートされていません**。スレッドの解決では `args.memory.thread` が読み取られますが、`RequestContext.MastraMemory` は Agent がスレッドを解決した後に `prepare-memory-step` によって設定されます。
+
+## `runEvals` でスレッドを共有する
+
+`runEvals` は、`agent.generate()` に転送される `targetOptions` を受け取ります。`memory: { thread, resource }` を渡すと、すべてのデータ項目が同じスレッドで実行されます。複数ターンの会話にわたる記憶のテストに便利です。
+
+```typescript title="src/mastra/agents/support-agent.test.ts"
+import { runEvals } from '@mastra/core/evals'
+import { supportAgent } from './support-agent'
+import { recallScorer } from '../scorers/recall-scorer'
+
+const memory = await supportAgent.getMemory()
+await memory!.createThread({ threadId: 'eval-thread', resourceId: 'ci-user' })
+
+const result = await runEvals({
+  target: supportAgent,
+  scorers: [recallScorer],
+  targetOptions: {
+    memory: { thread: 'eval-thread', resource: 'ci-user' },
+  },
+  data: [
+    { input: 'My order number is 12345' },
+    { input: 'What is my order number?', groundTruth: '12345' },
+  ],
+})
+```
+
+`targetOptions` は**呼び出し単位でグローバル**です。現在、`RunEvalsDataItem` では項目ごとのオーバーライドを利用できません。
+
+## `runEvals` で項目ごとにスレッドを分ける
+
+各データ項目に独自のスレッドが必要な場合（一般的な CI の構成）、項目ごとに一意の `targetOptions.memory` を指定して `runEvals` を呼び出し、スコアを自分で集計します。
+
+```typescript title="src/mastra/agents/support-agent.test.ts"
+import { randomUUID } from 'node:crypto'
+import { runEvals } from '@mastra/core/evals'
+import { supportAgent } from './support-agent'
+import { recallScorer } from '../scorers/recall-scorer'
+
+const memory = await supportAgent.getMemory()
+const resourceId = 'ci-user'
+
+const items = [
+  { input: 'Cats are mammals', groundTruth: 'mammals' },
+  { input: 'Dogs are mammals too', groundTruth: 'mammals' },
+]
+
+// `runEvals` returns `{ scores: Record<string, number>; summary: { totalItems } }`.
+const scores: number[] = []
+for (const item of items) {
+  const threadId = `eval-${randomUUID()}`
+  await memory!.createThread({ threadId, resourceId, title: item.input })
+
+  const result = await runEvals({
+    target: supportAgent,
+    scorers: [recallScorer],
+    targetOptions: { memory: { thread: threadId, resource: resourceId } },
+    data: [item],
+  })
+
+  scores.push(result.scores[recallScorer.id])
+}
+
+const average = scores.reduce((a, b) => a + b, 0) / scores.length
+```
+
+:::note
+Eval を実行する前にスレッドを作成してください。`thread` スコープの Observational Memory は、事前に存在する必要があるレコードから読み取ります。
+:::
+
+## インラインタスクを使用した Dataset の実験
+
+`dataset.startExperiment({ target: agent })` は Agent に `memory` オプションを転送せず、`requestContext` のみを転送します。保存済み Dataset を Memory 対応 Agent に対して実行するには、インラインの `task` 関数を使用し、各項目の `metadata` に `{ threadId, resourceId }` を保存します。Scorer パイプラインは通常どおり実行されます。
+
+```typescript title="src/mastra/evals/dataset-experiment.ts"
+import { randomUUID } from 'node:crypto'
+import { mastra } from '../index'
+import { supportAgent } from '../agents/support-agent'
+import { recallScorer } from '../scorers/recall-scorer'
+
+const memory = await supportAgent.getMemory()
+const resourceId = 'ci-user'
+
+const items = [
+  { input: 'Cats are mammals', groundTruth: 'mammals', thread: `ds-${randomUUID()}` },
+  { input: 'Dogs are mammals too', groundTruth: 'mammals', thread: `ds-${randomUUID()}` },
+]
+
+for (const it of items) {
+  await memory!.createThread({ threadId: it.thread, resourceId, title: it.input })
+}
+
+const dataset = await mastra.datasets.create({
+  name: 'support-recall',
+  description: 'Per-item memory via inline task + item metadata',
+})
+
+await dataset.addItems({
+  items: items.map(it => ({
+    input: it.input,
+    groundTruth: it.groundTruth,
+    metadata: { threadId: it.thread, resourceId },
+  })),
+})
+
+const summary = await dataset.startExperiment({
+  scorers: [recallScorer],
+  task: async ({ input, metadata }) => {
+    const { threadId, resourceId: rid } = (metadata ?? {}) as {
+      threadId: string
+      resourceId: string
+    }
+    const result = await supportAgent.generate(input as string, {
+      memory: { thread: threadId, resource: rid },
+    })
+    return result.text
+  },
+})
+```
+
+インラインの `task` は項目の `metadata` を受け取るため、Agent や Scorer を変更せずに、各行で独自のスレッドを使用できます。完全な設定については、[runEvals リファレンス](/reference/evals/run-evals)と [Dataset リファレンス](/reference/datasets/dataset)を参照してください。
+
+## 関連項目
+
+- [CI で Scorer を実行する](/docs/evals/running-in-ci)
+- [実験を実行する](/docs/datasets/running-experiments)
+- [Observational Memory](/docs/memory/observational-memory)
+- [runEvals API リファレンス](/reference/evals/run-evals)
