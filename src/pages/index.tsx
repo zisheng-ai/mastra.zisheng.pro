@@ -3,6 +3,8 @@ import Link from '@docusaurus/Link'
 import { useLocation } from '@docusaurus/router'
 import Translate, { translate } from '@docusaurus/Translate'
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext'
+import AdSlot from '@site/src/components/AdSlot'
+import AdxSlot from '@site/src/components/AdxSlot'
 import Layout from '@theme/Layout'
 import {
   Activity,
@@ -522,6 +524,10 @@ export default function Home(): ReactNode {
           </div>
         </section>
 
+        <div className={styles.container}>
+          <AdSlot slot="8933935824" />
+        </div>
+
         <section className={styles.section}>
           <div className={styles.container}>
             <div className={styles.sectionHeading}>
@@ -553,6 +559,18 @@ export default function Home(): ReactNode {
             </div>
           </div>
         </section>
+
+        <div className={styles.container}>
+          <AdxSlot
+            path="/23294357175/q4"
+            id="div-gpt-ad-home-q4"
+            sizes={[
+              [336, 280],
+              [250, 250],
+              [300, 250],
+            ]}
+          />
+        </div>
 
         <section className={styles.splitSection}>
           <div className={styles.container}>
