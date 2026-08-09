@@ -2,18 +2,15 @@
 
 import Link from '@docusaurus/Link'
 import { Card, CardContent } from '../ui/card'
-import { useLocation } from '@docusaurus/router'
 
 export function CardItem({ links }: { links: Array<{ title: string; href: string }> }) {
-  const location = useLocation()
-  const locale = location.pathname.split('/')[1] || 'en'
   return (
     <Card className="w-full rounded-none border-none px-0 shadow-none transition-colors dark:border-[#404040]">
       <CardContent className="grid w-full gap-3 px-0 md:grid-cols-2 lg:grid-cols-3">
         {links.map(item => (
           <Link
             key={`${item.title}-${item.href}`}
-            to={`/${locale}${item.href}`}
+            to={item.href}
             style={{
               textDecoration: 'none',
             }}

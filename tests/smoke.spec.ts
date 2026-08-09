@@ -18,6 +18,7 @@ const IGNORED_CONSOLE_PATTERNS = [
   /kapa/i,
   /hubspot|hs-scripts/i,
   /google.*tag|gtag|gtm/i,
+  /googlesyndication|doubleclick|securepubads/i,
   /algolia/i,
   /reo\.dev/i,
   // Browser extensions & service workers
@@ -53,6 +54,7 @@ const IGNORED_REQUEST_PATTERNS = [
   /hs-scripts\.com/i,
   /hubspot/i,
   /google.*tag|googletagmanager|gtag/i,
+  /googlesyndication|doubleclick|securepubads/i,
   /csp\.withgoogle\.com/i,
   /algolia/i,
   /kapa/i,

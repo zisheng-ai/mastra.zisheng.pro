@@ -57,7 +57,7 @@ export function getBaseUrl(sectionId: string, siteUrl: string): string {
     Guides: '/guides',
     Reference: '/reference',
   }
-  return new URL(baseUrls[sectionId] || '/', siteUrl).toString().replace(/\/$/, '')
+  return new URL((baseUrls[sectionId] || '/').replace(/^\//, ''), `${siteUrl}/`).toString().replace(/\/$/, '')
 }
 
 /**

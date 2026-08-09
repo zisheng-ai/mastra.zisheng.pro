@@ -27,7 +27,7 @@ export default function Layout(props: Props): ReactNode {
   const location = useLocation()
   const { siteConfig } = useDocusaurusContext()
   const canonicalUrl = new URL(location.pathname, siteConfig.url).toString()
-  const isNotFoundPage = /^\/404(?:\.html)?\/?$/.test(location.pathname)
+  const isNotFoundPage = /(?:^|\/)404(?:\.html)?\/?$/.test(location.pathname)
 
   return (
     <LayoutProvider>

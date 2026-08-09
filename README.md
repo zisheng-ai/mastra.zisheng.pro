@@ -15,9 +15,10 @@ updated only from `main/docs`.
 This is an independent deployment mirror and is not the official Mastra site.
 The official website is available at [mastra.ai](https://mastra.ai).
 
-The site currently uses English only, matching the official public
-documentation source. Docusaurus internationalization and a language switcher
-are not enabled.
+The site publishes Simplified Chinese at the root URL, plus English, Japanese,
+Taiwan Traditional Chinese, and Hong Kong Traditional Chinese under localized
+paths. The language switcher preserves the current page and the visitor's most
+recent language choice.
 
 ## Development
 
@@ -27,6 +28,11 @@ Requires Node.js 22 or later and pnpm 11 or later.
 pnpm install --frozen-lockfile
 pnpm dev
 ```
+
+`pnpm dev` builds and serves every locale so language switching works across
+the complete site. For faster hot-reload development of only the Simplified
+Chinese locale, run `pnpm dev:fast`. The other single-locale commands are
+`pnpm dev:en`, `pnpm dev:ja`, `pnpm dev:zh-TW`, and `pnpm dev:zh-HK`.
 
 Build the production site with:
 

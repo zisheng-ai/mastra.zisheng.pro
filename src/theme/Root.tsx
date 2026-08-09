@@ -1,5 +1,6 @@
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext'
 import { CookieConsent } from '@site/src/components/cookie/cookie-consent'
+import { LocalePreference } from '@site/src/components/locale-preference'
 import { DocsChatProvider, KapaChatProvider } from '@mastra/docusaurus-plugin-kapa/client'
 import { PostHogProvider } from 'posthog-js/react'
 import React from 'react'
@@ -11,6 +12,7 @@ export default function Root({ children }: { children: React.ReactNode }) {
 
   const content = (
     <>
+      <LocalePreference />
       <CookieConsent />
       <DocsChatProvider>
         <KapaChatProvider>{children}</KapaChatProvider>

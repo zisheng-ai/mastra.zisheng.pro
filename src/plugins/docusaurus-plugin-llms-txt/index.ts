@@ -20,11 +20,14 @@ const PLUGIN_NAME = 'docusaurus-plugin-llms-txt'
 const CONCURRENCY = 10
 const PLUGIN_DIR = path.dirname(new URL(import.meta.url).pathname)
 
-export default function pluginLlmsTxt(_context: LoadContext, userOptions: LlmsTxtPluginOptions): Plugin {
+export default function pluginLlmsTxt(context: LoadContext, userOptions: LlmsTxtPluginOptions): Plugin {
   // Validate and resolve options
   validateOptions(userOptions)
   const options = resolveOptions(userOptions)
-  const contentPrefix = `> Discover all available pages from the documentation index: ${options.siteUrl}/llms.txt\n\n`
+  const localeBaseUrl = context.siteConfig.i18n.localeConfigs?.[context.i18n.currentLocale]?.baseUrl ?? context.baseUrl
+  const localizedSiteUrl = new URL(localeBaseUrl, options.siteUrl).toString().replace(/\/$/, '')
+  const localizedOptions = { ...options, siteUrl: localizedSiteUrl }
+  const contentPrefix = `> Discover all available pages from the documentation index: ${localizedOptions.siteUrl}/llms.txt\n\n`
 
   return {
     name: PLUGIN_NAME,
@@ -76,7 +79,7 @@ export default function pluginLlmsTxt(_context: LoadContext, userOptions: LlmsTx
 
           // Point the HTML at its markdown twin. The cache key stays on the original HTML, and the
           // injection is idempotent, so a repeated build cannot add the tag twice.
-          const htmlWithLink = injectMarkdownAlternateLink(html, markdownUrlForRoute(route, options.siteUrl))
+          const htmlWithLink = injectMarkdownAlternateLink(html, markdownUrlForRoute(route, localizedOptions.siteUrl))
 
           if (htmlWithLink !== html) {
             await fs.writeFile(htmlPath, htmlWithLink, 'utf-8')
@@ -120,7 +123,7 @@ export default function pluginLlmsTxt(_context: LoadContext, userOptions: LlmsTx
       await writeManifest(manifest, outDir)
 
       // Generate root llms.txt
-      await generateRootLlmsTxt(outDir, siteDir, options)
+      await generateRootLlmsTxt(outDir, siteDir, localizedOptions)
 
       // Save cache
       await cache.save()

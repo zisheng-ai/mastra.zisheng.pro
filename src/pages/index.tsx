@@ -886,7 +886,7 @@ export default function Home(): ReactNode {
                   <a href="https://github.com/mastra-ai/mastra">GitHub</a>
                   <a href="https://discord.gg/BTYqqHKUrf">Discord</a>
                   <a href="https://www.youtube.com/@mastra-ai">YouTube</a>
-                  <a href="https://x.com/mastra">X</a>
+                  <a href="https://x.com/zisheng_ai">X</a>
                 </div>
               </nav>
             </div>

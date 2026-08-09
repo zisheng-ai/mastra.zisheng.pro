@@ -22,7 +22,7 @@ cd docs
 pnpm run dev
 ```
 
-This will start a local development server at `http://localhost:3000` where you can preview your changes.
+This builds and starts the complete multilingual site at `http://localhost:3000`, so the language switcher works on every route. For faster hot-reload development of only the Simplified Chinese locale, use `pnpm dev:fast`.
 
 If you're copying these instructions, remember to [configure this project as a fork](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/configuring-a-remote-repository-for-a-fork).
 
@@ -88,7 +88,7 @@ The Mastra documentation is organized into several sections:
 - **models/**: Model provider documentation (`src/content/en/models/`). These docs are auto-generated and should not be edited manually.
 - **course/**: Tutorial and course content (`src/course/`)
 
-All documentation should be written in English and placed in the appropriate section under `src/content/en/`. English is the only supported language and there are no plans to support other languages at this time.
+New source documentation should be written in English and placed in the appropriate section under `src/content/en/`. The site also publishes Simplified Chinese, Japanese, Taiwan Traditional Chinese, and Hong Kong Traditional Chinese localizations.
 
 ## Editing content
 

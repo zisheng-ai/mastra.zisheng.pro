@@ -14,6 +14,7 @@ const IGNORED_ERROR_PATTERNS = [
   /hubspot|hs-scripts/i,
   /reo\.dev/i,
   /google.*tag|gtag|gtm/i,
+  /googlesyndication|doubleclick|securepubads/i,
   // Vercel analytics & speed insights (not available locally)
   /_vercel\/(insights|speed-insights)/,
   /chrome-extension/i,
