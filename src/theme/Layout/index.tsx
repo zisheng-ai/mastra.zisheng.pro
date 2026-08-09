@@ -28,6 +28,11 @@ export default function Layout(props: Props): ReactNode {
   const { siteConfig } = useDocusaurusContext()
   const canonicalUrl = new URL(location.pathname, siteConfig.url).toString()
   const isNotFoundPage = /(?:^|\/)404(?:\.html)?\/?$/.test(location.pathname)
+  const socialTitle = title
+    ? title.endsWith(siteConfig.title)
+      ? title
+      : `${title} | ${siteConfig.title}`
+    : siteConfig.title
 
   return (
     <LayoutProvider>
@@ -35,6 +40,12 @@ export default function Layout(props: Props): ReactNode {
 
       <Head>
         <link rel="canonical" href={canonicalUrl} />
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content={siteConfig.title} />
+        <meta property="og:image:alt" content={socialTitle} />
+        <meta name="twitter:title" content={socialTitle} />
+        {description && <meta name="twitter:description" content={description} />}
+        <meta name="twitter:image:alt" content={socialTitle} />
         {isNotFoundPage && <meta name="robots" content="noindex" />}
       </Head>
 

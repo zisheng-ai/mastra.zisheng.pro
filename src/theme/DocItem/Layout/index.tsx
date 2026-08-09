@@ -1,4 +1,5 @@
 import React, { type ReactNode } from 'react'
+import Head from '@docusaurus/Head'
 import clsx from 'clsx'
 import { useWindowSize } from '@docusaurus/theme-common'
 import { useDoc } from '@docusaurus/plugin-content-docs/client'
@@ -44,6 +45,9 @@ export default function DocItemLayout({ children }: Props): ReactNode {
   return (
     <div id="doc-item-container" className="row @container">
       <div className={clsx('col', !docTOC.hidden && styles.docItemCol)}>
+        <Head>
+          <meta name="twitter:description" content={metadata.description} />
+        </Head>
         <ContentVisibility metadata={metadata} />
         <DocVersionBanner />
         <div className={styles.docItemContainer}>

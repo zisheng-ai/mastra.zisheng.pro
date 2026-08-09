@@ -390,7 +390,10 @@ function ProductPreview() {
 }
 
 export default function Home(): ReactNode {
-  const { siteConfig } = useDocusaurusContext()
+  const {
+    siteConfig,
+    i18n: { currentLocale },
+  } = useDocusaurusContext()
   const location = useLocation()
   const title = translate({ id: 'homepage.meta.title', message: 'Build AI agents' })
   const description = translate({
@@ -399,27 +402,46 @@ export default function Home(): ReactNode {
       'Build, observe, and improve production AI agents with Mastra, the open-source TypeScript agent framework.',
   })
   const canonicalUrl = new URL(location.pathname, siteConfig.url).toString()
-  const siteName = translate({ id: 'homepage.structuredData.siteName', message: 'Mastra documentation community' })
+  const alternateSiteName = translate({
+    id: 'homepage.structuredData.siteName',
+    message: 'Mastra documentation community',
+  })
+  const socialTitle = translate({ id: 'homepage.meta.ogTitle', message: 'Build AI agents with Mastra' })
+  const socialDescription = translate({
+    id: 'homepage.meta.ogDescription',
+    message: 'The open-source TypeScript framework for building, observing, and improving production AI agents.',
+  })
   const structuredData = [
     {
       '@context': 'https://schema.org',
       '@type': 'WebSite',
       '@id': `${siteConfig.url}/#website`,
-      name: siteName,
+      name: 'Mastra',
+      alternateName: alternateSiteName,
       url: siteConfig.url,
       description,
+      inLanguage: currentLocale,
     },
     {
       '@context': 'https://schema.org',
       '@type': 'WebPage',
+      '@id': `${canonicalUrl}#webpage`,
       name: title,
       description,
       url: canonicalUrl,
       isPartOf: { '@id': `${siteConfig.url}/#website` },
+      inLanguage: currentLocale,
+      primaryImageOfPage: {
+        '@type': 'ImageObject',
+        url: new URL('/img/og-home.png', siteConfig.url).toString(),
+      },
     },
     {
       '@context': 'https://schema.org',
       '@type': 'FAQPage',
+      '@id': `${canonicalUrl}#faq`,
+      isPartOf: { '@id': `${canonicalUrl}#webpage` },
+      inLanguage: currentLocale,
       mainEntity: faqs.map(faq => ({
         '@type': 'Question',
         name: faq.question,
@@ -431,20 +453,11 @@ export default function Home(): ReactNode {
   return (
     <Layout title={title} description={description} noFooter wrapperClassName={styles.layout}>
       <Head>
-        <meta property="og:type" content="website" />
-        <meta
-          property="og:title"
-          content={translate({ id: 'homepage.meta.ogTitle', message: 'Build AI agents with Mastra' })}
-        />
+        <meta property="og:title" content={socialTitle} />
+        <meta name="twitter:title" content={socialTitle} />
         <script type="application/ld+json">{JSON.stringify(structuredData)}</script>
-        <meta
-          property="og:description"
-          content={translate({
-            id: 'homepage.meta.ogDescription',
-            message:
-              'The open-source TypeScript framework for building, observing, and improving production AI agents.',
-          })}
-        />
+        <meta property="og:description" content={socialDescription} />
+        <meta name="twitter:description" content={socialDescription} />
       </Head>
 
       <main className={styles.page}>

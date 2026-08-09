@@ -277,8 +277,8 @@ const config: Config = {
         },
         sitemap: {
           lastmod: 'date',
-          changefreq: 'weekly',
-          priority: 0.5,
+          changefreq: null,
+          priority: null,
           ignorePatterns: ['/tags/**'],
           filename: 'sitemap.xml',
           createSitemapItems: createLocalizedSitemapItems,
