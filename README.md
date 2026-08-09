@@ -1,14 +1,23 @@
-# Mastra documentation mirror
+# Mastra site mirror
 
-This branch deploys the latest documentation source from the official
+This branch deploys a complete Mastra landing page together with the latest
+documentation source from the official
 [mastra-ai/mastra](https://github.com/mastra-ai/mastra) repository.
 
 The documentation source is imported from upstream `main/docs` without old
 release branches or a multi-version documentation setup. See [UPSTREAM.md](./UPSTREAM.md)
 for the exact synced commit.
 
+The landing page is maintained locally because Mastra's marketing website
+source is not public. The documentation remains an upstream snapshot and is
+updated only from `main/docs`.
+
 This is an independent deployment mirror and is not the official Mastra site.
-The official documentation is available at [mastra.ai/docs](https://mastra.ai/docs).
+The official website is available at [mastra.ai](https://mastra.ai).
+
+The site currently uses English only, matching the official public
+documentation source. Docusaurus internationalization and a language switcher
+are not enabled.
 
 ## Development
 

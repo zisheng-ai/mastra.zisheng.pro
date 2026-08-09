@@ -17,7 +17,11 @@ const protectedPaths = [
   'docusaurus.config.ts',
   'package.json',
   'static/robots.txt',
+  'static/img/og-home.png',
   'src/components/cookie/cookie-consent.tsx',
+  'src/pages/index.module.css',
+  'src/pages/index.tsx',
+  'src/theme/Navbar/index.tsx',
   'src/theme/Root.tsx',
 ]
 
@@ -112,8 +116,10 @@ fs.writeFileSync(
 - Synced: ${syncedDate}
 - Imported path: \`docs/\`
 
-This branch contains only the current documentation snapshot. It does not
-vendor Mastra's Git history, release branches, tags, or a versioned docs site.
+The imported content contains only the current documentation snapshot. It does
+not vendor Mastra's Git history, release branches, tags, or a versioned docs
+site. The landing page, domain, analytics, and deployment configuration are
+maintained locally.
 `,
 )
 

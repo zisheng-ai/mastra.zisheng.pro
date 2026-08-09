@@ -6,5 +6,7 @@
 - Synced: 2026-08-09
 - Imported path: `docs/`
 
-This branch contains only the current documentation snapshot. It does not
-vendor Mastra's Git history, release branches, tags, or a versioned docs site.
+The imported content contains only the current documentation snapshot. It does
+not vendor Mastra's Git history, release branches, tags, or a versioned docs
+site. The landing page, domain, analytics, and deployment configuration are
+maintained locally.

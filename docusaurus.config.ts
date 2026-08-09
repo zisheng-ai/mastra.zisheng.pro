@@ -40,7 +40,7 @@ const kapaThemes: Config['themes'] =
     : []
 
 const config: Config = {
-  title: 'Mastra Docs',
+  title: 'Mastra',
   tagline: 'The TypeScript Agent Framework',
   favicon: '/img/favicon.ico',
   url: SITE_URL,
@@ -203,7 +203,7 @@ const config: Config = {
     ],
   ],
   themeConfig: {
-    image: 'img/og-image.png',
+    image: 'img/og-home.png',
     colorMode: {
       respectPrefersColorScheme: true,
     },
