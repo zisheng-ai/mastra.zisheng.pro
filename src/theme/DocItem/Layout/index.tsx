@@ -12,10 +12,9 @@ import DocItemContent from '@theme/DocItem/Content'
 import DocBreadcrumbs from '@theme/DocBreadcrumbs'
 import ContentVisibility from '@theme/ContentVisibility'
 import type { Props } from '@theme/DocItem/Layout'
+import AdSlot from '@site/src/components/AdSlot'
 
 import styles from './styles.module.css'
-import SubscribeForm from '@site/src/components/subscribe-form'
-import { FeedbackTrigger } from '@site/src/components/feedback-trigger'
 
 /**
  * Decide if the toc should be rendered, on mobile or desktop viewports
@@ -52,9 +51,11 @@ export default function DocItemLayout({ children }: Props): ReactNode {
             <DocVersionBadge />
             {docTOC.mobile}
             <DocItemContent>{children}</DocItemContent>
+            <AdSlot slot="5674061671" />
             {/* TODO: Fix display of prev/next, especially on mobile since the arrows are missing and the click targets are unclear. Add slight borders making it more obvious */}
             <DocItemFooter />
           </article>
+          <AdSlot slot="8933935824" />
           <DocItemPaginator />
         </div>
       </div>
@@ -62,14 +63,11 @@ export default function DocItemLayout({ children }: Props): ReactNode {
       {docTOC.desktop ? (
         <div id="toc-column" className={clsx('col col--3')}>
           {docTOC.desktop}
+          <AdSlot slot="2009434824" className="hidden xl:block" />
         </div>
       ) : (
         <div id="toc-column" className={clsx('col col--3')}>
-          {/* TODO: Do not hide on mobile, properly add feedback and newsletter form */}
-          <div className="hidden flex-col gap-4 px-1.5 xl:flex">
-            <SubscribeForm />
-            <FeedbackTrigger />
-          </div>
+          <AdSlot slot="2009434824" className="hidden xl:block" />
         </div>
       )}
     </div>
