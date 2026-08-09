@@ -31,8 +31,7 @@ AI Agent 正在带来新一轮平台变革。掌握其构建方法已成为工�
       },
       seo: {
         title: '什么是 Agent？| Mastra',
-        description:
-          '了解什么是 AI Agent、它与 chatbot 有何不同，并预览将使用 Mastra 构建的主题公园伴侣 Agent。',
+        description: '了解什么是 AI Agent、它与 chatbot 有何不同，并预览将使用 Mastra 构建的主题公园伴侣 Agent。',
       },
     },
     {
@@ -54,8 +53,7 @@ AI Agent 正在带来新一轮平台变革。掌握其构建方法已成为工�
       },
       seo: {
         title: '运行你的第一个 Agent | Mastra',
-        description:
-          '搭建 Mastra 项目脚手架并在本地运行，然后探索用于构建和测试 Agent 的交互式界面 Mastra Studio。',
+        description: '搭建 Mastra 项目脚手架并在本地运行，然后探索用于构建和测试 Agent 的交互式界面 Mastra Studio。',
       },
     },
     {
@@ -77,8 +75,7 @@ AI Agent 正在带来新一轮平台变革。掌握其构建方法已成为工�
       },
       seo: {
         title: '项目结构 | Mastra',
-        description:
-          '了解 Mastra 的项目结构，包括 Agent、Tool、Workflow 和配置，以及 Studio 与源码文件的对应关系。',
+        description: '了解 Mastra 的项目结构，包括 Agent、Tool、Workflow 和配置，以及 Studio 与源码文件的对应关系。',
       },
     },
     {
@@ -100,8 +97,7 @@ AI Agent 正在带来新一轮平台变革。掌握其构建方法已成为工�
       },
       seo: {
         title: '创建 Agent | Mastra',
-        description:
-          '使用 instructions 和 model 配置构建自定义 AI Agent，在 Mastra 中注册，并通过 Studio 运行。',
+        description: '使用 instructions 和 model 配置构建自定义 AI Agent，在 Mastra 中注册，并通过 Studio 运行。',
       },
     },
 
@@ -135,11 +131,7 @@ AI Agent 正在带来新一轮平台变革。掌握其构建方法已成为工�
       preview: {
         intro:
           '补充说明：如果你正在使用 Cursor、Windsurf、Claude Code、VS Code、Codex 或其他支持 MCP 的工具，建议启用 Mastra MCP Docs Server。',
-        bullets: [
-          'Mastra MCP Docs Server 是什么',
-          '如何在编辑器中启用它',
-          '编写代码时获取与上下文相关的 Mastra 文档',
-        ],
+        bullets: ['Mastra MCP Docs Server 是什么', '如何在编辑器中启用它', '编写代码时获取与上下文相关的 Mastra 文档'],
       },
     },
     {
@@ -293,8 +285,7 @@ AI Agent 正在带来新一轮平台变革。掌握其构建方法已成为工�
       status: 'published',
       module: '生产环境',
       preview: {
-        intro:
-          '使用 Mastra Server，将主题公园 Agent 从本地 Studio 环境部署到可公开访问的线上 endpoint。',
+        intro: '使用 Mastra Server，将主题公园 Agent 从本地 Studio 环境部署到可公开访问的线上 endpoint。',
         bullets: [
           '通过 Swagger UI 查看已作为 HTTP endpoint 暴露的每个 Agent',
           '运行 mastra server deploy 完成构建和上传，并获得稳定的公开 URL',

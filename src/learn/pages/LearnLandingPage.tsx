@@ -23,8 +23,7 @@ function useModules(lessons: Lesson[]) {
 }
 
 function LandingContent() {
-  const { course, isSimplifiedChinese, isHongKongChinese, isJapanese, isLocalized } =
-    useLocalizedLearnContent()
+  const { course, isSimplifiedChinese, isHongKongChinese, isJapanese, isLocalized } = useLocalizedLearnContent()
   const { storage } = useSharedLearnStorage()
   const modules = useModules(course.lessons)
 

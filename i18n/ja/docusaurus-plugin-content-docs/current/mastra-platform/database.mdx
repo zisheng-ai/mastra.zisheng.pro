@@ -1,0 +1,183 @@
+---
+title: "ホステッドデータベース | Mastra platform"
+description: CLIまたはplatformのプロジェクト設定から管理対象のTurso（LibSQL）およびPostgresデータベースをプロビジョニングし、手動設定なしでMastraプロジェクトに接続します。
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# ホステッドデータベース
+
+CLIまたは[platform](/docs/mastra-platform/overview)のプロジェクト設定からフルマネージドデータベースをプロビジョニングし、プロジェクトに接続します。MastraがProvider上にデータベースを作成して認証情報を安全に保存し、データベースの準備が整うと接続情報をランタイム環境変数として注入するため、接続文字列のコピーや設定は不要です。
+
+```bash
+mastra env db create --kind turso
+```
+
+## ホステッドデータベースを使用する場面
+
+platformによって管理される永続ストレージがプロジェクトに必要な場合は、ホステッドデータベースを使用します。用途には次のものがあります。
+
+- **Agentのメモリ**: 会話履歴とワーキングメモリを永続化し、セッションをまたいだセマンティックリコールも実現します。
+- **アプリケーションデータ**: プロジェクトが実行時に必要とするリレーショナルデータや構造化データを保存・取得します。
+- **ベクトル検索**: Retrieval-Augmented Generationとセマンティック検索に使用するembeddingを保存します。
+
+## Provider
+
+現在、ホステッドデータベースはTursoとPostgresの2つのProviderで利用でき、MongoDBにも近日対応予定です。データベースを接続するときに1つを選び、注入された変数をコード内の対応するMastraストレージアダプターに渡します。
+
+各Providerは、固定された一連の変数名を注入します。たとえば、Postgresでは単一の`DATABASE_URL`、Tursoでは個別の`TURSO_*`変数です。これらの名前は各環境内で一意でなければならないため、1つの環境で使用できるデータベースはProviderごとに最大1つです。ワークロードごとにストアを分ける必要がある場合は、同じプロジェクトにTursoとPostgresを接続します。
+
+Agent中心のほとんどのプロジェクトでは、**Turso**が最も手軽な出発点です。軽量でSQLite互換のエンジンを提供し、Agentのメモリ、会話履歴、テナントごとの分離に適しています。Mastraのランタイム状態にとどまらず、完全なSQL、リレーショナルスキーマ、構造化されたアプリケーションデータが必要なワークロードでは、**Postgres**を選択してください。**MongoDB**（_近日対応予定_）では、SQLに適切に対応付けられないワークロード向けに、ドキュメントストレージと組み込みのベクトル検索が追加される予定です。
+
+| Provider | エンジン | 最適な用途 |
+| - | - | - |
+| **Turso** | LibSQL、SQLite互換 | Agentのメモリ、テナントごとの分離 |
+| **PostgreSQL** | Serverless Postgres | リレーショナルワークロード、構造化データ |
+| **MongoDB** | ドキュメントおよびベクトル検索 | ドキュメントストレージ、ベクトル検索（_近日対応予定_） |
+
+## データベースのスコープ
+
+データベースは、次の2つのスコープのいずれかに接続されます。
+
+- **環境スコープ**: デフォルトです。1つの環境に接続されるため、環境間でデータが分離されます（たとえば、productionとstagingで別々のデータベースを使用します）。プロジェクトに環境が1つだけの場合、`mastra env db create`が自動的に選択します。複数ある場合は、CLIが選択を求めます。
+- **プロジェクトスコープ**: プロジェクトのすべての[環境](/docs/mastra-platform/environments)で1つのデータベースを共有します。`--shared`で明示的に選択します。その変数はすべてのデプロイに注入されます。
+
+スコープはデータベースの接続時に設定され、`mastra env db list`に表示されます。
+
+同じProviderでは、スコープを重複させることはできません。プロジェクトスコープのデータベースはすでにすべての環境に変数を注入しているため、同じProviderの環境スコープデータベースを接続しようとすると、変数名の競合により拒否されます。共有データベースから環境ごとのデータベースへ移行するには、まずプロジェクトスコープのデータベースを削除し、環境ごとに1つのデータベースを接続します。データベースを削除すると、Provider上のデータベースとその全データが破棄されるため、スコープを切り替える前に保持する必要があるデータをエクスポートしてください。異なる環境にある環境スコープのデータベース同士は競合せず、各デプロイには自身の環境用の変数のみが渡されます。
+
+## CLIで接続する
+
+このコマンドを事前に実行する必要はありません。プロジェクトにホステッドデータベースが必要で、まだ接続されていない場合、`mastra deploy`はデプロイのpreflight checkを実行するときに接続を提案します。同意すれば、CLIを離れることなくデプロイが続行されます。
+
+または、事前にデータベースを作成して接続します。CLIは準備が整うまでポーリングします。通常は数秒かかります。
+
+```bash
+# Scoped to a single environment (the CLI picks the only one, or prompts if there are several)
+mastra env db create --kind turso
+
+# Scoped to a specific environment
+mastra env db create staging --kind turso
+
+# Shared by all environments
+mastra env db create --kind turso --shared
+```
+
+対応するkindは`turso`と`neon`（Postgres）です。便利なフラグは次のとおりです。
+
+- `--shared`: すべての環境で共有されるプロジェクトスコープのデータベースを接続します。環境引数とは併用できません。
+- `--name <name>`: データベース名。デフォルトでは、プロジェクトslugから派生した名前になります。
+- `--region <region>`: プロジェクトスコープのデータベースに使用するProviderのリージョンID（例: `fra`）。環境スコープのデータベースは、環境のリージョン付近に自動配置され、明示的な`--region`は無視されます。
+- `--no-wait`: ポーリングせず、すぐに制御を戻します。後で`mastra env db show`を使用して進捗を確認します。
+- `--json`: 機械可読な出力。プロジェクトに複数の環境がある場合、`--json`には環境引数または`--shared`が必要です（対話型プロンプトは表示されません）。
+
+接続済みのデータベースを確認・管理します。
+
+```bash
+mastra env db list
+mastra env db show <database>
+mastra env db delete <database>
+```
+
+`mastra env db list`は、各データベースのkind、状態、スコープ、注入される変数名を表示します。`mastra env db show`は、シークレット値をマスクして接続手順を表示します。値を表示するには`--show-secrets`を渡します。`mastra env db delete`は、Provider上のデータベースとその全データを完全に削除します。データベースの作成と削除には、組織内のadminロールが必要です。
+
+## プロジェクト設定から接続する
+
+<Steps>
+  <StepItem>
+    [platform](/docs/mastra-platform/overview)でプロジェクトを開き、**Project Settings**に移動します。
+  </StepItem>
+
+  <StepItem>
+    **Database**セクションを開き、**Add database**を選択します。
+  </StepItem>
+
+  <StepItem>
+    **provider**（TursoまたはPostgres）を選択します。接続前であればProviderを切り替えられます。
+  </StepItem>
+
+  <StepItem>
+    データベースを設定します。
+
+    - **Name**: プロジェクト内でデータベースを識別するラベル。
+    - **Region**: データベースをホストする場所。ユーザーに最も近いリージョンを選択します。Tursoのデフォルトは`sjc`（San Jose）で、世界20か所以上から選択できます。Postgresのデフォルトは`aws-us-west-2`で、米国、EU、APACのAWSおよびAzureリージョンから選択できます。
+  </StepItem>
+
+  <StepItem>
+    **Attach database**を選択します。プロビジョニングはバックグラウンドで実行されます。データベースは`provisioning`状態で開始し、Providerによるセットアップが完了すると`ready`に移行します。接続情報は、サーバーのランタイム環境変数としてプロジェクトに自動的に注入されます。
+  </StepItem>
+</Steps>
+
+プロジェクト設定から接続したデータベースは、プロジェクトスコープになります。環境スコープのデータベースを接続するには、[CLI](#attach-with-the-cli)を使用してください。
+
+## コードから接続する
+
+データベースが`ready`になると、Providerによるプロビジョニングが完了し、platformが接続情報を管理対象の環境変数として注入済みです。**Project Settings → Database**で状態を確認できます。接続された各データベースは、バックグラウンドでのセットアップ中は`provisioning`、接続可能になると`ready`と表示されます。`ready`のデータベースを開くと、環境変数とコピーして使用できるコードスニペットを確認できます。これらの変数をMastraストレージアダプターに渡せば、手動設定は不要です。
+
+### Turso（LibSQL）
+
+Tursoは、`TURSO_DATABASE_URL`と`TURSO_AUTH_TOKEN`の2つの環境変数を公開します。次の例では、これらの変数を使用して[LibSQLStore](/reference/storage/libsql)に接続します。
+
+```ts title="src/mastra/storage.ts" caption="Turso（LibSQL）データベースに接続する"
+import { LibSQLStore } from '@mastra/libsql'
+
+export const storage = new LibSQLStore({
+  id: 'mastra-storage',
+  url: process.env.TURSO_DATABASE_URL!,
+  authToken: process.env.TURSO_AUTH_TOKEN!,
+})
+```
+
+アダプターをインストールします。
+
+```bash npm2yarn
+npm install @mastra/libsql@latest
+```
+
+### PostgreSQL
+
+PostgreSQLは、単一の`DATABASE_URL`接続文字列を公開します。次の例では、その変数を使用して[PostgresStore](/reference/storage/postgresql)に接続します。
+
+```ts title="src/mastra/storage.ts" caption="Postgresデータベースに接続する"
+import { PostgresStore } from '@mastra/pg'
+
+export const storage = new PostgresStore({
+  connectionString: process.env.DATABASE_URL!,
+})
+```
+
+アダプターをインストールします。
+
+```bash npm2yarn
+npm install @mastra/pg@latest
+```
+
+`storage`インスタンスを`Mastra`設定に渡すと、Agent、メモリ、Workflowから使用できます。
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { storage } from './storage'
+
+export const mastra = new Mastra({
+  storage,
+})
+```
+
+## 環境変数
+
+各Providerは、固定された一連の管理対象の環境変数を注入します。データベースが`ready`になると、プロジェクトの実行時にこれらを利用できます。自分で定義する必要はありません。
+
+| Provider | 変数 |
+| - | - |
+| Turso | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` |
+| Postgres | `DATABASE_URL` |
+
+:::warning
+接続用の認証情報はシークレットとして扱ってください。認証トークン（`TURSO_AUTH_TOKEN`）とPostgres接続文字列（`DATABASE_URL`）により、データへのフルアクセスが可能になります。platformはデフォルトでこれらをマスクし、要求された場合にのみ表示します。
+:::
+
+## データベースを管理する
+
+- **接続情報を表示する**: プロジェクト設定で`ready`のデータベースを開くと、環境変数とコピーして使用できるコードスニペットを確認できます。
+- **削除する**: プロジェクトからデータベースを削除すると、Provider上のデータベースも削除され、注入された環境変数が消去されます。この操作は元に戻せないため、データが不要であることを確認してください。

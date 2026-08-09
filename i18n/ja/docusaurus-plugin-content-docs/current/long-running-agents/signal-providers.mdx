@@ -1,0 +1,237 @@
+---
+title: "シグナルプロバイダー | 長時間実行エージェント"
+description: "シグナルプロバイダーの概要と、外部ソースを監視してエージェントスレッドへ通知を送るプロバイダーの構築方法を説明します。"
+packages:
+  - "@mastra/core"
+---
+
+# シグナルプロバイダー
+
+**追加バージョン:** `@mastra/core@1.39.0`
+
+:::experimental
+
+この機能はベータ版です。API が安定するまでは、メジャーバージョンの更新なしに破壊的変更が行われる可能性があります。
+
+:::
+
+シグナルプロバイダーは、GitHub、Slack、継続的インテグレーション（CI）、独自 API などの外部ソースを監視し、購読しているエージェントスレッドへ[通知シグナル](/docs/long-running-agents/signals#notification-signals)を送ります。
+
+## シグナルプロバイダーを使用する場面
+
+エージェントが反応すべきイベントを外部システムが生成し、その購読管理を Mastra に任せたい場合にシグナルプロバイダーを使用します。
+
+- プルリクエスト、チャンネル、ビルドなど、スレッドが関心を持つリソースに関連するイベントをソースが生成する場合。
+- どのスレッドがどの外部リソースを監視しているかを一元管理したい場合。
+- ポーリング、Webhook、またはその両方でイベントを受信したい場合。
+
+一度限りのイベントをスレッドに送るだけなら、代わりに [`agent.sendNotificationSignal()`](/reference/agents/agent#sendnotificationsignalnotification-options) を直接呼び出します。
+
+## シグナルプロバイダーの仕組み
+
+シグナルプロバイダーは、[シグナル](/docs/long-running-agents/signals)システムの生成側です。外部イベントをスレッドに取り込み、シグナル API がスレッドでの消費方法を制御します。
+
+シグナルプロバイダーは、次の3つの機能を組み合わせます。
+
+- **購読の追跡:** `SignalProvider` 基底クラスは、各エージェントスレッドと、そのスレッドが監視する外部リソースを対応付けるインメモリレジストリを保持します。
+- **取り込み:** プル型のソースでは `poll()`、プッシュ型のソースでは `handleWebhook()` をオーバーライドします。
+- **配信:** イベントが購読条件に一致したら、protected の `notify()` ヘルパーを呼び出し、接続されたエージェントのスレッドへ通知シグナルを転送します。
+
+プロバイダーをエージェントへ渡して登録します。
+
+エージェントはプロバイダーに接続し、`pollInterval` が設定されている場合はポーリングを開始します。また、プロバイダーが公開するプロセッサーや Tool もマージします。
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { CiSignals } from '../signals/ci-signals'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support Agent',
+  instructions: 'Help the user triage updates.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  signals: [new CiSignals()],
+})
+```
+
+:::note
+通知の配信には、[libSQL](/reference/storage/libsql)、[PostgreSQL](/reference/storage/postgresql)、[MongoDB](/reference/storage/mongodb) など、通知をサポートするストレージアダプターが必要です。`notify()` が通知レコードを保存できるように、Mastra インスタンスにストレージを設定してください。
+:::
+
+## クイックスタート
+
+次の例は、CI パイプラインを監視し、購読中のパイプラインが失敗したときに通知を送るポーリングプロバイダーです。
+
+```typescript title="src/mastra/signals/ci-signals.ts"
+import { SignalProvider } from '@mastra/core/signals'
+import type { SignalProviderTarget, SignalSubscription } from '@mastra/core/signals'
+
+type BuildStatus = {
+  id: string
+  status: 'passed' | 'failed'
+}
+
+const builds = new Map<string, BuildStatus>([
+  ['acme-app-main', { id: 'build_123', status: 'failed' }],
+])
+
+async function fetchBuildStatus(pipeline: string): Promise<BuildStatus> {
+  return builds.get(pipeline) ?? { id: 'build_unknown', status: 'passed' }
+}
+
+export class CiSignals extends SignalProvider<'ci-signals'> {
+  readonly id = 'ci-signals' as const
+  readonly pollInterval = 30_000
+
+  watch(target: SignalProviderTarget, pipeline: string) {
+    return this.subscribe(target, pipeline)
+  }
+
+  unwatch(target: SignalProviderTarget, pipeline: string) {
+    return this.unsubscribe(target, pipeline)
+  }
+
+  async poll(subscriptions: SignalSubscription[]) {
+    for (const sub of subscriptions) {
+      const build = await fetchBuildStatus(sub.externalResourceId)
+      if (build.status !== 'failed') continue
+
+      await this.notify(
+        {
+          source: this.id,
+          kind: 'ci-status',
+          priority: 'high',
+          summary: `Build failed for ${sub.externalResourceId}`,
+          payload: build,
+          dedupeKey: `${this.id}:${sub.externalResourceId}:${build.id}`,
+        },
+        { resourceId: sub.resourceId, threadId: sub.threadId },
+      )
+    }
+  }
+}
+```
+
+プロバイダーをエージェントに登録し、監視するパイプラインをスレッドで購読します。
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { CiSignals } from '../signals/ci-signals'
+
+export const ciSignals = new CiSignals()
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support Agent',
+  instructions: 'Help the user triage CI updates.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  signals: [ciSignals],
+})
+
+ciSignals.watch({ resourceId: 'user_123', threadId: 'thread_456' }, 'acme-app-main')
+```
+
+Mastra は、すべての有効な購読を渡して `pollInterval` ごとに `poll()` を呼び出します。購読がない場合はその周期をスキップし、周期が重複することもないため、時間のかかる `poll()` が自身と同時に実行されることはありません。
+
+:::note
+通知ストレージ、エージェント登録、スレッド購読、テストを含むポーリングプロバイダーの完全な構築手順については、[シグナルプロバイダーの構築](/guides/guide/signal-provider)を参照してください。
+:::
+
+## ポーリングプロバイダーと Webhook プロバイダー
+
+外部ソースがアプリへイベントをプッシュしない場合は、ポーリングを使用します。`pollInterval` を設定し、`poll(subscriptions)` をオーバーライドします。各購読には、確認するスレッドの送信先と外部リソース ID が含まれます。
+
+外部ソースがアプリを呼び出せる場合は、Webhook を使用します。`handleWebhook(request)` をオーバーライドしてペイロードを解析し、一致する購読を探して、それぞれに `notify()` を呼び出します。
+
+```typescript title="src/mastra/signals/ci-signals.ts"
+import { SignalProvider } from '@mastra/core/signals'
+import type { SignalProviderWebhookRequest } from '@mastra/core/signals'
+
+export class CiSignals extends SignalProvider<'ci-signals'> {
+  readonly id = 'ci-signals' as const
+
+  async handleWebhook(request: SignalProviderWebhookRequest) {
+    const payload = request.body as { pipeline: string; status: string }
+    const subscriptions = this.getSubscriptionsForResource(payload.pipeline)
+
+    for (const sub of subscriptions) {
+      await this.notify(
+        {
+          source: this.id,
+          kind: 'ci-status',
+          priority: 'high',
+          summary: `Build ${payload.status} for ${payload.pipeline}`,
+          payload,
+        },
+        { resourceId: sub.resourceId, threadId: sub.threadId },
+      )
+    }
+
+    return { status: 200, body: { matched: subscriptions.length } }
+  }
+}
+```
+
+`handleWebhook()` はプロバイダーのメソッドであり、自動的にマウントされる HTTP ルートではありません。リクエストボディ、ヘッダー、ルートパラメーターを渡して、独自のエンドポイントから呼び出します。購読、ポーリング、ライフサイクル、`notify()` の詳細については、[`SignalProvider` リファレンス](/reference/signals/signal-provider)を参照してください。重複排除フィールドや結合フィールドを含む通知ペイロードの完全な形式については、[`Agent.sendNotificationSignal()` リファレンス](/reference/agents/agent#sendnotificationsignalnotification-options)を参照してください。
+
+## 組み込み Webhook プロバイダー
+
+汎用の Webhook ソースには、サブクラスを作成する代わりに [`WebhookSignalProvider`](/reference/signals/webhook-signal-provider) を使用します。ペイロードからリソース ID を抽出する関数と、任意で通知を構築する関数を設定します。
+
+```typescript title="src/mastra/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { WebhookSignalProvider } from '@mastra/core/signals'
+
+const webhooks = new WebhookSignalProvider({
+  extractResourceId: payload => (payload as { repository: string }).repository,
+  buildNotification: (payload, sub) => ({
+    source: 'ci',
+    kind: 'build-status',
+    priority: 'medium',
+    summary: `Build ${(payload as { status: string }).status} for ${sub.externalResourceId}`,
+  }),
+})
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support Agent',
+  instructions: 'Help the user triage updates.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  signals: [webhooks],
+})
+
+webhooks.subscribeThread({ resourceId: 'user_123', threadId: 'thread_456' }, 'acme/app')
+```
+
+Webhook を受信したら、ルートから `webhooks.handleWebhook({ body, headers })` を呼び出します。プロバイダーは抽出したリソース ID と購読を照合し、一致する各スレッドに通知します。
+
+## プロバイダーの高度な機能
+
+プロバイダーは、イベントの取り込み以外の機能もサポートできます。ソースに必要な機能だけを追加してください。
+
+- **永続的な購読:** 基底レジストリはインメモリかつプロセス単位です。再起動後も購読を保持する必要がある場合は、自分で永続化し、[`start()`](/reference/signals/signal-provider#start) で復元します。
+- **ライフサイクルフック:** 非同期セットアップには [`start()`](/reference/signals/signal-provider#start)、クリーンアップには [`stop()`](/reference/signals/signal-provider#stop) をオーバーライドします。`stop()` をオーバーライドする場合は `super.stop()` を呼び出し、基底プロバイダーがポーリングを停止してレジストリを消去できるようにします。
+- **プロセッサーと Tool:** [`getInputProcessors()`](/reference/signals/signal-provider#getinputprocessors) または [`getOutputProcessors()`](/reference/signals/signal-provider#getoutputprocessors) からプロセッサーを返し、[`getTools()`](/reference/signals/signal-provider#gettools) からエージェントが呼び出せる Tool を返します。
+
+`@mastra/github-signals` パッケージは、本番環境向けのシグナルプロバイダーです。GitHub のプルリクエストを監視し、コメント、レビュー状態、継続的インテグレーションのステータス、マージについてスレッドに通知します。ポーリング、永続的な購読、Tool、プロセッサー、ライフサイクルフックの参考実装として利用できます。
+
+```typescript title="src/mastra/agents/dev-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { GithubSignals } from '@mastra/github-signals'
+
+export const devAgent = new Agent({
+  id: 'dev-agent',
+  name: 'Dev Agent',
+  instructions: 'Help triage pull request activity.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  signals: [new GithubSignals()],
+})
+```
+
+## 関連情報
+
+- [ガイド: シグナルプロバイダーの構築](/guides/guide/signal-provider)
+- [シグナル](/docs/long-running-agents/signals)
+- [通知シグナル](/docs/long-running-agents/signals#notification-signals)
+- [`SignalProvider` リファレンス](/reference/signals/signal-provider)
+- [`WebhookSignalProvider` リファレンス](/reference/signals/webhook-signal-provider)

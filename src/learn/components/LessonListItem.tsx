@@ -85,8 +85,7 @@ export function LessonListItem({ lesson, index, storage, className }: LessonList
             </span>
           </div>
           <span className="text-xs text-(--mastra-text-tertiary)">
-            {lesson.durationMin}{' '}
-            {isSimplifiedChinese ? '分钟' : isHongKongChinese ? '分鐘' : isJapanese ? '分' : 'min'}
+            {lesson.durationMin} {isSimplifiedChinese ? '分钟' : isHongKongChinese ? '分鐘' : isJapanese ? '分' : 'min'}
           </span>
         </div>
         <LessonStatusChip status={lesson.status} module={lesson.module} />
@@ -104,8 +103,7 @@ export function LessonListItem({ lesson, index, storage, className }: LessonList
           <span className="truncate text-sm font-medium text-(--mastra-text-primary) no-underline">{lesson.title}</span>
         </div>
         <span className="text-xs text-(--mastra-text-tertiary)">
-          {lesson.durationMin}{' '}
-          {isSimplifiedChinese ? '分钟' : isHongKongChinese ? '分鐘' : isJapanese ? '分' : 'min'}
+          {lesson.durationMin} {isSimplifiedChinese ? '分钟' : isHongKongChinese ? '分鐘' : isJapanese ? '分' : 'min'}
         </span>
       </div>
       {progressStatus === 'not-started' ? (

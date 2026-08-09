@@ -1,0 +1,178 @@
+---
+title: "デプロイ | Mastra platform"
+description: 1つのコマンドでMastraアプリケーションをMastra platformにデプロイします。mastra deployでビルド、検証、プロビジョニングを行い、任意の環境にリリースします。
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# Mastra platformにデプロイする
+
+[`mastra deploy`](/reference/cli/mastra#mastra-deploy)は、Mastraアプリケーションを[Mastra platform](/docs/mastra-platform/overview)にリリースするための単一コマンドです。
+
+1つのコマンドで、処理を開始する前にプロジェクトをビルドして検証します。さらに、初回実行時にはplatformプロジェクトと環境を作成し、デプロイを実行してビルドログをストリーミングし、デプロイがトラフィックを処理し始めると公開URLを表示します。
+
+```bash
+mastra deploy
+```
+
+:::note
+このページでは、統合されたデプロイフローについて説明します。以前の分割コマンドである[`mastra server deploy`](/docs/mastra-platform/server)と[`mastra studio deploy`](/docs/mastra-platform/studio)も引き続き動作しますが、`mastra deploy`が推奨される方法です。
+:::
+
+## 始める前に
+
+[Mastraアプリケーション](/guides/getting-started/quickstart)と[Mastra platform](https://projects.mastra.ai)アカウントが必要です。認証されていない場合、初回使用時にCLIがログインを求めます。
+
+ローカルの`.env`ファイルは任意です。platformに保存された環境変数はデプロイ時にそのまま使用され、[ホステッドデータベース](/docs/mastra-platform/database)などの管理対象リソースは独自の変数を注入します。ローカルの値を上位レイヤーとして適用する場合にのみ、`--env-file`を渡してください。
+
+## 最初のデプロイ
+
+<Steps>
+  <StepItem>
+    プロジェクトディレクトリから、次を実行します。
+
+    ```bash
+    mastra deploy
+    ```
+
+    初回実行時に、CLIはplatformプロジェクト（`package.json`に基づく名前）と`production`環境の作成を求めます。プロンプトを承認するか、確認なしでデフォルトを受け入れるには`--yes`を渡します。
+  </StepItem>
+
+  <StepItem>
+    CLIはリリース処理の前にpreflight checkを実行します。ローカルファイルパスにフォールバックするストレージ（platformの一時ファイルシステムでは保持されません）は通常、デプロイをブロックします。
+
+    ```
+    file:./mastra.db will be used at runtime because TURSO_DATABASE_URL is not set
+    ```
+
+    CLIはエラーで終了する代わりに、その場での修正を提案します。
+
+    ```
+    Preflight needs TURSO_DATABASE_URL for the production environment. Create a managed turso database now and attach it? (Y/n)
+    ```
+
+    プロンプトを承認すると、プロビジョニングが数秒で行われます。データベースの接続変数はデプロイに自動的に注入されるため、`.env`ファイルにコピーするものはありません。拒否するか、非対話型シェル（CI、`--yes`）で実行した場合、CLIは以前の動作にフォールバックし、自分で実行する正確なコマンドを表示します。
+
+    ```bash
+    mastra env db create production --kind turso
+    ```
+
+    環境slug（上記の`production`）は、CLIがデプロイしようとした環境と一致します。プロジェクトに複数の環境がある場合、非対話型シェルで`mastra env db create`を実行するには環境引数が必要なため、これは重要です。
+
+    :::note
+    preflightで代わりにハードコードされたローカルパス（`Build contains a host-local storage URL`）が報告された場合、その場での修正は提供されません。まず環境変数でパスをガードし、ローカル開発時にのみファイルが使用されるようにしてください。
+
+    ```ts title="src/mastra/index.ts"
+    new LibSQLStore({
+      id: 'mastra-storage',
+      // Uses the hosted database when deployed, a local file during development
+      url: process.env.TURSO_DATABASE_URL ?? 'file:./mastra.db',
+      authToken: process.env.TURSO_AUTH_TOKEN,
+    })
+    ```
+
+    :::
+  </StepItem>
+
+  <StepItem>
+    `mastra deploy`をもう一度実行します。preflightを通過するとビルドがアップロードされ、デプロイがliveになるまでCLIがビルドログをストリーミングします。ビルドとデプロイ全体には、30秒から数分かかります。成功メッセージは、新しいバージョンがトラフィックを処理し始めたときにのみ表示されます。
+  </StepItem>
+
+  <StepItem>
+    CLIが表示したURLでデプロイを確認します。`/api/agents`を追加し、AgentのJSONリストが返されることを確認してください。
+
+    :::warning
+    エンドポイントを公開する前に、[認証](/docs/server/auth)を設定してください。
+    :::
+  </StepItem>
+</Steps>
+
+最初のデプロイでは、ディレクトリをplatformプロジェクトに関連付ける`.mastra-project.json`ファイルが書き込まれます。以降のデプロイ、CI実行、[`mastra env`](/docs/mastra-platform/environments)コマンドが追加のフラグなしで同じプロジェクトを対象にするよう、コミットしてください。
+
+## 別の環境にデプロイする
+
+`mastra deploy`はデフォルトで`production`環境を対象とします。別の環境を対象にするには`--env`を渡します。環境がまだ存在しない場合、CLIが作成を提案します。
+
+```bash
+mastra deploy --env staging
+```
+
+各環境には、個別のURLと環境変数が割り当てられます。独自の[ホステッドデータベース](/docs/mastra-platform/database)を持つこともできます。
+
+全体のモデルについては、[環境](/docs/mastra-platform/environments)を参照してください。
+
+## リージョンを選択する
+
+デプロイで新しい環境を作成するときに`--region`を渡すと、実行する場所を指定できます。`us`または`eu`の省略形を使用します。
+
+```bash
+mastra deploy --env production --region eu
+```
+
+リージョンは環境の作成時に固定されます。環境に接続されたデータベースは、その環境のリージョン付近に自動配置され、Observabilityデータは環境のデータレジデンシーゾーンに対応する取り込みリージョンへルーティングされます。対応リージョン、データベースの配置、Observabilityのコロケーションについては、[リージョン](/docs/mastra-platform/regions)を参照してください。
+
+## Preflight check
+
+preflightは処理を開始する前にビルド済みの出力を検証し、自分のコードにある問題のみを報告します。
+
+- **ローカルストレージパス**: デプロイを完全にブロックします。ファイルベースのストレージ（例: `file:./mastra.db`）は、デプロイのたびに失われます。ローカルで設定された環境変数、platformに保存された環境変数、または管理対象データベースが提供する環境変数でパスがガードされている場合、preflightを通過します。
+
+  ```ts title="src/mastra/storage.ts"
+  import { LibSQLStore } from '@mastra/libsql'
+
+  export const storage = new LibSQLStore({
+    id: 'mastra-storage',
+    // Uses the hosted database when deployed, a local file during development
+    url: process.env.TURSO_DATABASE_URL ?? 'file:./mastra.db',
+    authToken: process.env.TURSO_AUTH_TOKEN,
+  })
+  ```
+
+- **不足している環境変数**: コードが読み取るものの、どのソースからも提供されない変数に対する警告です。ライブラリコードからのみ参照される変数は除外されます。
+
+preflightによってブロックされた場合は、通常、ホステッドデータベースを接続するか変数をplatformに保存して、原因を修正することを推奨します。`--skip-preflight`はエスケープハッチとして用意されていますが、壊れたデプロイを防ぐためのチェックを省略します。
+
+デプロイせずにチェックを実行します。
+
+```bash
+mastra lint --preflight
+```
+
+`mastra lint`から見えるのはローカルのenvファイルだけです。platformに保存された変数や管理対象データベースによって注入される変数は認識されないため、lintではエラーが報告されても、デプロイ時のpreflightは通過する場合があります。
+
+## 環境変数
+
+デプロイは、次の3つのソースから環境変数を解決します。
+
+- **管理変数**: ホステッドデータベースなどのplatformリソースによって注入されます（例: `TURSO_DATABASE_URL`）。platformが定義するため、編集できません。
+- **保存変数**: ダッシュボードを通じてプロジェクトまたは環境に保存されます。ローカルファイルがなくても、デプロイのたびにそのまま使用されます。
+- **ローカルenvファイル**: デプロイ時に、明示的に指定した`--env-file`、または現在の`.env`と`.env.local`ファイルの値が上位レイヤーとして適用されます。
+
+```bash
+mastra deploy --env staging --env-file .env.staging
+```
+
+再デプロイせずに実行中のサービスの変数を変更するには、ダッシュボードで変数を更新し、[`mastra env restart`](/reference/cli/mastra#mastra-env-restart)を実行します。
+
+## プロジェクトの解決
+
+すべてのデプロイは、次の順序で対象プロジェクトを解決します。
+
+1. `MASTRA_PROJECT_ID`環境変数
+1. `--project <name|slug|id>`フラグ
+1. 現在のディレクトリにある`.mastra-project.json`ファイル
+
+CIでは、`MASTRA_PROJECT_ID`と`MASTRA_API_TOKEN`を設定し、`--yes`を渡します。
+
+```bash
+mastra deploy --env production --yes
+```
+
+## 関連情報
+
+- [環境](/docs/mastra-platform/environments)
+- [リージョン](/docs/mastra-platform/regions)
+- [ホステッドデータベース](/docs/mastra-platform/database)
+- [`mastra deploy` CLIリファレンス](/reference/cli/mastra#mastra-deploy)
+- [設定](/docs/mastra-platform/configuration)

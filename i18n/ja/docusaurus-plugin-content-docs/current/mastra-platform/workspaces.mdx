@@ -1,0 +1,135 @@
+---
+title: "Workspaces | Mastra platform"
+description: Mastra platform の各環境に、ファイルシステムストレージ用の共有 bucket とコマンド実行用のオンデマンド Sandbox を備えた Workspace を提供します。platform がデプロイに必要なリソースをプロビジョニングします。
+---
+
+# Workspaces
+
+Workspace は、Mastra platform がプロビジョニングし、デプロイ時に Agent へ渡すランタイムリソースのセットです。環境ごとに固有の Workspace が用意されるため、`production` と `staging` は分離された状態に保たれます。
+
+各 Workspace は2つの機能を提供します。
+
+- ファイルシステムストレージ用の1つの **bucket**。[`PlatformFilesystem`](/reference/workspace/platform-filesystem) によってラップされています。bucket は環境単位の永続ストアであり、Agent は複数の実行にわたって読み書きできます。
+- コマンド実行用の**オンデマンド Sandbox** のプール。[`PlatformSandbox`](/reference/workspace/platform-sandbox) によってラップされています。各 `PlatformSandbox` インスタンスは `start()` で独自のリモート Sandbox をプロビジョニングし、`destroy()` で破棄します。通常、Agent はセッションごとに多数の Sandbox を起動し、タスクに使用した後、解放します。
+
+Workspace は単一の[環境](/docs/mastra-platform/environments)にスコープされるため、`production` と `staging` が bucket や Sandbox プールを共有することはありません。platform がプロビジョニング、認証、アイドル時のクリーンアップを管理します。
+
+## Workspace がプロビジョニングされるタイミング
+
+新しいプロジェクトでは、Workspace がデフォルトで有効です。環境を作成すると、platform がその環境用の bucket を自動的にプロビジョニングします。最初の `PlatformSandbox` 呼び出しをすばやく開始できるよう、Sandbox のベースイメージはバックグラウンドでウォームアップされます。
+
+まだオプトインしていない既存のプロジェクトでは、Workspaces タブに **Enable workspaces** アクションが表示されます。有効にすると、プロジェクトの各環境に bucket がプロビジョニングされます。
+
+たとえば Sandbox Provider の負荷が高いときに、ある環境のプロビジョニングが失敗した場合、Workspaces タブにエラーと再試行オプションが表示されます。環境自体は作成されます。再試行するまで利用できないのは Workspace だけです。
+
+## コードから Workspace を使用する
+
+Provider パッケージをインストールします。
+
+```bash npm2yarn
+npm install @mastra/platform-workspace
+```
+
+Provider を Workspace に組み込み、Mastra に登録します。
+
+```typescript title="src/mastra/workspace.ts"
+import { Workspace } from '@mastra/core/workspace'
+import { PlatformFilesystem, PlatformSandbox } from '@mastra/platform-workspace'
+
+export const workspace = new Workspace({
+  filesystem: new PlatformFilesystem(),
+  sandbox: new PlatformSandbox(),
+})
+```
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { workspace } from './workspace'
+
+export const mastra = new Mastra({
+  workspace,
+})
+```
+
+`PlatformFilesystem` と `PlatformSandbox` は環境変数から設定を読み取るため、platform 上ではオプションを渡しません。platform がデプロイ時にこれらを注入します。[環境変数](#environment-variables)を参照してください。
+
+## 1つの bucket と複数の Sandbox
+
+`PlatformFilesystem` と `PlatformSandbox` はライフサイクルが異なり、Agent を設計する際にはこの違いが重要です。
+
+**`PlatformFilesystem` は環境の bucket に対する長期間有効なハンドルです。** 環境内のすべてのリクエスト、Agent、Sandbox は、同じオブジェクトストレージを読み書きします。Agent が書き込んだ内容は、明示的に削除しない限り、次のリクエストでも参照できます。
+
+**`PlatformSandbox` は一時的な Sandbox をプロビジョニングするためのクライアントです。** 各 `PlatformSandbox` インスタンスは1つのリモート Sandbox を所有します。
+
+- `start()` は新しい Sandbox をプロビジョニングします（`sandboxId` を渡した場合は再接続します）。
+- `executeCommand()` はその Sandbox に対してコマンドを実行します。
+- `destroy()` は Sandbox を破棄します。`stop()` はそのエイリアスです。
+
+`Workspace` に渡す `sandbox` は、Agent が自身のリクエスト内で使用する Tool を提供します。たとえばタスクごとの Workspace、ユーザーごとのテナント、呼び出し元のシェル状態に影響を与えてはならないバックグラウンドジョブなど、Agent が別の隔離環境を必要とする場合は、別の `PlatformSandbox` を構築します。
+
+```typescript title="src/mastra/tools/run-in-fresh-sandbox.ts"
+import { PlatformSandbox } from '@mastra/platform-workspace'
+
+export async function runInFreshSandbox(command: string) {
+  const sandbox = new PlatformSandbox()
+  await sandbox.start()
+  try {
+    return await sandbox.executeCommand(command)
+  } finally {
+    await sandbox.destroy()
+  }
+}
+```
+
+または、設定済みの Sandbox を一群のテンプレートとして複製すれば、認証情報、環境、ネットワーク分離、デフォルト設定を繰り返し指定せずに clone に継承できます。
+
+```typescript
+const template = new PlatformSandbox({ networkIsolation: 'PRIVATE' })
+
+const perProjectSandbox = template.clone({ id: `project-${projectId}` })
+await perProjectSandbox.start()
+```
+
+完全なライフサイクル、checkpoint recovery、再接続、clone オプションについては、[`PlatformSandbox` リファレンス](/reference/workspace/platform-sandbox)を参照してください。
+
+## 環境変数
+
+Workspace がある platform 環境で実行されるすべてのデプロイには、次の変数が自動的に設定されます。
+
+| 変数 | 内容 |
+| - | - |
+| `MASTRA_PLATFORM_ACCESS_TOKEN` | Workspace Provider が認証に使用する、platform 発行の JSON Web Token (JWT)。Token のスコープは、デプロイの organization と project に限定されます。 |
+| `MASTRA_PROJECT_ID` | デプロイが属する project。 |
+| `MASTRA_ENVIRONMENT_ID` | デプロイが属する environment。platform が使用する Sandbox プールを選択します。 |
+| `MASTRA_PLATFORM_BUCKET_NAME` | environment に関連付けられた bucket 名。`PlatformFilesystem` が読み書きする bucket を選択します。 |
+
+これらの名前は予約されています。プロジェクトでいずれかを明示的に設定しても、platform が管理する値が優先されます。
+
+## ローカル開発
+
+4つの変数を `.env` ファイルに記述すれば、同じ Provider をローカルでも再利用できます。project、environment、bucket の値は、プロジェクトの **Workspaces** タブで確認できます。`MASTRA_PLATFORM_ACCESS_TOKEN` には、organization の設定ページにある **API Tokens** で `sk_` API Token を作成します。platform へのデプロイでは、代わりに注入された JWT が使用されます。
+
+```bash title=".env"
+MASTRA_PLATFORM_ACCESS_TOKEN=sk_your-api-token
+MASTRA_PROJECT_ID=your-project-id
+MASTRA_ENVIRONMENT_ID=your-environment-id
+MASTRA_PLATFORM_BUCKET_NAME=your-bucket-name
+```
+
+`PlatformFilesystem` と `PlatformSandbox` はローカルでも platform 上と同じように動作し、その環境の同じ bucket と Sandbox プールに接続します。本番データを分離したい場合は、ローカル実行に `staging` または `preview` 環境の変数を使用してください。
+
+platform に一切アクセスしない完全なオフラインループでは、ローカルビルドで Provider を [`LocalFilesystem`](/reference/workspace/local-filesystem) と [`LocalSandbox`](/reference/workspace/local-sandbox) に置き換えます。
+
+## Workspace を確認する
+
+platform プロジェクトの Workspaces タブには、環境ごとに次の情報が表示されます。
+
+- bucket のステータスと内容、およびアップロード、ダウンロード、削除の各アクション。
+- 最近の Sandbox セッションと、そのコマンド、終了コード、実行時間。
+- プロビジョニングの失敗と **Retry** アクション。
+
+## 関連項目
+
+- [`PlatformFilesystem`](/reference/workspace/platform-filesystem): ファイルシステム Provider のリファレンス。
+- [`PlatformSandbox`](/reference/workspace/platform-sandbox): checkpoint recovery と cloning を含む、Sandbox Provider のリファレンス。
+- [Environments](/docs/mastra-platform/environments): environment が Workspace、変数、データベースをスコープする仕組み。

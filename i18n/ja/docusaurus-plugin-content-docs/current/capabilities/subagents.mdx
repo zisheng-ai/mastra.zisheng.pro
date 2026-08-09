@@ -1,0 +1,470 @@
+---
+title: "Subagent | 機能"
+description: 委譲フック、反復監視、メッセージフィルタリング、タスク完了スコアリングを使用して、複数の Agent を連携させる方法を説明します。
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+---
+
+# Subagent
+
+**追加されたバージョン:** `@mastra/core@1.8.0`
+
+Subagent は、別の Agent からタスクを委譲できる特化型 Agent です。親 Agent の `agents` プロパティに追加してから、[`Agent.stream()`](/reference/streaming/agents/stream) または [`Agent.generate()`](/reference/agents/generate) を呼び出します。親 Agent は、自身の instructions と各 Subagent の `description` を使用して、タスクをいつ、どのように委譲するかを判断します。
+
+## Subagent を使用する場合
+
+異なる専門分野を持つ Agent が連携する必要のあるタスクでは、Subagent を使用します。親 Agent は委譲のタイミングを判断し、各 Subagent にコンテキストを渡します。その後、それぞれの結果を統合します。
+
+一般的なユースケースは次のとおりです。
+
+- 1 つの Agent がデータを収集し、別の Agent がコンテンツを作成する調査・執筆 Workflow
+- 各段階で異なる専門知識が必要な複数ステップのタスク
+- 委譲動作を細かく制御する必要があるタスク
+
+:::note
+
+Subagent を調整する親 Agent は、多くの場合 Supervisor と呼ばれます。Supervisor パターンは、Mastra でマルチ Agent システムを構築する方法の 1 つです。その他のパターンについては、[概念概要](/guides/concepts/multi-agent-systems)を参照してください。
+
+:::
+
+## クイックスタート
+
+明確な description を持つ Subagent を定義し、親 Agent に追加します。
+
+```typescript title="src/mastra/agents/parent-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+
+const researchAgent = new Agent({
+  id: 'research-agent',
+  // highlight-next-line
+  description: 'Gathers factual information and returns bullet-point summaries.',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+})
+
+const writingAgent = new Agent({
+  id: 'writing-agent',
+  // highlight-next-line
+  description: 'Transforms research into well-structured articles.',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+})
+
+// highlight-start
+const parentAgent = new Agent({
+  id: 'parent-agent',
+  instructions: `You coordinate research and writing using specialized agents.
+    Delegate to research-agent for facts, then writing-agent for content.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  agents: { researchAgent, writingAgent },
+  memory: new Memory({
+    storage: new LibSQLStore({ id: 'storage', url: 'file:mastra.db' }),
+  }),
+})
+// highlight-end
+
+const stream = await parentAgent.stream('Research AI in education and write an article', {
+  maxSteps: 10,
+})
+
+for await (const chunk of stream.textStream) {
+  process.stdout.write(chunk)
+}
+```
+
+## 委譲フック
+
+委譲フックを使用すると、委譲の発生時にそれをインターセプトし、変更または拒否できます。Agent の `defaultOptions` または呼び出しごとの `delegation` オプションで設定します。
+
+### `onDelegationStart`
+
+親 Agent が Subagent に委譲する前に呼び出されます。委譲を制御するには、オブジェクトを返します。
+
+- `proceed: true`: 委譲を許可します（デフォルトの動作）
+- `proceed: false`: `rejectionReason` を指定して委譲を拒否します
+- `modifiedPrompt`: Subagent に送信するプロンプトを書き換えます
+- `modifiedMaxSteps`: Subagent の反復回数を制限します
+
+```typescript title="src/mastra/agents/parent-agent.ts"
+const stream = await parentAgent.stream('Research AI trends', {
+  maxSteps: 10,
+  delegation: {
+    onDelegationStart: async context => {
+      console.log(`Delegating to: ${context.primitiveId}`)
+
+      // Modify the prompt for a specific agent
+      if (context.primitiveId === 'research-agent') {
+        return {
+          proceed: true,
+          modifiedPrompt: `${context.prompt}\n\nFocus on 2024-2025 data.`,
+          modifiedMaxSteps: 5,
+        }
+      }
+
+      // Reject delegation after too many iterations
+      if (context.iteration > 8) {
+        return {
+          proceed: false,
+          rejectionReason: 'Max iterations reached. Synthesize current findings.',
+        }
+      }
+
+      return { proceed: true }
+    },
+  },
+})
+```
+
+`context` オブジェクトには次のプロパティが含まれます。
+
+| プロパティ | 説明 |
+| - | - |
+| `primitiveId` | 委譲先の Subagent の ID |
+| `prompt` | 親 Agent が送信するプロンプト |
+| `iteration` | 現在の反復番号 |
+| `requestContext` | Subagent の実行が受け取るリクエストコンテキスト |
+
+### 委譲境界でのリクエストコンテキスト
+
+各委譲は、実行スコープの識別キーを除き、親の実行からエントリをシャローコピーしたリクエストコンテキストを受け取ります。Subagent の実行中にエントリを設定または削除しても、親のコンテキストには影響しません。委譲先の実行に値を渡すには、`onDelegationStart` で `context.requestContext` にエントリを設定します。
+
+```typescript title="src/mastra/agents/parent-agent.ts"
+const stream = await parentAgent.stream('Research AI trends', {
+  maxSteps: 10,
+  delegation: {
+    onDelegationStart: async context => {
+      context.requestContext.set('audience', 'technical')
+    },
+  },
+})
+```
+
+Subagent は、Tool や `instructions: ({ requestContext }) => ...` などの動的設定で、これらのエントリを読み取ります。詳細については、[Request Context](/docs/server/request-context)を参照してください。永続 Agent で動作させるには、値が JSON シリアライズ可能である必要があります。
+
+### `onDelegationComplete`
+
+委譲の完了後に呼び出されます。結果の確認やフィードバックの提供に使用できるほか、実行を停止することもできます。
+
+- `context.bail()`: 親 Agent のループを直ちに停止します
+- `{ feedback: '...' }` を返す: 親 Agent の Memory に保存され、後続の反復から参照できるフィードバックを追加します
+
+```typescript title="src/mastra/agents/parent-agent.ts"
+const stream = await parentAgent.stream('Research AI trends', {
+  maxSteps: 10,
+  delegation: {
+    onDelegationComplete: async context => {
+      console.log(`Completed: ${context.primitiveId}`)
+
+      // Bail on errors
+      if (context.error) {
+        context.bail()
+        return {
+          feedback: `Delegation to ${context.primitiveId} failed: ${context.error}. Try a different approach.`,
+        }
+      }
+    },
+  },
+})
+```
+
+`context` オブジェクトには次のプロパティが含まれます。
+
+| プロパティ | 説明 |
+| - | - |
+| `primitiveId` | 実行された Subagent の ID |
+| `result` | Subagent のレスポンス |
+| `error` | 委譲に失敗した場合のエラー |
+| `bail()` | 親 Agent のループを停止する関数 |
+
+## メッセージフィルタリング
+
+デフォルトでは、Subagent は親 Agent から会話コンテキスト全体を受け取ります。機密データの削除やコンテキストサイズの制限など、共有するメッセージを制御するには `messageFilter` を使用します。
+
+```typescript title="src/mastra/agents/parent-agent.ts"
+const stream = await parentAgent.stream('Research AI trends', {
+  maxSteps: 10,
+  delegation: {
+    messageFilter: ({ messages, primitiveId, prompt }) => {
+      // Remove messages containing sensitive data
+      return messages
+        .filter(msg => {
+          const content =
+            typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+          return !content.includes('confidential')
+        })
+        .slice(-10) // Only pass the last 10 messages
+    },
+  },
+})
+```
+
+コールバックは、`messages`（会話履歴全体）、`primitiveId`（Subagent の ID）、`prompt`（委譲プロンプト）を受け取ります。フィルタリングしたメッセージの配列を返します。
+
+## Subagent の結果コンテキスト
+
+Subagent が完了すると、以降の反復で、親 Agent のモデルは Subagent のテキストレスポンスを受け取ります。ネストされた Tool 呼び出しと、スレッド ID やリソース ID などの Subagent メタデータは、親 Agent のモデルコンテキストに追加されません。
+
+アプリケーションコードと UI インテグレーションでは、Tool の結果ペイロードに含まれる `subAgentToolResults` と、委譲結果のその他の生データを引き続き確認できます。
+
+これにより、ネストされた Tool の引数や出力を親 Agent の次のモデル呼び出しに送り返すことなく、デバッグ用および表示用のデータを利用できます。
+
+ネストされた Tool の結果と Subagent メタデータを含む Subagent の完全な結果を親 Agent のモデルコンテキストに追加するには、`includeSubAgentToolResultsInModelContext` を設定します。
+
+```typescript title="src/mastra/agents/parent-agent.ts"
+await parentAgent.generate('Research AI trends', {
+  delegation: {
+    includeSubAgentToolResultsInModelContext: true,
+  },
+})
+```
+
+## 反復の監視
+
+`onIterationComplete` は、親 Agent のループの各反復後に呼び出されます。実行の監視や次の反復への指示に使用します。実行を早期に停止することもできます。
+
+```typescript title="src/mastra/agents/parent-agent.ts"
+const stream = await parentAgent.stream('Research AI trends', {
+  maxSteps: 10,
+  onIterationComplete: async context => {
+    console.log(`Iteration ${context.iteration}/${context.maxIterations}`)
+    console.log(`Finish reason: ${context.finishReason}`)
+
+    // Inject feedback to guide the agent
+    if (!context.text.includes('recommendations')) {
+      return {
+        continue: true,
+        feedback: 'Please include specific recommendations in your analysis.',
+      }
+    }
+
+    // Stop early when the response is sufficient
+    if (context.text.length > 1000 && context.finishReason === 'stop') {
+      return { continue: false }
+    }
+
+    return { continue: true }
+  },
+})
+```
+
+反復を継続するには `{ continue: true }`、停止するには `{ continue: false }` を返します。会話に指示を追加するには、任意の `feedback` を指定します。`feedback` と `continue: false` を組み合わせた場合、モデルはフィードバックを反映したテキストレスポンスを生成するための最後のターンを得ることがあります。ただし、現在の反復がまだアクティブな場合（Tool 呼び出しの後など）に限られ、それ以外では追加のターンは与えられません。
+
+## Memory の分離
+
+Mastra は委譲中に Subagent の Memory を分離します。Subagent は判断に必要な会話コンテキスト全体を受け取りますが、その Memory に保存されるのは、個別の委譲プロンプトとレスポンスだけです。
+
+仕組みは次のとおりです。
+
+1. **完全なコンテキストの転送**: 親 Agent が委譲すると、Subagent は親 Agent の会話に含まれるすべてのメッセージを受け取ります
+1. **スコープを限定した Memory への保存**: Subagent の Memory に保存されるのは、委譲プロンプトと Subagent のレスポンスだけです
+1. **呼び出しごとに新しいスレッド**: 委譲ごとに一意のスレッド ID を使用し、明確に分離します
+
+これにより、Subagent は親 Agent の会話全体で Memory を煩雑にすることなく、必要なコンテキストを利用できます。詳細については、[マルチ Agent システムの Memory](/docs/memory/overview#memory-in-multi-agent-systems)を参照してください。
+
+## Tool 承認の伝播
+
+Tool の承認は委譲チェーン全体に伝播します。Subagent が `requireApproval: true` を設定した Tool を使用するか、`suspend()` を呼び出すと、その承認リクエストが親 Agent のストリームに現れます。
+
+```typescript
+const sensitiveDataTool = createTool({
+  id: 'get-user-data',
+  requireApproval: true,
+  execute: async input => {
+    return await database.getUserData(input.userId)
+  },
+})
+
+const dataAgent = new Agent({
+  id: 'data-agent',
+  tools: { sensitiveDataTool },
+})
+
+const parentAgent = new Agent({
+  id: 'parent-agent',
+  agents: { dataAgent },
+  memory: new Memory(),
+})
+
+const stream = await parentAgent.stream('Get data for user 123')
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'tool-call-approval') {
+    console.log('Tool requires approval:', chunk.payload.toolName)
+  }
+}
+```
+
+## キャンセル
+
+親 Agent の [`stream()`](/reference/streaming/agents/stream) または [`generate()`](/reference/agents/generate) の呼び出しに `abortSignal` を渡すと、Mastra は委譲先の Subagent に同じシグナルを転送します。`AbortController.abort()` を呼び出すと、実行中の Subagent を完了まで動作させず、次のステップでキャンセルします。
+
+```typescript
+const controller = new AbortController()
+
+const stream = await parentAgent.stream('Research AI trends', {
+  abortSignal: controller.signal,
+})
+
+// Cancel the parent agent and any in-flight subagents
+controller.abort()
+```
+
+## タスク完了スコアリング
+
+Agent は、最初の試行で必ずしも完全かつ正しい出力を生成するとは限りません。タスク完了 Scorer を使用すると、各反復後にタスクが完了したかどうかを検証できます。検証に失敗すると、親 Agent は反復を継続します。失敗した Scorer からのフィードバックは会話コンテキストに含まれるため、Subagent は不足していた内容を把握できます。
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+
+const taskCompleteScorer = createScorer({
+  id: 'task-complete',
+  name: 'Task Completeness',
+}).generateScore(async context => {
+  const text = (context.run.output || '').toString()
+  const hasAnalysis = text.includes('analysis')
+  const hasRecommendations = text.includes('recommendation')
+  return hasAnalysis && hasRecommendations ? 1 : 0
+})
+
+const stream = await parentAgent.stream('Research AI in education', {
+  maxSteps: 10,
+  isTaskComplete: {
+    scorers: [taskCompleteScorer],
+    strategy: 'all',
+    onComplete: async result => {
+      console.log('Task complete:', result.complete)
+    },
+  },
+})
+```
+
+### Rubric Scorer
+
+組み込みの Rubric Scorer を使用すると、「正しい」状態をチェックリストとして定義し、すべての基準を満たすか `maxSteps` に達するまで、Agent に自己評価と反復を行わせることができます。
+
+これは **LLM-as-judge** Scorer として動作します。各反復後に、別の評価モデルが Rubric に照らして Agent の出力を確認します。必須の基準をすべて満たすとループが終了します。基準を満たさなかった場合は、そのフィードバックが会話に追加され、Agent は再試行できます。
+
+これは、明確で検証可能な成功基準を持つタスクに最も効果的です。次のように使用できます。
+
+```typescript title="src/mastra/agents/rubric-scorer.ts"
+import { Agent } from '@mastra/core/agent'
+import { createRubricScorer } from '@mastra/evals/scorers/prebuilt'
+
+const parentAgent = new Agent({
+  id: 'parent-agent',
+  instructions: 'You coordinate research and writing using specialized agents.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  agents: { researchAgent, writingAgent },
+})
+
+const rubricScorer = createRubricScorer({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  criteria: [
+    { description: 'The response includes an analysis section' },
+    { description: 'The response includes concrete recommendations' },
+  ],
+})
+
+const stream = await parentAgent.stream('Research AI in education', {
+  maxSteps: 10,
+  isTaskComplete: {
+    scorers: [rubricScorer],
+    strategy: 'all',
+  },
+})
+```
+
+API の全詳細については、[Rubric Scorer のリファレンス](/reference/evals/rubric)を参照してください。
+
+## 効果的な instructions の記述
+
+効果的に委譲するには、明確な instructions が不可欠です。
+
+親 Agent の `instructions` では、利用可能なリソースと各リソースを使用するタイミングを指定する必要があります。また、連携方法と成功基準も定義する必要があります。
+
+各 Subagent には、親 Agent が使用するタイミングを含め、その目的と返却形式を説明する明確な `description` を設定する必要があります。
+
+親 Agent は、これらの description を使用して委譲を判断します。
+
+```typescript
+const parentAgent = new Agent({
+  id: 'parent-agent',
+  instructions: `You coordinate research and writing tasks.
+
+Available resources:
+- researchAgent: Gathers factual data and sources (returns bullet points)
+- writingAgent: Transforms research into narrative content (returns full paragraphs)
+
+Delegation strategy:
+1. For research requests: Delegate to researchAgent first
+2. For writing requests: Delegate to writingAgent
+3. For complex requests: Delegate to researchAgent first, then writingAgent
+
+Success criteria:
+- All user questions are fully answered
+- Response is well-formatted and complete`,
+  agents: { researchAgent, writingAgent },
+})
+```
+
+## Subagent をバックグラウンドで実行する
+
+Subagent の呼び出しは Tool 呼び出しとしてディスパッチされるため、[バックグラウンドタスク](/docs/long-running-agents/background-tasks)として実行できます。1 つ以上の委譲に時間がかかり、親 Agent のレスポンスをブロックさせたくない場合に便利です。
+
+Mastra インスタンスで [backgroundTasks manager](/reference/configuration#backgroundtasks) を有効にし、親 Agent で Subagent をオプトインします。
+
+```typescript title="src/mastra/agents/parent-agent.ts"
+const parentAgent = new Agent({
+  id: 'parent-agent',
+  instructions: 'Coordinate research and writing using the available agents.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  agents: { researchAgent, writingAgent },
+  // highlight-start
+  backgroundTasks: {
+    tools: {
+      researchAgent: { enabled: true, timeoutMs: 900_000 },
+      writingAgent: { enabled: true, timeoutMs: 900_000 },
+    },
+  },
+  // highlight-end
+})
+
+const stream = await parentAgent.streamUntilIdle('Research AI in education and write an article', {
+  memory: { thread: 't1', resource: 'u1' },
+})
+```
+
+Subagent が完了し、その結果に親 Agent が応答できるまでストリームを開いたままにするには、`stream()` の代わりに [`streamUntilIdle()`](/reference/streaming/agents/streamUntilIdle) を使用します。
+
+Subagent が親 Agent の `backgroundTasks.tools` に記載されていなくても、Subagent 自身にバックグラウンド実行可能な Tool がある場合、親 Agent はその Subagent をバックグラウンドタスクとしてディスパッチし、設定を継承します。詳細については、[Subagent からの継承](/docs/long-running-agents/background-tasks#inheriting-from-the-subagent)を参照してください。
+
+## Subagent のバージョン管理
+
+[editor](/docs/editor/overview) を使用する場合、親 Agent が実行時に使用する各 Subagent の保存済みバージョンを制御できます。Mastra インスタンスまたは呼び出しごとにバージョンのオーバーライドを設定します。
+
+```typescript
+const result = await parentAgent.generate('Research and write about AI safety', {
+  versions: {
+    agents: {
+      'research-agent': { status: 'published' },
+      'writing-agent': { versionId: 'draft-456' },
+    },
+  },
+})
+```
+
+バージョンのオーバーライドは、委譲を通じて自動的に伝播します。解決順序とサーバー API の使用方法については、[Subagent のバージョン管理](/reference/editor/versioning#sub-agent-versioning)を参照してください。
+
+## 関連情報
+
+- [バックグラウンドタスク](/docs/long-running-agents/background-tasks)
+- [Subagent のバージョン管理](/reference/editor/versioning#sub-agent-versioning)
+- [ガイド: リサーチコーディネーター](/guides/guide/research-coordinator)
+- [Agent.stream() リファレンス](/reference/streaming/agents/stream)
+- [Agent.streamUntilIdle() リファレンス](/reference/streaming/agents/streamUntilIdle)
+- [Agent.generate() リファレンス](/reference/agents/generate)
+- [Agent の承認](/docs/agents/agent-approval)
+- [マルチ Agent システムの Memory](/docs/memory/overview#memory-in-multi-agent-systems)
+- [概念: マルチ Agent システム](/guides/concepts/multi-agent-systems)
+- 📹 [Mastra Supervisor Agent ワークショップ](https://www.youtube.com/watch?v=FNb2fL9WhQg\&t=1872s)

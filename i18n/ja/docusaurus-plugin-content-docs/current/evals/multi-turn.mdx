@@ -1,0 +1,183 @@
+---
+title: "マルチターン Evals | Evals"
+description: "共有 Thread 上で入力を順番に送信し、マルチターン会話にわたる Agent の動作を評価します。"
+packages:
+  - "@mastra/core"
+---
+
+# マルチターン Evals
+
+マルチターン Evals は、会話全体にわたる Agent の動作をテストします。単一の `input` の代わりに、`inputs` 配列を指定します。各要素は同じ Thread 上で Agent に順番に送信され、Scorer はすべての Turn から蓄積された出力を参照します。
+
+## マルチターン Evals を使用する場面
+
+- Agent が Memory を使用し、前の Turn のコンテキストを記憶する必要がある
+- Agent が以前の応答に依存するフォローアップ質問を処理する
+- 会話全体にわたる Tool 呼び出しの順序を検証する必要がある
+- Agent が複数ステップの Workflow（検索、確認、実行）を実行する
+
+## クイックスタート
+
+```typescript title="src/evals/conversation-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { weatherAgent } from '../agents'
+
+const result = await runEvals({
+  data: [
+    {
+      inputs: [
+        'What is the weather in Brooklyn?',
+        'What about tomorrow?',
+        'Compare the two forecasts.',
+      ],
+    },
+  ],
+  target: weatherAgent,
+  scorers: [checks.calledTool('get_weather', { times: 2 }), checks.includes('Brooklyn')],
+})
+```
+
+各 Turn では同じ Thread ID を使用して `agent.generate()` が実行されるため、Agent は会話履歴全体を参照できます。Scorer は、すべての Turn から蓄積された出力メッセージを受け取ります。
+
+## Turn をまたぐ記憶には Memory が必要
+
+マルチターンでの記憶は、Agent に **Memory Store が設定されていること**に依存します。共有 Thread ID によって各 Turn から前の Turn を参照できますが、Thread の履歴が永続化されるのは Agent に Memory がある場合だけです。Agent に Memory が設定されていない場合も、Turn は順番に実行され、その出力は採点用に蓄積されますが、Agent は前の Turn を記憶しません（各入力は独立して実行されます）。Memory のない Agent で `inputs` を使用すると、`runEvals` は警告を記録します。
+
+`runEvals` は会話 ID を自動的に管理します。共有 `threadId` を生成し、`resourceId` を注入します（Mastra Memory は Resource と Thread の組み合わせでメッセージのスコープを設定するため、記憶を機能させるには両方が必要です）。デフォルトでは、生成された Thread から Resource が派生するため、各会話は分離されます。既存ユーザーの Memory を再利用する場合など、特定の Resource に固定するには `targetOptions.memory.resource` を渡します。Thread は引き続き `runEvals` が管理するため、指定する必要はありません。
+
+```typescript
+await runEvals({
+  target: weatherAgent,
+  data: [{ inputs: ['What is the weather in Brooklyn?', 'What about tomorrow?'] }],
+  scorers: [checks.similarity('weather forecast')],
+  targetOptions: { memory: { resource: 'user-42' } },
+})
+```
+
+Memory Store の設定方法については、[Memory](/docs/memory/overview)を参照してください。
+
+## 仕組み
+
+データ項目に `inputs` 配列がある場合、`runEvals` は次の処理を行います。
+
+1. 会話用に新しい Thread（一意の `threadId`）と Resource を作成する（呼び出し元が指定した `targetOptions.memory.resource` は維持される）
+1. その Thread 上で `agent.generate()` を介して各入力を順番に送信する
+1. すべての Turn の出力メッセージを蓄積する
+1. 蓄積した完全な出力を評価用に Scorer へ渡す
+
+Scorer は、すべての Turn を含む完全な会話出力を参照します。
+
+## 採点のセマンティクス
+
+マルチターン項目用の Scorer を作成する際は、次の詳細が重要です。
+
+- **`run.output` はすべての Turn から蓄積された出力です。** `checks.includes`、`checks.calledTool`、`checks.similarity` などの出力ベースの Scorer は、会話全体を評価します。たとえば、`checks.calledTool('get_weather', { times: 2 })` は、すべての Turn にわたる呼び出しを数えます。
+- **`run.input` は最初の Turn の入力だけです。** 入力と出力を比較する Scorer（Faithfulness、Answer Relevancy、その他の入力相対型 LLM Scorer）には、会話全体ではなく最初のユーザーメッセージだけが渡されます。マルチターンでは出力ベースのチェックを優先するか、蓄積された `run.output` を直接読み取る Scorer を作成してください。
+
+## `turns` による Turn ごとの検証
+
+`inputs` 形式では、**蓄積された**出力全体を、すべての Turn の出力に対する単一の Score として採点します。このため、Turn ごとの失敗が見えなくなる可能性があります。`checks.includes('Brooklyn')` のような出力ベースのチェックは、フォローアップの Turn が壊れていても、_いずれかの_ Turn で Brooklyn に言及していれば合格します。
+
+**特定の Turn** が正しく動作したことを検証する必要がある場合は、代わりに `turns` を使用します。各 Turn は、独自の `input` と、その Turn の入力と出力**だけ**を評価する任意の `gates`/`scorers` を持つオブジェクトです。
+
+```typescript title="src/evals/per-turn-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { weatherAgent } from '../agents'
+
+const result = await runEvals({
+  data: [
+    {
+      turns: [
+        {
+          input: 'What is the weather in Brooklyn?',
+          gates: [checks.calledTool('get_weather')],
+        },
+        {
+          // The follow-up must call the tool again — it can't be satisfied
+          // by the first turn's tool call.
+          input: 'What about tomorrow?',
+          gates: [checks.calledTool('get_weather')],
+          scorers: [{ scorer: checks.similarity('tomorrow forecast'), threshold: 0.5 }],
+        },
+      ],
+    },
+  ],
+  target: weatherAgent,
+})
+
+result.verdict // 'passed' | 'scored' | 'failed'
+result.turnResults // per-turn gate/threshold/scorer outcomes
+```
+
+セマンティクスは次のとおりです。
+
+- Turn ごとの Gate または Scorer が参照するのは、**その Turn の** `run.input` と `run.output` **だけ**であり、蓄積された会話は参照しません。これにより、`inputs` にある2つの盲点が解消されます。別の Turn でチェックを満たすことはできず、各 Turn で正しい `run.input` が使用されます。
+- Turn ごとの結果は [Verdict](/docs/evals/gates-and-verdicts) に集約されます。Turn の Gate が失敗すると Verdict は `failed` になります。Gate が合格していても Turn の Threshold を満たさなければ、`scored` になります。
+- `result.turnResults[i]` は、各 Turn の `gateResults`、`thresholdResults`、`scores` を報告するため、失敗した正確な Turn を特定できます。複数の会話では、Turn のインデックスごとに結果が平均されます。
+- `gates` も `scorers` もない Turn は、会話を次へ進めます。
+- トップレベルの `scorers`/`gates` は、引き続き蓄積された出力全体に対して実行されるため、「この Turn では Tool を呼び出す必要がある」と「回答で Brooklyn に言及する」を組み合わせられます。
+- Agent に Storage が設定されている場合、Turn ごとの各 Scorer/Gate の結果はトップレベルの Score と同様に永続化され、Score Store に表示されます。保存された Turn ごとの各 Score には Turn のインデックス（`metadata.turnIndex`）が付けられ、会話の `threadId` を共有し、その Turn 固有の Trace Span にリンクされます。
+
+会話全体に対する単一の Score で十分な場合は `inputs` を使用します。正しさが個々の Turn に依存する場合は `turns` を使用します。同じデータ項目で `turns` と `input` または `inputs` を組み合わせることはできません。
+
+## Gate と Threshold との組み合わせ
+
+マルチターンのデータ項目は、[Gate と Verdict](/docs/evals/gates-and-verdicts)に対応しています。Gate が会話全体を反映するよう、出力ベースの Scorer を使用してください。
+
+```typescript title="src/evals/memory-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+
+const result = await runEvals({
+  data: [
+    {
+      inputs: ['My favorite city is Brooklyn.', 'What is the weather in my favorite city?'],
+    },
+  ],
+  target: weatherAgent,
+  gates: [checks.calledTool('get_weather')],
+  scorers: [{ scorer: checks.similarity('Brooklyn weather forecast'), threshold: 0.5 }],
+})
+
+result.verdict // 'passed' | 'scored' | 'failed'
+```
+
+## シングルターンとマルチターンの混在
+
+1 回の `runEvals` 呼び出しには、シングルターンとマルチターンの両方のデータ項目を含められます。
+
+```typescript title="src/evals/mixed-eval.ts"
+const result = await runEvals({
+  data: [
+    { input: 'What is the weather in Brooklyn?' },
+    {
+      inputs: ['My favorite city is Brooklyn.', 'What is the weather in my favorite city?'],
+    },
+  ],
+  target: weatherAgent,
+  scorers: [checks.includes('Brooklyn')],
+})
+```
+
+シングルターンの項目では通常どおり `input` を使用します。マルチターンの項目では `inputs` を使用し、`input` は完全に省略できます。
+
+## 検証
+
+`inputs` が存在していて空の場合、`runEvals` は `MastraError` をスローします。
+
+```typescript
+// Throws: 'inputs' must be a non-empty array
+await runEvals({
+  data: [{ inputs: [] }],
+  target: myAgent,
+  scorers: [myScorer],
+})
+```
+
+## 関連情報
+
+- [`runEvals()` リファレンス](/reference/evals/run-evals): `runEvals` のパラメーターと戻り値に関する完全な API
+- [Gate と Verdict](/docs/evals/gates-and-verdicts): 厳格な要件と品質 Threshold を適用する
+- [Quick Checks](/docs/evals/quick-checks): LLM 不要で組み合わせ可能なマイクロ Scorer

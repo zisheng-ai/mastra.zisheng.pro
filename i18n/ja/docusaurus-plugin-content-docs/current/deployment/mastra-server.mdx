@@ -1,0 +1,166 @@
+---
+title: "Mastra サーバーのデプロイ | Deployment"
+description: "Mastra サーバーをビルドしてデプロイする方法を説明します。"
+packages:
+  - "@mastra/deployer"
+---
+
+# Mastra サーバーのデプロイ
+
+Mastra はアプリケーションを、Node.js、Bun、Deno をサポートする任意のプラットフォームで実行できるスタンドアロン Node.js サーバーにコンパイルします。
+
+:::tip
+
+このガイドでは、`mastra build` で生成されるスタンドアロンサーバーのデプロイについて説明します。Mastra を既存の Express または Hono アプリケーションに統合する場合は、代わりに [Server Adapter](/docs/server/server-adapters) を参照してください。
+
+:::
+
+## アプリケーションのビルド
+
+プロジェクトのルートからビルドコマンドを実行します。
+
+```bash
+mastra build
+```
+
+これにより、本番環境向けサーバーを含む `.mastra` ディレクトリが作成されます。使用可能なすべてのフラグについては、[`mastra build`](/reference/cli/mastra#mastra-build) のリファレンスを参照してください。
+
+## ビルド出力
+
+ビルド後、Mastra は次の構造を作成します。
+
+```
+.mastra/
+├── .build/                # Intermediate build artifacts (module maps, analysis)
+└── output/
+    ├── index.mjs          # Server entry point
+    ├── mastra.mjs         # Your bundled Mastra configuration
+    ├── tools.mjs          # Aggregated tool exports
+    ├── tools/             # Individual tool bundles
+    ├── package.json       # Production dependencies
+    ├── node_modules/      # Installed dependencies
+    ├── .npmrc             # Copied from your project (if present)
+    ├── public/            # Static assets (if src/mastra/public exists)
+    └── playground/        # Studio UI (if --studio flag used)
+```
+
+`output` ディレクトリは自己完結しています。任意のサーバーにコピーして直接実行できます。
+
+## サーバーの実行
+
+Mastra CLI を使用してサーバーを起動します。
+
+```bash
+mastra start
+```
+
+または、Node.js で直接実行します。
+
+```bash
+node .mastra/output/index.mjs
+```
+
+`mastra start` コマンドには、次の追加機能があります。
+
+- `.env.production` と `.env` から環境変数を読み込む
+- モジュールが不足している場合に役立つエラーメッセージを表示する
+- プロセスシグナルを処理し、正常にシャットダウンする
+
+使用可能なすべてのフラグについては、[`mastra start`](/reference/cli/mastra#mastra-start) のリファレンスを参照してください。
+
+## ビルド設定
+
+### ビルド時の設定
+
+Mastra はアプリケーションのビルド中に、`bundler`、`deployer`、`server` オプションを読み取ります。ビルド時に抽出できるように、これらのオプションは `new Mastra()` に渡すオブジェクトの直接のプロパティとして指定してください。
+
+次のようなエントリファイルの構造は使用できます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+
+export const mastra = new Mastra({
+  bundler: {
+    externals: ['sharp'],
+  },
+  server: {
+    port: 4111,
+  },
+})
+```
+
+各オプションの値には、変数、import、関数呼び出しを使用できます。ただし、オプション自体は直接のプロパティとして指定する必要があります。ビルド時のオプションをファクトリー呼び出しやオブジェクトスプレッドの背後に隠さないでください。
+
+```typescript title="src/mastra/index.ts"
+const options = {
+  bundler: {
+    externals: ['sharp'],
+  },
+}
+
+// These patterns prevent Mastra from extracting `bundler` during the build.
+export const mastra = new Mastra(createMastraOptions())
+export const otherMastra = new Mastra({ ...options })
+```
+
+Mastra がオプションを抽出できない場合、そのオプションにはデフォルトのビルド動作が適用されます。使用可能な `bundler`、`deployer`、`server` の設定については、[設定リファレンス](/reference/configuration)を参照してください。
+
+### public フォルダー
+
+Mastra ディレクトリに `public` フォルダー（`src/mastra/public`）が存在する場合、その内容はビルド時に出力ディレクトリへコピーされます。これらのファイルはサーバーから静的アセットとして配信されます。
+
+### Mastra の設定
+
+ビルドプロセスには、Mastra インスタンスの設定が反映されます。CORS、タイムアウト、ミドルウェアなどのサーバー動作については、[サーバーの概要](/docs/server/mastra-server)を参照してください。使用可能なすべてのオプションについては、[設定リファレンス](/reference/configuration)を参照してください。
+
+## ビルドプロセス
+
+ビルドは次の手順で行われます。
+
+1. **エントリファイルを特定する**: Mastra ディレクトリ内の `index.ts` または `index.js` を検索します。
+1. **Tool を検出する**: テストファイルを除き、`{mastraDir}/tools/**/*.{js,ts}` に一致する Tool ファイルをスキャンします。
+1. **依存関係を分析する**: バンドルするパッケージと外部依存関係としてインストールするパッケージを判定します。
+1. **コードをバンドルする**: tree-shaking とオプションのソースマップを使用して Rollup でバンドルします。
+1. **サーバーを生成する**: Hono ベースの HTTP サーバーを `index.mjs` として作成します。
+1. **依存関係をインストールする**: 出力ディレクトリで `npm install` を実行します。
+1. **アセットをコピーする**: `public` フォルダーと、存在する場合は `.npmrc` をコピーします。
+
+## 環境変数
+
+| 変数 | 説明 |
+| - | - |
+| `PORT` | サーバーのポート（デフォルト: `4111`） |
+| `MASTRA_STUDIO_PATH` | Studio のビルドディレクトリへのパス（デフォルト: `./playground`） |
+| `MASTRA_SKIP_DOTENV` | 設定されている場合、`.env` ファイルの読み込みをスキップします |
+| `NODE_OPTIONS` | Node.js のオプション（例: ビルド時のメモリ問題に対する `--max-old-space-size=4096`） |
+
+## サーバーエンドポイント
+
+ビルドされたサーバーは、ヘルスチェック、Agent、Workflow などのエンドポイントを公開します。
+
+| エンドポイント | 説明 |
+| - | - |
+| `GET /health` | ヘルスチェックエンドポイント。`200 OK` を返します |
+| `GET /api/openapi.json` | OpenAPI 仕様（`server.build.openAPIDocs` が有効な場合）。 |
+| `GET /swagger-ui` | インタラクティブな API ドキュメント（`server.build.swaggerUI` が有効な場合） |
+
+これはすべてのエンドポイントを網羅した一覧ではありません。すべてのエンドポイントを確認するには、`mastra dev` を実行して `http://localhost:4111/swagger-ui` にアクセスしてください。
+
+独自のエンドポイントを追加する方法については、[カスタム API ルート](/docs/server/custom-api-routes)を参照してください。
+
+## トラブルシューティング
+
+### ビルド時のメモリエラー
+
+`JavaScript heap out of memory` エラーが発生した場合は、次のコマンドを実行します。
+
+```bash
+NODE_OPTIONS="--max-old-space-size=4096" mastra build
+```
+
+## 関連情報
+
+- [サーバーの概要](/docs/server/mastra-server): サーバーの動作、ミドルウェア、認証を設定する
+- [Server Adapter](/docs/server/server-adapters): `mastra build` の代わりに Express または Hono を使用する
+- [カスタム API ルート](/docs/server/custom-api-routes): カスタム HTTP エンドポイントを追加する
+- [設定リファレンス](/reference/configuration): すべての設定オプション

@@ -1,0 +1,157 @@
+---
+title: "Scorer の概要 | Evals"
+description: Agent の出力評価とパフォーマンス測定に利用できる Mastra の Scorer の概要を説明します。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+# Scorer の概要
+
+従来のソフトウェアテストには明確な合格・不合格の条件がありますが、AI の出力は非決定論的であり、同じ入力でも変化する可能性があります。**Scorer** は、Agent の品質を測定する定量的な指標を提供し、この隔たりを埋めるのに役立ちます。
+
+Scorer は、モデルによる採点、ルールベース、統計的手法を使用して Agent の出力を評価する自動テストです。Scorer は、出力が評価基準をどの程度満たしているかを数値化した **Score**（通常は 0～1）を返します。この Score により、AI システムのパフォーマンスを客観的に追跡し、異なるアプローチを比較して、改善すべき領域を特定できます。Scorer は、独自のプロンプトや採点関数を使ってカスタマイズできます。
+
+Scorer はクラウドで実行し、リアルタイムの結果を取得できます。また、CI/CD パイプラインに組み込み、Agent を継続的にテストして監視することもできます。
+
+:::tip[📹 動画]
+
+Evals の概要と Agent の品質についての考え方は、[Mastra evals overview](https://www.youtube.com/watch?v=12WN6u2DrBk)をご覧ください。
+
+:::
+
+## Scorer の種類
+
+Mastra は、それぞれ特定の目的を持つさまざまな種類の Scorer を提供します。一般的な種類には次のものがあります。
+
+1. **テキスト Scorer**: Agent の応答の正確性、信頼性、コンテキスト理解を評価する
+1. **分類 Scorer**: 事前定義されたカテゴリに基づいてデータを分類する精度を測定する
+1. **Prompt Engineering Scorer**: 異なる指示や入力形式による影響を調べる
+
+## インストール
+
+Mastra の Scorer 機能を使用するには、`@mastra/evals` パッケージをインストールします。
+
+```bash npm2yarn
+npm install @mastra/evals@latest
+```
+
+## Live Evaluation
+
+**Live Evaluation** を使用すると、Agent や Workflow の動作中に AI の出力をリアルタイムで自動採点できます。評価を手動またはバッチで実行する代わりに、Scorer が AI システムと並行して非同期に実行され、品質を継続的に監視します。
+
+### Agent に Scorer を追加する
+
+組み込み Scorer を Agent に追加して、出力を自動的に評価できます。利用可能なすべてのオプションについては、[組み込み Scorer の全一覧](/docs/evals/built-in-scorers)を参照してください。
+
+```typescript title="src/mastra/agents/evaluated-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createAnswerRelevancyScorer, createToxicityScorer } from '@mastra/evals/scorers/prebuilt'
+
+export const evaluatedAgent = new Agent({
+  id: 'evaluated-agent',
+  scorers: {
+    relevancy: {
+      scorer: createAnswerRelevancyScorer({ model: '__GATEWAY_OPENAI_MODEL_MINI__' }),
+      sampling: { type: 'ratio', rate: 0.5 },
+    },
+    safety: {
+      scorer: createToxicityScorer({ model: '__GATEWAY_OPENAI_MODEL_MINI__' }),
+      sampling: { type: 'ratio', rate: 1 },
+    },
+  },
+})
+```
+
+### Workflow のステップに Scorer を追加する
+
+個々の Workflow ステップに Scorer を追加し、処理中の特定の地点で出力を評価することもできます。各 Scorer はそのステップ固有の入力と出力を受け取るため、最終回答だけを採点するのではなく、ステップごとに品質を測定できます。
+
+```typescript title="src/mastra/workflows/content-generation.ts" prettier:false
+import { createWorkflow, createStep } from "@mastra/core/workflows";
+import { z } from "zod";
+import { customStepScorer } from "../scorers/custom-step-scorer";
+
+const contentStep = createStep({
+  id: "content-step",
+  inputSchema: z.object({ topic: z.string() }),
+  outputSchema: z.object({ content: z.string() }),
+  scorers: {
+    customStepScorer: {
+      scorer: customStepScorer(),
+      sampling: {
+        type: "ratio",
+        rate: 1, // Score every step execution
+      },
+    },
+  },
+  execute: async ({ inputData }) => {
+    return { content: await generateContent(inputData.topic) };
+  },
+});
+
+export const contentWorkflow = createWorkflow({
+  id: "content-workflow",
+  inputSchema: z.object({ topic: z.string() }),
+  outputSchema: z.object({ content: z.string() }),
+})
+  .then(contentStep)
+  .commit();
+```
+
+ステップレベルの `scorers` API については、[Step クラスのリファレンス](/reference/workflows/step#scoring-step-output)を参照してください。
+
+### Live Evaluation の仕組み
+
+**非同期実行**: Live Evaluation は、Agent の応答や Workflow の実行をブロックせず、バックグラウンドで実行されます。これにより、AI システムのパフォーマンスを維持しながら監視できます。
+
+**サンプリング制御**: `sampling.rate` パラメーター（0～1）は、採点する出力の割合を制御します。
+
+- `1.0`: すべての応答を採点する（100%）
+- `0.5`: 全応答の半分を採点する（50%）
+- `0.1`: 応答の 10% を採点する
+- `0.0`: 採点を無効にする
+
+**自動保存**: すべての採点結果は、設定済みデータベースの `mastra_scorers` テーブルに自動的に保存され、時間の経過に伴うパフォーマンスの傾向を分析できます。
+
+## Trace Evaluation
+
+Live Evaluation に加えて、Scorer を使用して Agent の対話や Workflow の過去の Trace を評価できます。
+
+これは、過去のパフォーマンスの分析、問題のデバッグ、またはバッチ評価の実行に特に役立ちます。
+
+:::note[Observability が必要]
+
+Trace を採点するには、まず Mastra インスタンスで Observability を設定して Trace データを収集する必要があります。設定手順については、[Tracing のドキュメント](../observability/tracing/overview)を参照してください。
+
+:::
+
+## Studio
+
+Trace を採点するには、まず Mastra インスタンスに Scorer を登録する必要があります。
+
+```typescript
+const mastra = new Mastra({
+  scorers: {
+    answerRelevancy: myAnswerRelevancyScorer,
+    responseQuality: myResponseQualityScorer,
+  },
+})
+```
+
+登録後は、Studio の **Observability** セクションで Trace を対話的に採点できます。Studio を開いて Scorer と Score を管理・確認し、実験を実行します。
+
+- **Scorer の一覧**: 登録済みのすべての Scorer とその説明、および各 Scorer が関連付けられている Agent と Workflow の数を確認できます。
+- **Score の結果**: Scorer を選択すると、その Scorer が生成したすべての Score がページ分割された一覧で表示されます。行をクリックすると詳細パネルが開き、Score の値、理由、入力、出力、Judge が使用したプロンプトを確認できます。このパネルから、任意の結果を今後の実験用の Dataset 項目として保存できます。
+- **Agent の Evaluate タブ**: 任意の Agent で Evaluate タブを開き、Scorer と Dataset を管理します。ここから実験を実行することもできます。実験結果には、項目ごとの Score と合格・不合格のステータス、バージョンタグが表示されます。
+- **Trace Scoring**: Observability セクションで、過去の任意の Trace または Span に対して Scorer を実行し、以前の対話を評価します。Score は Agent または Workflow で絞り込めます。
+
+## 次のステップ
+
+- テキストや Tool の使用状況を高速かつ決定論的に検証するには、[Quick Checks](/docs/evals/quick-checks)を使用する
+- 厳格な要件と品質しきい値を適用するには、[Gate と Verdict](/docs/evals/gates-and-verdicts)を追加する
+- 連続した Turn にわたって動作が現れる[マルチターン会話](/docs/evals/multi-turn)をテストする
+- 独自の Scorer を作成する方法は、[カスタム Scorer の作成](/docs/evals/custom-scorers)ガイドで学ぶ
+- [組み込み Scorer](/docs/evals/built-in-scorers)セクションを確認する
+- [Studio](/docs/studio/overview) で Scorer をテストする
+- 📹 [Mastra evals workshop](https://www.youtube.com/watch?v=OHOZ5PgPj5M\&t=3578s)

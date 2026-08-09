@@ -1,0 +1,342 @@
+---
+title: "Sandbox へのデプロイ | デプロイ"
+description: "Mastra サーバーを一時的な Workspace Sandbox にデプロイし、公開 URL を取得します。"
+packages:
+  - "@mastra/deployer-sandbox"
+---
+
+# Sandbox へのデプロイ
+
+`@mastra/deployer-sandbox` は、Studio を含む完全な Mastra サーバーを一時的な Workspace Sandbox にデプロイし、公開 URL を返します。デプロイヤーは依存関係のインストールを省略できるため、再デプロイはより短時間で完了する場合があります。
+
+Sandbox デプロイは次の用途に使用します。
+
+- Agent が構築したアプリ：Agent が Mastra プロジェクトを生成してデプロイし、結果を検証します。
+- 継続的インテグレーション（CI）：チェック用の実サーバーを起動し、完了後に破棄します。
+- 即時プレビュー：マージ前に、動作する Agent をチームと共有します。
+- 信頼できないコードのマルチテナント実行：インフラストラクチャから分離したユーザーごとの Mastra インスタンスを実行します。
+
+Sandbox にはプロバイダーが設定する実行時間の上限があり、有効期限が切れます。本番環境でのホスティングについては、[デプロイの概要](/docs/deployment/overview)を参照してください。
+
+## サポートされている Sandbox
+
+デプロイヤーは、ネットワーク機能（公開ポート URL）をサポートする任意の Workspace Sandbox で動作します。
+
+- [Vercel Sandbox](/reference/workspace/vercel-sandbox)（`@mastra/vercel`）
+- [E2B](/reference/workspace/e2b-sandbox)（`@mastra/e2b`）
+- [Daytona](/reference/workspace/daytona-sandbox)（`@mastra/daytona`）
+
+プロバイダーの開発者は、[`WorkspaceSandbox`](/reference/workspace/sandbox) にオプションの `networking` capability を実装することで、サポートを追加できます。
+
+## クイックスタート
+
+デプロイヤーと任意の Sandbox プロバイダーをインストールします。この例では Vercel Sandbox を使用します。
+
+```bash npm2yarn
+npm install @mastra/deployer-sandbox @mastra/vercel
+```
+
+`src/mastra/index.ts` ファイルでデプロイヤーを設定します。`sandboxName` はデプロイを識別するため、以降、同じ名前でデプロイすると既存の Sandbox が再利用されます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { SandboxDeployer } from '@mastra/deployer-sandbox'
+import { VercelSandbox } from '@mastra/vercel'
+
+export const mastra = new Mastra({
+  deployer: new SandboxDeployer({
+    sandbox: new VercelSandbox({
+      sandboxName: 'my-preview',
+      timeout: 2_400_000, // 40 minutes
+      ports: [4111],
+    }),
+  }),
+})
+```
+
+Vercel 固有の要件が2つあります。
+
+- `timeout` は、プランで定められた Sandbox の最長有効期間（Pro では45分）を超えることはできません。それより大きい値を指定すると、Vercel API から 400 が返され、デプロイに失敗します。
+- サーバーポートを `ports` で宣言します。E2B や Daytona とは異なり、Vercel が公開するのは作成時に宣言されたポートだけです。
+
+1つのコマンドでビルドしてデプロイします。
+
+```bash
+mastra build
+```
+
+`SandboxDeployer()` が設定されている場合、`mastra build` はプロジェクトをバンドルし、Sandbox にデプロイします。デプロイ時には API と Studio の URL が出力され、`.mastra/output` に `sandbox-deployment.json` マニフェストが書き込まれます。
+
+```text
+API:    https://<sandbox-id>-4111.vercel.run/api
+Studio: https://<sandbox-id>-4111.vercel.run
+```
+
+Sandbox プロバイダーが有効期限を返す場合、マニフェストには `expiresAt` が含まれます。
+
+同じ Sandbox に再デプロイすると、依存関係の入力が変更されていない場合はインストールが省略されます。この入力には、`package.json`、バンドルされたロックファイル、インストールコマンドが含まれます。
+
+### 各 URL が提供する内容
+
+Studio URL は `/api` を含まない Sandbox のルートです。ブラウザーで開くと Studio を使用できます。`studio: false` でデプロイした場合、ルートには代わりに Mastra のウェルカムページが表示されます。
+
+API URL は、その配下にある `/api/agents` などのエンドポイントのプレフィックスにすぎません。`/api` 自体にはハンドラーがないため、サーバーが正常でもブラウザーで開くと「Not Found」レスポンスが返されます。
+
+デプロイを確認するには、エンドポイントを直接呼び出します。
+
+```bash
+curl -s -X POST https://4111-<sandbox-id>.e2b.app/api/agents/weatherAgent/generate \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Weather in London"}]}' | jq -r '.text'
+```
+
+### プロバイダーの認証情報
+
+各プロバイダーは、それぞれ固有の認証情報を使用して認証します。デプロイ先の Sandbox に対応する値を設定します。
+
+```bash title=".env"
+# E2B
+E2B_API_KEY=
+
+# Daytona
+DAYTONA_API_KEY=
+
+# Vercel
+VERCEL_TOKEN=
+VERCEL_TEAM_ID=
+VERCEL_PROJECT_ID=
+```
+
+すべてのプロバイダーで、これらの値をコンストラクターオプションとして渡すこともできます。セルフホストの E2B および Daytona では、`E2B_DOMAIN` または `DAYTONA_API_URL` を使用します。
+
+`mastra dev` とは異なり、`mastra build` は `.env` ファイルを読み込みません。デプロイはビルド内で行われるため、E2B の `E2B_API_KEY` のように環境から認証情報を読み取る Sandbox プロバイダーには空の値が渡され、認証エラーでデプロイに失敗します。
+
+`src/mastra/index.ts` に `import 'dotenv/config'` を追加しても解決しません。デプロイヤーを検出するため、ビルドはエントリーファイルから `deployer` オプションだけを抽出し、その import を含むその他すべてを tree-shaking で除去します。
+
+ビルドを実行する前に、`.env` ファイルをシェル環境へ読み込んでください。[`dotenv-cli`](https://www.npmjs.com/package/dotenv-cli) を使用する方法があります。
+
+```bash npm2yarn
+npm install --save-dev dotenv-cli
+```
+
+```json title="package.json"
+{
+  "scripts": {
+    "deploy": "dotenv -e .env -- mastra build"
+  }
+}
+```
+
+次に `npm run deploy` を実行します。`SandboxDeployer()` を設定すると `mastra build` がデプロイも行うため、このスクリプト名は処理内容に合わせています。ホスティングプラットフォームや CI ジョブで `npm run build` を実行した際に誤って Sandbox がデプロイされないよう、通常の `build` スクリプトとは分けてください。
+
+継続的インテグレーション（CI）では、代わりに認証情報をシークレットとしてエクスポートします。どの方法を使用する場合でも、変数は `.env` ファイル内だけでなく、シェル環境に存在する必要があります。
+
+これは、ローカルマシン上でデプロイヤーが必要とする認証情報に該当します。デプロイされたサーバーが必要とする変数は別に処理されます。デプロイヤーが `.env`、`.env.production`、`.env.local` を読み取り、Sandbox に注入します。[セキュリティ](#security)を参照してください。
+
+### E2B の使用
+
+E2B では、`id` がデプロイを識別します。以降、同じ値でデプロイすると、実行中か一時停止中かに関係なく既存の Sandbox に再接続します。
+
+```typescript title="src/mastra/index.ts"
+import { SandboxDeployer } from '@mastra/deployer-sandbox'
+import { E2BSandbox } from '@mastra/e2b'
+
+const deployer = new SandboxDeployer({
+  sandbox: new E2BSandbox({
+    id: 'my-preview',
+    template: 'base',
+    timeout: 3_600_000, // 1 hour
+  }),
+})
+```
+
+ファイルシステムのマウントが必要でない限り、`template: 'base'` を渡してください。指定しない場合、プロバイダーは初回使用時にカスタムの Filesystem in Userspace（FUSE）テンプレートをビルドします。E2B は停止するのではなく一時停止します。`stop()` はメモリと実行中のプロセスを含む仮想マシン（VM）全体のスナップショットを作成します。一時停止した Sandbox が復帰すると、Mastra サーバーは中断した箇所から再開するため、Vercel のような再起動ステップはありません。
+
+### Daytona の使用
+
+Daytona では、`id` がデプロイを識別します。以降、同じ値でデプロイすると既存の Sandbox に再接続します。トークンなしでプレビュー URL にアクセスできるようにするには、`public: true` を設定します。
+
+```typescript title="src/mastra/index.ts"
+import { SandboxDeployer } from '@mastra/deployer-sandbox'
+import { DaytonaSandbox } from '@mastra/daytona'
+
+const deployer = new SandboxDeployer({
+  sandbox: new DaytonaSandbox({
+    id: 'my-preview',
+    public: true,
+    autoStopInterval: 30, // minutes
+  }),
+})
+```
+
+Daytona Sandbox を停止すると、ファイルシステムは保持されますが、実行中のプロセスは保持されません。そのため、復帰時の動作は Vercel と同様です。resolver は `wake: true` の場合にサーバーを再起動します。
+
+Daytona は、送信先ごとに外向きトラフィックをフィルタリングします。一部のホストへのリクエストは Transport Layer Security（TLS）で正常に接続できますが、別のホストではハンドシェイク中に接続がリセットされ、Agent や Tool では Node の一般的な `fetch failed` として現れます。コードのデバッグを始める前に、Sandbox 内から同じホストに対して `curl` を実行し、コードが原因でないことを確認してください。
+
+```typescript
+const sandbox = new DaytonaSandbox({ id: 'my-preview' })
+await sandbox.start()
+
+const result = await sandbox.executeCommand('curl -v --max-time 10 https://api.example.com')
+console.info(result.stdout, result.stderr)
+```
+
+TLS ハンドシェイク中に `Connection reset by peer` が発生する場合、Agent ではなくフィルタリングが原因です。送信先を許可するよう Daytona サポートに依頼してください。制限付きの Daytona tier ではクラウドストレージのエンドポイントもブロックされ、その場合はマウント用ヘルパーが専用のエラーを報告します。
+
+## プログラムによるデプロイ
+
+`deployToSandbox()` は、バンドラーを使用せず、事前にビルドされた出力ディレクトリをデプロイします。`SandboxDeployer()` とは異なり、`studio: true` を渡さない限り Studio は含まれません。CI または Agent のコードから使用します。
+
+```typescript
+import { deployToSandbox } from '@mastra/deployer-sandbox'
+import { VercelSandbox } from '@mastra/vercel'
+
+const deployment = await deployToSandbox({
+  sandbox: new VercelSandbox({ sandboxName: 'ci-smoke', ports: [4111] }),
+  dir: '.mastra/output',
+})
+
+console.info(deployment.url) // https://<sandbox-id>-4111.vercel.run
+await deployment.logs() // tail the server log
+await deployment.stop() // stop the sandbox (resumable)
+await deployment.destroy() // permanently delete the sandbox
+```
+
+## ライフサイクル
+
+### デプロイの管理
+
+既存のデプロイを取得するには、`@mastra/deployer-sandbox/client` からエクスポートされるサーバー専用の `getDeployment()` を使用します。Vercel の `sandboxName` や E2B または Daytona の `id` など、プロバイダー固有の設定を通じて Sandbox を識別します。検索はデプロイを作成したプロセスに紐づかないため、別のサーバーサイドサービスや CI からも使用できます。
+
+```typescript title="scripts/stop.ts"
+import { getDeployment } from '@mastra/deployer-sandbox/client'
+import { VercelSandbox } from '@mastra/vercel'
+
+const deployment = await getDeployment({
+  sandbox: new VercelSandbox({ sandboxName: 'my-preview', ports: [4111] }),
+  port: 4111,
+})
+
+console.info(deployment.status, deployment.url)
+await deployment.logs() // tail the server log
+await deployment.stop() // stop the sandbox (resumable)
+await deployment.destroy() // permanently delete the sandbox
+```
+
+返す前に停止中の Sandbox を再開するには、`wake: true` を渡します。再開後もサーバーが正常でない場合に限り、サーバーが再起動されます。`vercel sandbox ls`、`vercel sandbox stop`、`vercel sandbox rm` など、プロバイダーのツールも使用できます。
+
+### 有効期限と URL
+
+Sandbox は、プロバイダーの実行時間制限に従って期限切れになります。プロバイダーが有効期限を返す場合、デプロイログに記録され、プログラムから `deployment.expiresAt` で参照できます。
+
+Sandbox の停止と再開に伴い、Sandbox URL が変わる場合があります。URL は接続のための情報として扱い、Sandbox の ID（たとえば `sandboxName`）を安定したハンドルとして扱ってください。以下のルーティング tier は URL の切り替わりに対応します。
+
+## ルーティング tier
+
+### Tier 1：直接 URL
+
+デプロイごとに新しい URL が発行されても問題ない開発、デモ、CI では、出力された URL を直接使用します。
+
+### Tier 2：実行時に解決
+
+`getDeployment()` は実行時に現在の URL を解決するため、利用側が古い URL を保持することはありません。Sandbox 名を認識しているサーバーであれば、Mastra プロジェクトとは別のコードベースにあるサーバーも含めて解決できます。
+
+```typescript title="app/api/agent-url/route.ts"
+import { getDeployment } from '@mastra/deployer-sandbox/client'
+import { VercelSandbox } from '@mastra/vercel'
+
+const deployment = await getDeployment({
+  sandbox: new VercelSandbox({ sandboxName: 'my-preview', ports: [4111] }),
+  wake: true,
+})
+
+console.info(deployment.url, deployment.status)
+```
+
+`wake: false`（デフォルト）の場合、Sandbox は起動されず、処理を判断するための `{ url, status }` が返されます。URL の解決、`stop()`、`destroy()` は、名前によって既存の Sandbox に接続し、再開はしません。そのため、停止中の Sandbox に対するライフサイクル操作で Sandbox が起動したり、課金が開始されたりすることはありません。`wake: true` の場合は Sandbox が再開され、サーバーが応答しなければ再起動されます。再起動が必要かどうかはプロバイダーによって異なります。Vercel と Daytona はファイルシステムを復元しますが実行中のプロセスは復元せず、E2B はサーバープロセスを含む VM 全体を再開します。
+
+:::warning
+
+`@mastra/deployer-sandbox/client` はサーバー専用です。Sandbox の解決にはプロバイダーの認証情報を使用するため、ブラウザーに渡してはいけません。このモジュールをブラウザーコンテキストで import すると例外がスローされます。
+
+:::
+
+### Tier 3：エンドユーザー向けの安定した URL
+
+ルートハンドラーのプロキシまたは Edge Config のエイリアスを使用して、独自ドメイン上の安定した URL をエンドユーザーに提供し、サーバーサイドから Sandbox に転送します。
+
+以下の例は Vercel と Next.js の構成ですが、リクエストを転送できる任意のサーバーサイドフレームワークやプロバイダーに同じ考え方を適用できます。
+
+- **ルートハンドラーのプロキシ。** `createSandboxHandler()` は Sandbox URL をキャッシュし、接続レベルの失敗後に再解決するため、URL の切り替わりとコールド状態からの復帰に対応できます。
+
+  ```typescript title="app/api/[...path]/route.ts"
+  import { createSandboxHandler, getDeployment } from '@mastra/deployer-sandbox/client'
+  import { VercelSandbox } from '@mastra/vercel'
+
+  const handler = createSandboxHandler({
+    resolve: async () => {
+      const deployment = await getDeployment({
+        sandbox: new VercelSandbox({ sandboxName: 'my-preview', ports: [4111] }),
+        wake: true,
+      })
+      return deployment.url!
+    },
+  })
+
+  export { handler as GET, handler as POST }
+  ```
+
+- **Edge Config のエイリアス。** デプロイヤーに `alias` オプションを設定すると、デプロイのたびに [Vercel Edge Config](https://vercel.com/docs/edge-config) の項目が現在の URL を指すよう維持されます。
+
+  ```typescript title="src/mastra/index.ts"
+  const deployer = new SandboxDeployer({
+    sandbox: new VercelSandbox({ sandboxName: 'my-preview', ports: [4111] }),
+    alias: { edgeConfigId: 'ecfg_...', key: 'my-preview', token: process.env.VERCEL_TOKEN! },
+  })
+  ```
+
+  次に、`createSandboxProxy()` を使用して Next.js middleware でリクエストを書き換えます。
+
+  ```typescript title="middleware.ts"
+  import { createSandboxProxy } from '@mastra/deployer-sandbox/client'
+
+  export const middleware = createSandboxProxy({ key: 'my-preview' })
+  export const config = { matcher: '/api/:path*' }
+  ```
+
+## CI の例
+
+pull request ごとにプレビューをデプロイします。
+
+```yaml title=".github/workflows/preview.yml"
+name: Sandbox preview
+on: pull_request
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npx mastra build
+      - run: curl --fail "$(jq -r .url .mastra/output/sandbox-deployment.json)/api"
+```
+
+## セキュリティ
+
+- Sandbox URL は公開されます。URL を知っている人は、Studio を含む Mastra サーバーにアクセスできます。使い捨てのプレビュー以外では、[サーバー認証](/docs/server/auth)を有効にしてください。
+- サーバーの実行に必要な `.env` ファイルの環境変数は、リモートの Sandbox VM に注入されます。この処理が行われると、デプロイログに警告が出力されます。共有プレビューサーバーに置けないシークレットはデプロイしないでください。
+- Tier 3 のトラフィックにアクセスを限定するには、`createSandboxHandler()` または `createSandboxProxy()` に `secret` を渡します。ヘルパーは転送するリクエストに `x-mastra-sandbox-secret` ヘッダーとして追加します。そのヘッダーを必須にするよう[サーバー認証](/docs/server/auth)を設定すると、独自ドメイン経由のトラフィックは通過し、Sandbox URL への直接アクセスは拒否されます。
+
+## 関連情報
+
+- [デプロイの概要](/docs/deployment/overview)
+- [サーバー認証](/docs/server/auth)
+- [`WorkspaceSandbox` リファレンス](/reference/workspace/sandbox)

@@ -70,33 +70,63 @@ export const mastra = new Mastra({
 
 向 topic 发布事件。`id` 和 `createdAt` 字段由实现赋值。
 
+```typescript
+await pubsub.publish('my-topic', {
+  type: 'example',
+  data: { value: 1 },
+  runId: 'run-123',
+})
+```
+
 #### `subscribe(topic, cb, options?)`
 
 注册 callback 以接收发布到 topic 的事件。设置 `options.group` 后，同一组的订阅者会竞争消息，每个事件仅投递给一个成员。没有 group 时，每个订阅者都会收到每个事件。
 
 传入 `options.batch` 可选择批量投递。callback 签名不变：N 个事件的批次会按发布顺序作为 N 次连续 `cb(event, ack, nack)` 调用投递。仅当 backend 的 [`supportsNativeBatching`](#properties) 为 `true` 时支持批处理。其他 backend 会忽略该选项并逐个投递事件。
 
+```typescript
+await pubsub.subscribe('my-topic', (event, ack, nack) => {
+  console.log(event)
+})
+```
+
 #### `unsubscribe(topic, cb)`
 
 从 topic 移除先前注册的 callback。
+
+```typescript
+await pubsub.unsubscribe('my-topic', callback)
+```
 
 #### `flush()`
 
 等待所有进行中的投递完成。关闭前调用以避免丢失事件。
 
+```typescript
+await pubsub.flush()
+```
+
 #### `clearTopic(topic)`
 
 在不再向 topic 发布事件后，删除其所有保留状态（缓存历史、持久 stream 条目和 consumer group）。Mastra 的 run lifecycle 会在 run 达到终态时自动调用它，因此每个 run 的 topic 不会在保留消息的 transport 上累积。
 
-默认实现是无操作：不为每个 topic 保留任何状态的 transport（如 `EventEmitterPubSub`）没有内容可清除。`RedisStreamsPubSub` 等持久化消息的 backend 会重写它。该 contract 是尽力而为的：实现记录失败而不抛出，因为调用者会在清理边界以 fire-and-forget 方式调用它。
+默认实现是无操作：不为每个 topic 保留任何状态的 transport（如 `EventEmitterPubSub`）没有内容可清除。[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) 等持久化消息的 backend 会重写它。该 contract 是尽力而为的：实现记录失败而不抛出，因为调用者会在清理边界以 fire-and-forget 方式调用它。
+
+```typescript
+await pubsub.clearTopic('workflow.events.v2.run-123')
+```
 
 ### Replay 方法
 
-这些方法支持在断开后恢复 stream。默认实现会回退到普通 `subscribe`，因此无历史支持的 backend 只提供实时行为。`CachingPubSub` 会重写它们以 replay 缓存事件。
+这些方法支持在断开后恢复 stream。默认实现会回退到普通 `subscribe`，因此无历史支持的 backend 只提供实时行为。[`CachingPubSub`](/reference/pubsub/caching-pubsub) 会重写它们以 replay 缓存事件。
 
 #### `getHistory(topic, offset?)`
 
 返回 topic 从 `offset` 开始的缓存事件。backend 没有历史记录时返回空数组。
+
+```typescript
+const events = await pubsub.getHistory('my-topic', 0)
+```
 
 返回：`Promise<Event[]>`
 
@@ -104,58 +134,189 @@ export const mastra = new Mastra({
 
 replay 缓存事件，然后订阅实时事件。
 
+```typescript
+await pubsub.subscribeWithReplay('my-topic', event => {
+  console.log(event)
+})
+```
+
 #### `subscribeFromOffset(topic, offset, cb)`
 
 从已知位置开始 replay 缓存事件，然后订阅实时事件。当 client 知道其最后位置时，这比完整 replay 更高效。
 
+```typescript
+await pubsub.subscribeFromOffset('my-topic', 42, event => {
+  console.log(event)
+})
+```
+
 ## 属性
 
-<PropertiesTable content={[
-  { name: 'supportedModes', type: 'ReadonlyArray<"pull" | "push">', description: '实现支持的投递模式。默认值为 `["pull"]`。' },
-  { name: 'supportsNativeBatching', type: 'boolean', description: '实现是否在 `subscribe()` 中支持 `options.batch`。默认值为 `false`。在内部集成批处理的 backend 会重写此项并返回 `true`。' },
-]}/>
+<PropertiesTable
+  content={[
+  {
+    name: 'supportedModes',
+    type: 'ReadonlyArray<"pull" | "push">',
+    description: '实现支持的投递模式。默认值为 `["pull"]`。',
+  },
+  {
+    name: 'supportsNativeBatching',
+    type: 'boolean',
+    description:
+      '实现是否在 `subscribe()` 中支持 `options.batch`。默认值为 `false`。在内部集成批处理的 backend 会重写此项并返回 `true`。',
+  },
+]}
+/>
 
 ## 类型
 
 ### `Event`
 
-<PropertiesTable content={[
-  { name: 'type', type: 'string', description: '事件类型标识符。' },
-  { name: 'id', type: 'string', description: '唯一事件 ID，由实现于发布时分配。' },
-  { name: 'data', type: 'any', description: '事件 payload。' },
-  { name: 'runId', type: 'string', description: '事件所属的 run。' },
-  { name: 'createdAt', type: 'Date', description: '由实现于发布时分配的时间戳。' },
-  { name: 'index', type: 'number', description: '用于从特定 offset 恢复的顺序位置。', isOptional: true },
-  { name: 'deliveryAttempt', type: 'number', description: '事件已投递的次数。从 1 开始。当 backend 不跟踪重新投递时，默认为 1。', isOptional: true },
-]}/>
+<PropertiesTable
+  content={[
+  {
+    name: 'type',
+    type: 'string',
+    description: '事件类型标识符。',
+  },
+  {
+    name: 'id',
+    type: 'string',
+    description: '唯一事件 ID，由实现于发布时分配。',
+  },
+  {
+    name: 'data',
+    type: 'any',
+    description: '事件 payload。',
+  },
+  {
+    name: 'runId',
+    type: 'string',
+    description: '事件所属的 run。',
+  },
+  {
+    name: 'createdAt',
+    type: 'Date',
+    description: '由实现于发布时分配的时间戳。',
+  },
+  {
+    name: 'index',
+    type: 'number',
+    description: '用于从特定 offset 恢复的顺序位置。',
+    isOptional: true,
+  },
+  {
+    name: 'deliveryAttempt',
+    type: 'number',
+    description:
+      '事件已投递的次数。从 1 开始。当 backend 不跟踪重新投递时，默认为 1。',
+    isOptional: true,
+  },
+]}
+/>
 
 ### `SubscribeOptions`
 
-<PropertiesTable content={[
-  { name: 'group', type: 'string', description: '设置后，具有相同 group 的订阅者会竞争消息，每个事件仅投递给一个成员。省略时，每个订阅者都会收到每个事件。', isOptional: true },
-  { name: 'batch', type: 'SubscribeBatchOptions', description: '为此订阅选择批量投递。省略时，事件逐个投递。仅在 `supportsNativeBatching` 为 `true` 的 backend 上支持。', isOptional: true },
-]}/>
+<PropertiesTable
+  content={[
+  {
+    name: 'group',
+    type: 'string',
+    description:
+      '设置后，具有相同 group 的订阅者会竞争消息，每个事件仅投递给一个成员。省略时，每个订阅者都会收到每个事件。',
+    isOptional: true,
+  },
+  {
+    name: 'batch',
+    type: 'SubscribeBatchOptions',
+    description:
+      '为此订阅选择批量投递。省略时，事件逐个投递。仅在 `supportsNativeBatching` 为 `true` 的 backend 上支持。',
+    isOptional: true,
+  },
+]}
+/>
 
 ### `SubscribeBatchOptions`
 
 每个订阅的批处理策略。callback 签名不会改变。N 个事件的批次会按发布顺序变为 N 次连续 callback 调用。
 
-<PropertiesTable content={[
-  { name: 'maxSize', type: 'number', description: '强制 flush 前保留的最大事件数。', isOptional: true },
-  { name: 'maxWaitMs', type: 'number', description: '最早事件可在 buffer 中停留的最长毫秒数。buffer 从空变为非空时启动计时器。', isOptional: true },
-  { name: 'minIntervalMs', type: 'number', description: '连续批次投递之间的最小毫秒数。即使 `maxSize` 或 `maxWaitMs` 触发，buffer 也会保留到距离上次投递达到此间隔。', isOptional: true },
-  { name: 'isImmediate', type: '(event: Event) => boolean', description: '当它对事件返回 `true` 时，buffer 会在发布时立即 flush，但仍受 `minIntervalMs` 约束。每事件逃生阀。', isOptional: true },
-  { name: 'coalesce', type: '(events: Event[]) => Event[]', description: '在投递前应用于排队批次以丢弃已被取代的事件。必须按引用身份返回输入的子集；返回新构造的 `Event` 对象违反 contract，并会丢弃整个批次。保留事件的顺序不变。', isOptional: true },
-  { name: 'maxBufferSize', type: 'number', description: '在 overflow 处理开始前 buffer 可保留的最大事件数。标记为 immediate 的事件不会在 overflow 时丢弃。', isOptional: true, defaultValue: '256' },
-  { name: 'overflow', type: '"drop-oldest" | "drop-newest" | "coalesce-or-drop-oldest"', description: 'buffer 超过 `maxBufferSize` 时的 overflow 策略。`coalesce-or-drop-oldest` 会先运行 `coalesce`，如仍超出预算则丢弃最早事件。', isOptional: true, defaultValue: 'coalesce-or-drop-oldest' },
-]}/>
+<PropertiesTable
+  content={[
+  {
+    name: 'maxSize',
+    type: 'number',
+    description: '强制 flush 前保留的最大事件数。',
+    isOptional: true,
+  },
+  {
+    name: 'maxWaitMs',
+    type: 'number',
+    description:
+      '最早事件可在 buffer 中停留的最长毫秒数。buffer 从空变为非空时启动计时器。',
+    isOptional: true,
+  },
+  {
+    name: 'minIntervalMs',
+    type: 'number',
+    description:
+      '连续批次投递之间的最小毫秒数。即使 `maxSize` 或 `maxWaitMs` 触发，buffer 也会保留到距离上次投递达到此间隔。',
+    isOptional: true,
+  },
+  {
+    name: 'isImmediate',
+    type: '(event: Event) => boolean',
+    description:
+      '当它对事件返回 `true` 时，buffer 会在发布时立即 flush，但仍受 `minIntervalMs` 约束。每事件逃生阀。',
+    isOptional: true,
+  },
+  {
+    name: 'coalesce',
+    type: '(events: Event[]) => Event[]',
+    description:
+      '在投递前应用于排队批次以丢弃已被取代的事件。必须按引用身份返回输入的子集；返回新构造的 `Event` 对象违反 contract，并会丢弃整个批次。保留事件的顺序不变。',
+    isOptional: true,
+  },
+  {
+    name: 'maxBufferSize',
+    type: 'number',
+    description:
+      '在 overflow 处理开始前 buffer 可保留的最大事件数。标记为 immediate 的事件不会在 overflow 时丢弃。',
+    isOptional: true,
+    defaultValue: '256',
+  },
+  {
+    name: 'overflow',
+    type: '"drop-oldest" | "drop-newest" | "coalesce-or-drop-oldest"',
+    description:
+      'buffer 超过 `maxBufferSize` 时的 overflow 策略。`coalesce-or-drop-oldest` 会先运行 `coalesce`，如仍超出预算则丢弃最早事件。',
+    isOptional: true,
+    defaultValue: 'coalesce-or-drop-oldest',
+  },
+]}
+/>
 
 ### `EventCallback`
 
 订阅者的 callback 签名：`(event: Event, ack?: () => Promise<void>, nack?: () => Promise<void>) => void`。
 
-<PropertiesTable content={[
-  { name: 'event', type: 'Event', description: '已投递的事件。' },
-  { name: 'ack', type: '() => Promise<void>', description: '确认处理成功。事件将从队列中移除。', isOptional: true },
-  { name: 'nack', type: '() => Promise<void>', description: '否定确认。事件将在延迟后重新加入队列以重新投递。', isOptional: true },
-]}/>
+<PropertiesTable
+  content={[
+  {
+    name: 'event',
+    type: 'Event',
+    description: '已投递的事件。',
+  },
+  {
+    name: 'ack',
+    type: '() => Promise<void>',
+    description: '确认处理成功。事件将从队列中移除。',
+    isOptional: true,
+  },
+  {
+    name: 'nack',
+    type: '() => Promise<void>',
+    description: '否定确认。事件将在延迟后重新加入队列以重新投递。',
+    isOptional: true,
+  },
+]}
+/>

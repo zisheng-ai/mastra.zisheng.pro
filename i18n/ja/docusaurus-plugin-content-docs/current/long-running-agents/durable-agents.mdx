@@ -1,0 +1,287 @@
+---
+title: "Durable Agent | 長時間実行 Agent"
+description: "ストリームが切断、プロセスの再起動、長時間実行されるターンに耐えられるよう、Agent を Durable Execution でラップする方法を説明します。"
+packages:
+  - "@mastra/core"
+  - "@mastra/inngest"
+---
+
+# Durable Agent
+
+**追加バージョン：** `@mastra/core@1.45.0`
+
+:::warning
+
+Durable Agent は現在**ベータ版**です。今後のリリースで API が変更される可能性があります。
+
+:::
+
+Durable Agent は通常の [`Agent`](/docs/agents/overview) をラップし、Agent ループを Workflow 内で実行します。イベントは [PubSub](/docs/server/pubsub) を経由するため、クライアントはチャンクを失わずに切断、再接続できます。実行状態は永続化されるため、プロセスの再起動後も維持されます。
+
+## Durable Agent を使用する場面
+
+次のいずれかに該当する場合は Durable Agent を使用します。
+
+- クライアントがストリームの途中で切断し、再接続する可能性がある場合（モバイル、不安定なネットワーク、長時間実行される呼び出し）。
+- Agent ループが単一の HTTP リクエストより長く実行される可能性がある場合（バックグラウンド調査、複数ステップの Tool 使用）。
+- あるクライアントが開始したストリームを、別のクライアントが引き継ぐための監視、再接続 API が必要な場合。
+- ステップのメモ化、リトライ、監視を備えた [Inngest による実行](/guides/deployment/inngest)を使用する場合。
+
+クライアントが接続を維持する、リクエスト単位の短時間の呼び出しには、`stream()` または `generate()` を使用する通常の `Agent` の方がシンプルです。
+
+## クイックスタート
+
+`@mastra/core/agent/durable` の `createDurableAgent()` で既存の Agent をラップします。
+
+```typescript title="src/mastra/agents/researcher.ts"
+import { Agent } from '@mastra/core/agent'
+import { createDurableAgent } from '@mastra/core/agent/durable'
+
+const agent = new Agent({
+  id: 'researcher',
+  name: 'Researcher',
+  instructions: 'You research topics thoroughly.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+export const durableResearcher = createDurableAgent({ agent })
+```
+
+Durable Agent を Mastra に登録し、`stream()` を呼び出します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { durableResearcher } from './agents/researcher'
+
+const mastra = new Mastra({
+  agents: { durableResearcher },
+})
+
+const { output, runId, cleanup } = await durableResearcher.stream(
+  'Research quantum computing advances in 2025',
+)
+
+for await (const chunk of output.fullStream) {
+  // Process each chunk as it arrives
+}
+
+// Release PubSub subscriptions and clear the run from the registry.
+// If you skip this, an automatic cleanup timer fires after the stream ends.
+cleanup()
+```
+
+返される `runId` は実行を識別します。別のクライアントから再接続するには、この値を `observe()` に渡します。すべての設定とメソッドの API については、[DurableAgent リファレンス](/reference/agents/durable-agent)を参照してください。
+
+## 仕組み
+
+Durable Agent は、通常の Agent に次の 3 つのレイヤーを追加します。
+
+1. **Workflow 実行**：`stream()` はメッセージとオプションを Workflow の入力へシリアライズし、Durable Workflow 内で Agent ループを開始します。Workflow は `Agent.stream()` と同じループを実行しますが、各ステップをメモ化して再実行できます。
+
+1. **PubSub ストリーミング**：ループの実行中、チャンクは実行 ID をキーとする PubSub トピックに発行されます。呼び出し元はこのトピックを購読し、チャンクを `ReadableStream` に流します。呼び出し元が切断して再接続すると、切断中のチャンクがキャッシュから再生されます。
+
+1. **キャッシュレイヤー**：任意のキャッシュ（デフォルトはインメモリ。本番環境では Redis などのバックエンド）に発行済みイベントを保存し、後から購読したクライアントが追いつけるようにします。
+
+## 実行方式
+
+Mastra には Durable Agent を作成する 3 つの Factory 関数があります。Workflow の実行方法がそれぞれ異なります。
+
+| Factory | パッケージ | 適した用途 |
+| - | - | - |
+| `createDurableAgent()` | `@mastra/core` | ローカル開発と単一プロセスのサーバー。直接 await できるストリームを取得できます。 |
+| `createEventedAgent()` | `@mastra/core` | バックグラウンド実行。Workflow はブロックせずに開始され、PubSub を通じてチャンクを受信します。 |
+| `createInngestAgent()` | `@mastra/inngest` | 本番デプロイ。Inngest によりステップのメモ化、リトライ、監視ダッシュボードが追加されます。 |
+
+3 つとも、通常の Agent と同じ方法で `Mastra` に登録するオブジェクトを返します。`createDurableAgent()` と `createEventedAgent()` は `Agent` を拡張したクラスのインスタンスを返します。`createInngestAgent()` は、`Agent` のメソッドを基になる Agent に転送する Proxy ベースのオブジェクトを返します。
+
+### `createDurableAgent()` によるプロセス内実行
+
+Agent をラップして `stream()` を呼び出します。同じプロセス内で `DurableAgentStreamResult` を取得します。外部インフラは不要なため、最も速く始められる方法です。
+
+```typescript title="src/mastra/agents/durable.ts"
+import { Agent } from '@mastra/core/agent'
+import { createDurableAgent } from '@mastra/core/agent/durable'
+
+const agent = new Agent({
+  id: 'helper',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+export const durableHelper = createDurableAgent({ agent })
+```
+
+### `createEventedAgent()` による Fire-and-forget
+
+Workflow は呼び出し元をブロックせず、バックグラウンドで開始されます。チャンクは引き続き PubSub を通じて受信するため、`stream()` は利用可能な結果を返します。実行を開始した HTTP ハンドラーは、Workflow の完了を待つ必要がありません。
+
+```typescript title="src/mastra/agents/evented.ts"
+import { Agent } from '@mastra/core/agent'
+import { createEventedAgent } from '@mastra/core/agent/durable'
+
+const agent = new Agent({
+  id: 'writer',
+  instructions: 'You write articles.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+export const eventedWriter = createEventedAgent({ agent })
+```
+
+### `createInngestAgent()` による Inngest 実行
+
+[Inngest](https://www.inngest.com/docs) プラットフォーム上で Workflow を実行します。各 Tool 呼び出しは、Inngest が個別にリトライできるメモ化されたステップになります。また、実行を監視するためのダッシュボードも利用できます。
+
+```typescript title="src/mastra/agents/inngest.ts"
+import { Agent } from '@mastra/core/agent'
+import { createInngestAgent } from '@mastra/inngest'
+import { Inngest } from 'inngest'
+
+const inngest = new Inngest({ id: 'my-app' })
+
+const agent = new Agent({
+  id: 'analyst',
+  instructions: 'You analyze data.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+export const inngestAnalyst = createInngestAgent({ agent, inngest })
+```
+
+PubSub やキャッシュ設定など、Inngest 固有のオプションを含む完全な API については、[`createInngestAgent()` リファレンス](/reference/agents/inngest-agent)を参照してください。
+
+## 再開可能なストリーム
+
+Durable Agent は、PubSub とイベントキャッシュによる再開可能なストリームをサポートします。クライアントがストリームの途中で切断しても、キャッシュはイベントを保存し続けます。同じクライアントは、`runId` を指定して `observe()` を呼び出すことで再接続できます。
+
+```typescript title="src/server/reconnect.ts"
+const { output, cleanup } = await durableResearcher.observe(runId)
+
+for await (const chunk of output.fullStream) {
+  // Chunks from the run, including any missed while disconnected
+}
+
+cleanup()
+```
+
+`createDurableAgent()` と `createEventedAgent()` は、デフォルトでインメモリキャッシュを使用します。そのため、再開可能なストリームは単一プロセス内で動作します。本番環境では、プロセスの再起動後もキャッシュ済みイベントを維持できるように、永続的なキャッシュバックエンド（Redis など）を指定します。
+
+```typescript title="src/mastra/agents/durable-with-cache.ts" {2,3,5,9}
+import { createDurableAgent } from '@mastra/core/agent/durable'
+import { RedisServerCache } from '@mastra/redis'
+import Redis from 'ioredis'
+
+const cache = new RedisServerCache({ client: new Redis('redis://localhost:6379') })
+
+export const durableAgent = createDurableAgent({
+  agent,
+  cache,
+})
+```
+
+`createInngestAgent()` はデフォルトでキャッシュを有効にしません。再開可能なストリームを有効にするには、`cache` オプションを渡すか、`serverCache` を設定した `Mastra` インスタンスに Agent を登録します。
+
+## バックグラウンドタスクを含むストリーミング
+
+Durable Agent は、通常の Agent と同じ [`untilIdle`](/reference/streaming/agents/stream) オプションをサポートします。`untilIdle` を設定すると、Agent がアイドル状態になるまで、`stream()` はバックグラウンドタスクによる後続ターンをまたいで接続を維持します。
+
+```typescript title="src/mastra/run.ts"
+const { output, cleanup } = await durableAgent.stream('Research and summarize the topic', {
+  untilIdle: true,
+  memory: { thread: 'thread-1', resource: 'user-1' },
+})
+
+for await (const chunk of output.fullStream) {
+  // Chunks from the initial turn AND any follow-up turns triggered by
+  // background task completions
+}
+
+cleanup()
+```
+
+アイドルタイムアウトをカスタマイズするには `{ maxIdleMs }` を渡します（デフォルトは 5 分）。
+
+```typescript
+await durableAgent.stream('Research topic', {
+  untilIdle: { maxIdleMs: 30_000 },
+  memory: { thread: 'thread-1', resource: 'user-1' },
+})
+```
+
+設定、Subagent、一時停止、再開を含むバックグラウンドタスクの完全なガイドについては、[バックグラウンドタスク](/docs/long-running-agents/background-tasks)を参照してください。
+
+## クリーンアップ
+
+各 `stream()` および `observe()` 呼び出しは `cleanup` 関数を返します。この関数を呼び出すと PubSub の購読を解除し、内部レジストリから実行を削除します。呼び出し忘れた場合はストリーム終了後に自動タイマーが作動しますが、自分で `cleanup()` を呼び出すとリソースをすぐに解放できます。
+
+## Tool の承認
+
+Durable Agent は Tool の承認（ヒューマンインザループ）をサポートします。Tool 呼び出しに承認が必要な場合、Workflow は一時停止し、`onSuspended` コールバックを実行して、呼び出し元が `resume()` で再開するまで待機します。
+
+```typescript title="src/mastra/run.ts" {4}
+const { output, runId, cleanup } = await durableAgent.stream('Delete the old records', {
+  requireToolApproval: true,
+  onSuspended: ({ toolCallId, toolName, args }) => {
+    // Notify the user and ask for approval
+  },
+})
+```
+
+承認後、一時停止中の実行を再開します。
+
+```typescript
+await durableAgent.resume(runId, { approved: true })
+```
+
+## クラッシュからの復旧
+
+Durable Agent の実行中にサーバープロセスがクラッシュすると、その実行はストレージ内で `running` 状態のままとなり、自動ではリトライされません。次回サーバーを起動したときに、こうした孤立した実行を再駆動し、中断した箇所から処理を継続できます。
+
+### 自動復旧
+
+Mastra の設定で `recovery.durableAgents` を `'auto'` に設定します。デプロイヤーは起動時、アクティブな Workflow の実行を再開した直後に `recoverAllDurableAgents()` を呼び出します。
+
+```typescript title="src/mastra/index.ts" {4}
+export const mastra = new Mastra({
+  agents: { myAgent: durableAgent },
+  storage: new PostgresStore({ connectionString: process.env.DATABASE_URL! }),
+  recovery: { durableAgents: 'auto' },
+})
+```
+
+起動時に、`running` 状態のまま停止している実行を持つ登録済み Durable Agent をすべて検出し、最後に永続化されたスナップショットから再駆動します。
+
+:::warning
+
+復旧では最後のスナップショットから Agent ループを再実行するため、LLM 呼び出し（実際にコストが発生します）と Tool 呼び出しも再実行されます。自動復旧を有効にする前に、Tool が冪等であることを確認してください。
+
+:::
+
+### 手動復旧
+
+リーダー選出後にのみ復旧を実行する場合や、スケジュールに従って実行する場合など、より細かく制御するにはメソッドを直接呼び出します。
+
+```typescript
+// Recover all durable agents
+const result = await mastra.recoverAllDurableAgents()
+console.log(`Recovered ${result.recovered} runs (${result.succeeded} ok, ${result.failed} failed)`)
+
+// Recover a specific agent
+const agentResult = await durableAgent.recoverActiveRuns()
+
+// Recover a single known run
+await durableAgent.recoverActiveRuns({ runId: 'run-abc-123' })
+```
+
+### 複数インスタンスへのデプロイ
+
+Mastra はまだ分散 Lease やロックを提供していません。複数 Replica のデプロイでは、`recovery.durableAgents: 'auto'` を設定したすべての Replica が、起動時に同じ実行の復旧を競合して試みます。現時点では、独自のリーダー選出によって復旧を制限するか、単一の Replica から実行してください。
+
+## 関連項目
+
+- [DurableAgent リファレンス](/reference/agents/durable-agent)
+- [`createInngestAgent()` リファレンス](/reference/agents/inngest-agent)
+- [バックグラウンドタスク](/docs/long-running-agents/background-tasks)
+- [Inngest デプロイガイド](/guides/deployment/inngest)
+- [Agent の概要](/docs/agents/overview)
+- [Worker の概要](/docs/deployment/workers)

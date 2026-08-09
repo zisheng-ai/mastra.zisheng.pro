@@ -38,8 +38,7 @@ export function LessonHeader({
         </span>
         <span className="learn-meta-text">·</span>
         <span className="learn-meta-text text-sm">
-          {lesson.durationMin}{' '}
-          {isSimplifiedChinese ? '分钟' : isHongKongChinese ? '分鐘' : isJapanese ? '分' : 'min'}
+          {lesson.durationMin} {isSimplifiedChinese ? '分钟' : isHongKongChinese ? '分鐘' : isJapanese ? '分' : 'min'}
         </span>
         {lesson.status === 'comingSoon' && (
           <>

@@ -1,0 +1,162 @@
+---
+title: "Gate と Verdict | Evals"
+description: "Eval の実行に対する必須要件と品質しきい値を定義し、合否の Verdict を算出します。"
+packages:
+  - "@mastra/core"
+---
+
+# Gate と Verdict
+
+Gate と Verdict は、`runEvals` に重大度の意味を追加します。Gate は 1.0 のスコアを必須とする Scorer であり、実行を阻止する必須要件です。しきい値は、追跡対象の指標に対する許容可能な最低スコアです。Verdict は結果を `passed`、`scored`、`failed` のいずれかにまとめます。
+
+## Gate と Verdict を使用する場面
+
+- CI で必須要件を適用する（例: 「Agent は正しい Tool を呼び出す必要がある」）
+- 最低しきい値を指定して品質指標を追跡する（例: 「Faithfulness が 0.7 を上回る」）
+- カスタムのアサーションロジックを記述せずに、Eval の実行から単一の Verdict シグナル（`passed`、`scored`、`failed`）を取得する
+- 「必須」の Gate と「あれば望ましい」追跡指標を分離する
+
+## クイックスタート
+
+```typescript title="src/evals/weather-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { weatherAgent } from '../agents'
+import { faithfulnessScorer } from '../scorers'
+
+const result = await runEvals({
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  target: weatherAgent,
+
+  // Gates: must all score 1.0 or the run fails
+  gates: [checks.calledTool('get_weather'), checks.noToolErrors()],
+
+  // Scorers: tracked with optional thresholds
+  scorers: [
+    { scorer: faithfulnessScorer, threshold: 0.7 },
+    checks.includes('Brooklyn'), // no threshold = tracked only
+  ],
+})
+
+console.log(result.verdict) // 'passed' | 'scored' | 'failed'
+```
+
+## Verdict の仕組み
+
+すべてのデータ項目の処理後、Gate としきい値から Verdict が算出されます。
+
+- `failed`: 1つ以上の Gate で、データ項目全体の平均が 1.0 を下回った
+- `scored`: すべての Gate を通過したが、1つ以上のしきい値付き Scorer がしきい値を満たさなかった
+- `passed`: すべての Gate のスコアが 1.0 で、すべてのしきい値を満たした
+
+Gate も、しきい値付き Scorer も指定されていない場合、Verdict フィールドは省略され、`runEvals` は従来とまったく同じように動作します。
+
+## Gate
+
+Gate は `gates` フィールドで渡す Scorer です。各データ項目で、通常の Scorer より先に実行されます。Gate を通過するには、すべてのデータ項目にわたる平均スコアが 1.0 である必要があります。
+
+```typescript title="src/evals/tool-gate.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+
+const result = await runEvals({
+  data: [{ input: 'What is the weather?' }],
+  target: weatherAgent,
+  gates: [checks.calledTool('get_weather')],
+  scorers: [qualityScorer],
+})
+
+// result.gateResults: [{ id: 'check-called-tool', passed: true, score: 1 }]
+```
+
+どの Scorer も Gate として使用できます。Quick Checks は二値の 1/0 スコアを返すため、特に適しています。パラメーターと戻り値の型に関する完全なドキュメントについては、[runEvals() リファレンス](/reference/evals/run-evals)を参照してください。
+
+### Gate のみの実行
+
+1つ以上の Gate が指定されていれば、`scorers` は省略できます。品質指標を追跡する必要がなく、Gate の合否だけを確認したい決定論的な CI チェックに便利です。
+
+```typescript title="src/evals/gate-only.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+
+const result = await runEvals({
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  target: weatherAgent,
+  gates: [checks.calledTool('get_weather'), checks.noToolErrors()],
+})
+```
+
+Scorer または Gate を少なくとも1つ指定する必要があります。どちらも指定しない場合、実行時にエラーがスローされます。
+
+## しきい値
+
+Scorer を `{ scorer, threshold }` でラップすると、合否の範囲を設定できます。しきい値は、すべてのデータ項目にわたる Scorer の平均スコアと比較されます。
+
+`threshold` には次の値を指定できます。
+
+- **数値**: 最小値を意味します（その値以上のスコアで合格）: `{ scorer, threshold: 0.7 }`
+- **`min` や `max` を含むオブジェクト**: 範囲ベースのチェックに使用します: `{ scorer, threshold: { max: 0.3 } }`
+
+高いスコアが望ましくない Scorer（Hallucination、Toxicity など）には `max` を使用します。スコアが特定の範囲内に収まる必要がある場合は、`{ min, max }` を使用します。
+
+```typescript title="src/evals/threshold-example.ts"
+import { runEvals } from '@mastra/core/evals'
+
+const result = await runEvals({
+  data: [{ input: 'Explain quantum computing' }],
+  target: myAgent,
+  scorers: [
+    { scorer: faithfulnessScorer, threshold: 0.7 }, // min threshold (number shorthand)
+    { scorer: hallucinationScorer, threshold: { max: 0.3 } }, // max threshold — high score = bad
+    { scorer: verbosityScorer, threshold: { min: 0.3, max: 0.8 } }, // range threshold
+    toneScorer, // bare scorer, no threshold — tracked only
+  ],
+})
+
+// result.thresholdResults:
+// [
+//   { id: 'faithfulness', passed: true, averageScore: 0.85, threshold: 0.7 },
+//   { id: 'hallucination', passed: true, averageScore: 0.1, threshold: { max: 0.3 } },
+//   { id: 'verbosity', passed: false, averageScore: 0.9, threshold: { min: 0.3, max: 0.8 } },
+// ]
+```
+
+しきい値のない Scorer も `result.scores` に表示されますが、Verdict には影響しません。
+
+## CI で Verdict を使用する
+
+Verdict は、CI パイプラインに単一のシグナルを提供します。
+
+```typescript title="src/evals/ci-check.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+
+const result = await runEvals({
+  data: testDataset,
+  target: myAgent,
+  gates: [checks.calledTool('search'), checks.noToolErrors()],
+  scorers: [{ scorer: faithfulnessScorer, threshold: 0.7 }],
+})
+
+if (result.verdict === 'failed') {
+  console.error(
+    'Gate failures:',
+    result.gateResults?.filter(g => !g.passed),
+  )
+  process.exit(1)
+}
+
+if (result.verdict === 'scored') {
+  console.warn(
+    'Threshold misses:',
+    result.thresholdResults?.filter(t => !t.passed),
+  )
+}
+```
+
+## 関連項目
+
+- [Quick Checks](/docs/evals/quick-checks): Gate に適した、LLM を使わない小規模な Scorer
+- [runEvals() リファレンス](/reference/evals/run-evals): 完全な API ドキュメント
+- [組み込み Scorer](/docs/evals/built-in-scorers): LLM ベースおよびコードベースの Scorer
+- [CI で Evals を実行する](/docs/evals/running-in-ci): CI の統合パターン

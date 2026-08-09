@@ -1,0 +1,155 @@
+---
+title: "Worker | デプロイ"
+description: "Workflow の実行、cron スケジュール、バックグラウンドタスクを専用の worker プロセスで実行し、バックグラウンド処理を API レイヤーから分離します。"
+packages:
+  - "@mastra/core"
+  - "@mastra/redis-streams"
+  - "@mastra/google-cloud-pubsub"
+  - "@mastra/pg"
+  - "@mastra/libsql"
+---
+
+import Tabs from '@theme/Tabs'
+import TabItem from '@theme/TabItem'
+
+# Worker
+
+:::experimental
+
+この機能はベータ版です。API は本番環境で使用できる程度に安定していますが、一部の詳細は変更される可能性があります。現在の不足点については、[既知の制限事項](#known-limitations)を参照してください。
+
+:::
+
+Worker は、リクエストとレスポンスのサイクル外でバックグラウンド処理を実行します。Workflow ステップの実行、cron ベースのスケジューリング、長時間実行される Tool 呼び出しはすべて worker で実行されるため、API の応答性が維持されます。
+
+デフォルトでは、worker は API と同じプロセスで実行されます。本番ワークロードでは、worker を個別のプロセスやコンテナに分割し、それぞれを独立してスケールできます。
+
+## Worker を使用するタイミング
+
+次のいずれかに該当する場合は、worker が重要になります。
+
+- Workflow ステップに数秒以上かかり、API レスポンスをブロックすべきでない場合
+- プロセスが再起動しても実行中の処理が失われないよう、イベントの耐久性が必要な場合
+- システムの各部分を独立してスケールする必要がある場合（たとえば、API インスタンスを増やさずにオーケストレーション能力を増やす場合）
+- バックグラウンドの Tool 呼び出しを専用のコンピューティングリソースで実行する必要がある場合
+
+アプリケーションのトラフィックが少なく、Workflow が短時間で完了する場合は、デフォルトのインプロセス構成で十分です。必要になるまでは worker インフラストラクチャを導入する必要はありません。
+
+## Worker の種類
+
+Mastra には3種類の組み込み worker があります。それぞれが特定のバックグラウンド処理を担当します。
+
+### Orchestration worker
+
+[PubSub](/docs/server/pubsub) バス上の Workflow イベントを購読し、Workflow ステップを実行します。すべての `workflow.start`、ステップ遷移、ライフサイクルイベントがこの worker を通過します。
+
+分割デプロイでは、orchestration worker が分散 PubSub バックエンドからイベントを取得し、HTTP 経由で API にステップ実行を委任します。インプロセスでは、ステップを直接実行します。
+
+Orchestration worker には、pull モードをサポートする PubSub バックエンド（[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) や [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub) など）が必要です。
+
+### Scheduler worker
+
+実行時刻を迎えた cron スケジュールがないかストレージをポーリングし、`workflow.start` イベントを発行します。これはプロデューサーとしてのみ機能し、orchestration worker が取得する処理を作成します。
+
+Scheduler は、Workflow 定義の宣言的な `schedule` フィールドを自動的に読み取ります。スケジュールの宣言方法については、[スケジュールされた Workflow](/docs/workflows/scheduled-workflows)を参照してください。
+
+**Scheduler インスタンスを複数実行しないでください。** 複数の scheduler が同じストレージをポーリングすると、同じスケジュールに対してイベントが重複して発生します。
+
+### Background task worker
+
+`background: { enabled: true }` が指定された Agent の Tool 呼び出しを実行します。Agent がバックグラウンド Tool を呼び出すと、API はレスポンスストリームをブロックせず、この worker にタスクをディスパッチします。
+
+Background task worker は、同時実行数の制限、タスクのライフサイクル、PubSub バスを介した結果の配信を管理します。
+
+## Worker の実行方法
+
+### インプロセスモード（デフォルト）
+
+設定を行わない場合、Mastra は API プロセス内で worker を作成して起動します。イベントはインメモリ PubSub を通じて流れ、すべてが単一の Node.js ランタイムを共有します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+
+export const mastra = new Mastra({
+  // Workers run in-process by default.
+  // No pubsub or worker config needed.
+})
+```
+
+この構成では、ストレージアダプター以外の外部インフラストラクチャは不要です。プロセスのクラッシュには耐えられず、個々のコンポーネントをスケールすることもできません。
+
+### プロセスの分割
+
+Worker を独立したプロセスで実行するには、分散 [PubSub](/docs/server/pubsub) バックエンドを設定し、`MASTRA_WORKERS` 環境変数を使用して各プロセスで起動する worker を制御します。
+
+<Tabs>
+  <TabItem value="redis" label="Redis Streams + PostgreSQL">
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core/mastra'
+    import { RedisStreamsPubSub } from '@mastra/redis-streams'
+    import { PostgresStore } from '@mastra/pg'
+
+    export const mastra = new Mastra({
+      storage: new PostgresStore({
+        connectionString: process.env.DATABASE_URL!,
+      }),
+      pubsub: new RedisStreamsPubSub({
+        url: process.env.REDIS_URL!,
+      }),
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="gcp" label="Google Cloud Pub/Sub + LibSQL">
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core/mastra'
+    import { GoogleCloudPubSub } from '@mastra/google-cloud-pubsub'
+    import { LibSQLStore } from '@mastra/libsql'
+
+    export const mastra = new Mastra({
+      storage: new LibSQLStore({
+        url: process.env.DATABASE_URL!,
+      }),
+      pubsub: new GoogleCloudPubSub({
+        projectId: process.env.GCP_PROJECT_ID!,
+      }),
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+[サポートされているストレージバックエンド](/reference/workers/overview#supported-storage-backends)であれば、どれでも使用できます。ストレージアダプターを任意のデータベース用のものに置き換えてください。
+
+同じビルド成果物を複数のコンテナで実行し、各コンテナに異なる [`MASTRA_WORKERS`](/reference/workers/overview#mastra_workers) の値を設定して、各プロセスで起動する worker を制御します。
+
+分割デプロイには、分散 PubSub バックエンド（[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) または [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub)）、共有[ストレージバックエンド](/reference/workers/overview#supported-storage-backends)、および orchestration worker と API 間のネットワーク接続が必要です。
+
+[Worker デプロイガイド](/guides/deployment/mastra-workers)では、Docker Compose と Kubernetes の例を使ってこの構成を説明しています。
+
+## ネットワークアーキテクチャ
+
+Worker は内部インフラストラクチャです。エンドユーザーには公開されず、独自のサブドメイン、公開 URL、受信 HTTP ルートは必要ありません。
+
+分割デプロイでは、次のようになります。
+
+- **API サーバーのみが外部に公開されるプロセスです**：REST エンドポイント、Agent とのやり取り、Workflow のトリガー、カスタムルートなど、クライアントからのすべての HTTP リクエストを処理します。
+- **Worker は外向きの接続のみを行います**：分散 PubSub バックエンドからイベントを取得し、共有ストレージデータベースの読み書きを行います。クライアントからの受信トラフィックは受け付けません。
+- **Orchestration worker は内部で API を呼び出します**：`MASTRA_STEP_EXECUTION_URL` を使用し、コンテナネットワーク経由で API にステップ実行リクエストを送信します。これは内部のサービス間通信であり、公開エンドポイントではありません。
+
+3種類すべての worker（orchestration、scheduler、background task）は、プライベートネットワーク上で API の背後に配置されます。PubSub バックエンドとストレージデータベースへのアクセスを共有しますが、クライアントから直接トラフィックを受信することはありません。Worker 関連の機能に HTTP ルートが必要な場合（たとえば、音声統合用のトークン発行）、そのルートは worker プロセスではなく API サーバーで実行されます。
+
+## 既知の制限事項
+
+- **デッドレターキューがない**：失敗したイベントは nack されて再試行されますが、すべての再試行後も失敗したイベントを処理する DLQ はありません。
+- **組み込みのヘルスエンドポイントがない**：Worker は HTTP ヘルスチェックを公開しません。コンテナレベルの liveness probe またはプロセス監視を使用してください。
+- **Scheduler は単一インスタンスのみ**：複数の scheduler プロセスを実行すると、スケジュールが重複して発火します。
+- **API クラッシュ後に実行が「running」のままになる**：Workflow ステップの実行中に API プロセスがクラッシュすると、実行は自動再試行されず `running` ステータスのままになります。[durable Agent](/docs/long-running-agents/durable-agents)では、Mastra の設定で `recovery.durableAgents` を `'auto'` に設定すると、サーバー再起動時に孤立した実行を自動的に再駆動できます。詳細については、[クラッシュリカバリ](/docs/long-running-agents/durable-agents#crash-recovery)を参照してください。
+
+## 関連情報
+
+- [Worker デプロイガイド](/guides/deployment/mastra-workers)：Docker Compose と Kubernetes の例
+- [Worker 認証](/docs/server/auth/workers)：worker から API への通信を保護する方法
+- [Worker リファレンス](/reference/workers/overview)：サポートされているストレージバックエンドの一覧を含む、worker の環境変数と種類に関する詳細
+- [CLI リファレンス](/reference/cli/mastra#mastra-worker-build)：`mastra worker build` と `mastra worker start`
+- [PubSub](/docs/server/pubsub)：イベント配信バックエンド
+- [スケジュールされた Workflow](/docs/workflows/scheduled-workflows)：Workflow で cron スケジュールを宣言する方法
