@@ -1,0 +1,85 @@
+---
+title: "参考：IsolatedVmCodeModeTransport | Tools and MCP"
+description: "IsolatedVmCodeModeTransport 的 API 参考。它在进程内 V8 isolate 中运行 Code Mode 程序。"
+packages:
+  - "@mastra/isolated-vm"
+---
+
+# IsolatedVmCodeModeTransport
+
+:::experimental
+
+此功能处于 beta 阶段。在 API 稳定之前，可能会出现不伴随主版本号递增的破坏性变更。
+
+:::
+
+`IsolatedVmCodeModeTransport` 类在进程内 V8 isolate 中运行 [Code mode](/docs/agents/code-mode) 程序，并由 [isolated-vm](https://github.com/laverdet/isolated-vm) 提供支持。isolate 是执行边界，因此不需要 Workspace Sandbox：程序无法访问文件系统、网络、进程或模块。它仅能使用 `external_*` 函数，这些函数会回调宿主上的真实 Tool。
+
+与默认的 `StdioCodeModeTransport` 相比，此 transport 不会生成进程，也不会写入临时文件，因此很适合无法使用操作系统级沙箱的无服务器和多租户宿主环境。
+
+## 安装
+
+```bash npm2yarn
+npm install @mastra/isolated-vm
+```
+
+`isolated-vm` 是原生 addon。它为常见平台提供预构建二进制文件，因此安装时通常不需要额外设置。只有在没有匹配预构建版本的平台上，才需要 C++ 工具链来回退到从源代码编译。
+
+在 Node.js 20 及更高版本中，必须使用 `--no-node-snapshot` 标志启动宿主进程，否则创建 isolate 会导致进程崩溃。缺少该标志时，构造函数会抛出错误。启动服务器时传入该标志，或通过 `NODE_OPTIONS` 设置：
+
+```bash
+NODE_OPTIONS=--no-node-snapshot npm run dev
+```
+
+## 用法
+
+将 transport 作为第二个参数传给 `createCodeMode()`。无需 `sandbox`：
+
+```typescript
+import { createCodeMode } from '@mastra/core/tools'
+import { IsolatedVmCodeModeTransport } from '@mastra/isolated-vm'
+
+const { tool, instructions } = createCodeMode(
+  { tools: { getTopProducts, getProductRatings } },
+  new IsolatedVmCodeModeTransport({ memoryLimitMb: 128 }),
+)
+```
+
+## 构造函数参数
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'IsolatedVmCodeModeTransportOptions',
+    description: 'isolate 的配置。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'IsolatedVmCodeModeTransportOptions',
+        parameters: [
+          {
+            name: 'memoryLimitMb',
+            type: 'number',
+            description:
+              'V8 isolate 的堆限制，以 MiB 为单位。超出限制的程序会被终止，Tool 会返回错误结果。',
+            isOptional: true,
+            defaultValue: '128',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 工作原理
+
+每次运行都会创建一个拥有独立堆的新 isolate。TypeScript 会在宿主上通过 esbuild 去除类型，然后程序会在 isolate 内执行。每次 `external_*` 调用在双向跨越 isolate 边界时都使用 JSON 字符串，因此宿主对象引用不会泄漏到模型编写的代码中。与其他 transport 一样，允许列表、Tool 验证、请求上下文和追踪都在宿主上运行。
+
+在 `createCodeMode()` 上配置的 `timeout` 同时适用于异步挂起和同步无限循环，并且 isolate 会在每次运行后销毁。
+
+## 相关内容
+
+- [Code mode](/docs/agents/code-mode)
+- [createCodeMode() 参考](/reference/tools/create-code-mode)

@@ -1,0 +1,1057 @@
+---
+title: "參考：Agent 類別 | Agent"
+description: "Mastra `Agent` 類別的文件；此類別是建立具備各種能力之 AI Agent 的基礎。"
+packages:
+  - "@mastra/core"
+---
+
+# Agent 類別
+
+`Agent` 類別是透過 Mastra 建立 AI Agent 的基礎。它提供生成回應與串流互動的方法，也能處理語音能力。
+
+## 使用範例
+
+### 基本字串指示
+
+將指示以字串或字串陣列傳入，是設定 Agent 最簡單的方式。這適合只需要提供 prompt 而不需其他設定的單純使用情境。
+
+```typescript title="src/mastra/agents/string-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+// String instructions
+export const agent = new Agent({
+  id: 'test-agent',
+  name: 'Test Agent',
+  // highlight-next-line
+  instructions: 'You are a helpful assistant that provides concise answers.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+// System message object
+export const agent2 = new Agent({
+  id: 'test-agent-2',
+  name: 'Test Agent 2',
+  // highlight-start
+  instructions: {
+    role: 'system',
+    content: 'You are an expert programmer',
+  },
+  // highlight-end
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+// Array of system messages
+export const agent3 = new Agent({
+  id: 'test-agent-3',
+  name: 'Test Agent 3',
+  // highlight-start
+  instructions: [
+    { role: 'system', content: 'You are a helpful assistant' },
+    { role: 'system', content: 'You have expertise in TypeScript' },
+  ],
+  // highlight-end
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+### Provider 專屬設定
+
+每個模型 Provider 也會提供一些不同選項，包括 prompt 快取與推理設定。您可以在指示層級設定 `providerOptions`，為每個 system instruction/prompt 指定不同的快取策略。
+
+```typescript title="src/mastra/agents/core-message-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const agent = new Agent({
+  id: 'core-message-agent',
+  name: 'Core Message Agent',
+  instructions: {
+    role: 'system',
+    content: 'You are a helpful assistant specialized in technical documentation.',
+    // highlight-start
+    providerOptions: {
+      openai: {
+        reasoningEffort: 'low',
+      },
+    },
+    // highlight-end
+  },
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+### 混合指示格式
+
+```typescript title="src/mastra/agents/multi-message-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+// This could be customizable based on the user
+const preferredTone = {
+  role: 'system',
+  content: 'Always maintain a professional and empathetic tone.',
+}
+
+export const agent = new Agent({
+  id: 'multi-message-agent',
+  name: 'Multi Message Agent',
+  instructions: [
+    { role: 'system', content: 'You are a customer service representative.' },
+    preferredTone,
+    {
+      role: 'system',
+      content: 'Escalate complex issues to human agents when needed.',
+      providerOptions: {
+        anthropic: { cacheControl: { type: 'ephemeral' } },
+      },
+    },
+  ],
+  model: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+})
+```
+
+## 模型字串
+
+最簡單的設定方式，是以 `provider/model` 格式的字串傳入 `model`。請用斜線分隔 Provider 與模型名稱。Mastra 會從環境中讀取相符的 Provider 憑證，因此此格式不需要 Provider 套件或 import。
+
+常見的 Provider 字串與憑證：
+
+- **OpenAI**: `__GATEWAY_OPENAI_MODEL__` 使用 `OPENAI_API_KEY`.
+- **Anthropic**: `__GATEWAY_ANTHROPIC_MODEL_SONNET__` 使用 `ANTHROPIC_API_KEY`.
+- **Google**：`__GATEWAY_GOOGLE_MODEL__` 使用 `GOOGLE_API_KEY` 或 `GOOGLE_GENERATIVE_AI_API_KEY`。
+
+支援的模型 ID 請參閱[模型](/models)；完整的 Provider 清單請參閱[環境變數](/models/environment-variables)。
+
+## thread signal
+
+使用 Agent signal 將即時輸入與 context 傳入記憶體 thread。訊息 API 適用於使用者撰寫的輸入；`sendSignal()` 則是用於系統生成 context 的底層 API。
+
+目標 thread 執行中時，`sendMessage()` 會將訊息送進作用中的 Agent 迴圈。thread 閒置時，Mastra 預設會啟動 stream，並以該訊息作為第一個輸入。
+
+```typescript title="src/mastra/signals.ts"
+const subscription = await agent.subscribeToThread({
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+
+void (async () => {
+  for await (const chunk of subscription.stream) {
+    console.log(chunk)
+  }
+})()
+
+agent.sendMessage('Use the latest customer note too.', {
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+  ifIdle: {
+    streamOptions: {
+      maxSteps: 3,
+    },
+  },
+})
+```
+
+使用 `attributes` 識別共用 thread 中的不同使用者。這些屬性會轉譯為 XML，讓模型能分辨每段內容的發言者：
+
+```typescript
+agent.sendMessage(
+  {
+    contents: 'Can we simplify the API surface?',
+    attributes: { name: 'Devin', from: 'slack' },
+  },
+  { resourceId: 'user-123', threadId: 'thread-abc' },
+)
+```
+
+模型會收到以下內容：
+
+```xml
+<user name="Devin" from="slack">Can we simplify the API surface?</user>
+```
+
+若訊息應根據 thread 是否正在執行而帶有不同 context，請使用 `ifActive.attributes` 與 `ifIdle.attributes`：
+
+```typescript title="src/mastra/signals.ts"
+agent.sendMessage(
+  {
+    contents: 'Also cover the edge cases.',
+    attributes: { source: 'chat' },
+  },
+  {
+    resourceId: 'user-123',
+    threadId: 'thread-abc',
+    ifActive: { attributes: { delivery: 'while-active' } },
+    ifIdle: { attributes: { delivery: 'new-message' } },
+  },
+)
+```
+
+thread 作用中時，模型會看到：
+
+```xml
+<user source="chat" delivery="while-active">Also cover the edge cases.</user>
+```
+
+thread 閒置時，模型會看到：
+
+```xml
+<user source="chat" delivery="new-message">Also cover the edge cases.</user>
+```
+
+UI 會看到訊息內容，也能從 signal 訊息讀取 `attributes` 與 `metadata` 以自訂轉譯方式（例如顯示使用者名稱、大頭貼或平台徽章）。
+
+### `sendMessage(message, options)`
+
+將使用者訊息傳送至作用中的 run 或記憶體 thread。若作用中的 Agent 應立即收到訊息，請使用此方法。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'message',
+    type: 'string | Array<TextPart | FilePart> | { contents: string | Array<TextPart | FilePart>; attributes?: Record<string, JSONValue>; metadata?: Record<string, unknown>; providerOptions?: ProviderMetadata }',
+    description:
+      '使用者撰寫的輸入。單獨字串與沒有 attributes 的 part 會作為一般使用者輸入傳給模型。若有 `attributes`，Mastra 會將訊息轉譯為包含這些屬性的 `<user>` XML 元素。',
+  },
+  {
+    name: 'options',
+    type: 'object',
+    isOptional: true,
+    description: '訊息的目標與傳送行為。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'runId',
+            type: 'string',
+            isOptional: true,
+            description: '要直接指定的 run ID。已知作用中 run ID 時請使用此值。',
+          },
+          {
+            name: 'resourceId',
+            type: 'string',
+            isOptional: true,
+            description: '記憶體 thread 的 resource ID。若要將訊息指定至 thread，必須與 `threadId` 一併提供。',
+          },
+          {
+            name: 'threadId',
+            type: 'string',
+            isOptional: true,
+            description: '要指定的 thread ID。若要將訊息指定至 thread，必須與 `resourceId` 一併提供。',
+          },
+          {
+            name: 'ifActive',
+            type: 'object',
+            isOptional: true,
+            description: '控制目標 thread 作用中時的行為。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'behavior',
+                    type: "'deliver' | 'persist' | 'discard'",
+                    isOptional: true,
+                    description: '控制目標 thread 作用中時的行為。預設為 `deliver`。',
+                  },
+                  {
+                    name: 'attributes',
+                    type: 'Record<string, string | number | boolean>',
+                    isOptional: true,
+                    description: '目標 thread 作用中且 Mastra 接受訊息時，合併至訊息的屬性。',
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            name: 'ifIdle',
+            type: 'object',
+            isOptional: true,
+            description: '控制目標 thread 閒置時的行為。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'behavior',
+                    type: "'wake' | 'persist' | 'discard'",
+                    isOptional: true,
+                    description: '控制目標 thread 閒置時的行為。預設為 `wake`。',
+                  },
+                  {
+                    name: 'streamOptions',
+                    type: 'AgentExecutionOptions',
+                    isOptional: true,
+                    description:
+                      '`ifIdle.behavior` 為 `wake` 時所啟動 stream 的選項。Mastra 會使用頂層 `resourceId` 與 `threadId` 作為記憶體 context。',
+                  },
+                  {
+                    name: 'attributes',
+                    type: 'Record<string, string | number | boolean>',
+                    isOptional: true,
+                    description: '目標 thread 閒置且 Mastra 接受訊息時，合併至訊息的屬性。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+若閒置的 thread 應以自訂執行選項啟動新 stream，請將 `ifIdle.behavior` 設為 `wake`，並傳入 `ifIdle.streamOptions`：
+
+```typescript title="src/mastra/signals.ts"
+agent.sendMessage('Continue with the next step.', {
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+  ifIdle: {
+    behavior: 'wake',
+    streamOptions: {
+      maxSteps: 3,
+    },
+  },
+})
+```
+
+回傳 `{ accepted: Promise<SendAgentSignalAccepted>, signal: CreatedAgentSignal, persisted?: Promise<void> }`。Mastra 決定如何處理訊息時，`accepted` 會立即解析：此程序執行 Agent 時（它啟動了 run，或取得啟動 run 的 lease）為 `{ action: 'wake', runId, output }`；訊息轉送至現有 run 時（包括此程序在跨程序 wake 競爭中未取得 lease）為 `{ action: 'deliver', runId }`；未執行任何項目時則為 `{ action: 'persist' }` / `{ action: 'discard' }`。`runId` 是處理訊息之 run 的權威 ID，只有 `wake` 與 `deliver` 動作會提供。若為 `persist`/`discard`，請使用 `result.signal.id` 關聯已儲存的訊息。路由完成時 `accepted` 就會解析（`wake` run 的生成錯誤會透過 `output.consumeStream()` 顯示）；只有訊息完全無法路由或啟動時才會拒絕，例如 Agent 設定錯誤。只有 `persist` 行為會提供 `persisted`；Mastra 完成將訊息寫入記憶體時，它會解析。若動作為 `wake`，`output` 是可在程序內取用的 Agent stream。
+
+### `queueMessage(message, options)`
+
+將使用者訊息排入 thread 下一輪的佇列。若 thread 作用中，Mastra 會等待作用中的 run 完成，再以佇列訊息啟動新的 run。若 thread 閒置，Mastra 會立即啟動 run。
+
+```typescript
+agent.queueMessage('Also check whether the tests need updates.', {
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+```
+
+`queueMessage()` 接受與 `sendMessage()` 相同結構的 `message` 與 `options`，並回傳 `{ accepted: Promise<SendAgentSignalAccepted>, signal: CreatedAgentSignal, persisted?: Promise<void> }`；其 `accepted` 語意也與 `sendMessage()` 相同。
+
+### `sendSignal(signal, options)`
+
+將 signal 傳送至作用中的 run 或記憶體 thread。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'signal',
+    type: "{ type: 'user' | 'state' | 'reactive' | 'notification' | 'user-message' | 'system-reminder'; tagName?: string; contents: string | Array<TextPart | FilePart>; attributes?: Record<string, JSONValue>; metadata?: Record<string, unknown>; providerOptions?: ProviderMetadata }",
+    description:
+      "要傳送至 thread 的 signal context。`type` 是 signal 的語意類別；`tagName` 控制模型看到的 XML tag。例如，`{ type: 'notification', tagName: 'github-review' }` 會轉譯為 `<github-review>...</github-review>`。系統仍接受舊版 `user-message` 與 `system-reminder` payload，並會加以正規化。未知的 `type` 值會遭到拒絕；若要使用自訂 XML tag，請設定 `tagName`。",
+  },
+  {
+    name: 'options',
+    type: 'object',
+    isOptional: true,
+    description: 'signal 的目標與傳送行為。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'runId',
+            type: 'string',
+            isOptional: true,
+            description: '要直接指定的 run ID。已知作用中 run ID 時請使用此值。',
+          },
+          {
+            name: 'resourceId',
+            type: 'string',
+            isOptional: true,
+            description: '記憶體 thread 的 resource ID。若要將 signal 指定至 thread，必須與 `threadId` 一併提供。',
+          },
+          {
+            name: 'threadId',
+            type: 'string',
+            isOptional: true,
+            description: '要指定的 thread ID。若要將 signal 指定至 thread，必須與 `resourceId` 一併提供。',
+          },
+          {
+            name: 'ifActive',
+            type: 'object',
+            isOptional: true,
+            description: '控制目標 thread 作用中時的行為。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'behavior',
+                    type: "'deliver' | 'persist' | 'discard'",
+                    isOptional: true,
+                    description: '控制目標 thread 作用中時的行為。預設為 `deliver`。',
+                  },
+                  {
+                    name: 'attributes',
+                    type: 'Record<string, string | number | boolean>',
+                    isOptional: true,
+                    description: '目標 thread 作用中且 Mastra 接受 signal 時，合併至 signal 的屬性。',
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            name: 'ifIdle',
+            type: 'object',
+            isOptional: true,
+            description: '控制目標 thread 閒置時的行為。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'behavior',
+                    type: "'wake' | 'persist' | 'discard'",
+                    isOptional: true,
+                    description: '控制目標 thread 閒置時的行為。預設為 `wake`。',
+                  },
+                  {
+                    name: 'streamOptions',
+                    type: 'AgentExecutionOptions',
+                    isOptional: true,
+                    description:
+                      '`ifIdle.behavior` 為 `wake` 時所啟動 stream 的選項。Mastra 會使用頂層 `resourceId` 與 `threadId` 作為記憶體 context。',
+                  },
+                  {
+                    name: 'attributes',
+                    type: 'Record<string, string | number | boolean>',
+                    isOptional: true,
+                    description: '目標 thread 閒置且 Mastra 接受 signal 時，合併至 signal 的屬性。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+回傳 `{ accepted: Promise<SendAgentSignalAccepted>, signal: CreatedAgentSignal, persisted?: Promise<void> }`。Mastra 決定如何處理 signal 時，`accepted` 會立即解析：此程序執行 Agent 時（它啟動了 run，或取得啟動 run 的 lease）為 `{ action: 'wake', runId, output }`；signal 轉送至現有 run 時（包括此程序在跨程序 wake 競爭中未取得 lease）為 `{ action: 'deliver', runId }`；未執行任何項目時則為 `{ action: 'persist' }` / `{ action: 'discard' }`。`action` 會反映 `ifActive`/`ifIdle` 中勝出的 `behavior`。`runId` 是處理 signal 之 run 的權威 ID，只有 `wake` 與 `deliver` 動作會提供。若為 `persist`/`discard`，請使用 `result.signal.id` 關聯已儲存的 signal。路由完成時 `accepted` 就會解析（`wake` run 的生成錯誤會透過 `output.consumeStream()` 顯示）；只有 signal 完全無法路由或啟動時才會拒絕，例如 Agent 設定錯誤。只有 `persist` 行為會提供 `persisted`；Mastra 完成將 signal 寫入記憶體時，它會解析。若動作為 `wake`，`output` 是可在程序內取用的 Agent stream。
+
+在 serverless handler 中，請 await `accepted`，並將 `wake` 輸出傳給平台中等同 `waitUntil` 的 API，讓取得 lease 的程序能在 HTTP 回應傳回後取用完整 stream。
+
+```typescript
+const result = agent.sendSignal(signal, { resourceId, threadId })
+ctx.waitUntil(
+  result.accepted.then(async accepted => {
+    if (accepted.action === 'wake') {
+      await accepted.output.consumeStream()
+    }
+  }),
+)
+```
+
+### `sendStateSignal(state, options)`
+
+將具名且限定於 thread 範圍的 state context 傳送至作用中的 run 或記憶體 thread。若外部 producer 擁有會隨時間變動的持久 context（例如瀏覽器狀態、編輯器狀態或 watcher 輸出），請使用此方法。
+
+```typescript
+const result = await agent.sendStateSignal(
+  {
+    id: 'browser',
+    mode: 'snapshot',
+    cacheKey: 'browser:https://example.com:3-tabs',
+    contents: 'Browser is open. Active tab URL: https://example.com. 3 open tabs.',
+    value: {
+      activeUrl: 'https://example.com',
+      tabCount: 3,
+      open: true,
+    },
+  },
+  {
+    resourceId: 'user-123',
+    threadId: 'thread-abc',
+  },
+)
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'state',
+    type: 'object',
+    description: '要傳送至 thread 的 state signal。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          { name: 'id', type: 'string', description: 'state lane 名稱，例如 `browser` 或 `editor`。' },
+          {
+            name: 'cacheKey',
+            type: 'string',
+            description: '由 producer 擁有的 key，Mastra 會用它略過同一 lane 與 mode 的重複 state。',
+          },
+          {
+            name: 'contents',
+            type: 'string | Array<TextPart | FilePart>',
+            description: '提供給 LLM 的 state 表示法。',
+          },
+          {
+            name: 'mode',
+            type: "'snapshot' | 'delta'",
+            isOptional: true,
+            description: 'state 是權威快照或變更 event。預設為 `snapshot`。',
+          },
+          {
+            name: 'value',
+            type: 'unknown',
+            isOptional: true,
+            description: "`mode: 'snapshot'` 的結構化快照值。",
+          },
+          {
+            name: 'delta',
+            type: 'unknown',
+            isOptional: true,
+            description: "`mode: 'delta'` 的結構化變更值。",
+          },
+          {
+            name: 'attributes',
+            type: 'Record<string, string | number | boolean>',
+            isOptional: true,
+            description: '轉譯於 state signal tag 上的屬性。',
+          },
+          {
+            name: 'metadata',
+            type: 'Record<string, unknown>',
+            isOptional: true,
+            description: '與 state signal 一併儲存的應用程式 metadata。',
+          },
+          {
+            name: 'tagName',
+            type: 'string',
+            isOptional: true,
+            description: '向模型顯示的 XML tag 名稱。預設為 `state`。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'options',
+    type: 'object',
+    description: 'state signal 的目標與傳送行為。接受與 `sendSignal()` 相同的選項。',
+  },
+]}
+/>
+
+Mastra 接受新 state 時，回傳 `{ accepted: Promise<SendAgentSignalAccepted>, signal: CreatedAgentSignal, persisted?: Promise<void>, skipped?: false }`。若同一 `cacheKey` 與 mode 已是該 state lane 的目前值，則回傳 `{ skipped: true, reason: 'unchanged' }`。Mastra 決定如何處理 signal 時，`accepted` 會立即解析：此程序執行 Agent 時（它啟動了 run，或取得啟動 run 的 lease）為 `{ action: 'wake', runId, output }`；signal 轉送至現有 run 時（包括此程序在跨程序 wake 競爭中未取得 lease）為 `{ action: 'deliver', runId }`；未執行任何項目時則為 `{ action: 'persist' }` / `{ action: 'discard' }`。`runId` 是處理 signal 之 run 的權威 ID，只有 `wake` 與 `deliver` 動作會提供。若為 `persist`/`discard`，請使用 `result.signal.id` 關聯已儲存的 signal。若動作為 `wake`，`output` 是可在程序內取用的 Agent stream。
+
+### `sendNotificationSignal(notification, options)`
+
+建立或合併 notification inbox 記錄，並解析通知傳送原則。若決策為立即傳送，便會傳送 notification signal。
+
+```typescript
+const result = await agent.sendNotificationSignal(
+  {
+    source: 'github',
+    kind: 'ci-status',
+    priority: 'high',
+    summary: 'CI failed on main: 3 tests failed.',
+    dedupeKey: 'github:acme/app:main:ci',
+  },
+  {
+    resourceId: 'user-123',
+    threadId: 'thread-abc',
+  },
+)
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'notification',
+    type: 'object',
+    description: '要建立或合併的 notification inbox 記錄。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'source',
+            type: 'string',
+            description: '產生通知的外部系統，例如 `github`、`slack` 或 `email`。',
+          },
+          {
+            name: 'kind',
+            type: 'string',
+            description: '來源中的通知種類，例如 `ci-status`、`mention` 或 `direct-message`。',
+          },
+          {
+            name: 'summary',
+            type: 'string',
+            description: '提供給 LLM 的摘要，用作 notification signal 內容。',
+          },
+          {
+            name: 'priority',
+            type: "'low' | 'medium' | 'high' | 'urgent'",
+            isOptional: true,
+            description: '通知傳送原則所使用的優先順序。預設為 `medium`。',
+          },
+          {
+            name: 'payload',
+            type: 'unknown',
+            isOptional: true,
+            description: '儲存在 inbox 記錄中的結構化 payload，可供 Tool 或應用程式程式碼使用。',
+          },
+          {
+            name: 'dedupeKey',
+            type: 'string',
+            isOptional: true,
+            description: '用來合併相同來源與 thread 之重複待處理通知的 key。',
+          },
+          {
+            name: 'coalesceKey',
+            type: 'string',
+            isOptional: true,
+            description: '用來組合相同來源與 thread 之相關待處理通知的 key。',
+          },
+          {
+            name: 'attributes',
+            type: 'Record<string, JSONValue>',
+            isOptional: true,
+            description: '複製到所發出 notification signal 的其他屬性。',
+          },
+          {
+            name: 'metadata',
+            type: 'Record<string, unknown>',
+            isOptional: true,
+            description: '儲存在 inbox 記錄中的應用程式 metadata。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'options',
+    type: 'object',
+    description: '通知的目標 thread 與喚醒行為。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'resourceId',
+            type: 'string',
+            description: 'notification inbox 與目標記憶體 thread 的 resource ID。',
+          },
+          {
+            name: 'threadId',
+            type: 'string',
+            description: 'notification inbox 與目標記憶體 thread 的 thread ID。',
+          },
+          {
+            name: 'ifIdle',
+            type: 'object',
+            isOptional: true,
+            description: '控制目標 thread 閒置時的行為。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'streamOptions',
+                    type: 'AgentExecutionOptions',
+                    isOptional: true,
+                    description: '立即通知喚醒閒置 thread 時所啟動 stream 的選項。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+回傳 `{ record: NotificationRecord, decision: NotificationDeliveryDecision, runId?: string, signal?: CreatedAgentSignal, persisted?: Promise<void>, accepted?: Promise<SendAgentSignalAccepted> }`。`record` 是儲存的 inbox 記錄；`decision` 是傳送原則的結果。ingress 立即發出 signal 時會提供 `signal` 與 `runId`，包括為作用中的高優先順序通知立即發出的摘要。發出的 signal 在未喚醒閒置 thread 的情況下持久化時，會提供 `persisted`。發出 signal 時會提供 `accepted`；Mastra 決定如何處理 signal 時，它會立即解析：此程序執行 Agent 時（它啟動了 run，或取得啟動 run 的 lease）為 `{ action: 'wake', runId, output }`；signal 轉送至現有 run 時為 `{ action: 'deliver', runId }`；未執行任何項目時則為 `{ action: 'persist' }` / `{ action: 'discard' }`。accepted 結果中的 `runId` 只有 `wake` 與 `deliver` 動作會提供。若動作為 `wake`，`output` 是可在程序內取用的 Agent stream。
+
+預設傳送方式會考量優先順序。`urgent` 通知會立即傳送。`high` 通知會在 thread 閒置時立即傳送；thread 作用中時，Mastra 會立即發出摘要，並保留 `deliverAt`，等 thread 閒置時再完整傳送。`medium` 通知會在閒置時立即傳送，作用中時則批次彙整為摘要。`low` 通知在作用中與閒置 thread 中都會批次彙整為摘要。閒置時的低優先順序摘要不會喚醒模型迴圈，即可傳給訂閱者。完整流程請參閱 [Signal](/docs/long-running-agents/signals#notification-signals)。
+
+若部分通知應等待不同的派送時段或摘要彙總，請在 Agent 上設定 `notifications.deliveryPolicy`：
+
+```typescript title="src/mastra/agents/support-agent.ts"
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support Agent',
+  instructions: 'Help the user triage updates.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  notifications: {
+    deliveryPolicy: {
+      priorities: {
+        urgent: 'deliver',
+      },
+      decide: ({ record }) => {
+        if (record.priority === 'low') {
+          return {
+            action: 'summarize',
+            summaryAt: new Date(Date.now() + 30 * 60 * 1000),
+          }
+        }
+      },
+    },
+  },
+})
+```
+
+### `subscribeToThread(options)`
+
+訂閱記憶體 thread 的原始 stream chunk。請在呼叫 `sendMessage()`、`queueMessage()` 或 `sendSignal()` 前使用此方法。它可讓您轉譯 stream 輸出並觀察 signal echo，包括 signal 中止作用中 run 的情況。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'object',
+    description: 'thread 訂閱目標。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'resourceId',
+            type: 'string',
+            isOptional: true,
+            description: '記憶體 thread 的 resource ID。',
+          },
+          {
+            name: 'threadId',
+            type: 'string',
+            description: '要訂閱的 thread ID。',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+回傳包含下列成員的 `AgentThreadSubscription` 物件：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'stream',
+    type: 'AsyncIterable<AgentChunkType>',
+    description: '已訂閱 thread 的原始 Agent stream chunk。',
+  },
+  {
+    name: 'activeRunId',
+    type: '() => string | null',
+    description: '回傳 thread 的作用中 run ID；若沒有作用中的 run，則回傳 `null`。',
+  },
+  {
+    name: 'abort',
+    type: '() => boolean',
+    description: '中止 thread 的作用中 run。成功中止 run 時回傳 `true`。',
+  },
+  {
+    name: 'unsubscribe',
+    type: '() => void',
+    description: '停止訂閱，但不中止作用中的 run。',
+  },
+]}
+/>
+
+## constructor 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: false,
+    description: 'Agent 的唯一識別碼。',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    isOptional: false,
+    description: 'Agent 的顯示名稱。',
+  },
+  {
+    name: 'description',
+    type: 'string',
+    isOptional: true,
+    description: 'Agent 用途與能力的選用說明。',
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown> | ({ requestContext: RequestContext }) => Record<string, unknown> | Promise<Record<string, unknown>>',
+    isOptional: true,
+    description:
+      '在 client 中將 Agent 分類或篩選的選用 metadata。可以是靜態記錄，或從 request context 解析 metadata 的函式。',
+  },
+  {
+    name: 'instructions',
+    type: 'SystemMessage | ({ requestContext: RequestContext }) => SystemMessage | Promise<SystemMessage>',
+    isOptional: false,
+    description: `引導 Agent 行為的指示。可以是字串、字串陣列、system message 物件、
+system message 陣列，或動態回傳上述任一類型的函式。
+SystemMessage 類型：string | string[] | CoreSystemMessage | CoreSystemMessage[] | SystemModelMessage | SystemModelMessage[]`,
+  },
+  {
+    name: 'model',
+    type: 'MastraLanguageModel | ({ requestContext: RequestContext }) => MastraLanguageModel | Promise<MastraLanguageModel>',
+    isOptional: false,
+    description:
+      'Agent 使用的語言模型。請傳入 `provider/model` 格式的模型 router 字串、模型設定、Provider 執行個體，或在 runtime 解析模型的函式。常見的 Provider 與環境變數請參閱[模型字串](#model-strings)。',
+  },
+  {
+    name: 'agents',
+    type: 'Record<string, Agent> | ({ requestContext: RequestContext }) => Record<string, Agent> | Promise<Record<string, Agent>>',
+    isOptional: true,
+    description: 'Agent 可存取的子 Agent。可靜態提供，也可動態解析。',
+  },
+  {
+    name: 'tools',
+    type: 'ToolsInput | ({ requestContext: RequestContext, mastra?: Mastra }) => ToolsInput | Promise<ToolsInput>',
+    isOptional: true,
+    description: 'Agent 可存取的 Tool。可靜態提供；若有 request context 與相關聯的 Mastra 執行個體，也可從中動態解析。',
+  },
+  {
+    name: 'hooks',
+    type: 'ToolHooks',
+    isOptional: true,
+    description:
+      '此 Agent 每次呼叫 Tool 前後執行的 hook。傳給 `generate()` 或 `stream()` 的單次執行 hook，會覆寫此處相符的 hook。請參閱下方的 Tool hook。',
+    properties: [
+      {
+        type: 'ToolHooks',
+        parameters: [
+          {
+            name: 'beforeToolCall',
+            type: '(context: ToolHookContext) => void | ToolBeforeHookResult | Promise<void | ToolBeforeHookResult>',
+            isOptional: true,
+            description:
+              '在 Tool 執行前執行。接收 `{ toolName, input, context, metadata }`。回傳 `{ proceed: false, output }` 可略過 Tool 呼叫，並以 `output` 作為結果。',
+          },
+          {
+            name: 'afterToolCall',
+            type: '(context: ToolAfterHookContext) => void | Promise<void>',
+            isOptional: true,
+            description:
+              '在 Tool 執行後執行。接收 `{ toolName, input, context, metadata, output, error }`。Tool 擲回錯誤時，`output` 為 undefined，並改為設定 `error`。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'transform',
+    type: 'ToolPayloadTransformPolicy',
+    isOptional: true,
+    description:
+      '在顯示 stream 或使用者可見的逐字稿訊息收到 Tool payload 前，用於轉換 payload 的共用原則。若要設定單一 Tool 規則，請使用 `createTool()` 上各 Tool 的 `transform`。',
+  },
+  {
+    name: 'workflows',
+    type: 'Record<string, Workflow> | ({ requestContext: RequestContext }) => Record<string, Workflow> | Promise<Record<string, Workflow>>',
+    isOptional: true,
+    description: 'Agent 可執行的 Workflow。可靜態提供或動態解析。',
+  },
+  {
+    name: 'defaultOptions',
+    type: 'AgentExecutionOptions | ({ requestContext: RequestContext }) => AgentExecutionOptions | Promise<AgentExecutionOptions>',
+    isOptional: true,
+    description: '呼叫 `stream()` 與 `generate()` 時使用的預設選項。',
+  },
+  {
+    name: 'defaultGenerateOptionsLegacy',
+    type: 'AgentGenerateOptions | ({ requestContext: RequestContext }) => AgentGenerateOptions | Promise<AgentGenerateOptions>',
+    isOptional: true,
+    description: '呼叫 `generateLegacy()` 時使用的預設選項。',
+  },
+  {
+    name: 'defaultStreamOptionsLegacy',
+    type: 'AgentStreamOptions | ({ requestContext: RequestContext }) => AgentStreamOptions | Promise<AgentStreamOptions>',
+    isOptional: true,
+    description: '呼叫 `streamLegacy()` 時使用的預設選項。',
+  },
+  {
+    name: 'mastra',
+    type: 'Mastra',
+    isOptional: true,
+    description: 'Mastra runtime 執行個體的參考（自動注入）。',
+  },
+  {
+    name: 'scorers',
+    type: 'MastraScorers | ({ requestContext: RequestContext }) => MastraScorers | Promise<MastraScorers>',
+    isOptional: true,
+    description: 'runtime 評估與 telemetry 的評分設定。可靜態或動態提供。',
+  },
+  {
+    name: 'memory',
+    type: 'MastraMemory | ({ requestContext: RequestContext }) => MastraMemory | Promise<MastraMemory>',
+    isOptional: true,
+    description: '用來儲存及擷取具狀態 context 的記憶體模組。',
+  },
+  {
+    name: 'notifications',
+    type: 'object',
+    isOptional: true,
+    description: '持久 notification signal 的通知傳送設定。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'deliveryPolicy',
+            type: 'NotificationDeliveryPolicyConfig',
+            isOptional: true,
+            description:
+              '控制通知記錄的傳送方式。您可以設定預設決策、各優先順序的決策、各來源的決策，或自訂 `decide()` 函式。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'voice',
+    type: 'CompositeVoice',
+    isOptional: true,
+    description: '語音輸入與輸出的語音設定。',
+  },
+  {
+    name: 'inputProcessors',
+    type: '(Processor | ProcessorWorkflow)[] | ({ requestContext: RequestContext }) => (Processor | ProcessorWorkflow)[] | Promise<(Processor | ProcessorWorkflow)[]>',
+    isOptional: true,
+    description:
+      '在 Agent 處理訊息前修改或驗證訊息的輸入 Processor。可以是個別 Processor 物件，或使用 ProcessorStepSchema 搭配 `createWorkflow()` 建立的 Workflow。',
+  },
+  {
+    name: 'outputProcessors',
+    type: '(Processor | ProcessorWorkflow)[] | ({ requestContext: RequestContext }) => (Processor | ProcessorWorkflow)[] | Promise<(Processor | ProcessorWorkflow)[]>',
+    isOptional: true,
+    description: '在 Agent 訊息傳送至 client 前修改或驗證訊息的輸出 Processor。可以是個別 Processor 物件或 Workflow。',
+  },
+  {
+    name: 'maxProcessorRetries',
+    type: 'number',
+    isOptional: true,
+    description: 'Processor 可要求重試 LLM 步驟的次數上限。',
+  },
+  {
+    name: 'requestContextSchema',
+    type: 'StandardJSONSchemaV1',
+    isOptional: true,
+    description:
+      '用來驗證 request context 值的 Standard JSON Schema。提供此值時，會在 generate() 或 stream() 開始時驗證 context；若驗證失敗，則擲回 MastraError。',
+  },
+  {
+    name: 'editor',
+    type: 'false | { instructions?: boolean; tools?: boolean | { description?: boolean } }',
+    isOptional: true,
+    description:
+      '控制 Editor 可覆寫此程式碼定義 Agent 的哪些欄位。省略此值可允許編輯 instructions 與 tools。請參閱下方的 Editor 覆寫。',
+  },
+]}
+/>
+
+## `generate()` 記憶體選項
+
+呼叫 `agent.generate()` 時傳入 `memory`，可選擇 run 應讀取與寫入哪個對話 thread。常見結構為 `memory: { resource: string, thread: string }`，其中 `resource` 識別擁有者，`thread` 識別對話。概念模型請參閱 [thread 與 resource](/docs/memory/message-history#threads-and-resources)。
+
+```typescript title="src/mastra/run.ts"
+const response = await agent.generate('What did we decide about retries?', {
+  memory: {
+    resource: 'user-123',
+    thread: 'support-thread-456',
+  },
+})
+```
+
+若需要在呼叫期間建立或更新 thread metadata，請使用 thread 物件：
+
+```typescript title="src/mastra/run.ts"
+const response = await agent.generate('Continue the support conversation.', {
+  memory: {
+    resource: 'user-123',
+    thread: {
+      id: 'support-thread-456',
+      title: 'Billing support',
+      metadata: { category: 'billing' },
+    },
+  },
+})
+```
+
+## Tool hook
+
+使用 `hooks` 在 Agent 每次呼叫 Tool 前後執行邏輯，包括已指派的 Tool、記憶體 Tool、toolset、client Tool 與 Workspace Tool。
+
+```typescript title="src/mastra/agents/hooked-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const agent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  instructions: 'Help users with their questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // highlight-start
+  hooks: {
+    beforeToolCall: ({ toolName, input }) => {
+      console.log(`Running ${toolName}`, input)
+    },
+    afterToolCall: ({ toolName, output, error }) => {
+      console.log(`Finished ${toolName}`, { output, error })
+    },
+  },
+  // highlight-end
+})
+```
+
+`beforeToolCall` 可回傳 `{ proceed: false, output }`，使 Tool 呼叫提前結束。Agent 會略過執行，並以 `output` 作為 Tool 結果：
+
+```typescript
+const result = await agent.generate('Clean up old records', {
+  hooks: {
+    beforeToolCall: ({ toolName }) => {
+      if (toolName === 'deleteRecord') {
+        return { proceed: false, output: { blocked: true } }
+      }
+    },
+  },
+})
+```
+
+hook context 的 `metadata` 包含 `agentId` 與 `agentName`。傳給 `generate()` 或 `stream()` 的單次執行 hook，會覆寫相符的 Agent 層級 hook。若 [Workspace](/reference/workspace/workspace-class) 也定義 `tools.hooks`，Workspace hook 會在 Agent hook wrapper 內執行。
+
+## Editor 覆寫
+
+註冊 [`MastraEditor`](/reference/editor/mastra-editor) 後，`editor` 欄位會控制程式碼定義 Agent 的哪些部分可透過 Editor 變更。由程式碼擁有的欄位在 Studio 中為唯讀，且會從已儲存的覆寫值中移除。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'editor',
+    type: 'false | { instructions?: boolean; tools?: boolean | { description?: boolean } }',
+    isOptional: true,
+    description:
+      '省略此值可允許編輯 instructions 與 tools。設為 `false` 可鎖定 Agent。設為 `instructions: true` 可允許編輯指示。設為 `tools: true` 可允許編輯 Tool 成員與說明；設為 `tools: { description: true }` 則只允許編輯說明。',
+  },
+]}
+/>
+
+Agent 的 `id`、`name` 與 `model` 一律來自程式碼，無法透過 Editor 覆寫。使用方式請參閱 [Editor](/docs/editor/overview)。
+
+## 回傳值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'Agent<TAgentId, TTools>',
+    description: '使用指定設定建立的新 Agent 執行個體。',
+  },
+]}
+/>

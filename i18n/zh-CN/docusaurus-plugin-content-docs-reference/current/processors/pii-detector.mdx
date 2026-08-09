@@ -1,0 +1,212 @@
+---
+title: "参考：PIIDetector | Processors"
+description: "Mastra 中 PIIDetector 的文档，该 Processor 从 AI 响应中检测和遮盖个人身份信息（PII）。"
+packages:
+  - "@mastra/core"
+---
+
+# PIIDetector
+
+`PIIDetector` 是一个**混合 Processor**，可同时用于输入和输出处理，以检测和遮盖个人身份信息（PII），满足隐私合规要求。此 Processor 通过识别 PII 类型并提供灵活的处理策略来帮助保护隐私，其中包括多种遮盖方法，以确保符合 GDPR、CCPA、HIPAA 和其他隐私法规。
+
+## 用法示例
+
+```typescript
+import { PIIDetector } from '@mastra/core/processors'
+
+const processor = new PIIDetector({
+  model: 'openrouter/openai/gpt-oss-safeguard-20b',
+  threshold: 0.6,
+  strategy: 'redact',
+  detectionTypes: ['email', 'phone', 'credit-card', 'ssn'],
+  lastMessageOnly: true,
+})
+```
+
+## 构造函数参数
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'Options',
+    description: 'PII 检测和遮盖的配置选项',
+    isOptional: false,
+    properties: [
+      {
+        type: 'Options',
+        parameters: [
+          {
+            name: 'model',
+            type: 'MastraModelConfig',
+            description: '检测 Agent 的模型配置',
+            isOptional: false,
+          },
+          {
+            name: 'detectionTypes',
+            type: 'string[]',
+            description: '要检测的 PII 类型。如未指定，则使用默认类型',
+            isOptional: true,
+            default:
+              "['email', 'phone', 'credit-card', 'ssn', 'api-key', 'ip-address', 'name', 'address', 'date-of-birth', 'url', 'uuid', 'crypto-wallet', 'iban']",
+          },
+          {
+            name: 'threshold',
+            type: 'number',
+            description:
+              '标记内容的置信度阈值（0-1）。如果任何类别的分数超过此阈值，就会标记 PII',
+            isOptional: true,
+            default: '0.6',
+          },
+          {
+            name: 'strategy',
+            type: "'block' | 'warn' | 'filter' | 'redact'",
+            description:
+              "检测到 PII 时采用的策略：'block' 返回错误并拒绝内容，'warn' 记录警告但允许内容通过，'filter' 移除被标记的消息，'redact' 将 PII 替换为遮盖后的版本",
+            isOptional: true,
+            default: "'redact'",
+          },
+          {
+            name: 'redactionMethod',
+            type: "'mask' | 'hash' | 'remove' | 'placeholder'",
+            description:
+              "PII 的遮盖方法：'mask' 用星号替换，'hash' 用 SHA256 哈希替换，'remove' 完全移除，'placeholder' 用类型占位符替换",
+            isOptional: true,
+            default: "'mask'",
+          },
+          {
+            name: 'instructions',
+            type: 'string',
+            description:
+              '检测 Agent 的自定义 instructions。如未提供，则使用基于检测类型的默认 instructions',
+            isOptional: true,
+            default: 'undefined',
+          },
+          {
+            name: 'includeDetections',
+            type: 'boolean',
+            description: '是否在日志中包含检测详情。适用于合规审计和调试',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'lastMessageOnly',
+            type: 'boolean',
+            description:
+              '是否只检查批次中最新的消息，而不检查每条消息。使用此选项可避免在长线程中为每条较早的消息调用一次 LLM。',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'preserveFormat',
+            type: 'boolean',
+            description:
+              '遮盖时是否保留 PII 格式。设为 true 时，会为电话号码保留类似 ***-**-1234 的结构',
+            isOptional: true,
+            default: 'true',
+          },
+          {
+            name: 'providerOptions',
+            type: 'ProviderOptions',
+            description:
+              "传给内部检测 Agent 的 Provider 特定选项。可用它控制模型行为，例如 thinking model 的 reasoning effort（例如 `{ openai: { reasoningEffort: 'low' } }`）",
+            isOptional: true,
+            default: 'undefined',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 返回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "Processor 标识符，设为 'pii-detector'",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: '可选的 Processor 显示名称',
+    isOptional: true,
+  },
+  {
+    name: 'processInput',
+    type: '(args: { messages: MastraDBMessage[]; abort: (reason?: string) => never; tracingContext?: TracingContext }) => Promise<MastraDBMessage[]>',
+    description: '在发送给 LLM 前处理输入消息，以检测和遮盖 PII',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputStream',
+    type: '(args: { part: ChunkType; streamParts: ChunkType[]; state: Record<string, any>; abort: (reason?: string) => never; tracingContext?: TracingContext }) => Promise<ChunkType | null | undefined>',
+    description: '处理流式输出 part，以在流式传输期间检测和遮盖 PII',
+    isOptional: false,
+  },
+]}
+/>
+
+## 扩展用法示例
+
+### 输入处理
+
+```typescript title="src/mastra/agents/private-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { PIIDetector } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'private-agent',
+  name: 'private-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [
+    new PIIDetector({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      detectionTypes: ['email', 'phone', 'credit-card', 'ssn'],
+      threshold: 0.6,
+      strategy: 'redact',
+      redactionMethod: 'mask',
+      instructions:
+        'Detect and redact personally identifiable information while preserving message intent',
+      includeDetections: true,
+      preserveFormat: true,
+    }),
+  ],
+})
+```
+
+### 通过批量合并处理输出
+
+将 `PIIDetector` 用作输出 Processor 时，建议将其与 `BatchPartsProcessor` 结合使用以优化性能。`BatchPartsProcessor` 会先批量合并 stream chunk，再将其传给 PII 检测器，从而减少检测所需的 LLM 调用次数。
+
+```typescript title="src/mastra/agents/output-pii-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { BatchPartsProcessor, PIIDetector } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'output-pii-agent',
+  name: 'output-pii-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  outputProcessors: [
+    // Batch stream parts first to reduce LLM calls
+    new BatchPartsProcessor({
+      batchSize: 10,
+    }),
+    // Then apply PII detection on batched content
+    new PIIDetector({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      strategy: 'redact',
+    }),
+  ],
+})
+```
+
+## 相关内容
+
+- [Guardrails](/docs/agents/guardrails)

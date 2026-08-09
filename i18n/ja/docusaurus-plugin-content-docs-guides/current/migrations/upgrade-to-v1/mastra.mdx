@@ -1,0 +1,160 @@
+---
+title: "Mastra クラス | v1 移行ガイド"
+description: "v1 へのアップグレード時に Mastra クラスの変更を移行する方法を説明します。"
+---
+
+# Mastra クラス
+
+Mastra クラスは、トップレベルの import を制限し、プロパティへの直接アクセスを getter メソッドに置き換えるよう再構成されました。
+
+## 変更
+
+### トップレベル import からサブパス import へ
+
+メインの `@mastra/core` インデックスファイルは、`Mastra` と `Config` のみを export するようになりました。その他のすべての export はサブパス import に移動しました。この変更により Tree Shaking が改善され、Bundler が未使用コードを除去できるためバンドルサイズが小さくなります。
+
+移行するには、`@mastra/core` からのすべての import を適切なサブパスを使用するよう更新します。
+
+```diff
+- import { Mastra, Agent, Workflow, createTool } from '@mastra/core';
++ import { Mastra, type Config } from '@mastra/core';
++ import { Agent } from '@mastra/core/agent';
++ import { Workflow } from '@mastra/core/workflows';
++ import { createTool } from '@mastra/core/tools';
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/mastra-core-imports .
+```
+
+:::
+
+### `experimental_auth` から `auth` へ
+
+実験的な Auth 設定が安定版に昇格しました。この変更は、Auth API が安定し、本番環境で使用できる状態になったことを反映しています。
+
+移行するには、Mastra 設定の `experimental_auth` キーを `auth` に改名します。
+
+```diff
+  const mastra = new Mastra({
+-   experimental_auth: {
++   auth: {
+      provider: workos,
+    },
+  });
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/experimental-auth .
+```
+
+:::
+
+### すべての Mastra プリミティブで `id` パラメーターが必須に
+
+すべての Storage、Vector Store、Agent、Workflow、mcpServer、Processor、Scorer、Tool で、初期化時に `id` パラメーターが必須になりました。これにより、標準化された Mastra API が利用でき、ID の衝突を防止できます。
+
+これらのプリミティブには、`get`、`list`、`add` 関数も追加されました。
+
+移行するには、すべての Storage と Vector Store のインスタンス化に `id` パラメーターを追加します。同じ Storage/Vector クラスを複数回使用する場合は、各インスタンスに一意の ID を指定してください。
+
+```diff
+- const storage = new LibSQLStore({
+-   url: ':memory:',
+- });
++ const storage = new LibSQLStore({
++   id: 'my-app-storage',
++   url: ':memory:',
++ });
+
+- const vector = new PgVector({
+-   connectionString: process.env.DATABASE_URL,
+- });
++ const vector = new PgVector({
++   id: 'my-app-vector',
++   connectionString: process.env.DATABASE_URL,
++ });
+```
+
+目的ごとに別のインスタンスを使用する場合は、内容を表す一意の ID を指定してください。
+
+```diff
+  const agentMemory = new Memory({
+    storage: new LibSQLStore({
+-     url: 'file:./agent.db',
++     id: 'weather-agent-memory-storage',
++     url: 'file:./agent.db',
+    }),
+  });
+
+  const mastra = new Mastra({
+    storage: new LibSQLStore({
++     id: 'mastra-storage',
+      url: ':memory:',
+    }),
+  });
+```
+
+### プリミティブの複数形 API を `get<primitives>` から `list<primitive>` へ変更
+
+プリミティブの全インスタンスを返す `get*` 関数は、その目的をより適切に表す `list*` に改名されました。
+
+```diff
+- const agents = mastra.getAgents();
++ const agents = mastra.listAgents();
+- const vectors = mastra.getVectors();
++ const vectors = mastra.listVectors();
+- const workflows = mastra.getWorkflows();
++ const workflows = mastra.listWorkflows();
+- const scorers = mastra.getScorers();
++ const scorers = mastra.listScorers();
+- const mcpServers = mastra.getMCPServers();
++ const mcpServers = mastra.listMCPServers();
+- const logsByRunId = await mastra.getLogsByRunId({ runId: 'id', transportId: 'id' });
++ const logsByRunId = await mastra.listLogsByRunId({ runId: 'id', transportId: 'id' });
+- const logs = await mastra.getLogs('transportId');
++ const logs = await mastra.listLogs('transportId');
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/mastra-plural-apis .
+```
+
+:::
+
+### 各プリミティブに `getById` 関数と `get` 関数を追加
+
+```typescript
+mastra.getMCPServer('myServer') // Works (registry key)
+mastra.getMCPServerById('my-mcp-server') // Works (intrinsic ID)
+```
+
+### Tool の登録で固有 ID を使用
+
+Agent または MCP Server から Mastra インスタンスへ Tool を自動登録する際に、設定オブジェクトのキーではなく、Tool 固有の `id` を使用するようになりました。これにより、複数の Agent/MCP Server に同じ設定キーを持つ Tool がある場合の衝突を防止できます。
+
+移行するには、設定キーで Tool を参照しているコードを、Tool 固有の ID を使用するよう更新します。
+
+```diff
+  const agent = new Agent({
+    id: 'agent1',
+    tools: {
+      searchTool: weatherSearchTool,
+    },
+  });
+
+- mastra.getTool('searchTool');
++ mastra.getTool(weatherSearchTool.id);
+```

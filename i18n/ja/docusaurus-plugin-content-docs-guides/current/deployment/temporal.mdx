@@ -1,0 +1,221 @@
+---
+title: "Temporal | Deployment"
+description: "Mastra Workflow を Temporal にデプロイする"
+---
+
+# Temporal Workflow
+
+[Temporal](https://temporal.io/) は、長時間実行されるフォールトトレラントな Workflow をオーケストレーションするための Durable Execution プラットフォームです。`@mastra/temporal` パッケージを使用すると、標準の Mastra API で Workflow を作成し、Temporal Cluster 上で実行できます。
+
+:::warning
+`@mastra/temporal` は実験的機能であり、本番環境では使用できません。API はリリース間で変更される可能性があります。現在の状態については、[パッケージの README](https://github.com/mastra-ai/mastra/tree/main/workflows/temporal) を参照してください。
+:::
+
+## Temporal と Mastra の連携
+
+`createWorkflow()` と `createStep()` で作成した Mastra Workflow は、Temporal の Workflow と Activity モデルに対応します。Temporal Worker 用の `MastraPlugin` は、バンドル時に Mastra の Entry File をコンパイルします。
+
+- 各 `createStep()` Handler は Temporal Activity として抽出されます。
+- 各 `createWorkflow()` は、それらの Activity を呼び出す Temporal Workflow に書き換えられます。
+- Plugin は生成された Activity と Workflow を Worker に自動登録します。
+
+`mastra.getWorkflow(...).createRun().start(...)` から Run を開始すると、Mastra Client が Temporal に制御を渡します。Temporal は Worker 上で Durable Execution、再試行、状態の永続化を行います。
+
+## セットアップ
+
+必要なパッケージをインストールします。
+
+```bash npm2yarn
+npm install @mastra/temporal@latest @temporalio/client @temporalio/worker @temporalio/envconfig
+```
+
+Temporal Cluster へのアクセスも必要です。ローカル開発では Docker で実行できます（[ローカルで実行する](#running-locally)を参照）。
+
+## Temporal を使用する Workflow を構築する
+
+このガイドでは、値を増分するカウンターアプリケーションを例に、Temporal と Mastra を使用した Workflow の作成方法を説明します。
+
+### Temporal を初期化する
+
+Temporal 統合を初期化し、Mastra 互換の Workflow Helper を取得します。`createWorkflow()` と `createStep()` 関数は Temporal Client と Task Queue に関連付けられます。
+
+```ts title="src/mastra/temporal/index.ts"
+import { init } from '@mastra/temporal'
+import { Client, Connection } from '@temporalio/client'
+import { loadClientConnectConfig } from '@temporalio/envconfig'
+
+const config = loadClientConnectConfig()
+const connection = await Connection.connect(config.connectionOptions)
+const client = new Client({ connection })
+
+export const { createWorkflow, createStep } = init({
+  client,
+  taskQueue: 'mastra',
+})
+```
+
+`loadClientConnectConfig()` は、`TEMPORAL_ADDRESS`、`TEMPORAL_NAMESPACE`、mTLS 設定など、標準の Temporal 環境変数を読み取ります。完全な一覧については、[Temporal envconfig ドキュメント](https://docs.temporal.io/develop/typescript/temporal-clients)を参照してください。
+
+### Step を作成する
+
+Workflow を構成する個別の Step を定義します。各 Step は Temporal Activity になります。
+
+```ts title="src/mastra/workflows/index.ts"
+import { z } from 'zod'
+import { createWorkflow, createStep } from '../temporal'
+
+const incrementStep = createStep({
+  id: 'increment',
+  inputSchema: z.object({
+    value: z.number(),
+  }),
+  outputSchema: z.object({
+    value: z.number(),
+  }),
+  execute: async ({ inputData }) => {
+    return { value: inputData.value + 1 }
+  },
+})
+```
+
+### Workflow を作成する
+
+Step を Workflow に構成します。ビルド時の Transformer が Temporal Export 名を取得できるように、Workflow の `id` は静的な文字列リテラルにする必要があります。
+
+```ts title="src/mastra/workflows/index.ts"
+const workflow = createWorkflow({
+  id: 'increment-workflow',
+  steps: [incrementStep],
+  inputSchema: z.object({
+    value: z.number(),
+  }),
+  outputSchema: z.object({
+    value: z.number(),
+  }),
+}).then(incrementStep)
+
+workflow.commit()
+
+export { workflow as incrementWorkflow }
+```
+
+### Mastra インスタンスを設定する
+
+Workflow を Mastra に登録します。実行は Temporal Worker が制御します。
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { PinoLogger } from '@mastra/loggers'
+import { incrementWorkflow } from './workflows'
+
+export const mastra = new Mastra({
+  workflows: { incrementWorkflow },
+  logger: new PinoLogger({ name: 'Mastra', level: 'info' }),
+})
+```
+
+## Worker を実行する
+
+Worker は Temporal Task Queue を Poll する、長時間稼働する Node.js プロセスです。`MastraPlugin` をインストールし、`src` オプションに Workflow を登録する Mastra Entry File を指定します。
+
+```ts title="src/mastra/worker.ts"
+import { MastraPlugin } from '@mastra/temporal/worker'
+import { NativeConnection, Worker } from '@temporalio/worker'
+
+const connection = await NativeConnection.connect({
+  address: 'localhost:7233',
+})
+
+const mastraPlugin = new MastraPlugin()
+
+await mastraPlugin.prebuild({
+  entryFile: import.meta.resolve('./index.ts'),
+})
+
+const worker = await Worker.create({
+  connection,
+  namespace: 'default',
+  taskQueue: 'mastra',
+  plugins: [mastraPlugin],
+})
+
+await worker.run()
+```
+
+`MastraPlugin` は Entry File を Workflow 専用のバンドルに書き換え、Step Handler を Temporal Activity として接続します。`activities` や `workflowsPath` を `Worker.create()` に手動で渡す必要はありません。
+
+## Workflow を実行する
+
+### ローカルで実行する
+
+1. ローカル Temporal サーバーを起動します。最も簡単な方法は、`temporalio/auto-setup` Docker イメージを使用することです。
+
+   ```bash
+   docker run --rm -p 7233:7233 -p 8080:8080 temporalio/auto-setup:latest
+   ```
+
+1. [http://localhost:8080](http://localhost:8080) で Temporal UI を開き、Namespace、Workflow、Activity を確認します。
+
+1. 新しいターミナルで次のコマンドを実行し、Worker を起動します。
+
+   ```bash
+   npx tsx src/mastra/worker.ts
+   ```
+
+1. Mastra インスタンスをインポートする Script または任意のプロセスから Workflow の Run を開始します。
+
+   ```ts title="scripts/run.ts"
+   import { mastra } from '../src/mastra'
+
+   const run = await mastra.getWorkflow('incrementWorkflow').createRun()
+   const result = await run.start({ inputData: { value: 5 } })
+
+   console.log(result)
+   ```
+
+1. Temporal UI の **Workflows** で実行を監視し、Activity の進行状況と再試行履歴を Step ごとに確認します。
+
+### 本番環境で実行する
+
+本番環境では、[Temporal Cloud](https://temporal.io/cloud) またはセルフホストした Temporal Cluster を使用します。`@temporalio/envconfig` が読み取る環境変数を使用して、Client と Worker の接続を設定します。
+
+```bash title=".env"
+TEMPORAL_ADDRESS=your-namespace.tmprl.cloud:7233
+TEMPORAL_NAMESPACE=your-namespace
+TEMPORAL_API_KEY=your-api-key
+```
+
+mTLS と API キーのオプションについては、[Temporal Cloud の接続ドキュメント](https://docs.temporal.io/cloud/get-started)を参照してください。
+
+:::warning
+Temporal Worker は長時間稼働するプロセスとして実行する必要があります。AWS Lambda や Vercel Functions など、実行時間の短い Serverless プラットフォームにはデプロイしないでください。コンテナ、VM、または Fly.io、Railway、Kubernetes など Worker に適したプラットフォームを使用してください。
+:::
+
+## 設定オプション
+
+### `taskQueue`
+
+必須。Worker が Poll する Temporal Task Queue を識別します。同じ値を `init()`（Client が Run を開始するときに使用）と `Worker.create()`（Worker が Run を受信するときに使用）に渡す必要があります。
+
+### `startToCloseTimeout`
+
+任意。Temporal が個別の Activity（Step）をキャンセルして再試行ポリシーを適用するまでの最大実行時間を設定します。デフォルトは `1 minute` です。
+
+```ts title="src/mastra/temporal/index.ts"
+export const { createWorkflow, createStep } = init({
+  client,
+  taskQueue: 'mastra',
+  startToCloseTimeout: '5 minutes',
+})
+```
+
+## 制約と注意事項
+
+- Workflow ID は静的な文字列リテラルにする必要があります。ビルド時の Transformer はリテラル値を読み取り、Temporal Workflow の Export 名を取得します。
+- Activity は `createStep()` Handler から自動生成されます。`Worker.create({ activities })` に渡さないでください。
+
+## 関連項目
+
+- [Workflow Runner](/docs/deployment/workflow-runners)
+- [Workflow の概要](/docs/workflows/overview)
+- [Temporal ドキュメント](https://docs.temporal.io/)

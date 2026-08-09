@@ -1,0 +1,188 @@
+---
+title: "リファレンス：Observability API | Client SDK"
+description: client-js SDK を使用して、Trace の取得、アプリケーションパフォーマンスの監視、Trace のスコアリング、フィードバックの記録を行う方法を説明します。
+packages:
+  - "@mastra/client-js"
+---
+
+# Observability API
+
+Observability API は、Trace の取得、アプリケーションパフォーマンスの監視、評価用の Trace のスコアリング、および Trace や span に関連付けられたフィードバックの記録を行うためのメソッドを提供します。
+
+## 特定の Trace を取得
+
+すべての span と詳細を含む特定の Trace を ID で取得します。
+
+```typescript
+const trace = await mastraClient.getTrace('trace-id-123')
+```
+
+## フィルタリングして Trace を取得
+
+オプションのフィルタリングを使用して、Trace のルート span をページネーション付きで取得します。
+
+```typescript
+const traces = await mastraClient.getTraces({
+  pagination: {
+    page: 1,
+    perPage: 20,
+    dateRange: {
+      start: new Date('2024-01-01'),
+      end: new Date('2024-01-31'),
+    },
+  },
+  filters: {
+    name: 'weather-agent', // Filter by trace name
+    spanType: 'agent', // Filter by span type
+    entityId: 'weather-agent-id', // Filter by entity ID
+    entityType: 'agent', // Filter by entity type
+  },
+})
+
+console.log(`Found ${traces.spans.length} root spans`)
+console.log(`Total pages: ${traces.pagination.totalPages}`)
+
+// To get the complete trace with all spans, use getTrace
+const completeTrace = await mastraClient.getTrace(traces.spans[0].traceId)
+```
+
+## 一覧表示用に Trace を取得
+
+`listTracesLight()` は、`input`、`output`、`attributes` のペイロードを除き、Trace の一覧と同じ行を返します。代わりに各行に短い `inputPreview` 文字列が含まれるため、プロンプト全体を転送せずに一覧へプレビュー列を表示できます。
+
+多数の Trace を一度に表示する場合はこのメソッドを優先し、行が開かれたときにだけ完全なレコードを取得します。
+
+```typescript
+const list = await mastraClient.listTracesLight({
+  pagination: { page: 0, perPage: 25 },
+  filters: { entityType: 'agent' },
+})
+
+for (const span of list.spans) {
+  console.log(span.name, span.inputPreview)
+}
+
+// Fetch the full payload only for the trace the user selects
+const selected = await mastraClient.getTrace(list.spans[0].traceId)
+```
+
+このメソッドは `listTraces()` と同じフィルタリング、並び順、差分ポーリングの引数を受け取ります。完全な span ペイロードが実際に必要な場合は `listTraces()` を使用してください。
+
+## Trace をスコアリング
+
+登録済みの Scorer を使用して、評価対象の特定の Trace をスコアリングします。
+
+```typescript
+const result = await mastraClient.score({
+  scorerName: 'answer-relevancy',
+  targets: [
+    { traceId: 'trace-1', spanId: 'span-1' }, // Score specific span
+    { traceId: 'trace-2' }, // Score specific span which defaults to the parent span
+  ],
+})
+```
+
+## span ごとのスコアを取得
+
+Trace 内の特定の span に対するスコアを取得します。
+
+```typescript
+const scores = await mastraClient.listScoresBySpan({
+  traceId: 'trace-123',
+  spanId: 'span-456',
+  page: 1,
+  perPage: 20,
+})
+```
+
+## フィードバック
+
+フィードバック用のメソッドでは、評価、賛否、コメント、訂正など、人間を介したシグナルを作成、一覧表示、照会できます。例については[フィードバックガイド](/docs/observability/feedback)、完全なスキーマについては[フィードバックリファレンス](/reference/observability/feedback)を参照してください。
+
+### フィードバックを作成
+
+Trace または span に関連付けられたフィードバックレコードを作成します。
+
+```typescript
+const response = await mastraClient.createFeedback({
+  feedback: {
+    traceId: 'trace-123',
+    spanId: 'span-456',
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'Helpful answer.',
+  },
+})
+```
+
+### フィードバックを一覧表示
+
+オプションのフィルターを使用して、フィードバックレコードをページネーション付きで取得します。
+
+```typescript
+const feedback = await mastraClient.listFeedback({
+  filters: {
+    feedbackType: 'rating',
+    feedbackSource: 'studio',
+  },
+  pagination: { page: 0, perPage: 20 },
+  orderBy: { field: 'timestamp', direction: 'DESC' },
+})
+```
+
+### フィードバックを集計
+
+評価や、`1` と `-1` で表される賛否など、数値のフィードバック値を集計します。
+
+```typescript
+const averageRating = await mastraClient.getFeedbackAggregate({
+  feedbackType: 'rating',
+  aggregation: 'avg',
+  comparePeriod: 'previous_day',
+})
+```
+
+### フィードバックをグループ化
+
+Observability のディメンション別に数値のフィードバックをグループ化します。
+
+```typescript
+const ratingsByAgent = await mastraClient.getFeedbackBreakdown({
+  feedbackType: 'rating',
+  groupBy: ['entityName'],
+  aggregation: 'avg',
+})
+```
+
+### 時系列でフィードバックを照会
+
+数値のフィードバックを時間間隔ごとにまとめます。
+
+```typescript
+const ratingsOverTime = await mastraClient.getFeedbackTimeSeries({
+  feedbackType: 'rating',
+  interval: '1h',
+  aggregation: 'avg',
+  groupBy: ['feedbackSource'],
+})
+```
+
+### フィードバックのパーセンタイルを照会
+
+数値のフィードバック値に対するパーセンタイル系列を返します。
+
+```typescript
+const ratingPercentiles = await mastraClient.getFeedbackPercentiles({
+  feedbackType: 'rating',
+  percentiles: [0.5, 0.95],
+  interval: '1d',
+})
+```
+
+## 関連項目
+
+- [フィードバックガイド](/docs/observability/feedback)：フィードバックの作成、一覧表示、照会方法を説明します
+- [フィードバックリファレンス](/reference/observability/feedback)：フィードバックのスキーマと HTTP ルートを確認します
+- [Agents API](./agents)：Trace を生成する Agent とのやり取りを説明します
+- [Workflows API](./workflows)：Workflow の実行監視について説明します

@@ -1,0 +1,198 @@
+---
+title: "参考：LangfuseExporter | 可观测性"
+description: 用于 Tracing 的 Langfuse Exporter
+packages:
+  - "@mastra/langfuse"
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# LangfuseExporter
+
+将 Tracing 数据发送到 Langfuse，用于可观测性。
+
+## 构造函数
+
+```typescript prettier:false
+new LangfuseExporter(config: LangfuseExporterConfig)
+```
+
+## `LangfuseExporterConfig`
+
+```typescript
+interface LangfuseExporterConfig extends BaseExporterConfig {
+  publicKey?: string
+  secretKey?: string
+  baseUrl?: string
+  realtime?: boolean
+  flushAt?: number
+  flushInterval?: number
+  environment?: string
+  release?: string
+}
+```
+
+扩展 `BaseExporterConfig`，其中包含：
+
+- `logger?: IMastraLogger` - Logger 实例
+- `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'` - 日志级别（默认值：INFO）
+
+<PropertiesTable
+  props={[
+  {
+    name: 'publicKey',
+    type: 'string',
+    description: 'Langfuse API key。未设置时使用 LANGFUSE_PUBLIC_KEY 环境变量。',
+    required: false,
+  },
+  {
+    name: 'secretKey',
+    type: 'string',
+    description: 'Langfuse secret key。未设置时使用 LANGFUSE_SECRET_KEY 环境变量。',
+    required: false,
+  },
+  {
+    name: 'baseUrl',
+    type: 'string',
+    description: 'Langfuse host URL。未设置时使用 LANGFUSE_BASE_URL 环境变量。默认值：https://cloud.langfuse.com',
+    required: false,
+  },
+  {
+    name: 'realtime',
+    type: 'boolean',
+    description: '启用实时模式，立即导出 Span，而不是进行批处理',
+    required: false,
+  },
+  {
+    name: 'flushAt',
+    type: 'number',
+    description: '每个 OTEL 导出批次最多包含的 Span 数量。会转发给底层 LangfuseSpanProcessor。',
+    required: false,
+  },
+  {
+    name: 'flushInterval',
+    type: 'number',
+    description:
+      '导出待处理 Span 前的最长等待时间（秒）。会转发给底层 LangfuseSpanProcessor。',
+    required: false,
+  },
+  {
+    name: 'environment',
+    type: 'string',
+    description: 'Trace 的环境 tag（例如 production、staging）。显示在 Langfuse UI 中，可用于筛选。',
+    required: false,
+  },
+  {
+    name: 'release',
+    type: 'string',
+    description: 'Trace 的 release tag（例如 git commit hash）。用于版本跟踪。',
+    required: false,
+  },
+  {
+    name: 'logLevel',
+    type: "'debug' | 'info' | 'warn' | 'error'",
+    description: "logger 级别（默认值：'warn'）",
+    required: false,
+  },
+]}
+/>
+
+## 属性
+
+### `client`
+
+```typescript prettier:false
+get client(): LangfuseClient | undefined
+```
+
+用于 Langfuse 高级功能的 `LangfuseClient` 实例。Exporter 被禁用（缺少凭据）时返回 `undefined`。可用于 prompt 管理、评估、数据集和直接访问 API。
+
+## 方法
+
+### flush
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+强制将缓冲区中的所有 Span 和 score 刷新到 Langfuse，而不关闭 Exporter。适用于需要确保运行时终止前已导出数据的 serverless 环境。
+
+### shutdown
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+刷新待处理数据，并同时关闭 Span processor 和客户端。
+
+## 用法
+
+### 零配置（使用环境变量）
+
+```typescript
+import { LangfuseExporter } from '@mastra/langfuse'
+
+// Reads from LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL
+const exporter = new LangfuseExporter()
+```
+
+### 显式配置
+
+```typescript
+import { LangfuseExporter } from '@mastra/langfuse'
+
+const exporter = new LangfuseExporter({
+  publicKey: process.env.LANGFUSE_PUBLIC_KEY,
+  secretKey: process.env.LANGFUSE_SECRET_KEY,
+  baseUrl: 'https://cloud.langfuse.com',
+  realtime: true,
+})
+```
+
+## Span 映射
+
+Mastra Span 会转换为 OTel 格式，并通过 `LangfuseSpanProcessor` 发送到 Langfuse。Langfuse 会根据 Span 的 `gen_ai.*` 属性自动进行映射：
+
+- 带有 `model` 属性的 Span → Langfuse generation
+- 所有其他 Span → Langfuse Span
+- 通过 OTel Trace/Span ID 保留父子关系
+
+## Prompt 关联
+
+使用 `withLangfusePrompt` helper 将 LLM generation 关联到 [Langfuse Prompt Management](https://langfuse.com/docs/prompt-management)：
+
+```typescript
+import { buildTracingOptions } from '@mastra/observability'
+import { LangfuseExporter, withLangfusePrompt } from '@mastra/langfuse'
+
+const exporter = new LangfuseExporter()
+
+// Fetch prompt via the Langfuse client
+const prompt = await exporter.client.prompt.get('customer-support', { type: 'text' })
+
+const agent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  instructions: prompt.compile(),
+  model: '__GATEWAY_OPENAI_MODEL__',
+  defaultGenerateOptions: {
+    tracingOptions: buildTracingOptions(
+      withLangfusePrompt({ name: prompt.name, version: prompt.version }),
+    ),
+  },
+})
+```
+
+### Helper 函数
+
+#### `withLangfusePrompt(prompt)`
+
+将 Langfuse prompt 元数据添加到 Tracing 选项。
+
+```typescript
+// Link by name and version (required for Langfuse v5)
+withLangfusePrompt({ name: 'my-prompt', version: 1 })
+```
+
+Prompt 元数据会作为 Span 属性透传，Langfuse 会将 generation 关联到相应的 prompt。

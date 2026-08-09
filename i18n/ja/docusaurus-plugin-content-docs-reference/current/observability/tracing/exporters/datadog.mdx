@@ -1,0 +1,179 @@
+---
+title: "リファレンス：DatadogExporter | Observability"
+description: Tracing 用 Datadog LLM Observability exporter
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# DatadogExporter
+
+監視と分析のために、Tracing データを Datadog の LLM Observability 製品へ送信します。
+
+:::info
+`dd-trace` APM 自動インストルメンテーションも使用し、Mastra Span の配下に正しく関連付ける必要がある場合は、代わりに [DatadogBridge](/reference/observability/tracing/bridges/datadog) を使用してください。exporter は実行完了後に LLM Observability データを送信するため、`dd-trace` のライブスコープには関与しません。
+:::
+
+## コンストラクター
+
+```typescript prettier:false
+new DatadogExporter(config: DatadogExporterConfig)
+```
+
+## `DatadogExporterConfig`
+
+```typescript
+interface DatadogExporterConfig extends BaseExporterConfig {
+  apiKey?: string
+  mlApp?: string
+  site?: string
+  service?: string
+  env?: string
+  agentless?: boolean
+  integrationsEnabled?: boolean
+}
+```
+
+`BaseExporterConfig` を拡張し、次の項目を含みます。
+
+- `logger?: IMastraLogger` - Logger インスタンス
+- `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'` - ログレベル（デフォルト：INFO）
+
+<PropertiesTable
+  props={[
+  {
+    name: 'apiKey',
+    type: 'string',
+    description: 'Datadog API キー。Agentless モードでは必須です。未指定の場合は DD_API_KEY 環境変数を使用します。',
+    required: false,
+  },
+  {
+    name: 'mlApp',
+    type: 'string',
+    description: 'Trace をグループ化する ML アプリケーション名。必須です。未指定の場合は DD_LLMOBS_ML_APP 環境変数を使用します。',
+    required: false,
+  },
+  {
+    name: 'site',
+    type: 'string',
+    description:
+      "Datadog サイト（例：'datadoghq.com'、'datadoghq.eu'、'us3.datadoghq.com'）。未指定の場合は DD_SITE 環境変数を使用します。デフォルト：'datadoghq.com'。",
+    required: false,
+  },
+  {
+    name: 'service',
+    type: 'string',
+    description: 'アプリケーションのサービス名。デフォルトは mlApp の値です。',
+    required: false,
+  },
+  {
+    name: 'env',
+    type: 'string',
+    description: "環境名（例：'production'、'staging'）。未指定の場合は DD_ENV 環境変数を使用します。",
+    required: false,
+  },
+  {
+    name: 'agentless',
+    type: 'boolean',
+    description: 'HTTPS intake へ直接送信する場合は true、ローカルの Datadog Agent を使用する場合は false。デフォルト：true。',
+    required: false,
+  },
+  {
+    name: 'integrationsEnabled',
+    type: 'boolean',
+    description: 'dd-trace の自動統合を有効にします。デフォルト：false。',
+    required: false,
+  },
+]}
+/>
+
+## メソッド
+
+### `exportTracingEvent`
+
+```typescript prettier:false
+async exportTracingEvent(event: TracingEvent): Promise<void>
+```
+
+Tracing イベントを Datadog LLM Observability へエクスポートします。
+
+### flush
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+exporter をシャットダウンせず、バッファー内のすべての Span を Datadog へ強制的にフラッシュします。ランタイム終了前に Span が確実にエクスポートされるようにする必要がある、サーバーレス環境で役立ちます。
+
+### shutdown
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+保留中のデータをフラッシュし、exporter をシャットダウンします。保留中のクリーンアップタイマーをすべてキャンセルし、LLM Observability を無効にします。
+
+## 使用方法
+
+### ゼロコンフィグ（環境変数を使用）
+
+```typescript
+import { DatadogExporter } from '@mastra/datadog'
+
+// Reads from DD_LLMOBS_ML_APP, DD_API_KEY, DD_SITE, DD_ENV
+const exporter = new DatadogExporter()
+```
+
+### 明示的な設定
+
+```typescript
+import { DatadogExporter } from '@mastra/datadog'
+
+const exporter = new DatadogExporter({
+  mlApp: 'my-llm-app',
+  apiKey: process.env.DD_API_KEY,
+  site: 'datadoghq.com',
+  env: 'production',
+})
+```
+
+### ローカルの Datadog Agent を使用
+
+```typescript
+const exporter = new DatadogExporter({
+  mlApp: 'my-llm-app',
+  agentless: false, // Use local Datadog Agent
+  env: 'production',
+})
+```
+
+## Span のマッピング
+
+Mastra の Span タイプは、Datadog LLM Observability の Span kind に次のようにマッピングされます。
+
+| Mastra SpanType | Datadog Kind |
+| - | - |
+| `AGENT_RUN` | `agent` |
+| `MODEL_GENERATION` | `workflow` |
+| `MODEL_STEP` | `llm` |
+| `TOOL_CALL` | `tool` |
+| `MCP_TOOL_CALL` | `tool` |
+| `PROVIDER_TOOL_CALL` | `tool` |
+| `WORKFLOW_RUN` | `workflow` |
+| その他すべてのタイプ | `task` |
+
+マッピングされていないすべての Span タイプ（`MODEL_CHUNK`、`WORKFLOW_STEP`、`GENERIC`、将来追加される Span タイプを含む）は、自動的にデフォルトの `task` になります。
+
+## 環境変数
+
+exporter は次の環境変数から設定を読み取ります。
+
+| 変数 | 説明 |
+| - | - |
+| `DD_API_KEY` | Datadog API キー |
+| `DD_LLMOBS_ML_APP` | ML アプリケーション名 |
+| `DD_SITE` | Datadog サイト |
+| `DD_ENV` | 環境名 |
+| `DD_LLMOBS_AGENTLESS_ENABLED` | ローカル Agent を使用するには 'false' または '0' に設定 |

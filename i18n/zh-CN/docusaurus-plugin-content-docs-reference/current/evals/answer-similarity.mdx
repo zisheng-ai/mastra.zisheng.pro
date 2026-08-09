@@ -1,0 +1,191 @@
+---
+title: "参考：答案相似度 Scorer | Evals"
+description: Mastra 答案相似度 Scorer 的文档，该 Scorer 在 CI/CD 测试中将 Agent 输出与 ground truth 答案进行比较。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+# 答案相似度 Scorer
+
+`createAnswerSimilarityScorer()` 函数会创建一个 Scorer，用于评估 Agent 输出与 ground truth 答案的相似程度。该 Scorer 专为 CI/CD 测试场景而设计，适用于已有预期答案并希望确保结果长期保持一致的情况。
+
+## 参数
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'LanguageModel',
+    required: true,
+    description: '用于评估输出与 ground truth 之间语义相似度的语言模型。',
+  },
+  {
+    name: 'options',
+    type: 'AnswerSimilarityOptions',
+    required: false,
+    description: 'Scorer 的配置选项。',
+    properties: [
+      {
+        type: 'AnswerSimilarityOptions',
+        parameters: [
+          {
+            name: 'requireGroundTruth',
+            type: 'boolean',
+            required: false,
+            defaultValue: 'true',
+            description:
+              '评估时是否必须提供 ground truth。若为 false，缺少 ground truth 时返回 0 分。',
+          },
+          {
+            name: 'semanticThreshold',
+            type: 'number',
+            required: false,
+            defaultValue: '0.8',
+            description: '语义匹配相对于完全匹配的权重（0-1）。',
+          },
+          {
+            name: 'exactMatchBonus',
+            type: 'number',
+            required: false,
+            defaultValue: '0.2',
+            description: '完全匹配时的额外加分（0-1）。',
+          },
+          {
+            name: 'missingPenalty',
+            type: 'number',
+            required: false,
+            defaultValue: '0.15',
+            description: 'ground truth 中每缺少一个关键概念所扣的分数。',
+          },
+          {
+            name: 'contradictionPenalty',
+            type: 'number',
+            required: false,
+            defaultValue: '1.0',
+            description: '信息矛盾时的扣分。较高的值可确保错误答案的分数接近 0。',
+          },
+          {
+            name: 'extraInfoPenalty',
+            type: 'number',
+            required: false,
+            defaultValue: '0.05',
+            description: '包含 ground truth 中没有的额外信息时的小幅扣分（上限为 0.2）。',
+          },
+          {
+            name: 'scale',
+            type: 'number',
+            required: false,
+            defaultValue: '1',
+            description: '分数缩放系数。',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+此函数返回 MastraScorer 类的实例。`.run()` 方法接受与其他 Scorer 相同的输入（参见 [MastraScorer 参考](./mastra-scorer)），但 run 对象中**必须提供 ground truth**。
+
+## `.run()` 返回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'runId',
+    type: 'string',
+    description: 'run ID（可选）。',
+  },
+  {
+    name: 'score',
+    type: 'number',
+    description:
+      '0-1 之间的相似度分数（若使用自定义 scale，则为 0-scale）。分数越高，表示与 ground truth 越相似。',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description: '对分数的易读说明，并包含可操作的反馈。',
+  },
+  {
+    name: 'preprocessStepResult',
+    type: 'object',
+    description: '从输出和 ground truth 中提取的语义单元。',
+  },
+  {
+    name: 'analyzeStepResult',
+    type: 'object',
+    description: '对匹配项、矛盾和额外信息的详细分析。',
+  },
+  {
+    name: 'preprocessPrompt',
+    type: 'string',
+    description: '用于提取语义单元的 prompt。',
+  },
+  {
+    name: 'analyzePrompt',
+    type: 'string',
+    description: '用于相似度分析的 prompt。',
+  },
+  {
+    name: 'generateReasonPrompt',
+    type: 'string',
+    description: '用于生成说明的 prompt。',
+  },
+]}
+/>
+
+## 评分详情
+
+该 Scorer 使用多步骤流程：
+
+1. **提取**：将输出和 ground truth 拆分为语义单元
+1. **分析**：比较语义单元，并识别匹配项、矛盾和缺漏
+1. **评分**：计算加权相似度，并对矛盾进行扣分
+1. **说明**：生成易读的说明
+
+分数计算：`max(0, base_score - contradiction_penalty - missing_penalty - extra_info_penalty) × scale`
+
+## 示例
+
+在不同场景下评估 Agent 响应与 ground truth 的相似度：
+
+```typescript title="src/example-answer-similarity.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createAnswerSimilarityScorer } from '@mastra/evals/scorers/prebuilt'
+import { myAgent } from './agent'
+
+const scorer = createAnswerSimilarityScorer({ model: '__GATEWAY_OPENAI_MODEL__' })
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'What is 2+2?',
+      groundTruth: '4',
+    },
+    {
+      input: 'What is the capital of France?',
+      groundTruth: 'The capital of France is Paris',
+    },
+    {
+      input: 'What are the primary colors?',
+      groundTruth: 'The primary colors are red, blue, and yellow',
+    },
+  ],
+  scorers: [scorer],
+  target: myAgent,
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+有关 `runEvals` 的更多详情，请参阅 [runEvals 参考](/reference/evals/run-evals)。
+
+要将此 Scorer 添加到 Agent，请参阅 [Scorer 概述](/docs/evals/overview#adding-scorers-to-agents)指南。

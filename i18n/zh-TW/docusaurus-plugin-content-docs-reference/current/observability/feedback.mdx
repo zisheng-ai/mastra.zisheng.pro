@@ -1,0 +1,536 @@
+---
+title: "參考：回饋 | 可觀測性"
+description: "可觀測性回饋記錄、filter 與查詢方法的 API 參考。"
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# 回饋
+
+**新增於：**`@mastra/core@1.18.0`
+
+回饋 API 可儲存及查詢人工介入的可觀測性 signal，例如評分、拇指評價、留言與修正。如需使用模式，請參閱[回饋指南](/docs/observability/feedback)。
+
+## 使用範例
+
+以下範例透過可觀測性進入點，為已持久化的 trace 記錄評分。`addFeedback()` 在此進入點上為選用，因此呼叫前請先檢查作用中的可觀測性實作是否支援。
+
+```typescript
+if (!mastra.observability.addFeedback) {
+  throw new Error('Feedback is not supported by the active observability implementation')
+}
+
+await mastra.observability.addFeedback({
+  traceId: 'trace-123',
+  spanId: 'span-456',
+  feedback: {
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'Helpful answer.',
+  },
+})
+```
+
+## 建立回饋
+
+### `addFeedback(args)`
+
+透過可觀測性進入點，將回饋新增至已持久化的 trace 或 span。
+
+```typescript
+await mastra.observability.addFeedback?.({
+  traceId: 'trace-123',
+  spanId: 'span-456',
+  feedback: {
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'Helpful answer.',
+  },
+})
+```
+
+<PropertiesTable
+  content={[
+  { name: 'traceId', type: 'string', description: '作為回饋目標定位依據的 trace。', isOptional: true },
+  { name: 'spanId', type: 'string', description: '作為回饋目標定位依據的 span。', isOptional: true },
+  {
+    name: 'correlationContext',
+    type: 'CorrelationContext',
+    description: '用於產生事件的即時 span 或 trace context，不必從儲存空間重新載入目標。',
+    isOptional: true,
+  },
+  { name: 'feedback', type: 'FeedbackInput', description: '要新增的回饋 payload。' },
+]}
+/>
+
+### `createFeedback(args)`
+
+透過可觀測性 storage domain 建立一筆回饋記錄。儲存層級呼叫會直接寫入儲存區，因此請包含 `timestamp`。
+
+```typescript
+await observability.createFeedback({
+  feedback: {
+    feedbackId: 'feedback-1',
+    timestamp: new Date(),
+    traceId: 'trace-123',
+    spanId: 'span-456',
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'Helpful answer.',
+  },
+})
+```
+
+HTTP 與 client SDK 的建立 route 接受 `CreateFeedbackBody`，並由 server 端設定 `timestamp`。省略 `feedbackId` 時會自動產生：
+
+```typescript
+await mastraClient.createFeedback({
+  feedback: {
+    traceId: 'trace-123',
+    spanId: 'span-456',
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+  },
+})
+```
+
+### `batchCreateFeedback(args)`
+
+透過可觀測性 storage domain 建立多筆回饋記錄。HTTP route 與 `@mastra/client-js` 不會公開此方法。
+
+```typescript
+await observability.batchCreateFeedback({
+  feedbacks: [
+    {
+      feedbackId: 'feedback-1',
+      timestamp: new Date(),
+      traceId: 'trace-123',
+      feedbackSource: 'user',
+      feedbackType: 'rating',
+      value: 1,
+    },
+    {
+      feedbackId: 'feedback-2',
+      timestamp: new Date(),
+      traceId: 'trace-123',
+      feedbackSource: 'qa',
+      feedbackType: 'comment',
+      value: 'Needs a citation before shipping.',
+    },
+  ],
+})
+```
+
+## 列出回饋
+
+### `listFeedback(args?)`
+
+以分頁模式或 delta 模式傳回回饋記錄。
+
+```typescript
+const response = await mastraClient.listFeedback({
+  filters: {
+    feedbackType: 'rating',
+    feedbackSource: 'studio',
+  },
+  pagination: { page: 0, perPage: 20 },
+  orderBy: { field: 'timestamp', direction: 'DESC' },
+})
+```
+
+<PropertiesTable
+  content={[
+  { name: 'mode', type: "'page' | 'delta'", description: "列出模式。預設為 'page'。", isOptional: true },
+  { name: 'filters', type: 'FeedbackFilter', description: '回饋記錄的 filter。', isOptional: true },
+  {
+    name: 'pagination',
+    type: '{ page?: number; perPage?: number }',
+    description: '分頁模式的分頁設定。`page` 從零開始編號。',
+    isOptional: true,
+  },
+  {
+    name: 'orderBy',
+    type: "{ field?: 'timestamp'; direction?: 'ASC' | 'DESC' }",
+    description: '分頁模式的排序設定。',
+    isOptional: true,
+  },
+  {
+    name: 'after',
+    type: 'string',
+    description: '用於增量輪詢的 delta cursor。只適用於 delta 模式。',
+    isOptional: true,
+  },
+  {
+    name: 'limit',
+    type: 'number',
+    description: 'Delta 模式中傳回的更新數量上限。',
+    isOptional: true,
+  },
+]}
+/>
+
+## OLAP 查詢
+
+OLAP 回饋查詢會針對數值型 `value` 欄位運作。
+
+### `getFeedbackAggregate(args)`
+
+傳回單一彙總回饋值。
+
+```typescript
+const response = await mastraClient.getFeedbackAggregate({
+  feedbackType: 'rating',
+  feedbackSource: 'user',
+  aggregation: 'avg',
+  comparePeriod: 'previous_day',
+})
+```
+
+<PropertiesTable
+  content={[
+  { name: 'feedbackType', type: 'string', description: '要彙總的回饋類型。' },
+  { name: 'feedbackSource', type: 'string', description: '要彙總的回饋來源。', isOptional: true },
+  {
+    name: 'aggregation',
+    type: "'sum' | 'avg' | 'min' | 'max' | 'count' | 'count_distinct' | 'last'",
+    description: '要套用的彙總方式。',
+  },
+  { name: 'filters', type: 'FeedbackFilter', description: '其他 filter。', isOptional: true },
+  {
+    name: 'comparePeriod',
+    type: "'previous_period' | 'previous_day' | 'previous_week'",
+    description: '選用的逐期比較。',
+    isOptional: true,
+  },
+]}
+/>
+
+### `getFeedbackBreakdown(args)`
+
+傳回依維度分組的回饋值。
+
+```typescript
+const response = await mastraClient.getFeedbackBreakdown({
+  feedbackType: 'rating',
+  groupBy: ['entityName'],
+  aggregation: 'avg',
+})
+```
+
+### `getFeedbackTimeSeries(args)`
+
+傳回依時間間隔分桶的回饋值。
+
+```typescript
+const response = await mastraClient.getFeedbackTimeSeries({
+  feedbackType: 'rating',
+  interval: '1h',
+  aggregation: 'avg',
+  groupBy: ['feedbackSource'],
+})
+```
+
+### `getFeedbackPercentiles(args)`
+
+傳回依時間間隔分桶的百分位數值。
+
+```typescript
+const response = await mastraClient.getFeedbackPercentiles({
+  feedbackType: 'rating',
+  percentiles: [0.5, 0.95],
+  interval: '1d',
+})
+```
+
+## 型別
+
+### `FeedbackRecord`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'feedbackId',
+    type: 'string | null',
+    description: '此回饋事件的唯一 ID。省略時，由 server route 產生。',
+    isOptional: true,
+  },
+  { name: 'timestamp', type: 'Date', description: '記錄回饋的時間。' },
+  {
+    name: 'traceId',
+    type: 'string | null',
+    description: '可用時，作為回饋目標定位依據的 trace。',
+    isOptional: true,
+  },
+  {
+    name: 'spanId',
+    type: 'string | null',
+    description: '可用時，作為回饋目標定位依據的 span。',
+    isOptional: true,
+  },
+  {
+    name: 'feedbackSource',
+    type: 'string | null',
+    description: "選用的來源 metadata，例如 'user'、'qa'、'studio' 或 'system'。",
+    isOptional: true,
+  },
+  {
+    name: 'source',
+    type: 'string | null',
+    description: '`feedbackSource` 的已淘汰 alias。',
+    isOptional: true,
+  },
+  {
+    name: 'feedbackType',
+    type: 'string',
+    description: "回饋類型，例如 'rating'、'thumbs'、'comment' 或 'correction'。",
+  },
+  {
+    name: 'value',
+    type: 'number | string',
+    description: '回饋值。數值型值支援彙總、細分、時間序列與百分位數查詢。',
+  },
+  {
+    name: 'comment',
+    type: 'string | null',
+    description: '回饋的其他留言或 context。',
+    isOptional: true,
+  },
+  {
+    name: 'feedbackUserId',
+    type: 'string | null',
+    description: '提供回饋的使用者。',
+    isOptional: true,
+  },
+  {
+    name: 'sourceId',
+    type: 'string | null',
+    description: '此回饋連結之來源記錄的 ID，例如實驗結果 ID。',
+    isOptional: true,
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown> | null',
+    description: '回饋記錄的使用者自訂 metadata。',
+    isOptional: true,
+  },
+]}
+/>
+
+### 共用 context 欄位
+
+回饋記錄可包含共用的可觀測性 context 欄位，用於篩選、分組，以及與 trace、log、指標和分數建立關聯。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'entityType',
+    type: 'EntityType | null',
+    description: '產生 signal 的實體類型。',
+    isOptional: true,
+  },
+  {
+    name: 'entityId',
+    type: 'string | null',
+    description: '產生 signal 之實體的 ID。',
+    isOptional: true,
+  },
+  {
+    name: 'entityName',
+    type: 'string | null',
+    description: '產生 signal 之實體的名稱。',
+    isOptional: true,
+  },
+  {
+    name: 'parentEntityType',
+    type: 'EntityType | null',
+    description: '父實體的實體類型。',
+    isOptional: true,
+  },
+  { name: 'parentEntityId', type: 'string | null', description: '父實體的 ID。', isOptional: true },
+  { name: 'parentEntityName', type: 'string | null', description: '父實體的名稱。', isOptional: true },
+  {
+    name: 'rootEntityType',
+    type: 'EntityType | null',
+    description: '根實體的實體類型。',
+    isOptional: true,
+  },
+  { name: 'rootEntityId', type: 'string | null', description: '根實體的 ID。', isOptional: true },
+  { name: 'rootEntityName', type: 'string | null', description: '根實體的名稱。', isOptional: true },
+  { name: 'userId', type: 'string | null', description: '觸發執行的人類終端使用者。', isOptional: true },
+  {
+    name: 'organizationId',
+    type: 'string | null',
+    description: '多租戶組織或帳戶。',
+    isOptional: true,
+  },
+  { name: 'resourceId', type: 'string | null', description: '較廣泛的資源 context。', isOptional: true },
+  { name: 'runId', type: 'string | null', description: '執行 run 識別碼。', isOptional: true },
+  {
+    name: 'sessionId',
+    type: 'string | null',
+    description: '用於將 trace 分組的 Session 識別碼。',
+    isOptional: true,
+  },
+  { name: 'threadId', type: 'string | null', description: '對話 thread 識別碼。', isOptional: true },
+  { name: 'requestId', type: 'string | null', description: '用於關聯的 HTTP request ID。', isOptional: true },
+  { name: 'environment', type: 'string | null', description: '部署環境。', isOptional: true },
+  { name: 'serviceName', type: 'string | null', description: '服務名稱。', isOptional: true },
+  {
+    name: 'scope',
+    type: 'Record<string, unknown> | null',
+    description: 'Package、應用程式版本或部署 metadata。',
+    isOptional: true,
+  },
+  {
+    name: 'entityVersionId',
+    type: 'string | null',
+    description: '產生 signal 之實體的版本 ID。',
+    isOptional: true,
+  },
+  {
+    name: 'parentEntityVersionId',
+    type: 'string | null',
+    description: '父實體的版本 ID。',
+    isOptional: true,
+  },
+  {
+    name: 'rootEntityVersionId',
+    type: 'string | null',
+    description: '根實體的版本 ID。',
+    isOptional: true,
+  },
+  { name: 'experimentId', type: 'string | null', description: '實驗或 eval run 識別碼。', isOptional: true },
+  {
+    name: 'executionSource',
+    type: 'string | null',
+    description: '執行來源，例如本機、cloud 或 CI。',
+    isOptional: true,
+  },
+  { name: 'tags', type: 'string[] | null', description: '用於篩選的標籤。', isOptional: true },
+]}
+/>
+
+### `FeedbackInput`
+
+請搭配 `mastra.observability.addFeedback()`、`recordedTrace.addFeedback()` 與 `recordedSpan.addFeedback()` 使用 `FeedbackInput`。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'feedbackSource',
+    type: 'string',
+    description: '回饋的選用來源 metadata。',
+    isOptional: true,
+  },
+  { name: 'source', type: 'string', description: '`feedbackSource` 的已淘汰 alias。', isOptional: true },
+  { name: 'feedbackType', type: 'string', description: '要記錄的回饋類型。' },
+  { name: 'value', type: 'number | string', description: '要記錄的回饋值。' },
+  { name: 'comment', type: 'string', description: '其他留言或 context。', isOptional: true },
+  { name: 'feedbackUserId', type: 'string', description: '提供回饋的使用者。', isOptional: true },
+  { name: 'userId', type: 'string', description: '`feedbackUserId` 的已淘汰 alias。', isOptional: true },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown>',
+    description: '其他回饋專屬 metadata。',
+    isOptional: true,
+  },
+  { name: 'experimentId', type: 'string', description: '實驗或 eval run 識別碼。', isOptional: true },
+  {
+    name: 'sourceId',
+    type: 'string',
+    description: '此回饋連結之來源記錄的 ID。',
+    isOptional: true,
+  },
+]}
+/>
+
+### `FeedbackFilter`
+
+請在 `listFeedback()` 與 OLAP 查詢的 `filters` 中使用 `FeedbackFilter`。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'timestamp',
+    type: '{ start?: Date; end?: Date; startExclusive?: boolean; endExclusive?: boolean }',
+    description: '依時間戳記範圍篩選。',
+    isOptional: true,
+  },
+  { name: 'traceId', type: 'string', description: '依 trace ID 篩選。', isOptional: true },
+  { name: 'spanId', type: 'string', description: '依 span ID 篩選。', isOptional: true },
+  {
+    name: 'feedbackType',
+    type: 'string | string[]',
+    description: '依一或多個回饋類型篩選。',
+    isOptional: true,
+  },
+  { name: 'feedbackSource', type: 'string', description: '依回饋來源篩選。', isOptional: true },
+  { name: 'source', type: 'string', description: '`feedbackSource` 的已淘汰 alias。', isOptional: true },
+  {
+    name: 'feedbackUserId',
+    type: 'string',
+    description: '依提供回饋的使用者篩選。',
+    isOptional: true,
+  },
+  { name: 'entityType', type: 'EntityType', description: '依實體類型篩選。', isOptional: true },
+  { name: 'entityName', type: 'string', description: '依實體名稱篩選。', isOptional: true },
+  { name: 'entityVersionId', type: 'string', description: '依實體版本 ID 篩選。', isOptional: true },
+  { name: 'parentEntityType', type: 'EntityType', description: '依父實體類型篩選。', isOptional: true },
+  { name: 'parentEntityName', type: 'string', description: '依父實體名稱篩選。', isOptional: true },
+  {
+    name: 'parentEntityVersionId',
+    type: 'string',
+    description: '依父實體版本 ID 篩選。',
+    isOptional: true,
+  },
+  { name: 'rootEntityType', type: 'EntityType', description: '依根實體類型篩選。', isOptional: true },
+  { name: 'rootEntityName', type: 'string', description: '依根實體名稱篩選。', isOptional: true },
+  { name: 'rootEntityVersionId', type: 'string', description: '依根實體版本 ID 篩選。', isOptional: true },
+  { name: 'userId', type: 'string', description: '依人類終端使用者 ID 篩選。', isOptional: true },
+  { name: 'organizationId', type: 'string', description: '依組織 ID 篩選。', isOptional: true },
+  { name: 'resourceId', type: 'string', description: '依資源 ID 篩選。', isOptional: true },
+  { name: 'runId', type: 'string', description: '依 run ID 篩選。', isOptional: true },
+  { name: 'sessionId', type: 'string', description: '依 session ID 篩選。', isOptional: true },
+  { name: 'threadId', type: 'string', description: '依 thread ID 篩選。', isOptional: true },
+  { name: 'requestId', type: 'string', description: '依 request ID 篩選。', isOptional: true },
+  { name: 'serviceName', type: 'string', description: '依服務名稱篩選。', isOptional: true },
+  { name: 'environment', type: 'string', description: '依環境篩選。', isOptional: true },
+  { name: 'executionSource', type: 'string', description: '依執行來源篩選。', isOptional: true },
+  {
+    name: 'experimentId',
+    type: 'string',
+    description: '依實驗或 eval run 識別碼篩選。',
+    isOptional: true,
+  },
+  {
+    name: 'tags',
+    type: 'string[]',
+    description: '依標籤篩選。相符記錄必須包含所有指定標籤。',
+    isOptional: true,
+  },
+]}
+/>
+
+## HTTP route
+
+| 方法 | 路徑 | 用途 | 權限 |
+| - | - | - | - |
+| `GET` | `/api/observability/feedback` | 列出回饋記錄 | 無衍生權限 |
+| `POST` | `/api/observability/feedback` | 建立回饋記錄 | 無衍生權限 |
+| `POST` | `/api/observability/feedback/aggregate` | 傳回單一彙總值 | `observability:read` |
+| `POST` | `/api/observability/feedback/breakdown` | 依維度將回饋分組 | `observability:read` |
+| `POST` | `/api/observability/feedback/timeseries` | 依時間間隔將回饋分桶 | `observability:read` |
+| `POST` | `/api/observability/feedback/percentiles` | 傳回百分位數序列 | `observability:read` |
+
+## 相關內容
+
+- [回饋指南](/docs/observability/feedback)
+- [Client SDK 可觀測性參考](/reference/client-js/observability)
+- [可觀測性設定](/reference/observability/tracing/configuration)

@@ -1,0 +1,587 @@
+---
+title: "自訂評分器 | Evals"
+packages:
+  - "@mastra/core"
+---
+
+# 自訂評分器
+
+Mastra 提供統一的 `createScorer` 工廠，讓你能在每個步驟中使用 JavaScript 函式或 LLM 提示物件，建立自訂評估邏輯。這項彈性可讓你為評估管線的各個部分選擇最合適的做法。
+
+## 四步驟管線 {#the-four-step-pipeline}
+
+Mastra 中的所有評分器都遵循一致的四步驟評估管線：
+
+1. **preprocess**（選填）：準備或轉換輸入／輸出資料
+1. **analyze**（選填）：執行評估分析並收集洞見
+1. **generateScore**（必填）：將分析轉換為數值分數
+1. **generateReason**（選填）：產生使用者可讀的說明
+
+每個步驟都能使用**函式**或**提示物件**（LLM 評估），讓你能依需求結合確定性演算法與 AI 判斷。
+
+## 函式與提示物件的比較
+
+**函式**使用 JavaScript 實作確定性邏輯，適合：
+
+- 條件明確的演算法式評估
+- 效能至關重要的情境
+- 與現有程式庫整合
+- 一致且可重現的結果
+
+**提示物件**使用 LLM 作為評估判定模型，適合：
+
+- 需要類似人類判斷的主觀評估
+- 難以使用演算法編碼的複雜條件
+- 自然語言理解工作
+- 細緻的內容評估
+
+**「提示物件」的含義：** 該步驟不是函式，而是包含 `description` 與 `createPrompt`（`preprocess`／`analyze` 還包含 `outputSchema`）的物件。此物件會指示 Mastra 為該步驟執行判定 LLM，並將結構化輸出儲存在 `results.<step>StepResult`。
+
+你可以在同一個評分器中混搭不同做法，例如使用函式預先處理資料，再使用 LLM 分析品質。
+
+## 初始化評分器
+
+每個評分器都從 `createScorer` 工廠函式開始。此函式需要 ID 與說明，也可選擇接受型別規格與判定模型設定。
+
+```typescript prettier:false
+import { createScorer } from '@mastra/core/evals';
+
+const glutenCheckerScorer = createScorer({
+  id: 'gluten-checker',
+  description: 'Check if recipes contain gluten ingredients',
+  judge: {                    // Optional: for prompt object steps
+    model: '__GATEWAY_OPENAI_MODEL__',
+    instructions: 'You are a Chef that identifies if recipes contain gluten.'
+  }
+})
+// Chain step methods here
+.preprocess(...)
+.analyze(...)
+.generateScore(...)
+.generateReason(...)
+```
+
+只有計畫在任一步驟中使用提示物件時，才需要判定模型設定。個別步驟可以用自己的判定模型設定覆寫此預設值。
+
+若所有步驟都以函式為基礎，系統就不會呼叫判定模型，也不會有判定模型輸出。若要查看 LLM 輸出，請將至少一個步驟定義為提示物件，並讀取對應的步驟結果（例如 `results.analyzeStepResult`）。
+
+### 最小判定模型範例（提示物件）
+
+此範例在 `analyze` 中使用提示物件，因此會執行判定模型，其結構化輸出可從 `results.analyzeStepResult` 取得。
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+import { z } from 'zod'
+
+const quoteSourcesScorer = createScorer({
+  id: 'quote-sources',
+  description: 'Check if the response includes sources',
+  judge: {
+    model: '__GATEWAY_OPENAI_MODEL_MINI__',
+    instructions: 'You are a strict evaluator.',
+  },
+})
+  .analyze({
+    description: 'Detect whether sources are present',
+    outputSchema: z.object({
+      hasSources: z.boolean(),
+      sources: z.array(z.string()),
+    }),
+    createPrompt: ({ run }) => `
+Does the response contain sources? Extract them as a list.
+
+Response:
+${run.output}
+`,
+  })
+  .generateScore(({ results }) => (results.analyzeStepResult.hasSources ? 1 : 0))
+
+// Run the scorer and inspect judge output
+const result = await quoteSourcesScorer.run({
+  input: 'What is the capital of France?',
+  output: 'Paris is the capital of France [1]. Source: [1] Wikipedia',
+})
+
+console.log(result.score) // 1
+console.log(result.analyzeStepResult) // { hasSources: true, sources: ["Wikipedia"] }
+```
+
+### 用於 Agent 評估的 Agent 型別
+
+建立 Agent 評估用評分器時，請使用 `type: 'agent'`，以確保型別安全，並同時相容於即時 Agent 評分與 Trace 評分。如此便能以同一個評分器評估 Agent 與 Trace：
+
+```typescript
+const myScorer = createScorer({
+  type: 'agent', // Automatically handles agent input/output types
+}).generateScore(({ run, results }) => {
+  // run.output is automatically typed as ScorerRunOutputForAgent
+  // run.input is automatically typed as ScorerRunInputForAgent
+})
+```
+
+## 逐步說明
+
+### preprocess 步驟（選填）
+
+當你需要擷取特定元素、篩選內容，或轉換複雜資料結構時，此步驟會準備輸入／輸出資料。
+
+**函式：** `({ run, results }) => any`
+
+```typescript prettier:false
+const glutenCheckerScorer = createScorer(...)
+.preprocess(({ run }) => {
+  // Extract and clean recipe text
+  const recipeText = run.output.text.toLowerCase();
+  const wordCount = recipeText.split(' ').length;
+
+  return {
+    recipeText,
+    wordCount,
+    hasCommonGlutenWords: /flour|wheat|bread|pasta/.test(recipeText)
+  };
+})
+```
+
+**提示物件：** 使用 `description`、`outputSchema` 與 `createPrompt` 建構 LLM 預先處理流程。
+
+```typescript prettier:false
+const glutenCheckerScorer = createScorer(...)
+.preprocess({
+  description: 'Extract ingredients from the recipe',
+  outputSchema: z.object({
+    ingredients: z.array(z.string()),
+    cookingMethods: z.array(z.string())
+  }),
+  createPrompt: ({ run }) => `
+    Extract all ingredients and cooking methods from this recipe:
+    ${run.output.text}
+
+    Return JSON with ingredients and cookingMethods arrays.
+  `
+})
+```
+
+**資料流：** 後續步驟可透過 `results.preprocessStepResult` 取得結果
+
+### analyze 步驟（選填）
+
+執行核心評估分析，收集將用於評分決策的洞見。
+
+**函式：** `({ run, results }) => any`
+
+```typescript prettier:false
+const glutenCheckerScorer = createScorer({...})
+.preprocess(...)
+.analyze(({ run, results }) => {
+  const { recipeText, hasCommonGlutenWords } = results.preprocessStepResult;
+
+  // Simple gluten detection algorithm
+  const glutenKeywords = ['wheat', 'flour', 'barley', 'rye', 'bread'];
+  const foundGlutenWords = glutenKeywords.filter(word =>
+    recipeText.includes(word)
+  );
+
+  return {
+    isGlutenFree: foundGlutenWords.length === 0,
+    detectedGlutenSources: foundGlutenWords,
+    confidence: hasCommonGlutenWords ? 0.9 : 0.7
+  };
+})
+```
+
+**提示物件：** 使用 `description`、`outputSchema` 與 `createPrompt` 進行 LLM 分析。
+
+```typescript prettier:false
+const glutenCheckerScorer = createScorer({...})
+.preprocess(...)
+.analyze({
+  description: 'Analyze recipe for gluten content',
+  outputSchema: z.object({
+    isGlutenFree: z.boolean(),
+    glutenSources: z.array(z.string()),
+    confidence: z.number().min(0).max(1)
+  }),
+  createPrompt: ({ run, results }) => `
+    Analyze this recipe for gluten content:
+    "${results.preprocessStepResult.recipeText}"
+
+    Look for wheat, barley, rye, and hidden sources like soy sauce.
+    Return JSON with isGlutenFree, glutenSources array, and confidence (0-1).
+  `
+})
+```
+
+**資料流：** 後續步驟可透過 `results.analyzeStepResult` 取得結果
+
+### `generateScore` 步驟（必填）
+
+將分析結果轉換為數值分數。這是管線中唯一的必填步驟。
+
+**函式：** `({ run, results }) => number`
+
+```typescript prettier:false
+const glutenCheckerScorer = createScorer({...})
+.preprocess(...)
+.analyze(...)
+.generateScore(({ results }) => {
+  const { isGlutenFree, confidence } = results.analyzeStepResult;
+
+  // Return 1 for gluten-free, 0 for contains gluten
+  // Weight by confidence level
+  return isGlutenFree ? confidence : 0;
+})
+```
+
+**提示物件：** 如需搭配 generateScore 使用提示物件的詳細資訊，包括必要的 `calculateScore` 函式，請參閱 [`createScorer`](/reference/evals/create-scorer) API 參考。
+
+**資料流：** `generateReason` 可透過 `score` 參數取得分數
+
+### `generateReason` 步驟（選填）
+
+產生使用者可讀的分數說明，適合用於偵錯、透明度或使用者意見回饋。
+
+**函式：** `({ run, results, score }) => string`
+
+```typescript prettier:false
+const glutenCheckerScorer = createScorer({...})
+.preprocess(...)
+.analyze(...)
+.generateScore(...)
+.generateReason(({ results, score }) => {
+  const { isGlutenFree, glutenSources } = results.analyzeStepResult;
+
+  if (isGlutenFree) {
+    return `Score: ${score}. This recipe is gluten-free with no harmful ingredients detected.`;
+  } else {
+    return `Score: ${score}. Contains gluten from: ${glutenSources.join(', ')}`;
+  }
+})
+```
+
+**提示物件：** 使用 `description` 與 `createPrompt` 產生 LLM 說明。
+
+```typescript prettier:false
+const glutenCheckerScorer = createScorer({...})
+.preprocess(...)
+.analyze(...)
+.generateScore(...)
+.generateReason({
+  description: 'Explain the gluten assessment',
+  createPrompt: ({ results, score }) => `
+    Explain why this recipe received a score of ${score}.
+    Analysis: ${JSON.stringify(results.analyzeStepResult)}
+
+    Provide a clear explanation for someone with dietary restrictions.
+  `
+})
+```
+
+## 輸入篩選
+
+Agent 對話可能包含數百則帶有 Tool 呼叫與資料部分的訊息，以及系統中繼資料。大多數評分器只需要其中一部分資料。`prepareRun` 選項會在評分器管線執行前轉換執行資料，以減少雜訊並讓評分器聚焦。
+
+### 使用 `filterRun()` 進行宣告式篩選
+
+[`filterRun()`](/reference/evals/filter-run) 公用程式會依宣告式選項建立 `prepareRun` 函式：
+
+```typescript title="src/mastra/scorers/tool-scorer.ts"
+import { createScorer, filterRun } from '@mastra/core/evals'
+
+const toolScorer = createScorer({
+  id: 'tool-quality',
+  description: 'Evaluates tool usage quality',
+  type: 'agent',
+  prepareRun: filterRun({
+    partTypes: ['tool-invocation', 'text'],
+    maxRememberedMessages: 20,
+  }),
+}).generateScore(({ run }) => {
+  // run.input.rememberedMessages has only tool and text messages, max 20
+  return 1
+})
+```
+
+常用選項包括：
+
+- `partTypes`：只保留部分型別相符的訊息（例如 `'tool-invocation'`、`'text'`、`'reasoning'`）
+- `toolNames`：只保留涉及特定 Tool 的訊息（例如 `['write_file', 'execute_command']`）
+- `maxRememberedMessages`：限制內容視窗大小
+- `dropRequestContext`、`dropGroundTruth`、`dropExpectedTrajectory`：移除未使用的欄位
+
+完整選項清單請參閱 [`filterRun()` 參考](/reference/evals/filter-run)。
+
+### 自訂 `prepareRun` 函式
+
+若邏輯不在 `filterRun()` 涵蓋範圍內，請直接撰寫 `prepareRun` 函式：
+
+```typescript prettier:false
+import { createScorer } from '@mastra/core/evals'
+
+const customScorer = createScorer({
+  id: 'recent-output',
+  description: 'Scores only the last response',
+  type: 'agent',
+  prepareRun: (run) => ({
+    ...run,
+    output: run.output.slice(-1), // Keep only the last message
+    requestContext: undefined,
+  }),
+})
+.generateScore(({ run }) => {
+  return run.output.length > 0 ? 1 : 0
+})
+```
+
+`prepareRun` 函式也可以是非同步函式。
+
+:::note[一律保留系統訊息]
+
+`filterRun()` 絕不會篩除 `systemMessages` 或 `taggedSystemMessages`。它們包含 Agent 指示，是評分所需的重要內容。
+
+:::
+
+## 範例：建立自訂評分器
+
+Mastra 的自訂評分器使用 `createScorer`，包含四個核心元件：
+
+1. [**判定模型設定**](#judge-configuration)
+1. [**分析步驟**](#analysis-step)
+1. [**分數產生**](#score-generation)
+1. [**理由產生**](#reason-generation)
+
+這些元件能讓你使用 LLM 作為判定模型，定義自訂評估邏輯。完整 API 與設定選項請參閱 [createScorer](/reference/evals/create-scorer)。
+
+```typescript title="src/mastra/scorers/gluten-checker.ts"
+import { createScorer } from '@mastra/core/evals'
+import { z } from 'zod'
+
+export const GLUTEN_INSTRUCTIONS = `You are a Chef that identifies if recipes contain gluten.`
+
+export const generateGlutenPrompt = ({
+  output,
+}: {
+  output: string
+}) => `Check if this recipe is gluten-free.
+
+Check for:
+- Wheat
+- Barley
+- Rye
+- Common sources like flour, pasta, bread
+
+Example with gluten:
+"Mix flour and water to make dough"
+Response: {
+  "isGlutenFree": false,
+  "glutenSources": ["flour"]
+}
+
+Example gluten-free:
+"Mix rice, beans, and vegetables"
+Response: {
+  "isGlutenFree": true,
+  "glutenSources": []
+}
+
+Recipe to analyze:
+${output}
+
+Return your response in this format:
+{
+  "isGlutenFree": boolean,
+  "glutenSources": ["list ingredients containing gluten"]
+}`
+
+export const generateReasonPrompt = ({
+  isGlutenFree,
+  glutenSources,
+}: {
+  isGlutenFree: boolean
+  glutenSources: string[]
+}) => `Explain why this recipe is${isGlutenFree ? '' : ' not'} gluten-free.
+
+${glutenSources.length > 0 ? `Sources of gluten: ${glutenSources.join(', ')}` : 'No gluten-containing ingredients found'}
+
+Return your response in this format:
+"This recipe is [gluten-free/contains gluten] because [explanation]"`
+
+export const glutenCheckerScorer = createScorer({
+  id: 'gluten-checker',
+  description: 'Check if the output contains any gluten',
+  judge: {
+    model: '__GATEWAY_OPENAI_MODEL_MINI__',
+    instructions: GLUTEN_INSTRUCTIONS,
+  },
+})
+  .analyze({
+    description: 'Analyze the output for gluten',
+    outputSchema: z.object({
+      isGlutenFree: z.boolean(),
+      glutenSources: z.array(z.string()),
+    }),
+    createPrompt: ({ run }) => {
+      const { output } = run
+      return generateGlutenPrompt({ output: output.text })
+    },
+  })
+  .generateScore(({ results }) => {
+    return results.analyzeStepResult.isGlutenFree ? 1 : 0
+  })
+  .generateReason({
+    description: 'Generate a reason for the score',
+    createPrompt: ({ results }) => {
+      return generateReasonPrompt({
+        glutenSources: results.analyzeStepResult.glutenSources,
+        isGlutenFree: results.analyzeStepResult.isGlutenFree,
+      })
+    },
+  })
+```
+
+### 判定模型設定 {#judge-configuration}
+
+設定 LLM 模型，並將其角色定義為領域專家。
+
+```typescript prettier:false
+judge: {
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  instructions: GLUTEN_INSTRUCTIONS,
+}
+```
+
+### 分析步驟 {#analysis-step}
+
+定義 LLM 應如何分析輸入，以及應傳回何種結構化輸出。
+
+```typescript prettier:false
+.analyze({
+  description: 'Analyze the output for gluten',
+  outputSchema: z.object({
+    isGlutenFree: z.boolean(),
+    glutenSources: z.array(z.string()),
+  }),
+  createPrompt: ({ run }) => {
+    const { output } = run;
+    return generateGlutenPrompt({ output: output.text });
+  },
+})
+```
+
+分析步驟會使用提示物件來：
+
+- 提供清楚的分析工作說明
+- 使用標準 JSON Schema 定義預期輸出結構（包括布林值結果與麩質來源清單）
+- 依輸入內容產生執行階段提示
+
+### 分數產生 {#score-generation}
+
+將 LLM 的結構化分析轉換為數值分數。
+
+```typescript prettier:false
+.generateScore(({ results }) => {
+  return results.analyzeStepResult.isGlutenFree ? 1 : 0;
+})
+```
+
+分數產生函式會取得分析結果並套用業務邏輯，以產生分數。在此情況下，LLM 會直接判定食譜是否不含麩質，因此我們使用該布林值結果：不含麩質為 1，含麩質為 0。
+
+### 理由產生 {#reason-generation}
+
+透過另一次 LLM 呼叫，提供使用者可讀的分數說明。
+
+```typescript prettier:false
+.generateReason({
+  description: 'Generate a reason for the score',
+  createPrompt: ({ results }) => {
+    return generateReasonPrompt({
+      glutenSources: results.analyzeStepResult.glutenSources,
+      isGlutenFree: results.analyzeStepResult.isGlutenFree,
+    });
+  },
+})
+```
+
+理由產生步驟會同時使用布林值結果與分析步驟找出的特定麩質來源，建立說明，協助使用者了解得到該分數的原因。
+
+## 高度不含麩質範例
+
+```typescript title="src/example-high-gluten-free.ts"
+const result = await glutenCheckerScorer.run({
+  input: [{ role: 'user', content: 'Mix rice, beans, and vegetables' }],
+  output: { text: 'Mix rice, beans, and vegetables' },
+})
+
+console.log('Score:', result.score)
+console.log('Gluten sources:', result.analyzeStepResult.glutenSources)
+console.log('Reason:', result.reason)
+```
+
+### 高度不含麩質的輸出
+
+```typescript prettier:false
+{
+  score: 1,
+  analyzeStepResult: {
+    isGlutenFree: true,
+    glutenSources: []
+  },
+  reason: 'This recipe is gluten-free because rice, beans, and vegetables are naturally gluten-free ingredients that are safe for people with celiac disease.'
+}
+```
+
+## 部分含麩質範例
+
+```typescript title="src/example-partial-gluten.ts"
+const result = await glutenCheckerScorer.run({
+  input: [{ role: 'user', content: 'Mix flour and water to make dough' }],
+  output: { text: 'Mix flour and water to make dough' },
+})
+
+console.log('Score:', result.score)
+console.log('Gluten sources:', result.analyzeStepResult.glutenSources)
+console.log('Reason:', result.reason)
+```
+
+### 部分含麩質的輸出
+
+```typescript prettier:false
+{
+  score: 0,
+  analyzeStepResult: {
+    isGlutenFree: false,
+    glutenSources: ['flour']
+  },
+  reason: 'This recipe is not gluten-free because it contains flour. Regular flour is made from wheat and contains gluten, making it unsafe for people with celiac disease or gluten sensitivity.'
+}
+```
+
+## 低度不含麩質範例
+
+```typescript title="src/example-low-gluten-free.ts"
+const result = await glutenCheckerScorer.run({
+  input: [{ role: 'user', content: 'Add soy sauce and noodles' }],
+  output: { text: 'Add soy sauce and noodles' },
+})
+
+console.log('Score:', result.score)
+console.log('Gluten sources:', result.analyzeStepResult.glutenSources)
+console.log('Reason:', result.reason)
+```
+
+### 低度不含麩質的輸出
+
+```typescript prettier:false
+{
+  score: 0,
+  analyzeStepResult: {
+    isGlutenFree: false,
+    glutenSources: ['soy sauce', 'noodles']
+  },
+  reason: 'This recipe is not gluten-free because it contains soy sauce, noodles. Regular soy sauce contains wheat and most noodles are made from wheat flour, both of which contain gluten and are unsafe for people with gluten sensitivity.'
+}
+```
+
+**範例與資源：**
+
+- [createScorer API 參考](/reference/evals/create-scorer)：完整技術文件
+- [內建評分器原始碼](https://github.com/mastra-ai/mastra/tree/main/packages/evals/src/scorers)：可供參考的實際實作

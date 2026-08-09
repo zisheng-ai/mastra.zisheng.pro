@@ -1,0 +1,163 @@
+---
+title: "リファレンス：Memory.summarizeThread() | Memory"
+description: "スレッドの会話を一度の呼び出しで要約し、そこから構造化された値を抽出する Mastra の `Memory.summarizeThread()` メソッドのドキュメントです。"
+packages:
+  - "@mastra/memory"
+---
+
+# Memory.summarizeThread()
+
+`.summarizeThread()` メソッドは、スレッドの会話を一度の呼び出しで要約します。ストレージからスレッドのメッセージを読み込み、[Observational Memory](/reference/memory/observational-memory) を支えるものと同じ Observer の仕組みで要約します。これは、Agent に Observational Memory を関連付けずに使えるスタンドアロン呼び出しです。
+
+メッセージは新しいものからページ単位で読み込まれ、`lastMessages` と `maxInputTokens` によって上限が設定されます。そのため、長いスレッドを要約するときも、履歴全体をストレージから読み込むことはありません。
+
+Memory には何も書き戻されません。要約と抽出された値は、呼び出し元（および各 Extractor の `onExtracted` Hook）へ返されるため、独自のデータベースなど、保存先を自分で決められます。
+
+セッション終了時に、通話終了時の音声通話など、会話全体の要約または構造化された抽出結果が必要な場合に使います。メッセージがすでに手元にある場合（スレッドから読み込まない場合）は、代わりにスタンドアロンの [`summarizeConversation()`](/reference/memory/summarizeConversation) 関数を使います。この関数は `threadId` の代わりに `messages` を指定し、それ以外は同じオプションを受け取ります。
+
+## 使用例
+
+```typescript
+const result = await memory.summarizeThread({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  threadId: 'thread-123',
+  instructions: 'Summarize this voicemail call for the business owner.',
+})
+```
+
+## パラメータ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'threadId',
+    type: 'string',
+    description: '要約するスレッドの一意な識別子。',
+    isOptional: false,
+  },
+  {
+    name: 'model',
+    type: 'string | LanguageModel | DynamicModel',
+    description: "要約を実行するモデル。`'__GATEWAY_OPENAI_MODEL_MINI__'` のようなルーター文字列などを指定します。",
+    isOptional: false,
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    description:
+      'スレッドを所有するリソースの ID。指定すると、スレッドの所有権を検証します。Extractor の Context にも渡されます。',
+    isOptional: true,
+  },
+  {
+    name: 'lastMessages',
+    type: 'number',
+    description:
+      'スレッドの最後の N 件のメッセージだけを要約します。デフォルトではスレッド全体が読み込まれますが、`maxInputTokens` によって上限が設定されます。',
+    isOptional: true,
+  },
+  {
+    name: 'maxInputTokens',
+    type: 'number',
+    description:
+      '収集したメッセージがこの推定 Token 数を超えた時点で、古いメッセージの読み込みを停止します。最新のメッセージは必ず含まれます。',
+    isOptional: true,
+    defaultValue: '1000000',
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description:
+      '要約対象の重点や要約の対象読者など、Summarizer のシステムプロンプトに追加する指示。',
+    isOptional: true,
+  },
+  {
+    name: 'extract',
+    type: 'Extractor[]',
+    description:
+      '会話に対して実行する Extractor。Zod スキーマを持つ Extractor は、後続の構造化出力呼び出しとして実行されます。スキーマのない Extractor はインラインで抽出されます。各 Extractor の `onExtracted` Hook は、抽出された値を受け取って実行されます。',
+    isOptional: true,
+  },
+  {
+    name: 'requestContext',
+    type: 'RequestContext',
+    description: 'Summarizer モデルと Extractor Hook に転送する Request Context。',
+    isOptional: true,
+  },
+  {
+    name: 'abortSignal',
+    type: 'AbortSignal',
+    description: '要約呼び出しをキャンセルするための Signal。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'summary',
+    type: 'string',
+    description: '会話から抽出・集約された観察結果。情報量の多い箇条書き形式で返されます。',
+  },
+  {
+    name: 'extracted',
+    type: 'Record<string, unknown>',
+    description: '`extract` の Extractor が生成した値。Extractor の slug をキーとします。',
+  },
+  {
+    name: 'extractionFailures',
+    type: '{ slug: string; error: string }[]',
+    description:
+      '有効な値を生成できなかった Extractor とその理由。1 つ以上の Extractor が失敗した場合にのみ存在します。',
+  },
+  {
+    name: 'usage',
+    type: '{ inputTokens?: number; outputTokens?: number; totalTokens?: number }',
+    description: '要約呼び出しの Token 使用量。',
+  },
+]}
+/>
+
+## 詳細な使用例
+
+次の例では、終了した音声通話を要約し、構造化レコードをアプリケーション独自のデータベースへ保存します。
+
+```typescript title="src/call-summary.ts"
+import { Extractor } from '@mastra/memory'
+import { z } from 'zod'
+import { memory } from './mastra/memory'
+import { callRecords } from './db'
+
+const callSummary = new Extractor({
+  name: 'call-summary',
+  instructions: 'Return a concise summary of the call.',
+  schema: z.object({
+    summary: z.string(),
+    sentiment: z.enum(['positive', 'neutral', 'negative']),
+    requestedServices: z.array(z.string()),
+  }),
+  metadataKeyPath: false, // don't persist into memory metadata — the hook owns storage
+  onExtracted: async ({ current, threadId, resourceId }) => {
+    await callRecords.upsert({ callId: threadId, callerId: resourceId, record: current })
+  },
+})
+
+export async function onCallEnd(threadId: string, resourceId: string) {
+  await memory.summarizeThread({
+    model: '__GATEWAY_OPENAI_MODEL_MINI__',
+    threadId,
+    resourceId,
+    instructions: 'Summarize this voicemail call for the business owner.',
+    extract: [callSummary],
+  })
+}
+```
+
+### 関連項目
+
+- [summarizeConversation()](/reference/memory/summarizeConversation)
+- [Memory クラスのリファレンス](/reference/memory/memory-class)
+- [Observational Memory](/reference/memory/observational-memory)
+- [.recall()](/reference/memory/recall)

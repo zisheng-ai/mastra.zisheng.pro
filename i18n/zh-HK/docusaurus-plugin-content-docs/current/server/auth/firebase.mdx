@@ -1,0 +1,302 @@
+---
+title: "Firebase | Auth"
+description: "`@mastra/auth-firebase` 依賴套件的文件；此依賴套件使用 Firebase Authentication 驗證 Mastra 應用程式。"
+packages:
+  - "@mastra/auth-firebase"
+  - "@mastra/client-js"
+  - "@mastra/core"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Firebase
+
+`@mastra/auth-firebase` 依賴套件使用 Firebase Authentication 為 Mastra 提供驗證。它會使用 Firebase ID 權杖核實傳入請求，並透過 `auth` 選項與 Mastra 伺服器整合。
+
+## 前置條件
+
+此範例使用 Firebase Authentication。請務必：
+
+1. 在 [Firebase Console](https://console.firebase.google.com/) 建立 Firebase 項目
+1. 啟用 Authentication，並設定你偏好的登入方式（Google、電郵／密碼等）
+1. 在 Project Settings > Service Accounts 產生服務帳戶金鑰
+1. 下載服務帳戶 JSON 檔案
+
+```env title=".env"
+FIREBASE_SERVICE_ACCOUNT=/path/to/your/service-account-key.json
+FIRESTORE_DATABASE_ID=(default)
+# Alternative environment variable names:
+# FIREBASE_DATABASE_ID=(default)
+```
+
+:::note
+
+請妥善保管服務帳戶 JSON 檔案，切勿將其提交至版本控制系統。
+
+:::
+
+## 安裝
+
+使用 `MastraAuthFirebase` 類別前，必須先安裝 `@mastra/auth-firebase` 依賴套件。
+
+```bash npm2yarn
+npm install @mastra/auth-firebase@latest
+```
+
+## 使用範例
+
+### 使用環境變數的基本用法
+
+如已設定所需的環境變數（`FIREBASE_SERVICE_ACCOUNT` 及 `FIRESTORE_DATABASE_ID`），便可在不傳入任何建構函數引數的情況下初始化 `MastraAuthFirebase`。此類別會自動讀取這些環境變數作為設定：
+
+```typescript {2,7} title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthFirebase } from '@mastra/auth-firebase'
+
+// Automatically uses FIREBASE_SERVICE_ACCOUNT and FIRESTORE_DATABASE_ID env vars
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthFirebase(),
+  },
+})
+```
+
+### 自訂設定
+
+```typescript {2,6-9} title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthFirebase } from '@mastra/auth-firebase'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthFirebase({
+      serviceAccount: '/path/to/service-account.json',
+      databaseId: 'your-database-id',
+    }),
+  },
+})
+```
+
+## 設定
+
+`MastraAuthFirebase` 類別可透過建構函數選項或環境變數設定。
+
+### 環境變數
+
+- `FIREBASE_SERVICE_ACCOUNT`：Firebase 服務帳戶 JSON 檔案的路徑
+- `FIRESTORE_DATABASE_ID` 或 `FIREBASE_DATABASE_ID`：Firestore 資料庫 ID
+
+:::note
+
+如未提供建構函數選項，此類別會自動讀取這些環境變數。因此，只要環境變數設定正確，便可呼叫 `new MastraAuthFirebase()` 而無須傳入任何引數。
+
+:::
+
+### 使用者授權
+
+`MastraAuthFirebase` 預設使用 Firestore 管理使用者存取權。它預期有一個 `user_access` 集合，當中的文件以使用者 UID 作為索引鍵。此集合中是否存在相應文件，會決定使用者是否獲得授權。
+
+```text title="firestore-structure.txt"
+user_access/
+  {user_uid_1}/     // Document exists = user authorized
+  {user_uid_2}/     // Document exists = user authorized
+```
+
+如要自訂使用者授權，請提供自訂的 `authorizeUser` 函數：
+
+```typescript title="src/mastra/auth.ts"
+import { MastraAuthFirebase } from '@mastra/auth-firebase'
+
+const firebaseAuth = new MastraAuthFirebase({
+  authorizeUser: async user => {
+    // Custom authorization logic
+    return user.email?.endsWith('@yourcompany.com') || false
+  },
+})
+```
+
+如要查看所有可用設定選項，請參閱 [MastraAuthFirebase](/reference/auth/firebase)。
+
+## 用戶端設定
+
+使用 Firebase Auth 時，你需要在用戶端初始化 Firebase、驗證使用者，並取得其 ID 權杖以傳入 Mastra 請求。
+
+### 在用戶端設定 Firebase
+
+首先，在用戶端應用程式中初始化 Firebase：
+
+```typescript title="lib/firebase.ts"
+import { initializeApp } from 'firebase/app'
+import { getAuth, GoogleAuthProvider } from 'firebase/auth'
+
+const firebaseConfig = {
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+}
+
+const app = initializeApp(firebaseConfig)
+export const auth = getAuth(app)
+export const googleProvider = new GoogleAuthProvider()
+```
+
+### 驗證使用者並取得權杖
+
+使用 Firebase Authentication 讓使用者登入並取得其 ID 權杖：
+
+```typescript title="lib/auth.ts"
+import { signInWithPopup, signOut, User } from 'firebase/auth'
+import { auth, googleProvider } from './firebase'
+
+export const signInWithGoogle = async () => {
+  try {
+    const result = await signInWithPopup(auth, googleProvider)
+    return result.user
+  } catch (error) {
+    console.error('Error signing in:', error)
+    throw error
+  }
+}
+
+export const getIdToken = async (user: User) => {
+  try {
+    const idToken = await user.getIdToken()
+    return idToken
+  } catch (error) {
+    console.error('Error getting ID token:', error)
+    throw error
+  }
+}
+
+export const signOutUser = async () => {
+  try {
+    await signOut(auth)
+  } catch (error) {
+    console.error('Error signing out:', error)
+    throw error
+  }
+}
+```
+
+:::note
+
+如要了解電郵／密碼、電話驗證等其他驗證方法，請參閱 [Firebase 文件](https://firebase.google.com/docs/auth)。
+
+:::
+
+## 設定 `MastraClient`
+
+啟用 `auth` 後，所有透過 `MastraClient` 發出的請求都必須在 `Authorization` 標頭中包含有效的 Firebase ID 權杖：
+
+```typescript {6} title="lib/mastra/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const createMastraClient = (idToken: string) => {
+  return new MastraClient({
+    baseUrl: 'https://<mastra-api-url>',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+    },
+  })
+}
+```
+
+:::info
+
+在 Authorization 標頭中，ID 權杖前必須加上 `Bearer`。
+
+如要查看更多設定選項，請參閱 [Mastra Client SDK](/docs/server/mastra-client)。
+
+:::
+
+### 發出已驗證請求
+
+使用 Firebase ID 權杖設定 `MastraClient` 後，即可傳送已驗證請求：
+
+<Tabs>
+  <TabItem value="react" label="React">
+    ```tsx title="src/components/test-agent.tsx"
+    'use client'
+
+    import { useAuthState } from 'react-firebase-hooks/auth'
+    import { MastraClient } from '@mastra/client-js'
+    import { auth } from '../lib/firebase'
+    import { getIdToken } from '../lib/auth'
+
+    export const TestAgent = () => {
+      const [user] = useAuthState(auth)
+
+      async function handleClick() {
+        if (!user) return
+
+        const token = await getIdToken(user)
+        const client = createMastraClient(token)
+
+        const weatherAgent = client.getAgent('weatherAgent')
+        const response = await weatherAgent.generate("What's the weather like in New York")
+
+        console.log({ response })
+      }
+
+      return (
+        <button onClick={handleClick} disabled={!user}>
+          Test Agent
+        </button>
+      )
+    }
+    ```
+  </TabItem>
+
+  <TabItem value="nodejs" label="Node.js">
+    ```typescript title="server.js"
+    const express = require('express')
+    const admin = require('firebase-admin')
+    const { MastraClient } = require('@mastra/client-js')
+
+    // Initialize Firebase Admin
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        // Your service account credentials
+      }),
+    })
+
+    const app = express()
+    app.use(express.json())
+
+    app.post('/generate', async (req, res) => {
+      try {
+        const { idToken } = req.body
+
+        // Verify the token
+        await admin.auth().verifyIdToken(idToken)
+
+        const mastra = new MastraClient({
+          baseUrl: 'http://localhost:4111',
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+          },
+        })
+
+        const weatherAgent = mastra.getAgent('weatherAgent')
+        const response = await weatherAgent.generate("What's the weather like in Nairobi")
+
+        res.json({ response: response.text })
+      } catch (error) {
+        res.status(401).json({ error: 'Unauthorized' })
+      }
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="curl" label="cURL">
+    ```bash
+    curl -X POST http://localhost:4111/api/agents/weatherAgent/generate \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer <your-firebase-id-token>" \
+      -d '{
+        "messages": "Weather in London"
+      }'
+    ```
+  </TabItem>
+</Tabs>

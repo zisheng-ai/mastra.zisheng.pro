@@ -1,0 +1,221 @@
+---
+title: "參考：createCodeMode() | Tools 與 MCP"
+description: "createCodeMode() 的 API 參考，用於在 Sandbox 中執行涉及多個 Tool 的運算。"
+packages:
+  - "@mastra/core"
+---
+
+# createCodeMode()
+
+**新增於：** `@mastra/core@1.38.0`
+
+`createCodeMode()` 函數會傳回一個 Tool 及產生的指示，讓 Agent 將涉及多個 Tool 的運算作為單一 TypeScript 函數執行。產生的代碼會在 Workspace Sandbox 中執行，而每次 `external_*` 呼叫都會在主機上執行實際的 Tool，並套用驗證、請求上下文及追蹤。
+
+如需概念概覽，請參閱[代碼模式](/docs/agents/code-mode)。
+
+## 使用範例
+
+建立代碼模式 Tool，將產生的指示加入 Agent，並以相同 id 註冊傳回的 Tool。
+
+```typescript title="src/mastra/agents/shop-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createCodeMode, createTool } from '@mastra/core/tools'
+import { LocalSandbox } from '@mastra/core/workspace'
+import { z } from 'zod'
+
+const getTopProducts = createTool({
+  id: 'getTopProducts',
+  description: 'Get top selling products',
+  inputSchema: z.object({ limit: z.number() }),
+  outputSchema: z.object({
+    products: z.array(z.object({ id: z.string(), name: z.string(), totalSales: z.number() })),
+  }),
+  execute: async ({ limit }) => fetchTopProducts(limit),
+})
+
+const getProductRatings = createTool({
+  id: 'getProductRatings',
+  description: 'Get ratings for a product',
+  inputSchema: z.object({ productId: z.string() }),
+  outputSchema: z.object({ ratings: z.array(z.object({ score: z.number() })) }),
+  execute: async ({ productId }) => fetchRatings(productId),
+})
+
+const { tool, instructions } = createCodeMode({
+  tools: { getTopProducts, getProductRatings },
+  sandbox: new LocalSandbox(),
+})
+
+export const shopAgent = new Agent({
+  id: 'shop-assistant',
+  name: 'shop-assistant',
+  instructions: ['You are a helpful shopping assistant.', instructions],
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { execute_typescript: tool },
+})
+```
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'config',
+    type: 'CodeModeConfig',
+    description: '代碼模式 Tool 及產生指示的設定。',
+    properties: [
+      {
+        type: 'CodeModeConfig',
+        parameters: [
+          {
+            name: 'tools',
+            type: 'ToolsInput',
+            description:
+              '以 `external_<id>` 函數形式向產生代碼公開的 Tools。只可呼叫這些 Tools。',
+          },
+          {
+            name: 'sandbox',
+            type: 'WorkspaceSandbox',
+            description:
+              '用於執行產生代碼的 Sandbox。除非 Agent 在提供 Sandbox 的 Workspace 中執行，或傳輸本身提供執行邊界（例如 `IsolatedVmCodeModeTransport`），否則必須設定。傳入 `new LocalSandbox()` 可明確在主機上執行。',
+            isOptional: true,
+          },
+          {
+            name: 'timeout',
+            type: 'number',
+            description: '執行逾時時間（毫秒）。',
+            isOptional: true,
+            defaultValue: '30000',
+          },
+          {
+            name: 'id',
+            type: 'string',
+            description: '產生的 Tool id。',
+            isOptional: true,
+            defaultValue: 'execute_typescript',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'transport',
+    type: 'CodeModeTransport',
+    description:
+      '可選的傳輸實作，用於在 Sandbox 中執行產生的代碼。預設傳輸會透過 Workspace Sandbox 的程序 API 使用 stdio JSON-RPC。宣告 `requiresSandbox: false` 的傳輸（例如 [IsolatedVmCodeModeTransport](/reference/tools/isolated-vm-transport)）無需 Sandbox 即可執行。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 傳回值
+
+傳回 `CodeModeResult` 物件。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'tool',
+    type: 'Tool<any, any>',
+    description: '產生的代碼模式 Tool。其 id 預設為 `execute_typescript`。',
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description: '為已設定 Tools 產生的模型指示，當中包含具型別的 `external_*` 宣告。',
+  },
+]}
+/>
+
+## CodeModeToolResult
+
+產生的 Tool 會傳回 `CodeModeToolResult`。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'success',
+    type: 'boolean',
+    description: '產生的代碼是否在沒有拋出例外的情況下完成執行。',
+  },
+  {
+    name: 'result',
+    type: 'unknown',
+    description: '產生的代碼所傳回的值。',
+    isOptional: true,
+  },
+  {
+    name: 'logs',
+    type: 'string[]',
+    description:
+      '依次擷取來自 `console.log`、`console.info`、`console.warn` 及 `console.error` 的控制台輸出。',
+    isOptional: true,
+  },
+  {
+    name: 'error',
+    type: '{ message: string; name?: string; line?: number }',
+    description: '產生的代碼拋出例外或無法執行時的錯誤詳情。',
+    isOptional: true,
+    properties: [
+      {
+        type: '{ message: string; name?: string; line?: number }',
+        parameters: [
+          {
+            name: 'message',
+            type: 'string',
+            description: '錯誤訊息。',
+          },
+          {
+            name: 'name',
+            type: 'string',
+            description: '錯誤名稱（如有）。',
+            isOptional: true,
+          },
+          {
+            name: 'line',
+            type: 'number',
+            description: '與失敗相關的行號（如有）。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 檢視指示
+
+使用 `createCodeModeInstructions()` 檢視為一組 Tools 產生的確切提示內容。
+
+```typescript title="src/mastra/tools/code-mode-instructions.ts"
+import { createCodeModeInstructions } from '@mastra/core/tools'
+
+console.log(
+  createCodeModeInstructions({
+    tools: { getTopProducts, getProductRatings },
+  }),
+)
+```
+
+指示包含使用規範，以及每個已設定 Tool 各一行具型別的 `declare function external_<id>(...)`。Tool id 會經過清理，轉換成有效的 TypeScript 函數名稱；如清理後的名稱發生衝突，便會拋出錯誤。
+
+## createCodeModeTool()
+
+如果只需要 Tool，並希望分開管理指示，請使用 `createCodeModeTool()`。大多數 Agent 應使用 `createCodeMode()`，讓 Tool 與相符的指示保持在一起。
+
+```typescript title="src/mastra/tools/code-mode-tool.ts"
+import { createCodeModeTool } from '@mastra/core/tools'
+import { LocalSandbox } from '@mastra/core/workspace'
+
+export const codeModeTool = createCodeModeTool({
+  tools: { getTopProducts, getProductRatings },
+  sandbox: new LocalSandbox(),
+})
+```
+
+## 相關內容
+
+- [代碼模式](/docs/agents/code-mode)
+- [createTool()](/reference/tools/create-tool)
+- [Workspace 概覽](/docs/workspace/overview)

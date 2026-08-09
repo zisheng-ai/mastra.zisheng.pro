@@ -1,0 +1,380 @@
+---
+title: "参考：PlatformSandbox | Workspace"
+description: "用于在 Mastra Platform 环境中执行命令的 PlatformSandbox Provider 文档。"
+packages:
+  - "@mastra/platform-workspace"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# PlatformSandbox
+
+用于在 Mastra Platform 环境中预置 Sandbox 的 client。每个 `PlatformSandbox` 实例拥有一个远程 Sandbox：`start()` 负责预置，`executeCommand()` 在其中运行命令，`destroy()` 则将其拆除。若要拥有更多远程 Sandbox，请构造更多实例。可以使用 `clone()` 从已配置模板派生实例（请参阅[克隆 Sandbox fleet](#cloning-for-a-fleet-of-sandboxes)）。
+
+Sandbox 从预构建的 recipe checkpoint 启动，其中已安装 Python 3、Node 22、TypeScript、tsx 及常用构建工具。传入稳定的 `id` 即可启用 [checkpoint 恢复](#checkpoint-recovery)，使新 Sandbox 从先前 Sandbox 的文件系统启动。
+
+相关 Provider：用于自托管 Railway Sandbox 的 [`RailwaySandbox`](/reference/workspace/railway-sandbox)，以及用于本地 Sandbox 的 [`LocalSandbox`](/reference/workspace/local-sandbox)。
+
+:::info
+
+有关接口详情，请参阅 [WorkspaceSandbox 接口](/reference/workspace/sandbox)。
+
+:::
+
+## 安装
+
+```bash npm2yarn
+npm install @mastra/platform-workspace
+```
+
+配置 Platform 凭据。Access token、project ID 和 environment ID 都会回退到环境变量，因此 Mastra Platform 部署可以不传任何构造函数选项。
+
+<Tabs>
+  <TabItem value="env-file" label=".env 文件">
+    ```bash
+    MASTRA_PLATFORM_ACCESS_TOKEN=your-platform-access-token
+    MASTRA_PROJECT_ID=your-project-id
+    MASTRA_ENVIRONMENT_ID=your-environment-id
+    ```
+  </TabItem>
+
+  <TabItem value="constructor" label="构造函数">
+    ```typescript
+    new PlatformSandbox({
+      accessToken: 'your-platform-access-token',
+      projectId: 'your-project-id',
+      environmentId: 'your-environment-id',
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+在 Mastra Platform 部署中，`MASTRA_PLATFORM_ACCESS_TOKEN`、`MASTRA_PROJECT_ID` 和 `MASTRA_ENVIRONMENT_ID` 会自动注入，因此调用构造函数时可以不传选项。对于本地开发，`MASTRA_PLATFORM_ACCESS_TOKEN` 可以使用组织设置页面中 **API Tokens** 下的 `sk_` API token。
+
+## 用法
+
+将 `PlatformSandbox` 添加到 Workspace，并将其分配给 Agent：
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Workspace } from '@mastra/core/workspace'
+import { PlatformSandbox } from '@mastra/platform-workspace'
+
+const workspace = new Workspace({
+  sandbox: new PlatformSandbox({
+    // accessToken, projectId, environmentId all fall back to env vars
+    idleTimeoutMinutes: 30,
+  }),
+})
+
+const agent = new Agent({
+  id: 'code-agent',
+  name: 'Code Agent',
+  instructions: 'You are a coding assistant working in this workspace.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+  workspace,
+})
+
+const response = await agent.generate(
+  'Print "Hello, world!" and show the current working directory.',
+)
+
+console.log(response.text)
+```
+
+### 私有网络
+
+将 `networkIsolation` 设为 `PRIVATE`，即可加入环境的私有网络，并访问同一 Mastra Platform 环境中运行的其他服务：
+
+```typescript
+const workspace = new Workspace({
+  sandbox: new PlatformSandbox({
+    networkIsolation: 'PRIVATE',
+  }),
+})
+```
+
+默认的 `ISOLATED` 模式只允许访问外部互联网，不提供私有网络连接。
+
+### 重新连接正在运行的 Sandbox
+
+传入现有 `sandboxId` 可重新连接实时 Sandbox，而不是创建新 Sandbox：
+
+```typescript
+const sandbox = new PlatformSandbox({
+  sandboxId: 'sbx_abc123',
+})
+await sandbox.start()
+
+const result = await sandbox.executeCommand('cat', ['/workspace/state.json'])
+```
+
+设置 `sandboxId` 后，由于 Sandbox 已经存在，因此不需要 `environmentId`。
+
+### Checkpoint 恢复
+
+构造函数的 `id`（显式指定或自动生成）会在 `POST /sandbox` 时作为建议性 recovery key 发送到 Platform：
+
+- 如果 Platform 识别出先前会话中的 `id`，新 Sandbox 会从先前 Sandbox 文件系统的最新 checkpoint 启动，而不是从基础 recipe 启动。
+- 如果 Platform 无法识别 `id`，则会从基础 recipe 启动全新的 Sandbox。自动生成的 id 永远不会匹配，因此省略 `id` 会禁用 checkpoint 恢复。
+
+传入稳定的 `id`，即可跨会话或跨 `destroy()`/`start()` 周期保留 Sandbox 文件系统：
+
+```typescript
+const sandbox = new PlatformSandbox({
+  id: `project-${projectId}`,
+})
+await sandbox.start() // Boots from the most recent checkpoint for this id, or fresh if unknown
+```
+
+Checkpoint 恢复的粒度比重新连接 `sandboxId` 更粗。通过 `sandboxId` 重新连接会加入完全相同的实时 Sandbox 及其中运行的进程。Checkpoint 恢复则会构造一个全新的 Sandbox，并从 Platform 为此前具有该 `id` 的 Sandbox 捕获的最新 checkpoint 中恢复文件系统。运行中的进程以及最新 checkpoint 之后的文件系统写入不会恢复。
+
+每个 `id` 映射到一个独立的文件系统。对互不相关的 Sandbox 重用同一个 `id`，会导致 Platform 使用彼此的 checkpoint 来启动它们。
+
+### 为 Sandbox fleet 执行克隆
+
+`clone()` 返回一个独立的同级 `PlatformSandbox`。它继承凭据和默认值（access token、project、environment、网络隔离、超时、指令、env、空闲超时），同时支持按实例覆盖。返回的 Sandbox 尚未启动，会在自身调用 `start()` 时进行预置，因此 `clone()` 不会执行 I/O：
+
+```typescript
+const template = new PlatformSandbox({
+  networkIsolation: 'PRIVATE',
+  idleTimeoutMinutes: 30,
+})
+
+const perProject = template.clone({ id: `project-${projectId}` })
+await perProject.start()
+```
+
+将 `clone()` 与各克隆实例稳定的 `id` 结合使用，可让每个克隆实例独立启用 [checkpoint 恢复](#checkpoint-recovery)。
+
+### 执行命令
+
+`executeCommand` 在远程 Sandbox 上运行命令并返回输出。通过 `args` 传入参数，可对参数安全地添加 shell 引号：
+
+```typescript
+const result = await sandbox.executeCommand('python', ['analyze.py'], {
+  timeout: 30_000,
+  cwd: '/workspace',
+  env: { INPUT: 'repo' },
+})
+
+console.log(result.stdout)
+console.log(result.exitCode)
+```
+
+:::warning
+
+`command` 参数是 shell 字符串，会逐字拼接到远程 shell 中。这样可以使用管道、重定向和命令串联（`ls -la | grep foo`），但不受信任的输入必须通过 `args` 传入（会安全加引号），或由调用方添加 shell 引号。不受信任的 `command` 值会允许在 Sandbox 中执行任意 shell 命令。
+
+:::
+
+## 构造函数参数
+
+<PropertiesTable
+  content={[
+  {
+    name: 'accessToken',
+    type: 'string',
+    description: 'Platform access token。未提供时回退到 MASTRA_PLATFORM_ACCESS_TOKEN 环境变量。',
+    isOptional: true,
+  },
+  {
+    name: 'projectId',
+    type: 'string',
+    description: 'Platform project ID。未提供时回退到 MASTRA_PROJECT_ID 环境变量。',
+    isOptional: true,
+  },
+  {
+    name: 'environmentId',
+    type: 'string',
+    description:
+      'Sandbox 所属的 Platform environment ID。未提供时回退到 MASTRA_ENVIRONMENT_ID 环境变量。除非传入 sandboxId，否则必填。',
+    isOptional: true,
+  },
+  {
+    name: 'sandboxId',
+    type: 'string',
+    description: '要重新连接的现有 Sandbox ID，用于替代创建新 Sandbox。设置后不需要 environmentId。',
+    isOptional: true,
+  },
+  {
+    name: 'idleTimeoutMinutes',
+    type: 'number',
+    description: 'Platform 销毁 Sandbox 前，在无活动情况下让 Sandbox 保持运行的时长。',
+    isOptional: true,
+  },
+  {
+    name: 'networkIsolation',
+    type: "'ISOLATED' | 'PRIVATE'",
+    description: "网络模式。'ISOLATED'（默认）只允许访问外部互联网；'PRIVATE' 会加入 Platform environment 的私有网络。",
+    isOptional: true,
+  },
+  {
+    name: 'env',
+    type: 'Record<string, string>',
+    description: '创建 Sandbox 时固化到其中的环境变量。也可以将每条命令的环境变量传给 executeCommand。',
+    isOptional: true,
+  },
+  {
+    name: 'timeout',
+    type: 'number',
+    description: '默认命令执行超时时间（毫秒）。可通过每次调用的 ExecuteCommandOptions.timeout 覆盖。',
+    isOptional: true,
+  },
+  {
+    name: 'instructions',
+    type: 'string | ((opts: { defaultInstructions: string; requestContext?: RequestContext }) => string)',
+    description:
+      'getInstructions() 返回的自定义指令。字符串会完全替换默认值；函数会接收默认值，并可按请求进行扩展或自定义。',
+    isOptional: true,
+  },
+  {
+    name: 'id',
+    type: 'string',
+    description:
+      '此 Sandbox 实例的唯一标识符。会作为建议性 recovery key 发送到 Platform：如果 Platform 识别出先前 Sandbox 的 id，新 Sandbox 会从该 Sandbox 的最新 checkpoint 启动，而不是从基础 recipe 启动。未知 id 会启动全新 Sandbox。省略时自动生成，这会禁用 checkpoint 恢复。',
+    isOptional: true,
+    defaultValue: '自动生成',
+  },
+  {
+    name: 'fetch',
+    type: 'typeof fetch',
+    description: '自定义 fetch 实现，主要用于测试。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 属性
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'Sandbox 实例标识符。',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: "Provider 名称（'PlatformSandbox'）。",
+  },
+  {
+    name: 'provider',
+    type: 'string',
+    description: "Provider 标识符（'platform'）。",
+  },
+  {
+    name: 'status',
+    type: 'ProviderStatus',
+    description:
+      "'pending' | 'initializing' | 'ready' | 'starting' | 'running' | 'stopping' | 'stopped' | 'destroying' | 'destroyed' | 'error'。",
+  },
+  {
+    name: 'processes',
+    type: 'PlatformProcessManager',
+    description: '后台进程管理器。请参阅 [SandboxProcessManager 参考](/reference/workspace/process-manager)。',
+  },
+]}
+/>
+
+## 方法
+
+<PropertiesTable
+  content={[
+  {
+    name: 'start',
+    type: '() => Promise<void>',
+    description:
+      '预置远程 Sandbox；如果构造函数传入了 sandboxId，则重新连接。Sandbox 运行后，此操作具备幂等性。如果重新连接的目标已销毁，则会改为预置全新 Sandbox。',
+  },
+  {
+    name: 'destroy',
+    type: '() => Promise<void>',
+    description:
+      '拆除远程 Sandbox，并清除缓存的 exec lease。后续调用 start() 会预置全新 Sandbox（设置稳定 id 时则从 checkpoint 恢复）。',
+  },
+  {
+    name: 'stop',
+    type: '() => Promise<void>',
+    description: 'destroy() 的别名。',
+  },
+  {
+    name: 'executeCommand',
+    type: '(command: string, args?: string[], options?: ExecuteCommandOptions) => Promise<CommandResult>',
+    description:
+      '在远程 Sandbox 上运行命令，并返回 stdout、stderr、exitCode 和 executionTimeMs。command 是 shell 字符串，args 会安全地添加 shell 引号。',
+  },
+  {
+    name: 'clone',
+    type: '(options?: SandboxCloneOptions) => PlatformSandbox',
+    description:
+      '构造尚未启动的同级 PlatformSandbox，它会继承凭据和默认值，同时支持按实例覆盖（id、sandboxId、env、idleTimeoutMinutes）。不执行 I/O。可用于从一个已配置模板构建由多个独立 Sandbox 组成的 fleet。',
+  },
+  {
+    name: 'getInfo',
+    type: '() => Promise<SandboxInfo>',
+    description:
+      '返回 Sandbox 的 Platform id、Provider、状态、createdAt 和元数据（sandboxId、providerResourceId、platformStatus）。',
+  },
+  {
+    name: 'getInstructions',
+    type: '(opts?: { requestContext?: RequestContext }) => string',
+    description:
+      '返回 Workspace 在 Tool 描述中呈现的 Sandbox 指令。遵循构造函数的 instructions 选项；否则返回 Platform 默认指令，其中会在运行时包含当前远程 Sandbox id。',
+  },
+]}
+/>
+
+## 错误
+
+Platform API 失败会抛出 `PlatformApiError`。结构化 `{ error: { message, type } }` 响应会解析为 `.code`（机器可读类型）和 `.proxyMessage`（供人阅读的字符串）；原始响应正文仍可通过 `.body` 获取：
+
+```typescript
+import { PlatformApiError } from '@mastra/platform-workspace'
+
+try {
+  await sandbox.executeCommand('cat', ['/missing.txt'])
+} catch (err) {
+  if (err instanceof PlatformApiError) {
+    if (err.code === 'not_found') {
+      // handle missing resource
+    } else if (err.code === 'authentication_error') {
+      // refresh token
+    }
+    console.error(err.status, err.code, err.proxyMessage)
+  }
+}
+```
+
+当响应正文不是 JSON 时（例如 load balancer 返回 HTML 502），`code` 和 `proxyMessage` 为 `undefined`。
+
+`executeCommand` 通过 direct-exec data plane（连接到 Railway tcp-proxy 的 WebSocket）运行；发生不可恢复的故障时，它还可能抛出两种带类型的 Sandbox 错误：
+
+```typescript
+import { SandboxDestroyedError, SandboxExecTransportError } from '@mastra/platform-workspace'
+
+try {
+  await sandbox.executeCommand('pytest')
+} catch (err) {
+  if (err instanceof SandboxDestroyedError) {
+    // /exec-lease returned 410; the sandbox has been destroyed.
+    // The cached sandbox id and lease have already been cleared,
+    // so reusing the instance will reprovision on the next call.
+  } else if (err instanceof SandboxExecTransportError) {
+    // Both the initial WebSocket attempt and the built-in retry
+    // closed without an exit frame against a live sandbox.
+    console.error(err.closeCode, err.closeReason, err.wsEndpoint)
+  }
+}
+```
+
+`SandboxExecTransportError` 携带诊断字段（`opened`、`closeCode`、`closeReason`、`wsEndpoint`，以及 `sandboxId`、`command` 和 `attempts`），以便运维人员区分 Railway data plane 故障与命令失败。
+
+## 相关内容
+
+- [PlatformFilesystem 参考](/reference/workspace/platform-filesystem)
+- [RailwaySandbox 参考](/reference/workspace/railway-sandbox)
+- [WorkspaceSandbox 接口](/reference/workspace/sandbox)
+- [SandboxProcessManager 参考](/reference/workspace/process-manager)

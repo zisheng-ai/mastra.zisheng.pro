@@ -1,0 +1,260 @@
+---
+title: "参考： MastraModelGateway | Core"
+description: "用于创建自定义模型 gateway 的基类和接口"
+packages:
+  - "@mastra/core"
+---
+
+# MastraModelGateway
+
+用于实现自定义模型 gateway 的抽象基类。Gateway 负责访问语言模型时特定于 Provider 的逻辑，包括 Provider 配置、身份验证、URL 构造和模型实例化。
+
+如果要提供普通对象形式的 gateway，而不是扩展基类，请使用 `MastraModelGatewayInterface`。
+
+## 类概览
+
+```typescript
+import { MastraModelGateway, type ProviderConfig } from '@mastra/core/llm'
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible-v5'
+import type { LanguageModelV2 } from '@ai-sdk/provider-v5'
+
+class MyCustomGateway extends MastraModelGateway {
+  readonly id = 'custom'
+  readonly name = 'My Custom Gateway'
+
+  async fetchProviders(): Promise<Record<string, ProviderConfig>> {
+    return {
+      'my-provider': {
+        name: 'My Provider',
+        models: ['__GATEWAY_OPENAI_MODEL__', '__GATEWAY_ANTHROPIC_MODEL_SONNET__'],
+        apiKeyEnvVar: 'MY_API_KEY',
+        gateway: this.id,
+      },
+    }
+  }
+
+  buildUrl(modelId: string, envVars?: Record<string, string>): string {
+    return 'https://api.my-provider.com/v1'
+  }
+
+  async getApiKey(modelId: string): Promise<string> {
+    const apiKey = process.env.MY_API_KEY
+    if (!apiKey) throw new Error('MY_API_KEY not set')
+    return apiKey
+  }
+
+  async resolveLanguageModel({
+    modelId,
+    providerId,
+    apiKey,
+  }: {
+    modelId: string
+    providerId: string
+    apiKey: string
+  }): Promise<LanguageModelV2> {
+    const baseURL = this.buildUrl(`${providerId}/${modelId}`)
+    return createOpenAICompatible({
+      name: providerId,
+      apiKey,
+      baseURL,
+    }).chatModel(modelId)
+  }
+}
+```
+
+## 必需属性
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description:
+      'gateway 的唯一标识符。此 ID 用作该 gateway 所有 Provider 的前缀（例如 "netlify/anthropic"）。例外：models.dev 是 Provider 注册表，不使用前缀。',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: 'gateway 的人类可读名称。',
+  },
+]}
+/>
+
+## 必需方法
+
+### `fetchProviders()`
+
+从 gateway 获取 Provider 配置。
+
+**返回值：** `Promise<Record<string, ProviderConfig>>`
+
+**ProviderConfig 结构：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'name',
+    type: 'string',
+    description: 'Provider 的显示名称',
+  },
+  {
+    name: 'models',
+    type: 'string[]',
+    description: '可用模型 ID 的数组',
+  },
+  {
+    name: 'apiKeyEnvVar',
+    type: 'string | string[]',
+    description: 'API key 的环境变量',
+  },
+  {
+    name: 'gateway',
+    type: 'string',
+    description: 'Gateway 标识符',
+  },
+  {
+    name: 'url',
+    type: 'string',
+    isOptional: true,
+    description: '可选的 API 基础 URL',
+  },
+  {
+    name: 'apiKeyHeader',
+    type: 'string',
+    isOptional: true,
+    description: '可选的自定义身份验证 header 名称',
+  },
+  {
+    name: 'docUrl',
+    type: 'string',
+    isOptional: true,
+    description: '可选的文档 URL',
+  },
+]}
+/>
+
+### `buildUrl()`
+
+为指定的模型/Provider 组合构建 API URL。
+
+如果 Provider URL 包含 `${ACCOUNT_ID}` 等占位符，请先在 `buildUrl()` 内从 `envVars` 或 `process.env` 解析它们，再返回最终 URL。
+
+**参数：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'modelId',
+    type: 'string',
+    description: '完整模型 ID（例如 "custom/my-provider/model-1"）',
+  },
+  {
+    name: 'envVars',
+    type: 'Record<string, string>',
+    isOptional: true,
+    description: '可选的环境变量',
+  },
+]}
+/>
+
+**返回值：** `string | undefined | Promise<string | undefined>`
+
+### `getApiKey()`
+
+获取用于身份验证的 API key。
+
+**参数：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'modelId',
+    type: 'string',
+    description: '完整模型 ID',
+  },
+]}
+/>
+
+**返回值：** `Promise<string>`
+
+### `resolveAuth()`
+
+在 Mastra 创建语言模型之前解析凭据。当 gateway 自行负责身份验证时，请实现此可选 hook。如果省略，Mastra 会回退到 `getApiKey()`。
+
+**参数：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'request',
+    type: 'GatewayAuthRequest',
+    description:
+      '传入的请求上下文，包含 gatewayId、providerId、modelId 和 routerId，供 gateway 检查和验证。',
+  },
+]}
+/>
+
+**返回值：** `GatewayAuthResult | undefined | Promise<GatewayAuthResult | undefined>`
+
+`GatewayAuthResult` 可包含 `apiKey`、`bearerToken`、`headers`，以及用于追踪身份验证来源的可选 `source` 字段。
+
+### `resolveLanguageModel()`
+
+创建语言模型实例。
+
+**参数：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'modelId',
+    type: 'string',
+    description: '模型 ID',
+  },
+  {
+    name: 'providerId',
+    type: 'string',
+    description: 'Provider ID',
+  },
+  {
+    name: 'apiKey',
+    type: 'string',
+    description: '用于身份验证的 API key',
+  },
+]}
+/>
+
+**返回值：** `Promise<LanguageModelV2> | LanguageModelV2`
+
+## 实例方法
+
+### `getId()`
+
+返回 gateway 的唯一标识符。
+
+**返回值：** `string` - gateway 的 `id` 属性
+
+## 模型 ID 格式
+
+对于真正的 gateway，gateway ID 会用作前缀，并通过以下格式访问模型：
+
+```
+[gateway-id]/[provider]/[model]
+```
+
+示例：
+
+- `id = 'custom'` 的 gateway: `'custom/my-provider/model-1'`
+
+## 内置实现
+
+- **NetlifyGateway** - Netlify AI Gateway 集成
+- **ModelsDevGateway** - OpenAI 兼容 Provider 的注册表
+
+## 相关内容
+
+- [自定义 Gateway 指南](/models/gateways/custom-gateways): 创建自定义 gateway 的完整指南
+- [Mastra.addGateway()](/reference/core/addGateway): 将 gateway 添加到 Mastra
+- [Mastra.getGateway()](/reference/core/getGateway): 按注册键获取 gateway
+- [Mastra.getGatewayById()](/reference/core/getGatewayById): 按 ID 获取 gateway
+- [Mastra.listGateways()](/reference/core/listGateways): 列出所有 gateway

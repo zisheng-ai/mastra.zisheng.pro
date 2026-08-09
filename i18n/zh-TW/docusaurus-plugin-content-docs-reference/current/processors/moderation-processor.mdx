@@ -1,0 +1,199 @@
+---
+title: "參考：ModerationProcessor | 處理器"
+description: "Mastra ModerationProcessor 的文件；此處理器會使用 LLM 提供內容審查，偵測多種類別的不當內容。"
+packages:
+  - "@mastra/core"
+---
+
+# ModerationProcessor
+
+`ModerationProcessor` 是一種**混合式處理器**，可同時用於輸入與輸出處理。它會使用 LLM 提供內容審查，以偵測多種類別的不當內容。此處理器會根據可設定的審查類別評估訊息，並提供多種策略來處理遭標記的內容，協助維護內容安全。
+
+## 使用範例
+
+```typescript
+import { ModerationProcessor } from '@mastra/core/processors'
+
+const processor = new ModerationProcessor({
+  model: 'openrouter/openai/gpt-oss-safeguard-20b',
+  threshold: 0.7,
+  strategy: 'block',
+  categories: ['hate', 'harassment', 'violence'],
+  lastMessageOnly: true,
+})
+```
+
+## 建構函式參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'Options',
+    description: '內容審查的設定選項',
+    isOptional: false,
+    properties: [
+      {
+        type: 'Options',
+        parameters: [
+          {
+            name: 'model',
+            type: 'MastraModelConfig',
+            description: '審查 Agent 的模型設定',
+            isOptional: false,
+          },
+          {
+            name: 'categories',
+            type: 'string[]',
+            description: '要檢查的審查類別。若未指定，則使用預設的 OpenAI 類別',
+            isOptional: true,
+            default:
+              "['hate', 'hate/threatening', 'harassment', 'harassment/threatening', 'self-harm', 'self-harm/intent', 'self-harm/instructions', 'sexual', 'sexual/minors', 'violence', 'violence/graphic']",
+          },
+          {
+            name: 'threshold',
+            type: 'number',
+            description: '標記內容的信賴度門檻（0-1）。若任一類別分數超過此門檻，就會標記該內容',
+            isOptional: true,
+            default: '0.5',
+          },
+          {
+            name: 'strategy',
+            type: "'block' | 'warn' | 'filter'",
+            description:
+              "內容遭標記時採取的策略：'block' 以錯誤拒絕內容，'warn' 記錄警告但允許內容通過，'filter' 移除遭標記的訊息",
+            isOptional: true,
+            default: "'block'",
+          },
+          {
+            name: 'instructions',
+            type: 'string',
+            description: '審查 Agent 的自訂指示。若未提供，則使用依類別產生的預設指示',
+            isOptional: true,
+            default: 'undefined',
+          },
+          {
+            name: 'includeScores',
+            type: 'boolean',
+            description: '是否在記錄中包含信賴度分數。適合用於調整門檻與偵錯',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'lastMessageOnly',
+            type: 'boolean',
+            description:
+              '是否只對批次中最新的訊息執行審查，而不檢查每則訊息。使用此選項，可避免在長對話中為每則較早的訊息額外呼叫一次 LLM。',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'chunkWindow',
+            type: 'number',
+            description: '審查串流區塊時，要納入內容脈絡的先前區塊數量。若設為 1，則包含前一個部分，依此類推。',
+            isOptional: true,
+            default: '0 (no context window)',
+          },
+          {
+            name: 'providerOptions',
+            type: 'ProviderOptions',
+            description:
+              "傳遞給內部審查 Agent 的 Provider 專用選項。可用於控制模型行為，例如思考型模型的推理強度（如 `{ openai: { reasoningEffort: 'low' } }`）",
+            isOptional: true,
+            default: 'undefined',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 回傳值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "設為 'moderation' 的處理器識別碼",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: '選用的處理器顯示名稱',
+    isOptional: true,
+  },
+  {
+    name: 'processInput',
+    type: '(args: { messages: MastraDBMessage[]; abort: (reason?: string) => never; tracingContext?: TracingContext }) => Promise<MastraDBMessage[]>',
+    description: '處理輸入訊息，以便在傳送至 LLM 前審查內容',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputStream',
+    type: '(args: { part: ChunkType; streamParts: ChunkType[]; state: Record<string, any>; abort: (reason?: string) => never; tracingContext?: TracingContext }) => Promise<ChunkType | null | undefined>',
+    description: '處理串流輸出部分，以便在串流期間審查內容',
+    isOptional: false,
+  },
+]}
+/>
+
+## 進階使用範例
+
+### 輸入處理
+
+```typescript title="src/mastra/agents/moderated-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { ModerationProcessor } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'moderated-agent',
+  name: 'moderated-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [
+    new ModerationProcessor({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      categories: ['hate', 'harassment', 'violence'],
+      threshold: 0.7,
+      strategy: 'block',
+      instructions: 'Detect and flag inappropriate content in user messages',
+      includeScores: true,
+    }),
+  ],
+})
+```
+
+### 搭配批次處理的輸出處理
+
+建議將 `ModerationProcessor` 作為輸出處理器時，搭配 `BatchPartsProcessor` 使用以最佳化效能。`BatchPartsProcessor` 會先將串流區塊批次合併，再傳遞給審查器，減少內容審查所需的 LLM 呼叫次數。
+
+```typescript title="src/mastra/agents/output-moderated-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { BatchPartsProcessor, ModerationProcessor } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'output-moderated-agent',
+  name: 'output-moderated-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  outputProcessors: [
+    // Batch stream parts first to reduce LLM calls
+    new BatchPartsProcessor({
+      batchSize: 10,
+    }),
+    // Then apply moderation on batched content
+    new ModerationProcessor({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      strategy: 'filter',
+      chunkWindow: 1,
+    }),
+  ],
+})
+```
+
+## 相關資源
+
+- [防護機制](/docs/agents/guardrails)

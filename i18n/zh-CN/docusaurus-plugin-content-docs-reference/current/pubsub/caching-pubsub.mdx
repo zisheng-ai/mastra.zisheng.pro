@@ -1,0 +1,89 @@
+---
+title: "参考：CachingPubSub | PubSub"
+description: CachingPubSub 的 API 参考；这是一个为可恢复流添加事件缓存和 replay 的 pub/sub 包装器。
+packages:
+  - "@mastra/core"
+---
+
+# CachingPubSub
+
+`CachingPubSub` 包装任意 [`PubSub`](/reference/pubsub/base) 实现，并添加事件缓存和 replay。它在 cache 中记录每个 topic 的每个已发布事件，因此晚连接或断开后重新连接的订阅者可以先 replay 错过的事件，再继续接收实时事件。
+
+将它用于在不保留历史记录的 transport（例如 [`EventEmitterPubSub`](/reference/pubsub/event-emitter)）上构建可恢复流。已经持久化事件的 transport（例如 [`RedisStreamsPubSub`](/reference/pubsub/redis-streams)）不需要此包装器。
+
+`CachingPubSub` 对批处理透明：`subscribe()` 将 `options.batch` 转发给内部 pub/sub，且 `supportsNativeBatching` 镜像内部值。即使传入 `options.batch`，包装不支持批处理的内部实现仍会导致非批量投递。
+
+## 使用示例
+
+包装内部 pub/sub，并提供用于存储事件的 server cache。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { CachingPubSub, EventEmitterPubSub } from '@mastra/core/events'
+import { InMemoryServerCache } from '@mastra/core/cache'
+
+const cache = new InMemoryServerCache()
+const pubsub = new CachingPubSub(new EventEmitterPubSub(), cache)
+
+export const mastra = new Mastra({
+  pubsub,
+})
+```
+
+使用内联包装时，`withCaching` helper 返回同一个实例，且可读性更好：
+
+```typescript
+import { withCaching, EventEmitterPubSub } from '@mastra/core/events'
+import { InMemoryServerCache } from '@mastra/core/cache'
+
+const pubsub = withCaching(new EventEmitterPubSub(), new InMemoryServerCache())
+```
+
+## 构造函数参数
+
+<PropertiesTable content={[
+  { name: 'inner', type: 'PubSub', description: '要包装的 pub/sub 实现。所有发布和实时订阅都会传递给此实例。', isOptional: false },
+  { name: 'cache', type: 'MastraServerCache', description: '用于按 topic 存储事件以供 replay 的 cache。', isOptional: false },
+  { name: 'options', type: 'CachingPubSubOptions', description: '可选配置。', isOptional: true, properties: [
+    { name: 'keyPrefix', type: 'string', description: '用于命名空间化事件的 cache key 前缀。', isOptional: true, defaultValue: 'pubsub:' },
+    { name: 'logger', type: 'IMastraLogger', description: '用于错误的 logger。省略时回退至 `console.error`。', isOptional: true },
+  ] },
+]}/>
+
+## 属性
+
+<PropertiesTable content={[{ name: 'supportsNativeBatching', type: 'boolean', description: '镜像内部 pub/sub。仅当包装的实现支持批处理时才返回 `true`。' }]}/>
+
+## 方法
+
+`CachingPubSub` 实现 [`PubSub`](/reference/pubsub/base) contract。它会重写 replay 方法以读取缓存事件。以下方法描述缓存行为。
+
+### `publish(topic, event)`
+
+使用顺序 index 缓存事件，然后将其发布到内部 pub/sub。
+
+### `subscribeWithReplay(topic, cb)`
+
+replay topic 的所有缓存事件，然后订阅实时事件。
+
+### `subscribeFromOffset(topic, offset, cb)`
+
+从 `offset` 开始 replay 缓存事件，然后订阅实时事件。当 client 知道最后位置时使用它，以避免 replay 整个历史记录。
+
+### `getHistory(topic, offset?)`
+
+返回 topic 从 `offset` 开始的缓存事件。
+
+返回：`Promise<Event[]>`
+
+### `clearTopic(topic)`
+
+移除 topic 的缓存事件和 offset 计数器，并将调用转发给内部 pub/sub，以便持久 transport（如 [`RedisStreamsPubSub`](/reference/pubsub/redis-streams)）也能删除其保留状态。Mastra 的 run lifecycle 会在 run 完成时自动调用此方法。
+
+## 函数
+
+### `withCaching(pubsub, cache, options?)`
+
+构造 `CachingPubSub` 的便捷包装器。接受与构造函数相同的参数，并返回新实例。
+
+返回：`CachingPubSub`

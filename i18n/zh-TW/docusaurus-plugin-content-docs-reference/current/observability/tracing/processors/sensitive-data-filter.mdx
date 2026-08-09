@@ -1,0 +1,204 @@
+---
+title: "參考：SensitiveDataFilter | 可觀測性"
+description: SensitiveDataFilter processor 的 API 參考
+packages:
+  - "@mastra/core"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# SensitiveDataFilter
+
+從 span 欄位中遮蔽敏感資訊的 SpanOutputProcessor。
+
+## 預設自動套用
+
+`Observability` 會自動將 `SensitiveDataFilter` 附加至每個已設定執行個體的 `spanOutputProcessors`，讓機密資料在送達 Mastra cloud exporter 等 exporter 前先經過遮蔽。此 filter 會最後執行（在使用者提供的所有 processor 之後），因此上游 processor 所引入或揭露的敏感資料仍會被遮蔽。除非您要自訂選項，否則不需要手動加入。
+
+若要選擇停用或自訂自動套用的 filter，請使用 [`Observability` registry 設定](/reference/observability/tracing/configuration#observabilityregistryconfig)中的 `sensitiveDataFilter` 選項：
+
+```typescript
+import { Observability } from '@mastra/observability'
+
+new Observability({
+  configs: {/* ... */},
+  // disable the auto-applied filter
+  sensitiveDataFilter: false,
+  // or customize it
+  // sensitiveDataFilter: { sensitiveFields: ['mySecret'], redactionStyle: 'partial' },
+})
+```
+
+如果某設定已在 `spanOutputProcessors` 中包含 `SensitiveDataFilter`，則會略過自動套用的 filter，以避免重複遮蔽。預先實例化的 `ObservabilityInstance` 值不會修改。如有需要，請自行將 `SensitiveDataFilter` 加入其 processor。
+
+## 建構函式
+
+```typescript prettier:false
+new SensitiveDataFilter(options?: SensitiveDataFilterOptions)
+```
+
+## `SensitiveDataFilterOptions`
+
+```typescript
+interface SensitiveDataFilterOptions {
+  /**
+   * List of sensitive field names to redact.
+   * Matching is case-insensitive and normalizes separators
+   * (api-key, api_key, Api Key → apikey).
+   * Defaults include: password, token, secret, key, apikey, auth,
+   * authorization, bearer, bearertoken, jwt, credential,
+   * clientsecret, privatekey, refresh, ssn.
+   */
+  sensitiveFields?: string[]
+
+  /**
+   * The token used for full redaction.
+   * Default: "[REDACTED]"
+   */
+  redactionToken?: string
+
+  /**
+   * Style of redaction to use:
+   * - "full": always replace with redactionToken
+   * - "partial": show 3 characters from the start and end, redact the middle
+   * Default: "full"
+   */
+  redactionStyle?: RedactionStyle
+}
+```
+
+<PropertiesTable
+  props={[
+  {
+    name: 'sensitiveFields',
+    type: 'string[]',
+    description: '要遮蔽的欄位名稱（不區分大小寫與分隔符號）',
+    required: false,
+  },
+  {
+    name: 'redactionToken',
+    type: 'string',
+    description: '完整遮蔽時使用的替代 token',
+    required: false,
+  },
+  {
+    name: 'redactionStyle',
+    type: "'full' | 'partial'",
+    description: '遮蔽樣式',
+    required: false,
+  },
+]}
+/>
+
+## `RedactionStyle`
+
+```typescript
+type RedactionStyle = 'full' | 'partial'
+```
+
+## 方法
+
+### process
+
+```typescript prettier:false
+process(span: AnySpan): AnySpan
+```
+
+篩選 span 關鍵欄位中的敏感資料以處理 span，這些欄位包括 attributes、metadata、input、output 與 errorInfo。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'span',
+    type: 'AnySpan',
+    description: '要篩選的輸入 span',
+    required: true,
+  },
+]}
+/>
+
+**傳回：**敏感值已遮蔽的新 span。
+
+### shutdown
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+此 processor 不需要清理。
+
+## 屬性
+
+```typescript prettier:false
+readonly name = 'sensitive-data-filter';
+```
+
+## 預設敏感欄位
+
+未提供自訂欄位時：
+
+```typescript
+[
+  'password',
+  'token',
+  'secret',
+  'key',
+  'apikey',
+  'auth',
+  'authorization',
+  'bearer',
+  'bearertoken',
+  'jwt',
+  'credential',
+  'clientsecret',
+  'privatekey',
+  'refresh',
+  'ssn',
+]
+```
+
+## 處理行為
+
+### 欄位比對
+
+- **不區分大小寫**：`APIKey`、`apikey`、`ApiKey` 都會相符
+- **不受分隔符號影響**：`api-key`、`api_key`、`apiKey` 會視為相同
+- **完全比對**：正規化後，欄位必須完全相符
+  - `token` 會與 `token`、`Token`、`TOKEN` 相符
+  - `token` 不會與 `promptTokens` 或 `tokenCount` 相符
+
+### 遮蔽樣式
+
+#### 完整遮蔽（預設）
+
+所有相符值都會替換為 redactionToken。
+
+#### 部分遮蔽
+
+- 顯示開頭與結尾各 3 個字元
+- 長度 ≤ 6 個字元的值會完整遮蔽
+- 非字串值會先轉換為字串，再進行部分遮蔽
+
+### 錯誤處理
+
+若篩選欄位失敗，該欄位會替換為：
+
+```typescript
+{
+  error: {
+    processor: 'sensitive-data-filter'
+  }
+}
+```
+
+### 處理的欄位
+
+Filter 會遞迴處理：
+
+- `span.attributes` - Span metadata 與屬性
+- `span.metadata` - 自訂 metadata
+- `span.input` - 輸入資料
+- `span.output` - 輸出資料
+- `span.errorInfo` - 錯誤資訊
+
+能安全處理巢狀物件、array 與循環參照。

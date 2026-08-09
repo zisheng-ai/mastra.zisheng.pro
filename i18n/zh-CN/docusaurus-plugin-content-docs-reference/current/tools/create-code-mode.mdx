@@ -1,0 +1,221 @@
+---
+title: "参考：createCodeMode() | Tools 与 MCP"
+description: "createCodeMode() 的 API 参考文档。此函数用于在 Sandbox 中运行多 Tool 运算。"
+packages:
+  - "@mastra/core"
+---
+
+# createCodeMode()
+
+**加入版本：** `@mastra/core@1.38.0`
+
+`createCodeMode()` 函数会返回一个 Tool 与产生的 instructions，让 Agent 能以单一 TypeScript 函数运行多 Tool 运算。产生的代码会在 Workspace Sandbox 中运行，每次 `external_*` 调用则会在主机上运行实际 Tool，并套用验证、request context 与 tracing。
+
+概念说明请参阅 [Code mode](/docs/agents/code-mode)。
+
+## 使用示例
+
+创建 Code mode Tool、将产生的 instructions 加入 Agent，并以相同 ID 注册返回的 Tool。
+
+```typescript title="src/mastra/agents/shop-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createCodeMode, createTool } from '@mastra/core/tools'
+import { LocalSandbox } from '@mastra/core/workspace'
+import { z } from 'zod'
+
+const getTopProducts = createTool({
+  id: 'getTopProducts',
+  description: 'Get top selling products',
+  inputSchema: z.object({ limit: z.number() }),
+  outputSchema: z.object({
+    products: z.array(z.object({ id: z.string(), name: z.string(), totalSales: z.number() })),
+  }),
+  execute: async ({ limit }) => fetchTopProducts(limit),
+})
+
+const getProductRatings = createTool({
+  id: 'getProductRatings',
+  description: 'Get ratings for a product',
+  inputSchema: z.object({ productId: z.string() }),
+  outputSchema: z.object({ ratings: z.array(z.object({ score: z.number() })) }),
+  execute: async ({ productId }) => fetchRatings(productId),
+})
+
+const { tool, instructions } = createCodeMode({
+  tools: { getTopProducts, getProductRatings },
+  sandbox: new LocalSandbox(),
+})
+
+export const shopAgent = new Agent({
+  id: 'shop-assistant',
+  name: 'shop-assistant',
+  instructions: ['You are a helpful shopping assistant.', instructions],
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { execute_typescript: tool },
+})
+```
+
+## 参数
+
+<PropertiesTable
+  content={[
+  {
+    name: 'config',
+    type: 'CodeModeConfig',
+    description: 'Code mode Tool 与产生之 instructions 的设置。',
+    properties: [
+      {
+        type: 'CodeModeConfig',
+        parameters: [
+          {
+            name: 'tools',
+            type: 'ToolsInput',
+            description:
+              '以 `external_<id>` 函数形式提供给产生代码的 Tool。只有这些 Tool 可以被调用。',
+          },
+          {
+            name: 'sandbox',
+            type: 'WorkspaceSandbox',
+            description:
+              '用于运行产生代码的 Sandbox。除非 Agent 在提供 Sandbox 的 Workspace 中运行，或 transport 本身提供运行边界（例如 `IsolatedVmCodeModeTransport`），否则此值为必填。若要明确在主机上运行，请传入 `new LocalSandbox()`。',
+            isOptional: true,
+          },
+          {
+            name: 'timeout',
+            type: 'number',
+            description: '运行逾时时间（毫秒）。',
+            isOptional: true,
+            defaultValue: '30000',
+          },
+          {
+            name: 'id',
+            type: 'string',
+            description: '产生的 Tool ID。',
+            isOptional: true,
+            defaultValue: 'execute_typescript',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'transport',
+    type: 'CodeModeTransport',
+    description:
+      '选填的 transport 实作，用来在 Sandbox 中运行产生的代码。缺省 transport 会通过 Workspace Sandbox process API，使用 stdio JSON-RPC。声明 `requiresSandbox: false` 的 transport（例如 [IsolatedVmCodeModeTransport](/reference/tools/isolated-vm-transport)）可在没有 Sandbox 的情况下运行。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 返回值
+
+返回 `CodeModeResult` 对象。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'tool',
+    type: 'Tool<any, any>',
+    description: '生成的 Code mode Tool。其 ID 默认为 `execute_typescript`。',
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description: '产生的模型 instructions，包含已设置 Tool 的具类型 `external_*` 声明。',
+  },
+]}
+/>
+
+## CodeModeToolResult
+
+产生的 Tool 会返回 `CodeModeToolResult`。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'success',
+    type: 'boolean',
+    description: '产生的代码是否在未掷回例外的情况下运行完成。',
+  },
+  {
+    name: 'result',
+    type: 'unknown',
+    description: '产生的代码所返回的值。',
+    isOptional: true,
+  },
+  {
+    name: 'logs',
+    type: 'string[]',
+    description:
+      '依序截取自 `console.log`、`console.info`、`console.warn` 与 `console.error` 的主控台输出。',
+    isOptional: true,
+  },
+  {
+    name: 'error',
+    type: '{ message: string; name?: string; line?: number }',
+    description: '产生的代码掷回例外或运行失败时的错误详细信息。',
+    isOptional: true,
+    properties: [
+      {
+        type: '{ message: string; name?: string; line?: number }',
+        parameters: [
+          {
+            name: 'message',
+            type: 'string',
+            description: '错误消息。',
+          },
+          {
+            name: 'name',
+            type: 'string',
+            description: '错误名称（如有）。',
+            isOptional: true,
+          },
+          {
+            name: 'line',
+            type: 'number',
+            description: '与失败相关的行号（如有）。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 检查 instructions
+
+使用 `createCodeModeInstructions()` 检查为一组 Tool 生成的确切 prompt 内容。
+
+```typescript title="src/mastra/tools/code-mode-instructions.ts"
+import { createCodeModeInstructions } from '@mastra/core/tools'
+
+console.log(
+  createCodeModeInstructions({
+    tools: { getTopProducts, getProductRatings },
+  }),
+)
+```
+
+Instructions 包含使用约定，并为每个已配置的 Tool 提供一行带类型的 `declare function external_<id>(...)`。Tool ID 会经过清理，转换为有效的 TypeScript 函数名；如果清理后的名称相互冲突，则会抛出错误。
+
+## createCodeModeTool()
+
+如果你只需要 Tool，并想自行管理 instructions，请使用 `createCodeModeTool()`。多数 Agent 应使用 `createCodeMode()`，让 Tool 与相符的 instructions 保持配对。
+
+```typescript title="src/mastra/tools/code-mode-tool.ts"
+import { createCodeModeTool } from '@mastra/core/tools'
+import { LocalSandbox } from '@mastra/core/workspace'
+
+export const codeModeTool = createCodeModeTool({
+  tools: { getTopProducts, getProductRatings },
+  sandbox: new LocalSandbox(),
+})
+```
+
+## 相关内容
+
+- [Code mode](/docs/agents/code-mode)
+- [createTool()](/reference/tools/create-tool)
+- [Workspace 概览](/docs/workspace/overview)

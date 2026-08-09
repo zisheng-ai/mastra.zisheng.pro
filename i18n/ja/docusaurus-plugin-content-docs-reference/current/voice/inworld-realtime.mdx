@@ -1,0 +1,672 @@
+---
+title: "リファレンス：Inworld Realtime Voice | Voice"
+description: "WebSocket によるリアルタイムの音声間通信、Tool 呼び出し、Inworld 固有のセッション制御を提供する InworldRealtimeVoice クラスのドキュメントです。"
+packages:
+  - "@mastra/node-audio"
+  - "@mastra/voice-inworld"
+---
+
+# Inworld Realtime Voice
+
+`InworldRealtimeVoice` クラスは、WebSocket 経由の [Inworld AI Realtime API](https://docs.inworld.ai/realtime/quickstart-websocket) を使用したリアルタイムの全二重 Voice 対話を提供します。音声間通信、Tool 呼び出し、Semantic Voice Activity Detection、MCP Tool ルーティング、再生速度などの Inworld 固有のセッション調整をサポートします。
+
+Inworld のワイヤープロトコルは OpenAI Realtime GA 仕様であるため、クライアントとサーバーのイベント名は `@mastra/voice-openai-realtime` と一致します。Provider レベルで異なるのは、エンドポイント（URL にクライアント生成のセッションキーを使用）、`Authorization: Basic <key>` ヘッダー、Inworld 固有の調整に使用する型付き `session` コンストラクターフィールド、`session.providerData` で送信する Inworld 拡張（STT、TTS、Memory、バックチャンネル、応答性）用の型付き `providerData` オブジェクトです。
+
+バッチ Text-to-Speech と Speech-to-Text については、[`@mastra/voice-inworld`](/reference/voice/inworld) を参照してください。
+
+## 使用例
+
+```typescript title="src/mastra/index.ts"
+import { InworldRealtimeVoice } from '@mastra/voice-inworld'
+import { playAudio, getMicrophoneStream } from '@mastra/node-audio'
+
+// Initialize with INWORLD_API_KEY from the environment
+const voice = new InworldRealtimeVoice()
+
+// Or initialize with explicit configuration
+const voiceWithConfig = new InworldRealtimeVoice({
+  apiKey: 'your-inworld-api-key',
+  model: 'inworld/models/gemma-4-26b-a4b-it',
+  speaker: 'Sarah',
+  instructions: 'You are a helpful voice assistant.',
+  session: {
+    audio: {
+      output: { speed: 1.1 },
+      input: { turn_detection: { type: 'semantic_vad', eagerness: 'high' } },
+    },
+  },
+})
+
+// Establish connection
+await voice.connect()
+
+// Listen for audio output (PCM16 @ 24 kHz by default)
+voice.on('speaker', stream => {
+  playAudio(stream)
+})
+
+voice.on('writing', ({ text, role }) => {
+  console.log(`${role}: ${text}`)
+})
+
+// Convert text to speech
+await voice.speak('Hello, how can I help you today?', {
+  speaker: 'Hades',
+})
+
+// Stream microphone audio to the model
+const microphoneStream = getMicrophoneStream()
+await voice.send(microphoneStream)
+
+// Clean up
+voice.close()
+```
+
+> Inworld API キーはあらかじめ Basic エンコードされています。`INWORLD_API_KEY` にそのまま貼り付けてください。パッケージでは再エンコードしません。
+
+## コンストラクターパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'apiKey',
+    type: 'string',
+    description:
+      'Inworld API キー。未指定の場合は INWORLD_API_KEY 環境変数を使用します。キーは Basic エンコード済みで、Authorization ヘッダーにそのまま渡されます。',
+    isOptional: true,
+  },
+  {
+    name: 'url',
+    type: 'string',
+    description:
+      'Realtime WebSocket エンドポイント。クライアント生成のセッションキーとプロトコルパラメーターが自動的に追加されます。',
+    isOptional: true,
+    defaultValue: "'wss://api.inworld.ai/api/v1/realtime/session'",
+  },
+  {
+    name: 'model',
+    type: 'string',
+    description:
+      'LLM Router のモデル ID。URL ではなく最初の session.update で送信されます。Inworld Router がサポートする任意のモデルを指定できます。',
+    isOptional: true,
+    defaultValue: "'inworld/models/gemma-4-26b-a4b-it'",
+  },
+  {
+    name: 'speaker',
+    type: 'string',
+    description: '音声合成に使用するデフォルトの Voice ID。Inworld カタログの任意の Voice を指定できます。',
+    isOptional: true,
+    defaultValue: "'Sarah'",
+  },
+  {
+    name: 'sessionId',
+    type: 'string',
+    description:
+      'URL の `key` パラメーターとして公開されるクライアント生成のセッションキー。省略するとタイムスタンプベースのキーが自動生成されます。',
+    isOptional: true,
+    defaultValue: "'voice-{Date.now()}'",
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description: '最初の session.update で送信するシステムプロンプト。',
+    isOptional: true,
+  },
+  {
+    name: 'session',
+    type: 'Partial<InworldSessionConfig>',
+    description:
+      '型付きの第一級セッションオプション（audio、tool_choice、output_modalities、temperature など）。audio.output.voice や audio.output.speed などのネストしたフィールドが互いに上書きされず合成されるよう、すべての session.update に深く統合されます。以下の session フィールドを参照してください。',
+    isOptional: true,
+  },
+  {
+    name: 'debug',
+    type: 'boolean',
+    description: '生のサーバーイベントをログに記録します。',
+    isOptional: true,
+    defaultValue: 'false',
+  },
+  {
+    name: 'providerData',
+    type: 'InworldProviderData',
+    description:
+      '型付きの Inworld 拡張設定（stt、tts、memory、backchannel、responsiveness、user_id、metadata）。すべての session.update で session.providerData の下に送信されます。`session` フィールドで設定した session.providerData と合成され、キーが競合した場合はコンストラクターオプションが優先されます。',
+    isOptional: true,
+  },
+  {
+    name: 'connectTimeoutMs',
+    type: 'number',
+    description:
+      '`connect()` が WebSocket ハンドシェイクと最初の `session.updated` 往復の両方を待機する最大時間。WebSocket が開く前のエラーや切断、またはこのタイムアウトの期限切れは、未捕捉のソケットエラーではなく reject された Promise として公開されます。',
+    isOptional: true,
+    defaultValue: '15000',
+  },
+]}
+/>
+
+### `session`（型付きの調整項目）
+
+ドキュメントに記載された Inworld Realtime オプションには、型付きの `session` フィールドを使用します。フィールドは接続時のデフォルト値（`speaker` から設定される `audio.output.voice` など）と合成されます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'output_modalities',
+    type: 'Array<"text" | "audio">',
+    description: 'モデルが生成するモダリティ。',
+    isOptional: true,
+  },
+  {
+    name: 'audio.output.voice',
+    type: 'string',
+    description: 'Voice カタログ ID。省略するとコンストラクターの `speaker` を使用します。',
+    isOptional: true,
+  },
+  {
+    name: 'audio.output.speed',
+    type: 'number',
+    description: '合成音声の再生速度倍率（0.25～1.5）。',
+    isOptional: true,
+  },
+  {
+    name: 'audio.output.model',
+    type: 'string',
+    description: 'Inworld TTS モデル（例："inworld-tts-2"）。',
+    isOptional: true,
+  },
+  {
+    name: 'audio.output.format',
+    type: 'InworldAudioFormat',
+    description:
+      '出力音声エンコーディング。コーデック文字列（例："audio/pcm"、"audio/pcmu"、"audio/pcma"、"audio/float32"）または `{ type, rate? }` オブジェクトを指定します。`rate`（Hz）は audio/pcm と audio/float32 に適用され（デフォルト 24000）、audio/pcmu と audio/pcma は 8 kHz 固定です。',
+    isOptional: true,
+  },
+  {
+    name: 'audio.input.format',
+    type: 'InworldAudioFormat',
+    description:
+      'サーバーに送信する入力音声エンコーディング。`audio.output.format` と同じ形式で、コーデック文字列または `{ type, rate? }` オブジェクトです。',
+    isOptional: true,
+  },
+  {
+    name: 'audio.input.noise_reduction',
+    type: '{ type: "near_field" | "far_field" }',
+    description: '文字起こしと VAD の前に適用する入力ノイズ低減モード。',
+    isOptional: true,
+  },
+  {
+    name: 'audio.input.transcription',
+    type: '{ model?: string; language?: string; prompt?: string }',
+    description:
+      '受信したユーザー音声のサーバー側文字起こし。デフォルトは `{ model: "inworld/inworld-stt-1" }` です。`prompt` は語彙、綴り、スタイルのヒントで文字起こしにバイアスをかけます。上書きするには独自のオブジェクトを指定し、ユーザー側の文字起こしを無効にするには `null` を設定します。',
+    isOptional: true,
+  },
+  {
+    name: 'audio.input.turn_detection',
+    type: 'InworldTurnDetection | null',
+    description:
+      'Voice Activity／ターン検出。デフォルトは `{ type: "semantic_vad", eagerness: "medium", create_response: true, interrupt_response: true }` です。上書きするには独自のオブジェクトを指定し、ターン検出を完全に無効にするには `null` を設定します。`eagerness` フィールドは Semantic VAD がユーザーのターンを終了する速さを制御します。`low` は明確な停止を待ち、`high` は早く終了します。デフォルトの `medium` は両者のバランスを取ります。`idle_timeout_ms`（server_vad だけ）は、サーバーがターンをコミットするまでのアイドル時間を設定します。',
+    isOptional: true,
+  },
+  {
+    name: 'tool_choice',
+    type: 'string | { type: "function"; name: string } | { type: "mcp"; server_label: string }',
+    description:
+      'Tool の選択戦略。設定済みの Inworld MCP サーバーを経由して Tool 呼び出しをルーティングするには mcp バリアントを使用します。',
+    isOptional: true,
+  },
+  {
+    name: 'temperature',
+    type: 'number',
+    description: 'モデルのサンプリング温度。',
+    isOptional: true,
+  },
+  {
+    name: 'max_output_tokens',
+    type: 'number | "inf"',
+    description: '応答ごとに生成する最大トークン数。',
+    isOptional: true,
+  },
+  {
+    name: 'truncation',
+    type: '"auto" | "disabled" | { type: "retention_ratio"; retention_ratio: number }',
+    description: '会話の切り詰め戦略。',
+    isOptional: true,
+  },
+  {
+    name: 'tracing',
+    type: '"auto" | { workflow_name?: string; group_id?: string; metadata?: Record<string, unknown> }',
+    description: '分散 Trace の設定。サーバーのデフォルトには "auto" を使用し、または Workflow／グループを明示的に指定します。',
+    isOptional: true,
+  },
+  {
+    name: 'include',
+    type: 'Array<"item.input_audio_transcription.logprobs">',
+    description: '送出イベントにサーバーが含める、オプトインの追加フィールド。',
+    isOptional: true,
+  },
+  {
+    name: 'prompt',
+    type: 'string | null',
+    description: 'サーバー側プロンプトテンプレートへの参照。消去するには null を渡します。',
+    isOptional: true,
+  },
+]}
+/>
+
+### `providerData`（Inworld 拡張）
+
+`providerData` は Inworld 固有の Realtime 拡張用の型付きオブジェクトです。すべての `session.update` で `session.providerData` の下に送信され、`session` フィールドで設定した任意の `session.providerData` と合成されます。キーが競合した場合はコンストラクターの `providerData` が優先されます。
+
+5つのブランチと2つのセッションレベルフィールドがあります。
+
+- `stt`：`prompt`、`voice_profile`、`language_hints`、VAD またはターン終了のしきい値などの STT 調整。
+- `tts`：`segmenter_strategy`、`steering_handling`、`delivery_mode`、`conversational`、`user_turn_mode` などの TTS セグメント化と配信。
+- `memory`：`enabled`、`turn_interval`、`max_facts` などの自動ローリング Memory。Inworld は状態を `memory` イベントで返します。
+- `backchannel`：ユーザーの発話中の短い相づち（「uh-huh」）。音声は `backchannel` イベントで届きます。
+- `responsiveness`：メイン応答の生成中に再生する早期フィラー音声。通常の `speaker` と `speaking` イベントを再利用するため、個別のイベントはありません。
+- `user_id` と `metadata`：Inworld にそのまま渡されるセッションレベルの識別子。
+
+```typescript
+const voice = new InworldRealtimeVoice({
+  providerData: {
+    stt: { voice_profile: true, language_hints: ['en-US'] },
+    tts: { delivery_mode: 'CREATIVE', segmenter_strategy: 'balanced' },
+    memory: { enabled: true, turn_interval: 4 },
+    backchannel: { enabled: true, max_per_turn: 1 },
+    user_id: 'user-123',
+  },
+})
+```
+
+## メソッド
+
+### `connect()`
+
+WebSocket 接続を開いて最初の `session.update` を送信し、サーバーが `session.updated` で確認すると解決します。`speak()`、`listen()`、`send()` より前に呼び出す必要があります。
+
+WebSocket が開く前の `error` または `close`（あるいは `connectTimeoutMs`、デフォルト15秒を超えるハンドシェイク）は、未捕捉のソケットエラーではなく reject された Promise として公開されます。reject 時には半開きのソケットが閉じられます。
+
+```typescript
+await voice.connect()
+```
+
+戻り値：`Promise<void>`
+
+### `speak()`
+
+モデルにテキストメッセージを送信して音声応答を開始します。返された Promise は応答のライフサイクル全体（この呼び出しで開始した応答の `response.done`）が完了した後にだけ解決し、ユーザーの発話によって応答が中断された場合やトランスポートエラーが発生した場合は reject されます。
+
+連続した `speak()` 呼び出しがサポートされるパターンです。同時呼び出しは同じリスナープールを共有し、応答を固定する順序は未定義です。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'input',
+    type: 'string | NodeJS.ReadableStream',
+    description: '音声に変換するテキストまたはテキストストリーム。',
+    isOptional: false,
+  },
+  {
+    name: 'options',
+    type: 'Options',
+    description: '呼び出しごとの設定。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'Options',
+        parameters: [
+          {
+            name: 'speaker',
+            type: 'string',
+            description: 'このリクエストに使用する Voice ID。',
+            isOptional: true,
+            defaultValue: "コンストラクターの speaker 値",
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+戻り値： `Promise<void>`
+
+### `listen()`
+
+単一の音声バッファをユーザーのターンとして送信し、テキストだけで応答するようモデルに求めます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'audioData',
+    type: 'NodeJS.ReadableStream',
+    description: '文字起こしする音声ストリーム。',
+    isOptional: false,
+  },
+]}
+/>
+
+戻り値： `Promise<void>`
+
+### `send()`
+
+音声データをサーバーへリアルタイムでストリーミングします。継続的なマイク入力に役立ちます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'audioData',
+    type: 'NodeJS.ReadableStream | Int16Array',
+    description:
+      'ストリーミングする音声データ。Int16Array は単一の base64 チャンクとして送信され、読み取り可能なストリームはチャンクごとに転送されます。',
+    isOptional: false,
+  },
+  {
+    name: 'eventId',
+    type: 'string',
+    description: '各音声チャンクとともにサーバーへ転送する省略可能なイベント ID。',
+    isOptional: true,
+  },
+]}
+/>
+
+戻り値： `Promise<void>`
+
+### `updateConfig()`
+
+サーバーへ `session.update` を送信します。型付きの `session` フィールドはペイロードに深く統合され、コンストラクターの `providerData` は `session.providerData` の下にネストされます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'sessionConfig',
+    type: 'InworldSessionConfig | Record<string, unknown>',
+    description: '適用する部分的なセッション設定。',
+    isOptional: false,
+  },
+]}
+/>
+
+戻り値：`void`
+
+### `addInstructions()`
+
+次回の `connect()` または `updateConfig()` 呼び出しで使用するシステム指示を設定します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'instructions',
+    type: 'string',
+    description: 'モデルのシステムプロンプト。',
+    isOptional: true,
+  },
+]}
+/>
+
+戻り値： `void`
+
+### `addTools()`
+
+セッション中にモデルが呼び出せる Tool を登録します。`InworldRealtimeVoice` を Agent に関連付けると、Agent に設定された Tool が自動的に利用可能になります。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'tools',
+    type: 'ToolsInput',
+    description: '設定する Tool の設定。',
+    isOptional: true,
+  },
+]}
+/>
+
+戻り値： `void`
+
+### `answer()`
+
+`response.create` イベントを送信してモデルの応答を開始します。応答ごとのオプションも指定できます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'Record<string, unknown>',
+    description: 'サーバーに転送する応答オプション。',
+    isOptional: true,
+  },
+]}
+/>
+
+戻り値： `Promise<void>`
+
+### ターン交代
+
+#### `commitInput()`
+
+バッファリングされた入力音声をユーザーのターンとして手動でコミットします。`turn_detection` を `null` に設定した場合のプッシュツートークまたは手動ターン交代に使用します。
+
+```typescript
+voice.commitInput()
+```
+
+戻り値： `void`
+
+#### `clearInput()`
+
+バッファリングされた入力音声をユーザーのターンとしてコミットせずに破棄します。
+
+```typescript
+voice.clearInput()
+```
+
+戻り値： `void`
+
+#### `clearOutput()`
+
+サーバーの出力音声バッファ全体を消去して再生を停止します。処理中のバックチャンネル音声も停止します。デフォルトの割り込みパス（`interrupted` での `response.cancel`）はバックチャンネルに影響しないため、そちらを優先してください。すべてを消去する場合だけ `clearOutput()` を使用します。
+
+```typescript
+voice.clearOutput()
+```
+
+戻り値： `void`
+
+### `close()` and `disconnect()`
+
+どちらのメソッドも WebSocket を閉じ、インスタンスを切断済みとしてマークします。
+
+戻り値： `void`
+
+### `getSpeakers()`
+
+パッケージに同梱された厳選 Voice の一覧を返します。Inworld のカタログにはこの一覧より多くの Voice があり、実行時に任意の Voice ID を `speaker` に渡せます。
+
+戻り値：`Promise<Array<{ voiceId: string }>>`
+
+### `on()` and `off()`
+
+イベントリスナーを登録および削除します。以下の[イベント](#events)を参照してください。
+
+## イベント
+
+`InworldRealtimeVoice` クラスは次のイベントを送出します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'speaker',
+    type: 'event',
+    description:
+      '応答ごとに1回、PCM 音声の PassThrough ストリームとともに送出されます。音声をプレーヤーにパイプする場合に使用します。',
+  },
+  {
+    name: 'speaking',
+    type: 'event',
+    description: '音声差分ごとに送出されます。コールバックは { audio: Buffer, response_id: string } を受け取ります。',
+  },
+  {
+    name: 'speaking.done',
+    type: 'event',
+    description: '応答の音声出力が完了したときに送出されます。コールバックは { response_id: string } を受け取ります。',
+  },
+  {
+    name: 'writing',
+    type: 'event',
+    description:
+      '文字起こしテキストが利用可能になると送出されます。コールバックは { text: string, response_id: string, role: "assistant" | "user", voiceProfile? } を受け取ります。同じ応答内の音声文字起こしとテキスト差分で重複排除され、1つの応答では1つのストリームだけが送出されます。ユーザーイベントでは、providerData.stt.voice_profile が有効な場合に voiceProfile が存在します。',
+  },
+  {
+    name: 'speech-started',
+    type: 'event',
+    description: 'サーバーからの生の `input_audio_buffer.speech_started` VAD エッジ。',
+  },
+  {
+    name: 'speech-stopped',
+    type: 'event',
+    description: 'サーバーからの生の `input_audio_buffer.speech_stopped` VAD エッジ。',
+  },
+  {
+    name: 'interrupted',
+    type: 'event',
+    description:
+      '合成されたクライアント側シグナル。ユーザーが話し始めると、処理中の `response_id` ごとに1回送出されます。割り込み時にメイン応答の再生を停止するために使用します。コールバックは `{ response_id: string }` を受け取ります。メイン応答 ID だけを含み、バックチャンネル ID は含まれません。そのため、対応する `speaker` ストリームを停止しても `backchannel` ストリームは再生を続けます。',
+  },
+  {
+    name: 'turn-suggestion',
+    type: 'event',
+    description:
+      'バッファリングされたユーザー発話に対する Smart-turn エンドポイントのヒント。コールバックは { item_id, utterance_index, probability, trailing_silence_ms?, audio_duration_ms?, inference_ms? } を受け取ります。',
+  },
+  {
+    name: 'turn-suggestion-revoked',
+    type: 'event',
+    description: '以前に送出されたターン候補が取り消されたことを示します。コールバックは { item_id, utterance_index } を受け取ります。',
+  },
+  {
+    name: 'input-committed',
+    type: 'event',
+    description:
+      'バッファリングされた入力音声がユーザーのターンとしてコミットされたことを示します（commitInput() または自動 VAD）。コールバックは { item_id, previous_item_id? } を受け取り、previous_item_id は null の場合があります。',
+  },
+  {
+    name: 'input-cleared',
+    type: 'event',
+    description: 'バッファリングされた入力音声が破棄されたことを示します（clearInput()）。コールバックは {} を受け取ります。',
+  },
+  {
+    name: 'input-timeout',
+    type: 'event',
+    description:
+      'サーバー VAD のアイドルタイムアウトによってユーザーのターンがコミットされたことを示します。コールバックは { audio_start_ms, audio_end_ms, item_id } を受け取ります。',
+  },
+  {
+    name: 'output-audio-started',
+    type: 'event',
+    description: 'サーバーが出力音声の送出を開始したことを示します。コールバックは {} を受け取ります。',
+  },
+  {
+    name: 'output-audio-stopped',
+    type: 'event',
+    description: 'サーバーが現在の応答の出力音声送出を停止したことを示します。コールバックは {} を受け取ります。',
+  },
+  {
+    name: 'output-audio-cleared',
+    type: 'event',
+    description: 'サーバーの出力音声バッファが消去され、再生が停止したことを示します（clearOutput()）。コールバックは {} を受け取ります。',
+  },
+  {
+    name: 'memory',
+    type: 'event',
+    description:
+      'Inworld のローリング要約と Fact 状態とともに送出され、バージョン単位で重複排除されます。providerData.memory.enabled が必要です。コールバックは InworldMemoryState を受け取ります。',
+  },
+  {
+    name: 'backchannel',
+    type: 'event',
+    description:
+      'バックチャンネル PCM 音声（ユーザーの発話中の短い相づち）の PassThrough ストリームとともに送出されます。各ストリームの `.id` は `interrupted` に決して現れない `backchannel_id` なので、割り込みで停止しない別トラックで再生してください。providerData.backchannel.enabled が必要です。',
+  },
+  {
+    name: 'backchannel.done',
+    type: 'event',
+    description: 'バックチャンネルが終了したときに送出されます。コールバックは { backchannel_id: string, phrase? } を受け取ります。',
+  },
+  {
+    name: 'backchannel.skipped',
+    type: 'event',
+    description:
+      '音声が生成される前に判定機能がバックチャンネルをスキップしたときに送出されます。コールバックは { reason: string } を受け取ります。',
+  },
+  {
+    name: 'response.created',
+    type: 'event',
+    description: '新しい応答が開始されたときに送出されます。コールバックは完全なサーバーイベントを受け取ります。',
+  },
+  {
+    name: 'response.done',
+    type: 'event',
+    description: '応答が完了したときに送出されます。コールバックは完全なサーバーイベントを受け取ります。',
+  },
+  {
+    name: 'conversation.item.added',
+    type: 'event',
+    description: '新しい会話項目が追加されたときに送出されます。',
+  },
+  {
+    name: 'conversation.item.done',
+    type: 'event',
+    description: '会話項目が終了したときに送出されます。',
+  },
+  {
+    name: 'function_call.arguments',
+    type: 'event',
+    description: '完全な Tool 呼び出し引数とともに送出されます。コールバックは { call_id, name, arguments } を受け取ります。',
+  },
+  {
+    name: 'tool-call-start',
+    type: 'event',
+    description: '登録済み Tool の実行前に送出されます。',
+  },
+  {
+    name: 'tool-call-result',
+    type: 'event',
+    description: '登録済み Tool が結果を返した後に送出されます。',
+  },
+  {
+    name: 'error',
+    type: 'event',
+    description: 'トランスポートまたはサーバーのエラー時に送出されます。',
+  },
+]}
+/>
+
+## Voice
+
+パッケージには、`getSpeakers()` から返される厳選された Voice ID が含まれています。
+
+- `Dennis`
+- `Hades`
+- `Wendy`
+- `Edward`
+- `Olivia`
+- `Sarah`
+- `Timothy`
+- `Priya`
+- `Ronald`
+- `Deborah`
+
+[Inworld Voice カタログ](https://docs.inworld.ai/quickstart-tts)の任意の Voice ID を実行時に `speaker` へ渡せます。
+
+## 注意事項
+
+- API キーは、コンストラクターオプションまたは `INWORLD_API_KEY` 環境変数で指定できます。キーはあらかじめ Basic エンコードされています。再エンコードしないでください。
+- WebSocket URL には `?key=<sessionId>&protocol=realtime` が追加されます。モデルは URL ではなく、最初の `session.update` で設定されます。
+- 呼び出しごとの `speak(input, { speaker })` は、Voice の上書きを単一の応答（フラットな `response.voice` フィールド）だけに適用し、セッションを変更しません。
+- 音声出力のデフォルトは 24 kHz の PCM16 です。8 kHz のテレフォニー `audio/pcmu` と `audio/pcma`、および `audio/float32` も `session.audio.output.format` でサポートされます。
+- send、speak、listen を呼び出す前に `connect()` を使用してください。WebSocket が開く前に送信されたイベントはキューに入り、サーバーが `session.updated` を確認するとフラッシュされます。
+- WebSocket を解放するには、Voice インスタンスを `close()` または `disconnect()` で閉じる必要があります。
+- `session` で指定しない場合、`audio.input.turn_detection` のデフォルトは Semantic VAD です。独自のオブジェクトで上書きするか、ターン検出を完全に無効にするには `null` を渡します。
+- `audio.input.transcription` のデフォルトは `{ model: 'inworld/inworld-stt-1' }` なので、ユーザー側の `writing` イベントはそのまま発生します。独自のオブジェクトで上書きするか、ユーザー側の文字起こしを無効にするには `null` を渡します。
+- `on()` と `off()` は `InworldVoiceEventMap` に対して型付けされます。既知のイベント名では型付きのコールバックペイロードを取得し、不明な名前では `unknown` にフォールバックします。

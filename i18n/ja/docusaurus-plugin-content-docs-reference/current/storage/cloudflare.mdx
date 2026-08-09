@@ -1,0 +1,198 @@
+---
+title: "リファレンス: Cloudflare ストレージ | Storage"
+description: KV と Durable Objects を含む、Mastra の Cloudflare ストレージ実装に関するドキュメントです。
+packages:
+  - "@mastra/cloudflare"
+---
+
+# Cloudflare ストレージ
+
+Mastra は、2つの Cloudflare ストレージ実装を提供します。
+
+- **Cloudflare KV**（`CloudflareKVStorage`）: グローバルに分散された結果整合性のある Key-Value ストア
+- **Cloudflare Durable Objects**（`CloudflareDOStorage`）: Durable Objects を使用する、強整合性を備えた SQLite ベースのストレージ
+
+:::warning[Observability は未サポート]
+
+Cloudflare ストレージは **observability ドメインをサポートしていません**。`MastraStorageExporter` のトレースを永続化できず、Cloudflare を唯一のストレージ Provider とした場合、[Studio](/docs/studio/overview) の observability 機能は動作しません。observability を有効にするには、[複合ストレージ](/reference/storage/composite#specialized-storage-for-observability)を使用し、observability データを ClickHouse などの対応 Provider にルーティングしてください。
+
+:::
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/cloudflare@latest
+```
+
+## Cloudflare KV ストレージ
+
+KV ストレージ実装は、Cloudflare Workers KV を使用した、グローバルに分散されるサーバーレス Key-Value ストアを提供します。
+
+### 使用方法
+
+```typescript
+import { CloudflareKVStorage } from '@mastra/cloudflare/kv'
+
+// --- Example 1: Using Workers Binding ---
+const storageWorkers = new CloudflareKVStorage({
+  id: 'cloudflare-workers-storage',
+  bindings: {
+    threads: THREADS_KV, // KVNamespace binding for threads table
+    messages: MESSAGES_KV, // KVNamespace binding for messages table
+    // Add other tables as needed
+  },
+  keyPrefix: 'dev_', // Optional: isolate keys per environment
+})
+
+// --- Example 2: Using REST API ---
+const storageRest = new CloudflareKVStorage({
+  id: 'cloudflare-rest-storage',
+  accountId: process.env.CLOUDFLARE_ACCOUNT_ID!, // Cloudflare Account ID
+  apiToken: process.env.CLOUDFLARE_API_TOKEN!, // Cloudflare API Token
+  namespacePrefix: 'dev_', // Optional: isolate namespaces per environment
+})
+```
+
+### パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'このストレージインスタンスの一意な識別子。',
+    isOptional: false,
+  },
+  {
+    name: 'bindings',
+    type: 'Record<string, KVNamespace>',
+    description: 'Cloudflare Workers KV バインディング（Workers ランタイム用）',
+    isOptional: true,
+  },
+  {
+    name: 'accountId',
+    type: 'string',
+    description: 'Cloudflare Account ID（REST API 用）',
+    isOptional: true,
+  },
+  {
+    name: 'apiToken',
+    type: 'string',
+    description: 'Cloudflare API Token（REST API 用）',
+    isOptional: true,
+  },
+  {
+    name: 'namespacePrefix',
+    type: 'string',
+    description: 'すべての名前空間名に付ける任意のプレフィックス（環境の分離に便利）',
+    isOptional: true,
+  },
+  {
+    name: 'keyPrefix',
+    type: 'string',
+    description: 'すべてのキーに付ける任意のプレフィックス（環境の分離に便利）',
+    isOptional: true,
+  },
+]}
+/>
+
+### 補足事項
+
+### スキーマ管理
+
+ストレージ実装がスキーマの作成と更新を自動的に処理します。次のテーブルが作成されます。
+
+- `threads`: 会話スレッドを保存します
+- `messages`: 個々のメッセージを保存します
+- `metadata`: スレッドとメッセージの追加メタデータを保存します
+
+### 整合性と伝播
+
+Cloudflare KV は結果整合性のあるストアです。そのため、書き込み直後は、すべてのリージョンでデータを利用できるとは限りません。
+
+### キー構造と名前空間
+
+Cloudflare KV のキーは、設定可能なプレフィックスとテーブル固有の形式（例: `threads:threadId`）の組み合わせで構成されます。
+Workers へのデプロイでは、`keyPrefix` を使用して名前空間内のデータを分離します。REST API でのデプロイでは、`namespacePrefix` を使用して環境またはアプリケーション間で名前空間全体を分離します。
+
+## Cloudflare Durable Objects ストレージ
+
+Durable Objects ストレージ実装は、Cloudflare Durable Objects を使用した、強整合性を備える SQLite ベースのストレージを提供します。トランザクションの整合性と SQL クエリ機能を必要とするアプリケーションに適しています。
+
+### 使用方法
+
+```typescript
+import { DurableObject } from 'cloudflare:workers'
+import { CloudflareDOStorage } from '@mastra/cloudflare/do'
+
+class AgentDurableObject extends DurableObject<Env> {
+  private storage: CloudflareDOStorage
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env)
+    this.storage = new CloudflareDOStorage({
+      sql: ctx.storage.sql,
+      tablePrefix: 'mastra_', // Optional: prefix for table names
+    })
+  }
+
+  async run() {
+    const memory = await this.storage.getStore('memory')
+    await memory?.saveThread({
+      thread: { id: 'thread-1', resourceId: 'user-1', title: 'Chat', metadata: {} },
+    })
+  }
+}
+```
+
+### パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'sql',
+    type: 'SqlStorage',
+    description: 'Durable Objects の ctx.storage.sql から取得した SqlStorage インスタンス',
+    isOptional: false,
+  },
+  {
+    name: 'tablePrefix',
+    type: 'string',
+    description: 'テーブル名に付ける任意のプレフィックス（英字、数字、アンダースコアのみ使用可能）',
+    isOptional: true,
+  },
+  {
+    name: 'disableInit',
+    type: 'boolean',
+    description:
+      'true の場合、テーブルの自動作成とマイグレーションを無効にします。マイグレーションを別途実行する CI/CD パイプラインに便利です。',
+    isOptional: true,
+  },
+]}
+/>
+
+### 強整合性
+
+KV とは異なり、Durable Objects は強整合性を保証します。Durable Object 内のすべての読み書きが直列化されるため、高速で長時間稼働する Agent に非常に適しています。
+
+### SQL 機能
+
+Durable Objects ストレージは内部で SQLite を使用し、Key-Value ストレージでは実現できない効率的なクエリ、フィルタリング、ページネーションを可能にします。
+
+## スキーマ管理
+
+どちらのストレージ実装も、スキーマの作成と更新を自動的に処理します。次のテーブルが作成されます。
+
+- `threads`: 会話スレッドを保存します
+- `messages`: 個々のメッセージを保存します
+- `workflow_snapshot`: Workflow の実行状態を保存します
+
+## 非推奨のエイリアス
+
+後方互換性のため、次のエイリアスを利用できます。
+
+```typescript
+// These are deprecated - use CloudflareKVStorage and CloudflareDOStorage instead
+import { CloudflareStore } from '@mastra/cloudflare/kv' // alias for CloudflareKVStorage
+import { DOStore } from '@mastra/cloudflare/do' // alias for CloudflareDOStorage
+```

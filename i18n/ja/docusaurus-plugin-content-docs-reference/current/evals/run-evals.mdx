@@ -1,0 +1,599 @@
+---
+title: "リファレンス: runEvals | Evals"
+description: "複数のスコアラーを使用して Agent と Workflow を一括評価できる、Mastra の runEvals 関数のドキュメントです。"
+packages:
+  - "@mastra/core"
+---
+
+# runEvals
+
+`runEvals` 関数は、複数のテストケースをスコアラーに対して並行実行し、Agent と Workflow を一括評価します。AI システムの体系的なテスト、パフォーマンス分析、検証に不可欠です。
+
+## 使用例
+
+```typescript
+import { runEvals } from '@mastra/core/evals'
+import { myAgent } from './agents/my-agent'
+import { myScorer1, myScorer2 } from './scorers'
+
+const result = await runEvals({
+  target: myAgent,
+  data: [
+    { input: 'What is machine learning?' },
+    { input: 'Explain neural networks' },
+    { input: 'How does AI work?' },
+  ],
+  scorers: [myScorer1, myScorer2],
+  targetOptions: { maxSteps: 5 },
+  concurrency: 2,
+  onItemComplete: ({ item, targetResult, scorerResults }) => {
+    console.log(`Completed: ${item.input}`)
+    console.log(`Scores:`, scorerResults)
+  },
+})
+
+console.log(`Average scores:`, result.scores)
+console.log(`Processed ${result.summary.totalItems} items`)
+```
+
+### 複数ターンの評価
+
+```typescript
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { weatherAgent } from './agents/weather-agent'
+
+const result = await runEvals({
+  target: weatherAgent,
+  data: [
+    {
+      inputs: [
+        'What is the weather in Brooklyn?',
+        'What about tomorrow?',
+        'Compare the two forecasts.',
+      ],
+    },
+  ],
+  scorers: [checks.calledTool('get_weather', { times: 2 }), checks.includes('Brooklyn')],
+})
+```
+
+### ゲートとしきい値の使用
+
+```typescript
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { faithfulnessScorer } from './scorers'
+
+const result = await runEvals({
+  target: myAgent,
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  gates: [checks.calledTool('get_weather'), checks.noToolErrors()],
+  scorers: [{ scorer: faithfulnessScorer, threshold: 0.7 }, checks.includes('Brooklyn')],
+})
+
+result.verdict // 'passed' | 'scored' | 'failed'
+result.gateResults // [{ id, passed, score }]
+result.thresholdResults // [{ id, passed, averageScore, threshold }]
+```
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'target',
+    type: 'Agent | Workflow',
+    description: '評価対象の Agent または Workflow。',
+    isOptional: false,
+  },
+  {
+    name: 'data',
+    type: 'RunEvalsDataItem[]',
+    description: '入力データと任意の正解データを含むテストケースの配列。',
+    isOptional: false,
+  },
+  {
+    name: 'scorers',
+    type: 'ScorerEntry[] | AgentScorerConfig | WorkflowScorerConfig',
+    description:
+      '使用するスコアラー。各エントリには、単体の `MastraScorer` またはしきい値を追跡する `{ scorer, threshold }` を指定します。`AgentScorerConfig` オブジェクトでは、Agent レベルのスコアラーと軌跡スコアラーを分けて指定します。`WorkflowScorerConfig` オブジェクトでは、Workflow、個々のステップ、軌跡に対するスコアラーを指定します。少なくとも 1 つのゲートを指定した場合は省略できます（ゲートのみの実行）。',
+    isOptional: true,
+  },
+  {
+    name: 'gates',
+    type: 'MastraScorer[]',
+    description:
+      '実行が合格するためにスコア 1.0 を取得する必要があるスコアラー。全データ項目での平均が 1.0 を下回るゲートが 1 つでもある場合、判定は `failed` になります。各データ項目では、通常のスコアラーより先にゲートが実行されます。指定した場合、`scorers` は省略できます。',
+    isOptional: true,
+  },
+  {
+    name: 'targetOptions',
+    type: 'AgentExecutionOptions | WorkflowRunOptions',
+    description:
+      '実行時に対象へ渡されるオプション。Agent の場合は agent.generate() に渡されるオプション（maxSteps、modelSettings、instructions など）。Workflow の場合は run.start() に渡されるオプション（perStep、outputOptions、initialState など）。複数ターンの Agent 実行（`inputs`/`turns`）では、`runEvals` が共有スレッドとリソースを生成して注入するため、`memory.thread` は省略できます。特定のリソースを再利用するには `memory.resource` を指定します。',
+    isOptional: true,
+  },
+  {
+    name: 'concurrency',
+    type: 'number',
+    description: '並行実行するテストケースの数。',
+    isOptional: true,
+    defaultValue: '1',
+  },
+  {
+    name: 'onItemComplete',
+    type: 'function',
+    description:
+      '各テストケースの完了後に呼び出されるコールバック関数。項目、対象の結果、スコアラーの結果を受け取ります。',
+    isOptional: true,
+  },
+]}
+/>
+
+## データ項目の構造
+
+<PropertiesTable
+  content={[
+  {
+    name: 'input',
+    type: 'string | string[] | CoreMessage[] | any',
+    description:
+      '対象への入力データ。Agent の場合はメッセージまたは文字列、Workflow の場合は Workflow の入力データです。`inputs` を指定した場合は省略できます。',
+    isOptional: true,
+  },
+  {
+    name: 'inputs',
+    type: '(string | string[] | CoreMessage[] | any)[]',
+    description:
+      '複数ターンの入力。各エントリは 1 つのターン（`input` と同じ形式）で、同じスレッド上の Agent に順番に送信されます。スコアラーには、すべてのターンから蓄積された出力が渡されます。Agent の対象でのみサポートされます。指定した場合、`input` は省略できます。`turns` とは同時に指定できません。',
+    isOptional: true,
+  },
+  {
+    name: 'turns',
+    type: 'EvalTurn[]',
+    description:
+      "ターンごとのアサーションを含む複数ターンの会話。各ターンは `{ input, gates?, scorers? }` オブジェクトで、同じスレッド上で順番に送信されます。その `gates`/`scorers` は、そのターンの入力と出力だけを評価します。ターンごとの結果は `turnResults` で報告され、全体の `verdict` に反映されます。Agent の対象でのみサポートされます。`input` および `inputs` とは同時に指定できません。",
+    isOptional: true,
+  },
+  {
+    name: 'groundTruth',
+    type: 'any',
+    description: 'スコアリング時の比較に使用する期待出力または参照出力。',
+    isOptional: true,
+  },
+  {
+    name: 'expectedTrajectory',
+    type: 'TrajectoryExpectation',
+    description:
+      '軌跡スコアリングで期待する軌跡の設定。期待されるステップ、順序、効率の上限、ブラックリスト、Tool の失敗許容度が含まれます。`run.expectedTrajectory` として軌跡スコアラーに渡されます。スコアラーのコンストラクターにある静的なデフォルト値を上書きします。',
+    isOptional: true,
+  },
+  {
+    name: 'requestContext',
+    type: 'RequestContext',
+    description: '実行時に対象へ渡す Request Context。',
+    isOptional: true,
+  },
+  {
+    name: 'tracingContext',
+    type: 'TracingContext',
+    description: '可観測性とデバッグに使用する Tracing コンテキスト。',
+    isOptional: true,
+  },
+  {
+    name: 'startOptions',
+    type: 'WorkflowRunOptions',
+    description:
+      '項目ごとの Workflow 実行オプション（initialState、perStep、outputOptions など）。targetOptions の上にマージされるため、項目ごとの値が優先されます。対象が Workflow の場合にのみ適用されます。',
+    isOptional: true,
+  },
+]}
+/>
+
+## Agent スコアラーの設定
+
+Agent では、`AgentScorerConfig` を使用して Agent レベルのスコアラーと軌跡スコアラーを分けて指定します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'MastraScorer[]',
+    description:
+      '未加工の Agent 出力（MastraDBMessage[]）を受け取るスコアラー。応答の品質や内容などの評価に使用します。',
+    isOptional: true,
+  },
+  {
+    name: 'trajectory',
+    type: 'MastraScorer[]',
+    description:
+      '抽出済みの Trajectory オブジェクトを受け取るスコアラー。ストレージが設定されている場合、パイプラインは可観測性トレースから階層的な軌跡（ネストされた Tool 呼び出しとモデル生成を含む）を抽出します。それ以外の場合は、Agent メッセージから Tool 呼び出しを抽出する方式にフォールバックします。',
+    isOptional: true,
+  },
+]}
+/>
+
+## Workflow スコアラーの設定
+
+Workflow では、`WorkflowScorerConfig` を使用して各レベルのスコアラーを指定します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'workflow',
+    type: 'MastraScorer[]',
+    description: 'Workflow 全体の出力を評価するスコアラー。',
+    isOptional: true,
+  },
+  {
+    name: 'steps',
+    type: 'Record<string, MastraScorer[]>',
+    description: '各ステップの出力を評価するため、ステップ ID とスコアラーの配列を対応付けるオブジェクト。',
+    isOptional: true,
+  },
+  {
+    name: 'trajectory',
+    type: 'MastraScorer[]',
+    description:
+      'Workflow の実行から抽出済みの Trajectory を受け取るスコアラー。ストレージが設定されている場合、パイプラインは可観測性トレースから階層的な軌跡（Workflow ステップ内のネストされた Agent 実行と Tool 呼び出しを含む）を抽出します。それ以外の場合は、Workflow の出力からステップ結果を抽出する方式にフォールバックします。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'scores',
+    type: 'Record<string, any>',
+    description: 'すべてのテストケースにわたる平均スコア。スコアラー名ごとに整理されます。',
+  },
+  {
+    name: 'summary',
+    type: 'object',
+    description: '実験の実行に関する概要情報。',
+  },
+  {
+    name: 'summary.totalItems',
+    type: 'number',
+    description: '処理されたテストケースの総数。',
+  },
+  {
+    name: 'verdict',
+    type: "'passed' | 'scored' | 'failed'",
+    description:
+      '`gates` またはしきい値付きのスコアラーを指定した場合に存在します。`passed` = すべてのゲートとしきい値を満たした状態。`scored` = ゲートには合格したものの、しきい値を満たさなかった状態。`failed` = 少なくとも 1 つのゲートがスコア 1.0 を取得できなかった状態。',
+    isOptional: true,
+  },
+  {
+    name: 'gateResults',
+    type: 'GateResult[]',
+    description:
+      'すべてのデータ項目にわたって平均化された、ゲートごとの結果。各エントリには `id`、`passed`（ブール値）、`score`（0～1）が含まれます。',
+    isOptional: true,
+  },
+  {
+    name: 'thresholdResults',
+    type: 'ThresholdResult[]',
+    description:
+      'すべてのデータ項目にわたって平均化された、しきい値付きスコアラーごとの結果。各エントリには `id`、`passed`、`averageScore`、`threshold` が含まれます。',
+    isOptional: true,
+  },
+  {
+    name: 'turnResults',
+    type: 'TurnResult[]',
+    description:
+      '`turns` を使用するデータ項目がある場合に存在します。各エントリには `index`（ゼロ始まりのターン）、任意の `gateResults`、`thresholdResults`、`scores`（スコアラー ID をキーとする単体スコアラーの平均）が含まれ、データ項目全体でターンのインデックスごとに集計されます。',
+    isOptional: true,
+  },
+]}
+/>
+
+## EvalTurn
+
+`turns` 配列内の 1 つのターンです。その `gates`/`scorers` は、そのターンの入力と出力だけを評価します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'input',
+    type: 'string | string[] | CoreMessage[] | any',
+    description: 'このターンで Agent に送信される入力。',
+  },
+  {
+    name: 'gates',
+    type: 'MastraScorer[]',
+    description: 'このターンでスコア 1.0 を取得する必要があるゲート。ターンのゲートが不合格になると、全体の判定は `failed` になります。',
+    isOptional: true,
+  },
+  {
+    name: 'scorers',
+    type: 'ScorerEntry[]',
+    description:
+      'このターンだけを対象に評価されるスコアラー（任意でしきい値を指定可能）。ゲートに合格しても、ターンごとのしきい値を満たさない場合、判定は `scored` になります。',
+    isOptional: true,
+  },
+]}
+/>
+
+## ScorerEntry
+
+`scorers` 配列内のスコアラーエントリには、単体のスコアラーまたはしきい値付きのスコアラーを指定できます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'scorer',
+    type: 'MastraScorer',
+    description: 'スコアラーのインスタンス。',
+  },
+  {
+    name: 'threshold',
+    type: 'number | { min?: number; max?: number }',
+    description:
+      '数値は最小しきい値を表します（スコアがその値以上なら合格）。範囲に基づくチェックには `{ min, max }` を使用します。たとえば、スコアが高いほど望ましくないハルシネーションなどのスコアラーには `{ max: 0.3 }` を使用します。`min` と `max` はどちらも 0～1 の範囲で指定する必要があります。',
+  },
+]}
+/>
+
+## 例
+
+### ゲートと判定
+
+厳格な合否要件には `gates` を使用し、追跡する品質指標には `{ scorer, threshold }` を使用します。
+
+```typescript
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+
+const result = await runEvals({
+  target: weatherAgent,
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  gates: [checks.calledTool('get_weather'), checks.noToolErrors()],
+  scorers: [
+    { scorer: faithfulnessScorer, threshold: 0.7 }, // min threshold (number shorthand)
+    { scorer: hallucinationScorer, threshold: { max: 0.3 } }, // max threshold (high = bad)
+    { scorer: toneScorer, threshold: { min: 0.5, max: 0.9 } }, // range threshold
+    checks.includes('Brooklyn'), // bare scorer, no threshold
+  ],
+})
+
+if (result.verdict === 'failed') {
+  console.log(
+    'Gate failures:',
+    result.gateResults?.filter(g => !g.passed),
+  )
+} else if (result.verdict === 'scored') {
+  console.log(
+    'Threshold misses:',
+    result.thresholdResults?.filter(t => !t.passed),
+  )
+}
+```
+
+### Agent の評価
+
+```typescript
+import { createScorer, runEvals } from '@mastra/core/evals'
+
+const myScorer = createScorer({
+  id: 'my-scorer',
+  description: "Check if Agent's response contains ground truth",
+  type: 'agent',
+}).generateScore(({ run }) => {
+  const response = run.output[0]?.content || ''
+  const expectedResponse = run.groundTruth
+  return response.includes(expectedResponse) ? 1 : 0
+})
+
+const result = await runEvals({
+  target: chatAgent,
+  data: [
+    {
+      input: 'What is AI?',
+      groundTruth: 'AI is a field of computer science that creates intelligent machines.',
+    },
+    {
+      input: 'How does machine learning work?',
+      groundTruth: 'Machine learning uses algorithms to learn patterns from data.',
+    },
+  ],
+  scorers: [relevancyScorer],
+  concurrency: 3,
+})
+```
+
+### Agent の軌跡評価
+
+`AgentScorerConfig` を使用して、Agent の応答と Tool 呼び出しの軌跡を両方評価します。
+
+```typescript
+import { runEvals } from '@mastra/core/evals'
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/code/trajectory'
+
+const trajectoryScorer = createTrajectoryAccuracyScorerCode()
+
+const result = await runEvals({
+  target: chatAgent,
+  data: [
+    {
+      input: 'What is the weather in London?',
+      expectedTrajectory: {
+        steps: [{ stepType: 'tool_call', name: 'weatherTool' }],
+      },
+    },
+  ],
+  scorers: {
+    // agent: [responseQualityScorer], // Optional: add agent-level scorers
+    trajectory: [trajectoryScorer],
+  },
+})
+
+// result.scores.agent — average agent-level scores
+// result.scores.trajectory — average trajectory scores
+```
+
+### `targetOptions` を使用する Agent
+
+評価中の Agent の動作をカスタマイズするには、`maxSteps` や `modelSettings` などの実行オプションを渡します。
+
+```typescript
+const result = await runEvals({
+  target: chatAgent,
+  data: [{ input: 'Summarize this article' }, { input: 'Translate to French' }],
+  scorers: [relevancyScorer],
+  targetOptions: {
+    maxSteps: 5,
+    modelSettings: { temperature: 0 },
+  },
+})
+```
+
+### Workflow の評価
+
+```typescript
+const workflowResult = await runEvals({
+  target: myWorkflow,
+  data: [
+    { input: { query: 'Process this data', priority: 'high' } },
+    { input: { query: 'Another task', priority: 'low' } },
+  ],
+  scorers: {
+    workflow: [outputQualityScorer],
+    steps: {
+      'validation-step': [validationScorer],
+      'processing-step': [processingScorer],
+    },
+  },
+  onItemComplete: ({ item, targetResult, scorerResults }) => {
+    console.log(`Workflow completed for: ${item.inputData.query}`)
+    if (scorerResults.workflow) {
+      console.log('Workflow scores:', scorerResults.workflow)
+    }
+    if (scorerResults.steps) {
+      console.log('Step scores:', scorerResults.steps)
+    }
+  },
+})
+```
+
+### Workflow の軌跡評価
+
+Workflow の評価に軌跡スコアリングを追加し、ステップの実行順序を検証します。
+
+```typescript
+const workflowResult = await runEvals({
+  target: myWorkflow,
+  data: [
+    {
+      input: { query: 'Process this data' },
+      expectedTrajectory: {
+        steps: [
+          { stepType: 'workflow_step', name: 'validate' },
+          { stepType: 'workflow_step', name: 'process' },
+          { stepType: 'workflow_step', name: 'output' },
+        ],
+      },
+    },
+  ],
+  scorers: {
+    workflow: [outputQualityScorer],
+    steps: {
+      validate: [validationScorer],
+    },
+    trajectory: [trajectoryScorer],
+  },
+})
+
+// result.scores.trajectory — workflow trajectory scores
+```
+
+### 項目ごとの `startOptions` を使用する Workflow
+
+個々のデータ項目に `startOptions` を使用して、Workflow の各実行をカスタマイズします。項目ごとの値は `targetOptions` より優先されます。
+
+```typescript
+const result = await runEvals({
+  target: myWorkflow,
+  data: [
+    {
+      input: { query: 'hello' },
+      startOptions: { initialState: { counter: 1 } },
+    },
+    {
+      input: { query: 'world' },
+      startOptions: { initialState: { counter: 2 } },
+    },
+  ],
+  scorers: [outputQualityScorer],
+  targetOptions: { perStep: true },
+})
+```
+
+### 複数ターンの会話評価
+
+`inputs` を使用して、共有スレッド上でターンを順番に送信します。スコアラーには、すべてのターンから蓄積された出力が渡されます。
+
+```typescript
+const result = await runEvals({
+  target: chatAgent,
+  data: [
+    {
+      inputs: ['My favorite city is Brooklyn.', 'What is the weather in my favorite city?'],
+    },
+  ],
+  gates: [checks.calledTool('get_weather')],
+  scorers: [{ scorer: checks.similarity('Brooklyn weather forecast'), threshold: 0.5 }],
+})
+
+// result.verdict: 'passed' | 'scored' | 'failed'
+```
+
+各ターンは同じ `threadId` で `agent.generate()` を実行するため、Agent は会話履歴全体を参照できます。`runEvals` は `resourceId` も注入し（Mastra のメモリは resource + thread 単位でメッセージを管理します）、デフォルトでは生成されたスレッドをその値として使用します。特定の値に固定するには、`targetOptions.memory.resource` を渡します。ターンをまたいだ情報の参照には、Agent にメモリストアが設定されている必要があります。設定されていない場合、各ターンは分離して実行されます。同じ `data` 配列内で、単一ターン（`input`）と複数ターン（`inputs`）の項目を混在させることができます。`inputs` を使用する場合、`input` は省略できます。
+
+スコアリングでは、すべてのターンから蓄積された出力が `run.output` として使用されますが、`run.input` として使用されるのは最初のターンだけです。複数ターンでは、出力に基づくスコアラー（`checks.includes`、`checks.calledTool`、`checks.similarity`）を推奨します。入力に関連するスコアラー（faithfulness など）は、最初のターンの入力だけを参照します。トレースから読み取る軌跡スコアラー（`AgentScorerConfig.trajectory`）は、最後のターンの span を参照します。`run.output` を読み取る Tool 呼び出しチェック（`checks.calledTool` など）では、引き続きすべてのターンを参照できます。
+
+### ターンごとのアサーション
+
+個々のターンに `gates`/`scorers` を設定するには、`turns` を使用します。ターンごとの各アサーションは、そのターンの入力と出力だけを参照するため、後のターンで発生したリグレッションが以前のターンによって隠されることはありません。
+
+```typescript
+const result = await runEvals({
+  target: chatAgent,
+  data: [
+    {
+      turns: [
+        {
+          input: 'What is the weather in Brooklyn?',
+          gates: [checks.calledTool('get_weather')],
+        },
+        {
+          input: 'What about tomorrow?',
+          gates: [checks.calledTool('get_weather')], // must call again this turn
+          scorers: [{ scorer: checks.similarity('tomorrow forecast'), threshold: 0.5 }],
+        },
+      ],
+    },
+  ],
+})
+
+result.verdict // folds in per-turn gate/threshold outcomes
+result.turnResults // [{ index, gateResults, thresholdResults, scores }]
+```
+
+ターンごとのゲートとスコアラーは、そのターンだけを評価します（`run.input`/`run.output` はそのターンの値です）。ターンのゲートが不合格になると、判定は `failed` になります。ターンのしきい値を満たさない場合（ゲートには合格）、判定は `scored` になります。トップレベルの `scorers`/`gates` は引き続き、蓄積された会話全体をスコアリングします。`turns` は Agent でのみ使用でき、`input` または `inputs` と組み合わせることはできません。
+
+## 関連項目
+
+- [複数ターンの Evals](/docs/evals/multi-turn): 複数ターン評価の概念ガイド
+- [ゲートと判定](/docs/evals/gates-and-verdicts): 重大度のセマンティクスに関する概念ガイド
+- [Quick Checks](/reference/evals/checks): LLM を使用しない、組み合わせ可能なマイクロスコアラー
+- [createScorer()](/reference/evals/create-scorer): 実験用のカスタムスコアラーを作成
+- [MastraScorer](/reference/evals/mastra-scorer): スコアラーの構造とメソッドについて学ぶ
+- [軌跡の精度](/reference/evals/trajectory-accuracy): 組み込みの軌跡評価スコアラー
+- [スコアラーのユーティリティ](/reference/evals/scorer-utils): 軌跡データを抽出するためのヘルパー関数
+- [カスタムスコアラー](/docs/evals/custom-scorers): 評価ロジックを構築するためのガイド
+- [スコアラーの概要](/docs/evals/overview): スコアラーの概念を理解する

@@ -1,0 +1,607 @@
+---
+title: "カスタム Gateway | モデル"
+description: "非公開または特殊な LLM deployment 向けにカスタムモデル Gateway を作成します"
+---
+
+# カスタムモデル Gateway
+
+カスタムモデル Gateway を使用すると、`MastraModelGatewayInterface` interface または `MastraModelGateway` 基底 class で、非公開または特殊な LLM Provider 連携を実装できます。
+
+## 概要
+
+Gateway は、言語モデルにアクセスするための Provider 固有ロジックを処理します。
+
+- Provider の設定とモデルの検出
+- 認証と API key の管理
+- API endpoint の URL 構築
+- 言語モデル instance の作成
+
+次の要件にはカスタム Gateway を作成します。
+
+- 非公開またはエンタープライズ向け LLM deployment
+- カスタム認証方式
+- 特殊な routing logic
+- 一意の ID による Gateway の versioning
+
+## カスタム Gateway の作成
+
+plain object の Gateway には `MastraModelGatewayInterface` を実装します。基底 class のデフォルトを利用する場合は `MastraModelGateway` を継承します。
+
+```typescript
+import { type MastraModelGatewayInterface, type ProviderConfig } from '@mastra/core/llm';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible-v5';
+
+const myPrivateGateway: MastraModelGatewayInterface = {
+  id: 'private',
+  name: 'My Private Gateway',
+  async fetchProviders(): Promise<Record<string, ProviderConfig>> {
+    return {
+      'my-provider': {
+        name: 'My Provider',
+        models: ['__GATEWAY_OPENAI_MODEL__'],
+        apiKeyEnvVar: 'MY_API_KEY',
+        gateway: 'private',
+        url: 'https://api.myprovider.com/v1',
+      },
+    };
+  },
+  buildUrl() {
+    return 'https://api.myprovider.com/v1';
+  },
+  async getApiKey() {
+    return process.env.MY_API_KEY ?? '';
+  },
+  async resolveLanguageModel({ modelId, providerId, apiKey }) {
+    return createOpenAICompatible({
+      name: providerId,
+      apiKey,
+      baseURL: 'https://api.myprovider.com/v1',
+    }).chatModel(modelId);
+  },
+};
+```
+
+次の例では `MastraModelGateway` class を継承します。
+
+```typescript
+import { MastraModelGateway, type ProviderConfig } from '@mastra/core/llm';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible-v5';
+import type { LanguageModelV2 } from '@ai-sdk/provider-v5';
+
+class MyPrivateGateway extends MastraModelGateway {
+  // Required: Unique identifier for the gateway
+  // This ID is used as the prefix for all providers from this gateway
+  readonly id = 'private';
+
+  // Required: Human-readable name
+  readonly name = 'My Private Gateway';
+
+  /**
+   * Fetch provider configurations from your gateway
+   * Returns a record of provider configurations
+   */
+  async fetchProviders(): Promise<Record<string, ProviderConfig>> {
+    return {
+      'my-provider': {
+        name: 'My Provider',
+        models: ['__GATEWAY_OPENAI_MODEL__', '__GATEWAY_ANTHROPIC_MODEL_SONNET__'],
+        apiKeyEnvVar: 'MY_API_KEY',
+        gateway: this.id,
+        url: 'https://api.myprovider.com/v1',
+      },
+    };
+  }
+
+  /**
+   * Build the API URL for a model
+   * @param modelId - Full model ID (e.g., "private/my-provider/model-1")
+   * @param envVars - Environment variables (optional)
+   */
+  buildUrl(modelId: string, envVars?: Record<string, string>): string {
+    return 'https://api.myprovider.com/v1';
+  }
+
+  /**
+   * Get the API key for authentication
+   * @param modelId - Full model ID
+   */
+  async getApiKey(modelId: string): Promise<string> {
+    const apiKey = process.env.MY_API_KEY;
+    if (!apiKey) {
+      throw new Error(`Missing MY_API_KEY environment variable`);
+    }
+    return apiKey;
+  }
+
+  /**
+   * Create a language model instance
+   * @param args - Model ID, provider ID, and API key
+   */
+  async resolveLanguageModel({
+    modelId,
+    providerId,
+    apiKey,
+  }: {
+    modelId: string;
+    providerId: string;
+    apiKey: string;
+  }): Promise<LanguageModelV2> {
+    const baseURL = this.buildUrl(`${providerId}/${modelId}`);
+
+    return createOpenAICompatible({
+      name: providerId,
+      apiKey,
+      baseURL,
+      supportsStructuredOutputs: true,
+    }).chatModel(modelId);
+  }
+}
+```
+
+### Gateway が管理する認証
+
+Gateway が credential の検索を管理する場合は `resolveAuth` を追加します。Mastra は `getApiKey()` に fallback する前にこの hook を使用します。
+
+```typescript
+const myPrivateGateway: MastraModelGatewayInterface = {
+  // ...gateway fields and methods
+  async resolveAuth() {
+    const apiKey = process.env.MY_API_KEY;
+    return apiKey ? { apiKey, source: 'gateway' } : undefined;
+  },
+};
+```
+
+## カスタム Gateway の登録
+
+### 初期化時
+
+Mastra instance の作成時に Gateway を record として渡します。
+
+```typescript
+import { Mastra } from '@mastra/core';
+
+const mastra = new Mastra({
+  gateways: {
+    myGateway: new MyPrivateGateway(),
+    anotherGateway: new AnotherGateway(),
+  },
+});
+```
+
+### 初期化後
+
+`addGateway` を使用して Gateway を動的に追加します。
+
+```typescript
+const mastra = new Mastra();
+
+// Add with explicit key
+mastra.addGateway(new MyPrivateGateway(), 'myGateway');
+
+// Add using gateway's ID
+mastra.addGateway(new MyPrivateGateway());
+// Stored with key 'my-private-gateway' (the gateway's id)
+```
+
+## カスタム Gateway の使用
+
+Gateway ID を prefix にして、カスタム Gateway のモデルを参照します。
+
+```typescript
+import { Agent } from '@mastra/core/agent';
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'My Agent',
+  instructions: 'You are a helpful assistant',
+  model: 'private/my-provider/__GATEWAY_OPENAI_MODEL__', // Uses MyPrivateGateway
+});
+
+mastra.addAgent(agent, 'myAgent');
+```
+
+Agent の作成時やモデルの使用時に、Mastra のモデルルーターがモデル ID に基づいて適切な Gateway を自動選択します。Gateway ID が prefix になります。一致するカスタム Gateway がない場合は、組み込み Gateway に fallback します。
+
+### TypeScript の自動補完
+
+#### 開発環境での型の自動生成
+
+開発 mode（`MASTRA_DEV=true`）で実行すると、Mastra はカスタム Gateway の TypeScript 型を自動生成します。
+
+1. **環境変数を設定します**:
+   ```bash
+   export MASTRA_DEV=true
+   ```
+
+1. **Gateway を登録します**:
+   ```typescript
+   const mastra = new Mastra({
+     gateways: {
+       myGateway: new MyPrivateGateway(),
+     },
+   });
+   ```
+
+1. **型が自動生成されます**:
+   - Gateway を追加すると、Mastra が GatewayRegistry と同期します
+   - registry がカスタム Gateway から Provider を取得します
+   - `~/.cache/mastra/` に TypeScript 型が再生成されます
+   - 数秒以内に IDE が新しい型を認識します
+
+1. **自動補完が利用できます**:
+   ```typescript
+   const agent = new Agent({
+     model: 'my-gateway-id/my-provider/model-1', // Full autocomplete!
+   });
+   ```
+
+#### 仕組み
+
+GatewayRegistry は 1 時間ごとに同期し、次の処理を行います。
+- 登録済みのすべての Gateway で `fetchProviders()` を呼び出す
+- TypeScript の型定義を生成する
+- global cache と project の `dist/` directory の両方に書き込む
+- TypeScript server が変更を自動認識する
+
+:::tip
+初めて Gateway を追加したときは、型の生成に数秒かかる場合があります。以降は 1 時間ごとにバックグラウンドで更新されます。
+:::
+
+#### 型を手動生成する方法
+
+開発 mode で実行していない場合や、型をすぐに更新する必要がある場合:
+
+**方法 1: 型 assertion を使用する（最も簡単）**
+```typescript
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  instructions: 'You are a helpful assistant',
+  model: 'private/my-provider/model-1' as any, // Bypass type checking
+});
+```
+
+**方法 2: カスタム union 型を作成する（型安全）**
+```typescript
+import type { ModelRouterModelId } from '@mastra/core/llm';
+
+// Define your custom model IDs
+type CustomModelId =
+  | 'private/my-provider/model-1'
+  | 'private/my-provider/model-2'
+  | 'private/my-provider/model-3';
+
+// Combine with built-in models
+type AllModelIds = ModelRouterModelId | CustomModelId;
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  instructions: 'You are a helpful assistant',
+  model: 'private/my-provider/model-1' satisfies AllModelIds,
+});
+```
+
+**方法 3: ModelRouterModelId を global に拡張する（上級）**
+```typescript
+// In a types.d.ts file in your project
+// The import is required: it makes this file a module, so the block below
+// merges into the existing types instead of replacing the module.
+import '@mastra/core/llm';
+
+declare module '@mastra/core/llm' {
+  interface ProviderModelsMap {
+    'my-provider': readonly ['model-1', 'model-2', 'model-3'];
+  }
+}
+```
+
+組み込みの型を拡張してカスタムモデルを含めることで、完全な自動補完を利用できます。
+
+## Gateway の管理
+
+### getGateway(key)
+
+登録 key で Gateway を取得します。
+
+```typescript
+const gateway = mastra.getGateway('myGateway');
+console.log(gateway.name); // 'My Private Gateway'
+```
+
+### getGatewayById(id)
+
+一意の ID で Gateway を取得します。
+
+```typescript
+const gateway = mastra.getGatewayById('my-private-gateway');
+console.log(gateway.name); // 'My Private Gateway'
+```
+
+次のような場合に便利です。
+- Gateway の明示的な ID が登録 key と異なる場合
+- 複数の instance をまたいで ID から Gateway を検索する場合
+- Gateway の versioning（例: `'gateway-v1'`、`'gateway-v2'`）に対応する場合
+
+### listGateways()
+
+登録済みの Gateway をすべて取得します。
+
+```typescript
+const gateways = mastra.listGateways();
+console.log(Object.keys(gateways)); // ['myGateway', 'anotherGateway']
+```
+
+## Gateway の property
+
+### 必須
+
+| property | type | 説明 |
+|----------|------|-------------|
+| `id` | `string` | Gateway の一意な識別子。モデル文字列の Gateway prefix として使用 |
+| `name` | `string` | 人が読める Gateway 名 |
+
+### method
+
+| method | 説明 |
+|--------|-------------|
+| `fetchProviders()` | Provider 設定を取得 |
+| `buildUrl(modelId, envVars?)` | モデルの API URL を構築 |
+| `getApiKey(modelId)` | 認証用 API key を取得 |
+| `resolveLanguageModel(args)` | 言語モデル instance を作成 |
+| `getId()` | Gateway ID を取得（`id` または `name` を返す） |
+
+## Provider の設定
+
+`fetchProviders()` method は `ProviderConfig` object の record を返します。
+
+```typescript
+interface ProviderConfig {
+  name: string;                    // Display name
+  models: string[];                // Available model IDs
+  apiKeyEnvVar: string | string[]; // Environment variable(s) for API key
+  gateway: string;                 // Gateway identifier
+  url?: string;                    // Optional API base URL
+  apiKeyHeader?: string;           // Optional custom auth header
+  docUrl?: string;                 // Optional documentation URL
+}
+```
+
+## Gateway ID と key の違い
+
+両者の違いは次のとおりです。
+
+- **key**: Gateway を Mastra に追加するときに使用する登録 key（record key）
+- **ID**: Gateway の一意な識別子（`id` property。未設定の場合は `name`）
+
+```typescript
+class VersionedGateway extends MastraModelGateway {
+  readonly id = 'my-gateway-v2';     // Unique ID for versioning and prefixing
+  readonly name = 'My Gateway';       // Display name
+}
+
+const mastra = new Mastra({
+  gateways: {
+    currentGateway: new VersionedGateway(), // Key: 'currentGateway'
+  },
+});
+
+// Retrieve by key
+const byKey = mastra.getGateway('currentGateway');
+
+// Retrieve by ID
+const byId = mastra.getGatewayById('my-gateway-v2');
+
+// Both return the same gateway
+console.log(byKey === byId); // true
+```
+
+## モデル ID の形式
+
+カスタム Gateway 経由でアクセスするモデルは、次の形式です。
+
+```
+[gatewayId]/[provider]/[model]
+```
+
+例:
+- `private/my-provider/model-1`
+
+## 高度な例
+
+token ベースの認証とキャッシュを備えた Gateway:
+
+```typescript
+class TokenGateway extends MastraModelGateway {
+  readonly id = 'token-gateway-v1';
+  readonly name = 'Token Gateway';
+
+  private tokenCache: Map<string, { token: string; expiresAt: number }> = new Map();
+
+  async fetchProviders(): Promise<Record<string, ProviderConfig>> {
+    const response = await fetch('https://api.gateway.com/providers');
+    const data = await response.json();
+
+    return {
+      provider: {
+        name: data.name,
+        models: data.models,
+        apiKeyEnvVar: 'GATEWAY_TOKEN',
+        gateway: this.id,
+      },
+    };
+  }
+
+  async buildUrl(modelId: string, envVars?: Record<string, string>): Promise<string> {
+    const token = await this.getApiKey(modelId);
+    const siteId = envVars?.SITE_ID || process.env.SITE_ID;
+
+    const response = await fetch(`https://api.gateway.com/sites/${siteId}/token`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const { url } = await response.json();
+    return url;
+  }
+
+  async getApiKey(modelId: string): Promise<string> {
+    const cached = this.tokenCache.get(modelId);
+
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.token;
+    }
+
+    const token = process.env.GATEWAY_TOKEN;
+    if (!token) {
+      throw new Error('Missing GATEWAY_TOKEN');
+    }
+
+    // Cache token for 1 hour
+    this.tokenCache.set(modelId, {
+      token,
+      expiresAt: Date.now() + 3600000,
+    });
+
+    return token;
+  }
+
+  async resolveLanguageModel({ modelId, providerId, apiKey }: {
+    modelId: string;
+    providerId: string;
+    apiKey: string;
+  }): Promise<LanguageModelV2> {
+    const baseURL = await this.buildUrl(`${providerId}/${modelId}`);
+
+    return createOpenAICompatible({
+      name: providerId,
+      apiKey,
+      baseURL,
+      supportsStructuredOutputs: true,
+    }).chatModel(modelId);
+  }
+}
+```
+
+## エラー処理
+
+よくある失敗に対して、原因が分かるエラーを提供します。
+
+```typescript
+class RobustGateway extends MastraModelGateway {
+  // ... properties
+
+  async getApiKey(modelId: string): Promise<string> {
+    const apiKey = process.env.MY_API_KEY;
+
+    if (!apiKey) {
+      throw new Error(
+        `Missing MY_API_KEY environment variable for model: ${modelId}. ` +
+        `Please set MY_API_KEY in your environment.`
+      );
+    }
+
+    return apiKey;
+  }
+
+  async buildUrl(modelId: string, envVars?: Record<string, string>): Promise<string> {
+    const baseUrl = envVars?.BASE_URL || process.env.BASE_URL;
+
+    if (!baseUrl) {
+      throw new Error(
+        `No base URL configured for model: ${modelId}. ` +
+        `Set BASE_URL environment variable or pass it in envVars.`
+      );
+    }
+
+    return baseUrl;
+  }
+}
+```
+
+## カスタム Gateway のテスト
+
+テスト構成の例:
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import { Mastra } from '@mastra/core';
+
+describe('MyPrivateGateway', () => {
+  beforeEach(() => {
+    process.env.MY_API_KEY = 'test-key';
+  });
+
+  it('should fetch providers', async () => {
+    const gateway = new MyPrivateGateway();
+    const providers = await gateway.fetchProviders();
+
+    expect(providers['my-provider']).toBeDefined();
+    expect(providers['my-provider'].models).toContain('model-1');
+  });
+
+  it('should integrate with Mastra', () => {
+    const mastra = new Mastra({
+      gateways: {
+        private: new MyPrivateGateway(),
+      },
+    });
+
+    const gateway = mastra.getGateway('private');
+    expect(gateway.name).toBe('My Private Gateway');
+  });
+
+  it('should resolve models by ID', () => {
+    const mastra = new Mastra({
+      gateways: {
+        key: new MyPrivateGateway(),
+      },
+    });
+
+    const gateway = mastra.getGatewayById('my-private-gateway');
+    expect(gateway).toBeDefined();
+  });
+});
+```
+
+## ベストプラクティス
+
+1. **versioning には分かりやすい ID を使用する**: Gateway の versioning が必要な場合は、明示的な `id` 値を設定します
+   ```typescript
+   readonly id = 'my-gateway-v1';
+   ```
+
+1. **適切なエラー処理を実装する**: 対処方法が分かる具体的なエラーを throw します
+
+1. **高コストな処理をキャッシュする**: 必要に応じて token、URL、Provider 設定をキャッシュします
+
+1. **環境変数を検証する**: `getApiKey` と `buildUrl` で必須の環境変数を確認します
+
+1. **Gateway を文書化する**: Gateway の目的と設定を説明する JSDoc comment を追加します
+
+1. **命名規則に従う**: Provider とモデルには明確で一貫した名前を使用します
+
+1. **非同期処理に対応する**: network request と I/O 処理には `async/await` を使用します
+
+1. **十分にテストする**: すべての Gateway method に unit test を作成します
+
+## Studio にカスタム Gateway だけを表示する
+
+デフォルトでは、**Studio** に登録したカスタム Gateway とすべての外部モデル Provider（OpenAI、Anthropic、Gemini など）が表示されます。外部 Provider を非表示にするには、`AUTO_BLOCK_EXTERNAL_PROVIDERS` 環境変数を設定します。
+
+```bash
+AUTO_BLOCK_EXTERNAL_PROVIDERS=true
+```
+
+この変数を `true` または `1` に設定すると、Mastra は自分で登録した Gateway の Provider だけを返します。静的 Provider registry と組み込み Gateway（`models.dev`、`netlify`、`mastra`）はモデル選択画面に表示されません。すべてのモデル traffic を 1 つの非公開 Gateway に routing し、他の Provider を表示したくない場合に便利です。
+
+この変数を設定した状態でカスタム Gateway が未登録の場合、モデル選択画面は空になります。モデルを表示するには、少なくとも 1 つのカスタム Gateway を登録してください。
+
+## 組み込み Gateway
+
+Mastra には reference implementation として次の Gateway が組み込まれています。
+
+- **NetlifyGateway**: token exchange を利用する Netlify AI Gateway 連携
+- **ModelsDevGateway**: models.dev の OpenAI 互換 Provider registry
+
+Gateway の使用例は、[Netlify](/models/gateways/netlify)、[OpenRouter](/models/gateways/openrouter)、[Vercel](/models/gateways/vercel)を参照してください。

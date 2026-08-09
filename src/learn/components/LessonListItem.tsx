@@ -3,6 +3,7 @@ import { cn } from '@site/src/lib/utils'
 import type { Lesson, LearnStorageV1 } from '../types'
 import { LessonStatusChip } from './LessonStatusChip'
 import type { LessonProgressStatus } from '../hooks/useLessonProgress'
+import { useLocalizedLearnContent } from '../localization'
 
 type LessonListItemProps = {
   lesson: Lesson
@@ -40,16 +41,22 @@ function PlayButton() {
 }
 
 export function LessonListItem({ lesson, index, storage, className }: LessonListItemProps) {
+  const { isSimplifiedChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
   const isComingSoon = lesson.status === 'comingSoon'
   const progressStatus = isComingSoon ? 'not-started' : getProgressStatus(storage, lesson.slug)
 
   const buttonLabel = (() => {
     if (isComingSoon) {
+      if (isSimplifiedChinese) return lesson.module === '生产环境' ? '即将推出' : '下周推出'
+      if (isHongKongChinese) return lesson.module === '生產環境' ? '即將推出' : '下星期推出'
+      if (isJapanese) return lesson.module === '本番環境' ? '近日公開' : '来週公開'
       return lesson.module === 'Production' ? 'Coming soon' : 'Coming next week'
     }
-    if (progressStatus === 'in-progress') return 'Continue'
-    if (progressStatus === 'completed') return 'Review'
-    return 'Start'
+    if (progressStatus === 'in-progress')
+      return isSimplifiedChinese ? '继续' : isHongKongChinese ? '繼續' : isJapanese ? '続ける' : 'Continue'
+    if (progressStatus === 'completed')
+      return isSimplifiedChinese ? '复习' : isHongKongChinese ? '重溫' : isJapanese ? '復習' : 'Review'
+    return isSimplifiedChinese ? '开始' : isHongKongChinese ? '開始' : isJapanese ? '開始' : 'Start'
   })()
 
   const sharedClassName = cn(
@@ -77,7 +84,10 @@ export function LessonListItem({ lesson, index, storage, className }: LessonList
               {lesson.title}
             </span>
           </div>
-          <span className="text-xs text-(--mastra-text-tertiary)">{lesson.durationMin} min</span>
+          <span className="text-xs text-(--mastra-text-tertiary)">
+            {lesson.durationMin}{' '}
+            {isSimplifiedChinese ? '分钟' : isHongKongChinese ? '分鐘' : isJapanese ? '分' : 'min'}
+          </span>
         </div>
         <LessonStatusChip status={lesson.status} module={lesson.module} />
       </a>
@@ -93,7 +103,10 @@ export function LessonListItem({ lesson, index, storage, className }: LessonList
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium text-(--mastra-text-primary) no-underline">{lesson.title}</span>
         </div>
-        <span className="text-xs text-(--mastra-text-tertiary)">{lesson.durationMin} min</span>
+        <span className="text-xs text-(--mastra-text-tertiary)">
+          {lesson.durationMin}{' '}
+          {isSimplifiedChinese ? '分钟' : isHongKongChinese ? '分鐘' : isJapanese ? '分' : 'min'}
+        </span>
       </div>
       {progressStatus === 'not-started' ? (
         <PlayButton />

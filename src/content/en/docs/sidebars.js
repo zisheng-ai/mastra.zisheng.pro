@@ -58,6 +58,7 @@ const sidebars = {
               type: 'doc',
               id: 'agents/agent-approval',
               label: 'Human-in-the-Loop',
+              key: 'agent-human-in-the-loop',
             },
             {
               type: 'doc',
@@ -127,6 +128,7 @@ const sidebars = {
               type: 'doc',
               id: 'workflows/human-in-the-loop',
               label: 'Human-in-the-Loop',
+              key: 'workflow-human-in-the-loop',
             },
             {
               type: 'doc',
@@ -272,6 +274,7 @@ const sidebars = {
           type: 'doc',
           id: 'agents/skills',
           label: 'Skills',
+          key: 'agent-skills',
         },
         {
           type: 'category',
@@ -293,6 +296,7 @@ const sidebars = {
               type: 'doc',
               id: 'workspace/sandbox',
               label: 'Sandbox',
+              key: 'workspace-sandbox',
             },
             {
               type: 'doc',
@@ -303,6 +307,7 @@ const sidebars = {
               type: 'doc',
               id: 'workspace/skills',
               label: 'Skills',
+              key: 'workspace-skills',
             },
             {
               type: 'doc',
@@ -608,6 +613,7 @@ const sidebars = {
               type: 'doc',
               id: 'server/auth/workers',
               label: 'Workers',
+              key: 'auth-workers',
               customProps: {
                 tags: ['beta'],
               },
@@ -644,6 +650,7 @@ const sidebars = {
               type: 'doc',
               id: 'deployment/sandbox',
               label: 'Sandbox',
+              key: 'deployment-sandbox',
             },
             {
               type: 'doc',
@@ -659,6 +666,7 @@ const sidebars = {
               type: 'doc',
               id: 'deployment/workers',
               label: 'Workers',
+              key: 'deployment-workers',
               customProps: {
                 tags: ['beta'],
               },
@@ -717,11 +725,13 @@ const sidebars = {
                       type: 'doc',
                       id: 'observability/integrations/bridges/datadog',
                       label: 'Datadog',
+                      key: 'datadog-bridge',
                     },
                     {
                       type: 'doc',
                       id: 'observability/integrations/bridges/otel',
                       label: 'OpenTelemetry',
+                      key: 'otel-bridge',
                     },
                   ],
                 },
@@ -763,6 +773,7 @@ const sidebars = {
                       type: 'doc',
                       id: 'observability/integrations/exporters/datadog',
                       label: 'Datadog',
+                      key: 'datadog-exporter',
                     },
                     {
                       type: 'doc',
@@ -783,6 +794,7 @@ const sidebars = {
                       type: 'doc',
                       id: 'observability/integrations/exporters/otel',
                       label: 'OpenTelemetry',
+                      key: 'otel-exporter',
                     },
                     {
                       type: 'doc',

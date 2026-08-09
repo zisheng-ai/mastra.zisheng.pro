@@ -1,0 +1,205 @@
+---
+title: "Mastra を AWS Lambda にデプロイする | Deployment"
+description: "Docker コンテナを使用して Mastra アプリケーションを AWS Lambda にデプロイする方法を説明します"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# Mastra を AWS Lambda にデプロイする
+
+Docker コンテナと [AWS Lambda Web Adapter](https://github.com/awslabs/aws-lambda-web-adapter) を使用して、Mastra アプリケーションを AWS Lambda にデプロイします。この方法では、Mastra サーバーをコンテナ化された Lambda Function として自動スケーリングさせます。
+
+:::info
+このガイドでは、[Mastra サーバー](/docs/server/mastra-server)のデプロイについて説明します。[Server Adapter](/docs/server/server-adapters) または [Web フレームワーク](/docs/deployment/web-framework)を使用している場合は、そのフレームワークの通常の方法でデプロイしてください。
+:::
+
+## 始める前に
+
+次のものが必要です。
+
+- [Mastra アプリケーション](/guides/getting-started/quickstart)
+- Lambda、ECR、IAM の権限を持つ [AWS アカウント](https://aws.amazon.com/)
+- インストール済みの **[AWS CLI](https://aws.amazon.com/cli/)**：`aws configure` を実行して認証します
+- インストールされ、実行中の **[Docker](https://www.docker.com/)**
+
+:::warning
+AWS Lambda のファイルシステムは一時的なため、ローカルデータベースファイルは呼び出し間で失われます。[LibSQLStore](/reference/storage/libsql) でローカルファイルを使用している場合は、代わりに [Turso](https://turso.tech/) など、リモートの LibSQL 互換データベースを使用するよう設定してください。
+:::
+
+## Dockerfile を作成する
+
+プロジェクトルートに `Dockerfile` を作成します。
+
+```dockerfile title="Dockerfile"
+FROM node:22-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package*.json ./
+RUN npm ci
+
+# Copy source and build Mastra
+COPY src ./src
+RUN npx mastra build
+
+# Alpine compatibility for some native deps
+RUN apk add --no-cache gcompat
+
+# Add the Lambda Web Adapter
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:0.9.1 /lambda-adapter /opt/extensions/lambda-adapter
+
+# Run as non-root
+RUN addgroup -g 1001 -S nodejs && \
+  adduser -S mastra -u 1001 && \
+  chown -R mastra:nodejs /app
+
+USER mastra
+
+# Adapter / app configuration
+ENV PORT=8080
+ENV NODE_ENV=production
+ENV AWS_LWA_READINESS_CHECK_PATH="/api"
+
+# Start the Mastra server
+CMD ["node", ".mastra/output/index.mjs"]
+```
+
+:::note
+この Dockerfile では npm を使用します。pnpm、yarn、その他のパッケージマネージャーを使用する場合は、コマンドを適宜変更してください（たとえば `npm ci` は pnpm のロックファイルでは動作しません）。
+:::
+
+## Docker イメージをビルドしてプッシュする
+
+<Steps>
+  <StepItem>
+    デプロイ用の環境変数を設定します。リージョン間でリソースが表示されない問題を避けるため、すべての AWS サービス（ECR、Lambda）で同じリージョンを使用します。
+
+    ```bash
+    export PROJECT_NAME="your-mastra-app"
+    export AWS_REGION="us-east-1"
+    export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+    ```
+  </StepItem>
+
+  <StepItem>
+    Docker イメージをビルドします。Lambda のコンテナランタイムとの互換性を確保するため、BuildKit を無効にします。
+
+    ```bash
+    export DOCKER_BUILDKIT=0
+    docker build --platform linux/arm64 -t "$PROJECT_NAME" .
+    ```
+
+    :::note
+    BuildKit のデフォルトイメージ形式は、Lambda で互換性の問題を引き起こすことがあります。`DOCKER_BUILDKIT=0` を設定すると、Lambda が確実に受け入れられる形式のイメージを生成する従来の Builder が使用されます。
+    :::
+  </StepItem>
+
+  <StepItem>
+    Docker イメージを保存する Amazon ECR リポジトリを作成します。
+
+    ```bash
+    aws ecr create-repository --repository-name "$PROJECT_NAME" --region "$AWS_REGION"
+    ```
+  </StepItem>
+
+  <StepItem>
+    Amazon ECR にログインします。
+
+    ```bash
+    aws ecr get-login-password --region "$AWS_REGION" | \
+      docker login --username AWS --password-stdin \
+      "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+    ```
+  </StepItem>
+
+  <StepItem>
+    イメージにタグを付けて ECR にプッシュします。
+
+    ```bash
+    docker tag "$PROJECT_NAME":latest \
+      "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$PROJECT_NAME":latest
+
+    docker push \
+      "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$PROJECT_NAME":latest
+    ```
+  </StepItem>
+</Steps>
+
+## Lambda Function を作成する
+
+<Steps>
+  <StepItem>
+    [AWS Lambda Console](https://console.aws.amazon.com/lambda/) に移動し、**Create function** をクリックします。ECR リポジトリを作成したリージョンと同じリージョンが選択されていることを確認してください。
+  </StepItem>
+
+  <StepItem>
+    **Container image** を選択し、Function を設定します。
+
+    - **Function name**：名前（`mastra-app` など）を入力
+    - **Container image URI**：**Browse images** をクリックし、ECR リポジトリと `latest` タグを選択
+    - **Architecture**：**arm64** を選択
+
+    **Create function** をクリックして Lambda Function を作成します。
+  </StepItem>
+
+  <StepItem>
+    Memory と Timeout を設定します。**Configuration** > **General configuration** に移動して **Edit** をクリックします。
+
+    - **Memory**：512 MB（アプリケーションの要件に応じて調整）
+    - **Timeout**：1 分以上（デフォルトの 3 秒では、ほとんどの Mastra アプリケーションに短すぎます）
+
+    **Save** をクリックします。
+  </StepItem>
+
+  <StepItem>
+    環境変数を追加します。**Configuration** > **Environment variables** に移動して **Edit** をクリックし、Mastra アプリケーションに必要な変数を追加します。
+
+    - `OPENAI_API_KEY`：OpenAI の API キー（OpenAI を使用する場合）
+    - `ANTHROPIC_API_KEY`：Anthropic の API キー（Anthropic を使用する場合）
+    - 必要に応じて、Provider 固有のその他の API キー（LibSQL と Turso を使用する場合の `TURSO_DATABASE_URL` と `TURSO_AUTH_TOKEN` など）
+
+    **Save** をクリックします。
+  </StepItem>
+
+  <StepItem>
+    外部アクセス用の Function URL を有効にします。**Configuration** > **Function URL** に移動して **Create function URL** をクリックします。
+
+    - **Auth type**：公開アクセスには **NONE** を選択
+    - **Additional settings** で **Configure cross-origin resource sharing (CORS)** にチェックを入れ、次のように設定
+      - **Allow origin**：`*`
+      - **Allow headers**：`content-type`（CloudFront や API Gateway などのサービスと使用する場合は `x-amzn-request-context` も必要）
+      - **Allow methods**：`*`
+
+    **Save** をクリックします。
+  </StepItem>
+</Steps>
+
+## デプロイを確認する
+
+<Steps>
+  <StepItem>
+    Lambda Console から **Function URL** をコピーし、ブラウザーで `<your-function-url>/api/agents` にアクセスします。Agent の一覧が JSON で表示されます。
+  </StepItem>
+
+  <StepItem>
+    これで、Mastra エンドポイントを HTTP 経由で呼び出せます。
+
+    :::warning
+    本番環境では、エンドポイントを公開する前に[認証](/docs/server/auth)を設定し、CORS のオリジンを信頼するドメインに制限してください。また、他の AWS サービスへの安全なアクセスには AWS IAM Role を使用し、機密性の高い環境変数は AWS Secrets Manager または Parameter Store に保存してください。
+    :::
+  </StepItem>
+</Steps>
+
+## 次のステップ
+
+このガイドでは、Mastra を AWS Lambda にデプロイするためのクイックスタートを説明しました。本番ワークロードでは、Lambda Function の [CloudWatch モニタリング](https://docs.aws.amazon.com/lambda/latest/dg/monitoring-cloudwatchlogs.html)を有効にし、分散 Trace 用に [AWS X-Ray](https://docs.aws.amazon.com/lambda/latest/dg/services-xray.html) を設定し、安定したパフォーマンスを得るために[プロビジョニング済み同時実行](https://docs.aws.amazon.com/lambda/latest/dg/provisioned-concurrency.html)を設定することを検討してください。
+
+## 関連項目
+
+- [Deployment の概要](/docs/deployment/overview)
+- [Mastra サーバー](/docs/server/mastra-server)
+- [Server Adapter](/docs/server/server-adapters)
+- [AWS Lambda ドキュメント](https://docs.aws.amazon.com/lambda/)
+- [AWS Lambda Web Adapter](https://github.com/awslabs/aws-lambda-web-adapter)

@@ -1,0 +1,327 @@
+---
+title: "Astro | フレームワーク"
+description: "Mastra と Astro を使い始める"
+---
+
+# Astro プロジェクトに Mastra を統合する
+
+このガイドでは、Mastra を使用して Tool を呼び出す AI Agent を構築し、ルートから Agent を直接 import して呼び出すことで Astro に接続します。
+
+[AI SDK UI](https://ai-sdk.dev/docs/ai-sdk-ui/overview) と [AI Elements](https://ai-sdk.dev/elements) を使用して、美しくインタラクティブなチャット体験を作成します。
+
+:::note
+
+このガイドでは Astro を React および完全なサーバーサイドレンダリング（SSR）と組み合わせる方法を示しますが、Astro と Mastra を組み合わせる方法はほかにも多数あります。ファイル単位で [SSR を有効化](https://docs.astro.build/en/guides/on-demand-rendering/#enabling-on-demand-rendering)し、Svelte、Vue、Solid、Preact などの別のフレームワークも使用できます。Astro でチャットインターフェースを構築し、[Astro ネイティブの方法](https://docs.astro.build/en/recipes/call-endpoints/)でエンドポイントを呼び出すこともできます。
+
+:::
+
+## 始める前に
+
+- サポートされている[モデル Provider](/models) の API キーが必要です。特に希望がなければ、[OpenAI](/models/providers/openai) を使用してください。
+- Node.js `v22.13.0` 以降をインストールしてください
+
+## 新しい Astro アプリを作成する（任意）
+
+Astro アプリがすでにある場合は、次の手順に進んでください。Astro アプリは次のようにセットアップされている必要があります。
+
+- SSR を使用する（`astro.config.mjs` で `output: "server"` を指定）
+- [React integration](https://docs.astro.build/en/guides/integrations-guide/react/) を使用する
+- Tailwind をインストールする
+
+[オンデマンドレンダリング](https://docs.astro.build/en/guides/on-demand-rendering/)をサポートするため、このガイドでは [Node.js アダプター](https://docs.astro.build/en/guides/integrations-guide/node/)を使用しますが、サポートされている任意のサーバーアダプターを利用できます。
+
+```bash npm2yarn
+npm create astro@latest mastra-astro -- --add node --add react --add tailwind --install --skip-houston --template minimal --git
+```
+
+これにより `mastra-astro` というプロジェクトが作成されますが、任意の名前に置き換えられます。
+
+`cd` でプロジェクトに移動し、`astro.config.mjs` ファイルを編集して [`output` 設定](https://docs.astro.build/en/reference/configuration-reference/#output)を `"server"` にします。
+
+```js title="astro.config.mjs {10}
+// @ts-check
+import { defineConfig } from 'astro/config'
+
+import node from '@astrojs/node'
+import react from '@astrojs/react'
+import tailwindcss from '@tailwindcss/vite'
+
+// https://astro.build/config
+export default defineConfig({
+  output: 'server',
+  adapter: node({
+    mode: 'standalone',
+  }),
+
+  integrations: [react()],
+
+  vite: {
+    plugins: [tailwindcss()],
+  },
+})
+```
+
+パスを解決できるように `tsconfig.json` を編集します。
+
+```jsonc title="tsconfig.json"
+{
+  "compilerOptions": {
+    // ...
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+    },
+    // ...
+  },
+}
+```
+
+## Mastra を初期化する
+
+[`mastra init`](/reference/cli/mastra#mastra-init) を実行します。プロンプトが表示されたら、Provider（OpenAI など）を選択してキーを入力します。
+
+```bash npm2yarn
+npx mastra@latest init
+```
+
+これにより、天気 Agent のサンプルと次のファイルを含む `src/mastra` フォルダーが作成されます。
+
+- `index.ts` - Memory を含む Mastra の設定
+- `tools/weather-tool.ts` - 指定した場所の天気を取得する Tool
+- `agents/weather-agent.ts`- Tool を使用するプロンプトを備えた天気 Agent
+
+次の手順では、Astro のルートから `weather-agent.ts` を呼び出します。
+
+## AI SDK UI と AI Elements をインストールする
+
+AI SDK UI と Mastra アダプターをインストールします。
+
+```bash npm2yarn
+npm install @mastra/ai-sdk@latest @ai-sdk/react ai
+```
+
+次に、AI Elements を初期化します。プロンプトが表示されたら、デフォルトのオプションを選択してください。
+
+```bash npm2yarn
+npx ai-elements@latest
+```
+
+これにより、AI Elements の UI コンポーネントライブラリ全体が `@/components/ai-elements` フォルダーにダウンロードされます。
+
+## チャットルートを作成する
+
+`src/pages/api/chat.ts` を作成します。
+
+```ts title="src/pages/api/chat.ts"
+import type { APIRoute } from 'astro'
+import { handleChatStream } from '@mastra/ai-sdk'
+import { toAISdkV5Messages } from '@mastra/ai-sdk/ui'
+import { createUIMessageStreamResponse } from 'ai'
+import { mastra } from '@/mastra'
+
+const THREAD_ID = 'example-user-id'
+const RESOURCE_ID = 'weather-chat'
+
+export const POST: APIRoute = async ({ request }) => {
+  const params = await request.json()
+  const stream = await handleChatStream({
+    mastra,
+    agentId: 'weather-agent',
+    params: {
+      ...params,
+      memory: {
+        ...params.memory,
+        thread: THREAD_ID,
+        resource: RESOURCE_ID,
+      },
+    },
+  })
+
+  return createUIMessageStreamResponse({ stream })
+}
+
+export const GET: APIRoute = async () => {
+  const memory = await mastra.getAgentById('weather-agent').getMemory()
+  let response = null
+
+  try {
+    response = await memory?.recall({
+      threadId: THREAD_ID,
+      resourceId: RESOURCE_ID,
+    })
+  } catch {
+    console.log('No previous messages found.')
+  }
+
+  const uiMessages = toAISdkV5Messages(response?.messages || [])
+
+  return Response.json(uiMessages)
+}
+```
+
+`POST` ルートはプロンプトを受け取り、Agent のレスポンスを AI SDK 形式でストリーミングします。一方、`GET` ルートは Memory からメッセージ履歴を取得し、クライアントの再読み込み時に UI を復元できるようにします。
+
+## チャットコンポーネントを作成する
+
+`src/components/chat.tsx` を作成します。
+
+```tsx title="src/components/chat.tsx"
+import '@/styles/global.css'
+import { useEffect, useState } from 'react'
+import { DefaultChatTransport, type ToolUIPart } from 'ai'
+import { useChat } from '@ai-sdk/react'
+
+import {
+  PromptInput,
+  PromptInputBody,
+  PromptInputTextarea,
+} from '@/components/ai-elements/prompt-input'
+
+import {
+  Conversation,
+  ConversationContent,
+  ConversationScrollButton,
+} from '@/components/ai-elements/conversation'
+
+import { Message, MessageContent, MessageResponse } from '@/components/ai-elements/message'
+
+import { Tool, ToolHeader, ToolContent, ToolInput, ToolOutput } from '@/components/ai-elements/tool'
+
+function Chat() {
+  const [input, setInput] = useState<string>('')
+
+  const { messages, setMessages, sendMessage, status } = useChat({
+    transport: new DefaultChatTransport({
+      api: '/api/chat',
+    }),
+  })
+
+  useEffect(() => {
+    const fetchMessages = async () => {
+      const res = await fetch('/api/chat')
+      const data = await res.json()
+      setMessages([...data])
+    }
+    fetchMessages()
+  }, [setMessages])
+
+  const handleSubmit = async () => {
+    if (!input.trim()) return
+
+    sendMessage({ text: input })
+    setInput('')
+  }
+
+  return (
+    <div className="relative size-full h-screen w-full p-6">
+      <div className="flex h-full flex-col">
+        <Conversation className="h-full">
+          <ConversationContent>
+            {messages.map(message => (
+              <div key={message.id}>
+                {message.parts?.map((part, i) => {
+                  if (part.type === 'text') {
+                    return (
+                      <Message key={`${message.id}-${i}`} from={message.role}>
+                        <MessageContent>
+                          <MessageResponse>{part.text}</MessageResponse>
+                        </MessageContent>
+                      </Message>
+                    )
+                  }
+
+                  if (part.type?.startsWith('tool-')) {
+                    return (
+                      <Tool key={`${message.id}-${i}`}>
+                        <ToolHeader
+                          type={(part as ToolUIPart).type}
+                          state={(part as ToolUIPart).state || 'output-available'}
+                          className="cursor-pointer"
+                        />
+                        <ToolContent>
+                          <ToolInput input={(part as ToolUIPart).input || {}} />
+                          <ToolOutput
+                            output={(part as ToolUIPart).output}
+                            errorText={(part as ToolUIPart).errorText}
+                          />
+                        </ToolContent>
+                      </Tool>
+                    )
+                  }
+
+                  return null
+                })}
+              </div>
+            ))}
+            <ConversationScrollButton />
+          </ConversationContent>
+        </Conversation>
+
+        <PromptInput onSubmit={handleSubmit} className="mt-20">
+          <PromptInputBody>
+            <PromptInputTextarea
+              onChange={e => setInput(e.target.value)}
+              className="md:leading-10"
+              value={input}
+              placeholder="Type your message..."
+              disabled={status !== 'ready'}
+            />
+          </PromptInputBody>
+        </PromptInput>
+      </div>
+    </div>
+  )
+}
+
+export default Chat
+```
+
+このコンポーネントは [`useChat()`](https://ai-sdk.dev/docs/reference/ai-sdk-ui/use-chat) を `api/chat` エンドポイントに接続し、そこへプロンプトを送信して、レスポンスをチャンク単位でストリーミングします。
+
+レスポンスのテキストは [`<MessageResponse>`](https://ai-sdk.dev/elements/components/message#messageresponse-) コンポーネントでレンダリングされ、Tool の呼び出しは [`<Tool>`](https://ai-sdk.dev/elements/components/tool) コンポーネントで表示されます。
+
+## チャットコンポーネントをレンダリングする
+
+最後に、インデックスページでチャットコンポーネントをレンダリングします。`src/pages/index.astro` を編集します。
+
+```html title="src/pages/index.astro" {2,14}
+---
+import Chat from '@/components/chat';
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content="{Astro.generator}" />
+    <title>Astro</title>
+  </head>
+  <body>
+    <Chat client:load />
+  </body>
+</html>
+```
+
+`Chat` コンポーネントを import し、クライアント側で実行されるように `client:load` [ディレクティブ](https://docs.astro.build/en/reference/directives-reference/#client-directives)を付けて body に追加します。
+
+## Agent をテストする
+
+1. `npm run dev` で Astro アプリを実行します
+1. [http://localhost:4321](http://localhost:4321) でチャットを開きます
+1. 天気について質問してみます。API キーが正しく設定されていれば、レスポンスが返されます
+
+## 次のステップ
+
+Astro で Mastra Agent を構築できました！🎉
+
+ここから、独自の Tool やロジックを追加してプロジェクトを拡張できます。
+
+- [Agent](/docs/agents/overview) について詳しく学ぶ
+- Agent に独自の [Tool](/docs/agents/using-tools) を追加する
+- Agent に人間のような [Memory](/docs/memory/overview) を追加する
+
+準備ができたら、Mastra と AI SDK UI の統合方法や、Agent を任意の場所へデプロイする方法について詳しく学びましょう。
+
+- Mastra を [AI SDK UI](/guides/build-your-ui/ai-sdk-ui) と統合する
+- Agent を[任意の場所](/docs/deployment/overview)にデプロイする

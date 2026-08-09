@@ -1,0 +1,277 @@
+---
+title: "リファレンス: Convex ストレージ | Storage"
+description: Mastra の Convex ストレージ実装に関するドキュメントです。
+packages:
+  - "@mastra/convex"
+---
+
+# Convex ストレージ
+
+Convex ストレージ実装は、リアルタイム同期と自動キャッシュを備えたフルスタック TypeScript 開発プラットフォームである [Convex](https://convex.dev) を使用し、サーバーレスストレージを提供します。
+
+:::warning[Observability は未サポート]
+
+Convex ストレージは **observability ドメインをサポートしていません**。`MastraStorageExporter` のトレースを Convex に永続化できず、Convex を唯一のストレージ Provider とした場合、[Studio](/docs/studio/overview) の observability 機能は動作しません。observability を有効にするには、[複合ストレージ](/reference/storage/composite#specialized-storage-for-observability)を使用し、observability データを ClickHouse などの対応 Provider にルーティングしてください。
+
+:::
+
+:::warning[レコードサイズの上限]
+Convex では、レコードの最大サイズが **1 MiB** に制限されます。画像など、base64 エンコードされた添付ファイルを含むメッセージを保存すると、この上限を超える場合があります。S3、Cloudflare R2、[Convex file storage](https://docs.convex.dev/file-storage) などの外部ストレージへ添付ファイルをアップロードする回避策については、[大きな添付ファイルの処理](/docs/memory/memory-processors#handling-large-attachments)を参照してください。
+:::
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/convex@latest
+```
+
+## Convex のセットアップ
+
+`ConvexStore` を使用する前に、Convex プロジェクトで Convex スキーマとストレージハンドラーを設定します。
+次のスキーマ例には、`ConvexStore` と `ConvexServerCache` の完全なセットアップが含まれます。`ConvexStore` だけを使用する場合は、`mastraCacheTable` と `mastraCacheListItemsTable` を省略してください。`ConvexServerCache` を使用する場合は、これらのテーブルを含めてキャッシュハンドラーを作成します。
+
+### 1. Convex スキーマを設定する
+
+`convex/schema.ts` で次のように設定します。
+
+```typescript
+import { defineSchema } from 'convex/server'
+import {
+  mastraThreadsTable,
+  mastraMessagesTable,
+  mastraResourcesTable,
+  mastraWorkflowSnapshotsTable,
+  mastraScoresTable,
+  mastraObservationalMemoryTable,
+  mastraVectorIndexesTable,
+  mastraVectorsTable,
+  mastraCacheTable,
+  mastraCacheListItemsTable,
+  mastraDocumentsTable,
+} from '@mastra/convex/schema'
+
+export default defineSchema({
+  mastra_threads: mastraThreadsTable,
+  mastra_messages: mastraMessagesTable,
+  mastra_resources: mastraResourcesTable,
+  mastra_workflow_snapshots: mastraWorkflowSnapshotsTable,
+  mastra_scorers: mastraScoresTable,
+  mastra_observational_memory: mastraObservationalMemoryTable,
+  mastra_vector_indexes: mastraVectorIndexesTable,
+  mastra_vectors: mastraVectorsTable,
+  mastra_cache: mastraCacheTable,
+  mastra_cache_list_items: mastraCacheListItemsTable,
+  mastra_documents: mastraDocumentsTable,
+})
+```
+
+### 2. ストレージハンドラーを作成する
+
+`convex/mastra/storage.ts` で次のように設定します。
+
+```typescript
+import { mastraStorage } from '@mastra/convex/server'
+
+export const handle = mastraStorage
+```
+
+`ConvexServerCache` を使用する場合は、`convex/mastra/cache.ts` を作成します。
+
+```typescript
+import { mastraCache } from '@mastra/convex/server'
+
+export const handle = mastraCache
+```
+
+### 3. Convex にデプロイする
+
+```bash
+npx convex dev
+# or for production
+npx convex deploy
+```
+
+## 使用方法
+
+```typescript
+import { ConvexServerCache, ConvexStore } from '@mastra/convex'
+
+const storage = new ConvexStore({
+  id: 'convex-storage',
+  deploymentUrl: process.env.CONVEX_URL!,
+  adminAuthToken: process.env.CONVEX_ADMIN_KEY!,
+})
+
+const cache = new ConvexServerCache({
+  deploymentUrl: process.env.CONVEX_URL!,
+  adminAuthToken: process.env.CONVEX_ADMIN_KEY!,
+})
+```
+
+## ConvexStore のパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'deploymentUrl',
+    type: 'string',
+    description: 'Convex のデプロイ URL（例: https://your-project.convex.cloud）',
+    isOptional: false,
+  },
+  {
+    name: 'adminAuthToken',
+    type: 'string',
+    description: 'バックエンドアクセス用の Convex 管理者認証トークン',
+    isOptional: false,
+  },
+  {
+    name: 'storageFunction',
+    type: 'string',
+    description: "ストレージ mutation 関数へのパス（デフォルト: 'mastra/storage:handle'）",
+    isOptional: true,
+    defaultValue: 'mastra/storage:handle',
+  },
+]}
+/>
+
+## ConvexServerCache のパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'deploymentUrl',
+    type: 'string',
+    description: 'Convex のデプロイ URL（例: https://your-project.convex.cloud）',
+    isOptional: false,
+  },
+  {
+    name: 'adminAuthToken',
+    type: 'string',
+    description: 'バックエンドアクセス用の Convex 管理者認証トークン',
+    isOptional: false,
+  },
+  {
+    name: 'cacheFunction',
+    type: 'string',
+    description: "ConvexServerCache のキャッシュ mutation 関数へのパス（デフォルト: 'mastra/cache:handle'）",
+    isOptional: true,
+    defaultValue: 'mastra/cache:handle',
+  },
+  {
+    name: 'requestTimeoutMs',
+    type: 'number',
+    description:
+      'Convex キャッシュ mutation リクエストのタイムアウト（ミリ秒）。0 にするとクライアント側のタイムアウトを無効にします。',
+    isOptional: true,
+    defaultValue: 30000,
+  },
+  {
+    name: 'keyPrefix',
+    type: 'string',
+    description:
+      'ConvexServerCache のキーに適用するプレフィックス。clear() は、保存されたプレフィックスがこの値と完全に一致する行を削除します。',
+    isOptional: true,
+    defaultValue: 'mastra:cache:',
+  },
+  {
+    name: 'ttlMs',
+    type: 'number',
+    description: 'ConvexServerCache のデフォルト TTL（ミリ秒）。0 にすると有効期限を無効にします。',
+    isOptional: true,
+    defaultValue: 300000,
+  },
+]}
+/>
+
+## コンストラクターの例
+
+```ts
+import { ConvexServerCache, ConvexStore } from '@mastra/convex'
+
+// Basic configuration
+const store = new ConvexStore({
+  id: 'convex-storage',
+  deploymentUrl: 'https://your-project.convex.cloud',
+  adminAuthToken: 'your-admin-token',
+})
+
+// With custom storage function path
+const storeCustom = new ConvexStore({
+  id: 'convex-storage',
+  deploymentUrl: 'https://your-project.convex.cloud',
+  adminAuthToken: 'your-admin-token',
+  storageFunction: 'custom/path:handler',
+})
+
+// Server cache for durable stream replay and response caching
+const cache = new ConvexServerCache({
+  deploymentUrl: 'https://your-project.convex.cloud',
+  adminAuthToken: 'your-admin-token',
+  cacheFunction: 'mastra/cache:handle',
+})
+```
+
+## サーバーキャッシュ
+
+`ConvexServerCache` は、Convex を使用して Mastra のサーバーキャッシュ規約を実装します。再開可能な durable Agent ストリーム、Workflow ストリームのリプレイ、レスポンスキャッシュなどの機能で、永続的なキャッシュ状態が必要な場合に使用します。
+
+`ConvexServerCache` は、リストエントリを個別の Convex ドキュメントとして保存します。これにより、1つのドキュメント内でストリームリプレイリストが肥大化することを防ぎ、Convex のレコードサイズ上限内に収めやすくなります。
+
+各スカラーキャッシュ値と各リスト項目は1つの Convex 行として保存されるため、Convex の行サイズ上限内に収める必要があります。非常に大きなリストでは、範囲をリプレイする際に Convex のクエリ上限も適用されます。
+
+キャッシュのクリーンアップと `clear()` は、サイズを制限したバッチで実行されます。1回のクライアント呼び出しで最大1,000件の Convex mutation をループでき、各 mutation は最大25件のリスト項目を処理します。`clear()` がキーをクリーンアップしている間、そのキーの読み取りでは完了まで空の結果が返る場合があります。
+
+非常に大きなキャッシュ名前空間では、長時間実行されるクリーンアップを避けるため、段階的にクリアするか、より限定的なプレフィックスを使用してください。
+
+バッチクリーンアップ中、キャッシュメタデータが一時的に内部の `deleted` 状態になる場合があります。次のクリーンアップ処理でこれらの行が削除されます。`clear()` が完了するまで、同じプレフィックスで新しい値を書き込まないでください。
+
+`clear()` は、保存された `keyPrefix` が設定済みの `keyPrefix` と完全に一致する行だけを削除します。文字列の前方一致でネストしたプレフィックスをクリアすることはありません。各 `listPush()` は、キャッシュに設定された `ttlMs` を使用してリストの TTL を更新します。
+
+`clear()` ですべてのキャッシュキーを意図的に削除する場合を除き、空でない `keyPrefix` を使用してください。期限切れのリスト行は読み書き中に段階的に回収されます。`clear()` は、対象プレフィックスのすべての行を削除します。
+
+`ConvexServerCache` は、中程度の頻度で発生するイベントの永続的なリプレイに適しています。高頻度のトークンストリームでは、イベントをバッチ化するか、より低レイテンシーのキャッシュバックエンドを使用してください。
+
+`ConvexServerCache` は、分散 pub/sub トランスポートの代わりにはなりません。アプリでプロセスをまたぐリアルタイムのイベント配信が必要な場合は、本番用の pub/sub バックエンドを別途設定してください。
+
+## 補足事項
+
+### スキーマ管理
+
+このストレージ実装は、Mastra の各ドメインに型付き Convex テーブルを使用します。
+
+| ドメイン | Convex テーブル | 用途 |
+| - | - | - |
+| Threads | `mastra_threads` | 会話スレッド |
+| Messages | `mastra_messages` | チャットメッセージ |
+| Resources | `mastra_resources` | ユーザーの working memory |
+| Observational Memory | `mastra_observational_memory` | observational memory の生成結果 |
+| Workflows | `mastra_workflow_snapshots` | Workflow の状態 |
+| Scorers | `mastra_scorers` | 評価データ |
+| Cache | `mastra_cache` | キャッシュ値、カウンター、リストのメタデータ |
+| Cache Items | `mastra_cache_list_items` | キャッシュリストのエントリ |
+| Fallback | `mastra_documents` | 不明なテーブル |
+
+### Observational memory
+
+`ConvexStore` は [observational memory](/docs/memory/observational-memory) をサポートします。有効にするには、Convex スキーマに `mastraObservationalMemoryTable` を追加し、`npx convex deploy` で再デプロイします。このテーブルが追加される前に作成された既存デプロイでも、同じスキーマ更新が必要です。
+
+### アーキテクチャ
+
+すべての型付きテーブルに次の項目が含まれます。
+
+- Mastra のレコード ID 用の `id` フィールド（Convex が自動生成する `_id` とは異なります）
+- Mastra ID で効率的に検索するための `by_record_id` インデックス
+
+この設計により、Convex の自動インデックスとリアルタイム機能を活用しながら、Mastra のストレージ規約との互換性を確保します。
+
+### 環境変数
+
+デプロイ用に次の環境変数を設定します。
+
+- `CONVEX_URL`: Convex のデプロイ URL
+- `CONVEX_ADMIN_KEY`: 管理者認証トークン（Convex ダッシュボードから取得）
+
+## 関連項目
+
+- [Convex Vector Store](../vectors/convex)
+- [Convex ドキュメント](https://docs.convex.dev/)

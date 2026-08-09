@@ -1,0 +1,326 @@
+---
+title: "Mastra Client SDK | Server"
+description: "Mastra Client SDK の設定方法と使用方法を説明します"
+packages:
+  - "@mastra/client-js"
+  - "@mastra/core"
+  - "@mastra/react"
+---
+
+# Mastra Client SDK
+
+Mastra Client SDK は、クライアント環境から [Mastra Server](/docs/server/mastra-server) を操作するための簡潔で型安全なインターフェースを提供します。
+
+## 前提条件
+
+ローカル開発を始める前に、次を用意してください。
+
+- Node.js `v22.13.0` 以降
+- TypeScript `v4.7` 以降（TypeScript を使用する場合）
+- 実行中のローカル Mastra サーバー（通常はポート `4111`）
+
+:::note
+
+Mastra Client SDK はブラウザ環境向けに設計されており、ネイティブの `fetch` API を使用して Mastra サーバーへ HTTP リクエストを送信します。
+
+:::
+
+## インストール
+
+Mastra Client SDK を使用するには、必要な依存関係をインストールします。
+
+```bash npm2yarn
+npm install @mastra/client-js@latest
+```
+
+### `MastraClient` の初期化
+
+`baseUrl` で初期化すると、`MastraClient` は Agent、Tool、Workflow を呼び出すための型安全なインターフェースを公開します。
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  baseUrl: process.env.MASTRA_API_URL || 'http://localhost:4111',
+})
+```
+
+## コア API
+
+Mastra Client SDK は、Mastra Server が提供するすべてのリソースを公開します。
+
+- **[Agent](/reference/client-js/agents)**: レスポンスを生成し、会話をストリーミングします。
+- **[A2A](/docs/agents/a2a)**: Agent カードから Agent を検出し、タスクベースの A2A ストリームを操作します。
+- **[Memory](/reference/client-js/memory)**: 会話スレッドとメッセージ履歴を管理します。
+- **[Tool](/reference/client-js/tools)**: Tool を実行、管理します。
+- **[Workflow](/reference/client-js/workflows)**: Workflow を開始し、実行を追跡します。
+- **[Vector](/reference/client-js/vectors)**: ベクトル埋め込みを使用してセマンティック検索を行います。
+- **[Responses](/reference/client-js/responses)**: OpenAI 互換の Agent ベースインターフェースにより、Mastra Agent を Responses API として使用します。この API は現在実験的な機能です。
+- **[Conversations](/reference/client-js/conversations)**: Responses API として動作する Mastra Agent の背後に保存された会話スレッドと項目履歴を操作します。この API は現在実験的な機能です。
+- **[ログ](/reference/client-js/logs)**: ログを表示し、システムの動作をデバッグします。
+- **[テレメトリ](/reference/client-js/telemetry)**: アプリケーションのパフォーマンスと Trace のアクティビティを表示します。
+
+## 動的 Workflow の作成と実行
+
+`upsertDynamicWorkflow()` を使用して、永続化された Workflow 定義を作成または置換します。upsert が成功すると、完全な定義が検証され、実行中の Mastra インスタンスに登録され、標準の Workflow 実行 API から利用できるようになります。
+
+次の例は、マッピング Workflow の作成と確認から、実行、削除までのライフサイクル全体を示します。
+
+```typescript title="lib/dynamic-workflow.ts"
+import { MastraClient } from '@mastra/client-js'
+import type { UpsertDynamicWorkflowParams } from '@mastra/client-js'
+
+const client = new MastraClient({
+  baseUrl: process.env.MASTRA_API_URL || 'http://localhost:4111',
+})
+
+const definition = {
+  id: 'greeting-workflow',
+  description: 'Returns a greeting for the supplied name',
+  inputSchema: {
+    type: 'object',
+    properties: { name: { type: 'string' } },
+    required: ['name'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: { message: { type: 'string' } },
+    required: ['message'],
+  },
+  graph: [
+    {
+      type: 'mapping',
+      id: 'create-greeting',
+      mapConfig: JSON.stringify({
+        message: { template: 'Hello, ${initData.name}!' },
+      }),
+    },
+  ],
+} satisfies UpsertDynamicWorkflowParams
+
+await client.upsertDynamicWorkflow(definition)
+
+const dynamicWorkflow = client.getDynamicWorkflow(definition.id)
+const dynamicDefinition = await dynamicWorkflow.details()
+
+const workflow = client.getWorkflow(dynamicDefinition.id)
+const run = await workflow.createRun()
+const result = await run.startAsync({ inputData: { name: 'Ada' } })
+
+console.log(result)
+
+await dynamicWorkflow.delete()
+```
+
+`listDynamicWorkflows()` を使用すると、永続化された定義を一覧表示できます。同じ `id` で `upsertDynamicWorkflow()` を再度呼び出すと、保存済みの定義と稼働中の Workflow 登録が置換されます。
+
+:::warning
+
+永続ストレージには、`workflowDefinitions` ドメインをサポートするストレージ Adapter の設定が必要です。このドメインがない場合、Core は Workflow をメモリ内に登録できますが、サーバーの動的 Workflow API は再起動後まで保持できません。
+
+保存済みの定義では、宣言的な Agent、Tool、マッピング、ネストした Workflow、並列処理、foreach、sleep、sleep-until、条件分岐、ループのエントリをサポートします。JavaScript クロージャーは含められません。条件分岐とループのロジックでは宣言的な述語形式を使用し、参照する Agent、Tool、ネストした Workflow は事前に登録する必要があります。
+
+認証を設定したサーバーでは、定義操作に `stored-workflows:read` または `stored-workflows:write`、Workflow の実行に `workflows:execute` が必要です。
+
+:::
+
+## レスポンスの生成
+
+文字列のプロンプトを指定して `.generate()` を呼び出します。
+
+```typescript
+import { mastraClient } from 'lib/mastra-client'
+
+const testAgent = async () => {
+  try {
+    const agent = mastraClient.getAgent('testAgent')
+
+    const response = await agent.generate('Hello')
+
+    console.log(response.text)
+  } catch (error) {
+    return 'Error occurred while generating response'
+  }
+}
+```
+
+:::info
+
+`role` と `content` を含むメッセージオブジェクトの配列を指定して `.generate()` を呼び出すこともできます。詳しくは、[.generate() リファレンス](/reference/client-js/agents#generate)を参照してください。
+
+:::
+
+## レスポンスのストリーミング
+
+文字列のプロンプトに対するリアルタイムレスポンスには `.stream()` を使用します。
+
+```typescript
+import { mastraClient } from 'lib/mastra-client'
+
+const testAgent = async () => {
+  try {
+    const agent = mastraClient.getAgent('testAgent')
+
+    const stream = await agent.stream('Hello')
+
+    stream.processDataStream({
+      onTextPart: text => {
+        console.log(text)
+      },
+    })
+  } catch (error) {
+    return 'Error occurred while generating response'
+  }
+}
+```
+
+:::info
+
+`role` と `content` を含むメッセージオブジェクトの配列を指定して `.stream()` を呼び出すこともできます。詳しくは、[.stream() リファレンス](/reference/client-js/agents#stream)を参照してください。
+
+:::
+
+## 設定オプション
+
+`MastraClient` は、リクエストの動作を制御する `retries`、`backoffMs`、`headers` などの任意パラメーターを受け取ります。これらは、再試行の動作を制御したり、診断用メタデータを含めたりする場合に役立ちます。
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  retries: 3,
+  backoffMs: 300,
+  maxBackoffMs: 5000,
+  headers: {
+    'X-Development': 'true',
+  },
+})
+```
+
+その他の設定オプションについては、[MastraClient](/reference/client-js/mastra-client) を参照してください。
+
+## 資格情報とセッション Cookie
+
+UI と Mastra API のオリジンが異なる場合（ホスト、サブドメイン、ポートが異なる場合。例: Mastra Studio とカスタムサーバーが別のポート）は、**セッション Cookie で Mastra API 呼び出しを認証します**。`MastraClient` に **`credentials: 'include'`** を追加すると、各リクエストにログイン後のユーザーが持つ Cookie が含まれます。省略すると、ブラウザでログインに成功していても、Mastra から **`401`** レスポンスが返されることがよくあります。
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  baseUrl: process.env.MASTRA_API_URL || 'http://localhost:4111',
+  credentials: 'include',
+})
+```
+
+**サーバーで資格情報を含むオリジン間リクエストを許可します**。[CORS: 資格情報を含むリクエスト](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS#requests_with_credentials)を参照してください。具体的な `Access-Control-Allow-Origin`（`*` ではない値）と `Access-Control-Allow-Credentials: true` が必要です。設定しない場合、Mastra に到達する前にブラウザが呼び出しをブロックします。
+
+**`@mastra/react` を使用していますか？** アプリケーションを `MastraReactProvider` でラップし、サーバーに合わせて `baseUrl` と `apiPrefix` を設定して、デフォルトの `credentials: 'include'` を使用します。`credentials` を変更するのは、`same-origin` または `omit` の動作が必要な場合だけです。
+
+## リクエストのキャンセルを追加する
+
+`MastraClient` は、標準の Node.js `AbortSignal` API を使用したリクエストのキャンセルに対応します。ユーザーが操作を中止した場合や、古いネットワーク呼び出しを破棄する場合など、処理中のリクエストをキャンセルするのに役立ちます。
+
+すべてのリクエストでキャンセルを有効にするには、クライアントのコンストラクターに `AbortSignal` を渡します。
+
+```typescript {3,7} title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const controller = new AbortController()
+
+export const mastraClient = new MastraClient({
+  baseUrl: process.env.MASTRA_API_URL || 'http://localhost:4111',
+  abortSignal: controller.signal,
+})
+```
+
+### `AbortController` の使用
+
+`.abort()` を呼び出すと、そのシグナルに関連付けられた処理中のリクエストがすべてキャンセルされます。
+
+```typescript
+import { mastraClient, controller } from 'lib/mastra-client'
+
+const handleAbort = () => {
+  controller.abort()
+}
+```
+
+## クライアント Tool
+
+`createTool()` 関数を使用して、クライアント側アプリケーション内で Tool を直接定義します。`.generate()` または `.stream()` の呼び出しで、`clientTools` パラメーターを介して Agent に渡します。
+
+これにより、Agent は DOM 操作、ローカルストレージへのアクセス、その他の Web API といったブラウザ側の機能を呼び出せます。Tool はサーバーではなくユーザーの環境で実行されます。
+
+```typescript {26}
+import { createTool } from '@mastra/client-js'
+import { z } from 'zod'
+
+const handleClientTool = async () => {
+  try {
+    const agent = mastraClient.getAgent('colorAgent')
+
+    const colorChangeTool = createTool({
+      id: 'color-change-tool',
+      description: 'Changes the HTML background color',
+      inputSchema: z.object({
+        color: z.string(),
+      }),
+      outputSchema: z.object({
+        success: z.boolean(),
+      }),
+      execute: async inputData => {
+        const { color } = inputData
+
+        document.body.style.backgroundColor = color
+        return { success: true }
+      },
+    })
+
+    const response = await agent.generate('Change the background to blue', {
+      clientTools: { colorChangeTool },
+    })
+
+    console.log(response)
+  } catch (error) {
+    console.error(error)
+  }
+}
+```
+
+### クライアント Tool 用 Agent
+
+これは16進カラーコードを返すように設定した標準の Mastra [Agent](../agents/overview#quickstart) で、上で定義したブラウザベースのクライアント Tool と連携します。
+
+```typescript title="src/mastra/agents/color-agent"
+import { Agent } from '@mastra/core/agent'
+
+export const colorAgent = new Agent({
+  id: 'color-agent',
+  name: 'Color Agent',
+  instructions: `You are a helpful CSS assistant.
+  You can change the background color of web pages.
+  Respond with a hex reference for the color requested by the user`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+## サーバーで MastraClient を使用する
+
+`MastraClient` は、API ルート、サーバーレス関数、Action などのサーバー側環境でも使用できます。使用方法は同じですが、クライアント向けにレスポンスを作り直す必要がある場合があります。
+
+```typescript {8}
+export async function action() {
+  const agent = mastraClient.getAgent('testAgent')
+
+  const stream = await agent.stream('Hello')
+
+  return new Response(stream.body)
+}
+```
+
+## ベストプラクティス
+
+1. **エラー処理**: 開発時には[エラー処理](/reference/client-js/error-handling)を使用します。
+1. **環境変数**: 設定には環境変数を使用します。
+1. **デバッグ**: 必要に応じて詳細な[ログ記録](/reference/client-js/logs)を有効にします。
+1. **パフォーマンス**: アプリケーションのパフォーマンス、[テレメトリ](/reference/client-js/telemetry)、Trace を追跡します。

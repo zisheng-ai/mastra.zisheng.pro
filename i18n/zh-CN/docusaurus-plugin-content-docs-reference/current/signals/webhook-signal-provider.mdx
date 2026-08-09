@@ -1,0 +1,151 @@
+---
+title: "参考：WebhookSignalProvider | Signals"
+description: "WebhookSignalProvider 的 API 参考；它是一种基于推送的 Signal Provider，可将传入的 webhook payload 路由至已订阅的 Agent thread。"
+packages:
+  - "@mastra/core"
+---
+
+# WebhookSignalProvider
+
+**新增于：** `@mastra/core@1.39.0`
+
+用于基于推送的事件投递的具体 Signal Provider。它通过将 payload 与可配置的资源 ID 提取器进行匹配，把传入的 webhook payload 路由至已订阅的 Agent thread。
+
+它扩展了 [`SignalProvider`](/reference/signals/signal-provider)，提供公共订阅管理和内置的 `handleWebhook()` 实现。
+
+## 使用示例
+
+将 GitHub webhook 事件路由至已订阅的 thread：
+
+```typescript title="src/signals/webhook.ts"
+import { WebhookSignalProvider } from '@mastra/core/signals'
+
+const webhookProvider = new WebhookSignalProvider({
+  extractResourceId: payload => `${payload.repository?.full_name}`,
+  buildNotification: (payload, subscription) => ({
+    source: 'github-webhook',
+    kind: payload.action ?? 'event',
+    summary: `${payload.action} on ${subscription.externalResourceId}`,
+    payload,
+  }),
+})
+```
+
+注册到 Agent 并订阅一个 thread：
+
+```typescript title="src/mastra/index.ts"
+import { Agent } from '@mastra/core/agent'
+
+const agent = new Agent({
+  id: 'agent',
+  signals: [webhookProvider],
+})
+
+// subscribe a thread to a specific repo
+webhookProvider.subscribeThread({ threadId: 'thread-1', resourceId: 'user-1' }, 'mastra-ai/mastra')
+
+// handle an incoming webhook
+const result = await webhookProvider.handleWebhook({
+  body: { repository: { full_name: 'mastra-ai/mastra' }, action: 'push' },
+  headers: {},
+})
+// result.matched === 1
+```
+
+## 构造函数参数
+
+<PropertiesTable
+  content={[
+  { name: 'id', type: 'string', description: 'Provider 实例的唯一标识符。', isOptional: true, defaultValue: "'webhook-signals'" },
+  { name: 'name', type: 'string', description: '人类可读的名称。', isOptional: true, defaultValue: "'Webhook Signals'" },
+  { name: 'extractResourceId', type: '(payload: unknown) => string | string[] | undefined', description: '从 webhook payload 提取外部资源 ID。返回 `undefined` 可跳过该事件。可返回数组以匹配多个资源。', isOptional: true, defaultValue: '如果存在则返回 `payload.resource` 或 `payload.externalResourceId`' },
+  { name: 'buildNotification', type: '(payload: unknown, subscription: SignalSubscription) => SendNotificationSignalInput', description: '根据 webhook payload 和匹配的订阅构建通知对象。', isOptional: true, defaultValue: "返回 `{ source: id, kind: 'webhook-event', summary, payload }`" },
+]}
+/>
+
+## 方法
+
+### 订阅管理
+
+#### `subscribeThread(target, externalResourceId, metadata?)`
+
+订阅一个 thread，以接收特定外部资源的 webhook 事件。
+
+```typescript prettier:false
+webhookProvider.subscribeThread(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'mastra-ai/mastra',
+  { watchType: 'push' },
+)
+```
+
+返回：`SignalSubscription`
+
+<PropertiesTable
+  content={[
+  { name: 'target', type: 'SignalProviderTarget', description: '要订阅的 thread。必须包含 `threadId` 和 `resourceId`。' },
+  { name: 'externalResourceId', type: 'string', description: '要监控的外部资源（例如，仓库全名）。' },
+  { name: 'metadata', type: 'Record<string, unknown>', description: '与订阅一起存储的附加数据。', isOptional: true },
+]}
+/>
+
+#### `unsubscribeThread(target, externalResourceId)`
+
+取消订阅一个 thread，使其不再接收特定外部资源的事件。
+
+```typescript prettier:false
+const removed = webhookProvider.unsubscribeThread(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'mastra-ai/mastra',
+)
+```
+
+返回：`boolean`
+
+### Webhook 处理
+
+#### `handleWebhook(request)`
+
+处理传入的 webhook 请求。从 payload 提取资源 ID，查找匹配的订阅，为每个订阅构建通知，并调用 `notify()`。
+
+```typescript prettier:false
+const result = await webhookProvider.handleWebhook({
+  body: { repository: { full_name: 'mastra-ai/mastra' }, action: 'push' },
+  headers: { 'x-github-event': 'push' },
+})
+```
+
+返回：`Promise<{ status: number; body: { matched: number } }>`
+
+返回 `{ status: 200, body: { matched: N } }`，其中 `N` 是收到通知的订阅数量。当无法提取资源 ID 或没有订阅匹配时，返回 `matched: 0`。
+
+<PropertiesTable
+  content={[
+  { name: 'request', type: 'object', description: '传入的 webhook 请求。', properties: [{ type: 'object', parameters: [
+    { name: 'body', type: 'unknown', description: '已解析的 webhook payload。' },
+    { name: 'headers', type: 'Record<string, string>', description: 'webhook 请求中的 HTTP headers。' },
+  ] }] },
+]}
+/>
+
+### 静态 Signal 工厂
+
+#### `WebhookSignalProvider.signals.subscribe(externalResourceId)`
+
+创建一个 reactive Signal 输入，为当前 thread 订阅外部资源。
+
+```typescript prettier:false
+const signal = WebhookSignalProvider.signals.subscribe('mastra-ai/mastra')
+```
+
+返回：`{ type: 'reactive'; tagName: string; contents: string; attributes: { resource: string } }`
+
+#### `WebhookSignalProvider.signals.unsubscribe(externalResourceId)`
+
+创建一个 reactive Signal 输入，取消当前 thread 对外部资源的订阅。
+
+```typescript prettier:false
+const signal = WebhookSignalProvider.signals.unsubscribe('mastra-ai/mastra')
+```
+
+返回：`{ type: 'reactive'; tagName: string; contents: string; attributes: { resource: string } }`

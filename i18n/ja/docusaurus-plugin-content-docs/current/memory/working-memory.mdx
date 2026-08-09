@@ -1,0 +1,447 @@
+---
+title: "Working memory | Memory"
+description: "Mastra で working memory を設定し、永続的なユーザーデータや設定を保存する方法を説明します。"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+  - "@mastra/mongodb"
+  - "@mastra/oracledb"
+  - "@mastra/pg"
+  - "@mastra/upstash"
+---
+
+# Working Memory
+
+[メッセージ履歴](/docs/memory/message-history)と[semantic recall](./semantic-recall)は Agent が会話を記憶するのに役立ちますが、working memory を使うと、複数の対話をまたいでユーザーに関する情報を永続的に保持できます。
+
+Working memory は Agent が使用するアクティブなスクラッチパッドです。ユーザーやタスクに関する重要な情報を、いつでも利用できる状態で保持します。会話中に、ユーザーの名前、好み、その他の重要な詳細を記憶できます。
+
+常に関連性があり、Agent がいつでも参照できるべき状態を継続的に保持する場合に便利です。
+
+[Observational Memory](/docs/memory/observational-memory) を使用する場合、`observationalMemory.observation.manageWorkingMemory` を使うと、OM が Agent の working memory を更新できます。
+
+:::tip[📹 動画]
+
+[Mastra working memory](https://www.youtube.com/watch?v=UMy_JHLf1n8\&pp=ygUVbWFzdHJhIHdvcmtpbmcgbWVtb3J5) では、Agent が複数の対話をまたいで永続的なユーザーコンテキストを利用できる状態に保つ仕組みを動画で確認できます。
+
+:::
+
+Working memory は、次の2つの異なるスコープで永続化できます。
+
+- **リソーススコープ**（デフォルト）: 同じユーザーのすべての会話スレッドにわたって Memory が保持されます
+- **スレッドスコープ**: 会話スレッドごとに Memory が分離されます
+
+**要件:** スコープを切り替えると、Agent は別のスコープの Memory を参照できません。スレッドスコープの Memory とリソーススコープの Memory は完全に分離されています。
+
+## クイックスタート
+
+Working memory を使用する Agent の最小構成例を次に示します。
+
+```typescript {11-15}
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+
+// Create agent with working memory enabled
+const agent = new Agent({
+  id: 'personal-assistant',
+  name: 'PersonalAssistant',
+  instructions: 'You are a helpful personal assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    options: {
+      workingMemory: {
+        enabled: true,
+      },
+    },
+  }),
+})
+```
+
+## 仕組み
+
+Working memory は Markdown テキストのブロックです。Agent はこれを随時更新し、継続的に関連する情報を保存します。
+
+## Memory の永続化スコープ
+
+Working memory は2つの異なるスコープで動作し、会話をまたいで Memory をどのように保持するかを選択できます。
+
+### リソーススコープの Memory（デフォルト）
+
+デフォルトでは、working memory は同じユーザー（resourceId）のすべての会話スレッドにわたって保持され、ユーザー情報を永続化できます。
+
+```typescript
+const memory = new Memory({
+  storage,
+  options: {
+    workingMemory: {
+      enabled: true,
+      scope: 'resource', // Memory persists across all user threads
+      template: `# User Profile
+- **Name**:
+- **Location**:
+- **Interests**:
+- **Preferences**:
+- **Long-term Goals**:
+`,
+    },
+  },
+})
+```
+
+**ユースケース:**
+
+- ユーザーの好みを記憶するパーソナルアシスタント
+- 顧客のコンテキストを保持するカスタマーサービス Bot
+- 学習者の進捗を追跡する教育アプリケーション
+
+### Agent での使用
+
+リソーススコープの Memory を使用する場合は、Memory オプションに必ず `resource` パラメーターを渡してください。
+
+```typescript
+// Resource-scoped memory requires resource
+const response = await agent.generate('Hello!', {
+  memory: {
+    thread: 'conversation-123',
+    resource: 'user-alice-456', // Same user across different threads
+  },
+})
+```
+
+### スレッドスコープの Memory
+
+スレッドスコープの Memory では、working memory が会話スレッドごとに分離されます。各スレッドは独立した Memory を保持します。
+
+```typescript
+const memory = new Memory({
+  storage,
+  options: {
+    workingMemory: {
+      enabled: true,
+      scope: 'thread', // Memory is isolated per thread
+      template: `# User Profile
+- **Name**:
+- **Interests**:
+- **Current Goal**:
+`,
+    },
+  },
+})
+```
+
+**ユースケース:**
+
+- 個別のトピックについての異なる会話
+- 一時的またはセッション固有の情報
+- 各スレッドに working memory が必要であり、スレッド同士に関連がなく一時的である Workflow
+
+## ストレージアダプターのサポート
+
+リソーススコープの working memory には、`mastra_resources` テーブルをサポートする特定のストレージアダプターが必要です。
+
+### サポートされるストレージアダプター
+
+- **libSQL** (`@mastra/libsql`)
+- **PostgreSQL** (`@mastra/pg`)
+- **OracleDB** (`@mastra/oracledb`)
+- **Upstash** (`@mastra/upstash`)
+- **MongoDB** (`@mastra/mongodb`)
+
+## カスタムテンプレート
+
+テンプレートは、working memory でどの情報を追跡し、更新するかを Agent に示します。テンプレートを指定しない場合、Mastra はデフォルトのテンプレートを使用します。Agent のユースケースに合わせたカスタムテンプレートを定義し、最も関連性の高い情報を記憶させてください。複数のユーザーで共有するスレッドについては、[マルチユーザースレッド](./multi-user-threads)を参照してください。
+
+カスタムテンプレートの例を次に示します。この例では、ユーザーが名前、所在地、タイムゾーンなどの情報を含むメッセージを送信すると、Agent がその情報を保存します。
+
+```typescript {5-28}
+const memory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: `
+# User Profile
+
+## Personal info
+
+- Name:
+- Location:
+- Timezone:
+
+## Preferences
+
+- Communication Style: [e.g., Formal, Casual]
+- Project Goal:
+- Key Deadlines:
+  - [Deadline 1]: [Date]
+  - [Deadline 2]: [Date]
+
+## Session state
+
+- Last Task Discussed:
+- Open Questions:
+  - [Question 1]
+  - [Question 2]
+`,
+    },
+  },
+})
+```
+
+## 効果的なテンプレートの設計
+
+適切に構造化されたテンプレートにより、Agent は情報を簡単に解析、更新できます。テンプレートは、アシスタントに最新の状態を維持させる短いフォームとして設計してください。
+
+- **短く目的が明確なラベルにする。** 段落や非常に長い見出しは避けます。更新内容を読みやすくし、途中で切り捨てられにくくするため、`## Personal Info` や `- Name:` など、ラベルは簡潔にしてください。
+- **大文字と小文字の規則を統一する。** `Timezone:` と `timezone:` のように表記が一貫していないと、更新結果が乱れることがあります。見出しと箇条書きのラベルには、タイトルケースまたは小文字のいずれかを一貫して使用してください。
+- **プレースホルダーテキストを最小限にする。** `[e.g., Formal]` や `[Date]` などのヒントを使い、LLM が適切な位置を入力できるようにします。
+- **非常に長い値は短縮する。** 短い形式だけが必要な場合は、正式な全文ではなく、`- Name: [First name or nickname]` や `- Address (short):` のような指示を含めます。
+- **更新ルールを `instructions` に記載する。** テンプレートの各部分をいつ、どのように入力または消去するかを、Agent の `instructions` フィールドで直接指示できます。
+
+### 別のテンプレート形式
+
+必要な項目が少ない場合は、短い単一ブロックを使用します。
+
+```typescript
+const basicMemory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: `User Facts:\n- Name:\n- Favorite Color:\n- Current Topic:`,
+    },
+  },
+})
+```
+
+文章形式を使いたい場合は、重要な事実を短い段落として保存することもできます。
+
+```typescript
+const paragraphMemory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: `Important Details:\n\nKeep a short paragraph capturing the user's important facts (name, main goal, current task).`,
+    },
+  },
+})
+```
+
+## 構造化 working memory
+
+Working memory は、Markdown テンプレートの代わりに構造化スキーマを使って定義することもできます。[Standard JSON Schema](https://standardschema.dev/json-schema)（[Zod](https://zod.dev/)、[Valibot](https://valibot.dev/)、[ArkType](https://arktype.io/) など）を使用し、追跡するフィールドと型を正確に指定できます。スキーマを使用すると、Agent はスキーマに一致する JSON オブジェクトとして working memory を参照、更新します。
+
+**要件:** `template` または `schema` のいずれか一方を指定する必要があります。両方を同時には指定できません。
+
+### 例: スキーマベースの Working Memory
+
+```typescript
+import { z } from 'zod'
+import { Memory } from '@mastra/memory'
+
+const userProfileSchema = z.object({
+  name: z.string().optional(),
+  location: z.string().optional(),
+  timezone: z.string().optional(),
+  preferences: z
+    .object({
+      communicationStyle: z.string().optional(),
+      projectGoal: z.string().optional(),
+      deadlines: z.array(z.string()).optional(),
+    })
+    .optional(),
+})
+
+const memory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      schema: userProfileSchema,
+      // template: ... (do not set)
+    },
+  },
+})
+```
+
+スキーマを指定すると、Agent は working memory を JSON オブジェクトとして受け取ります。次に例を示します。
+
+```json
+{
+  "name": "Sam",
+  "location": "Berlin",
+  "timezone": "CET",
+  "preferences": {
+    "communicationStyle": "Formal",
+    "projectGoal": "Launch MVP",
+    "deadlines": ["2025-07-01"]
+  }
+}
+```
+
+### スキーマベースの Memory におけるマージセマンティクス
+
+スキーマベースの working memory は**マージセマンティクス**を使用します。そのため、Agent は追加または更新するフィールドだけを含めればよく、既存のフィールドは自動的に保持されます。
+
+- **オブジェクトフィールドはディープマージされます:** 指定したフィールドだけが更新され、それ以外は変更されません
+- **フィールドを削除するには `null` を設定します:** Memory からそのフィールドを明示的に削除します
+- **配列は全体が置き換えられます:** 配列フィールドを指定すると既存の配列全体が置き換わります（要素単位ではマージされません）
+
+## テンプレートとスキーマの選択
+
+- ユーザープロフィールやスクラッチパッドなど、自由形式のテキストブロックとして Agent に Memory を維持させる場合は、**テンプレート**（Markdown）を使用します。テンプレートは**置換セマンティクス**を使用し、Agent は更新のたびに Memory の内容全体を指定する必要があります。
+- 検証でき、JSON としてプログラムからアクセス可能な、構造化された型安全なデータが必要な場合は、**スキーマ**を使用します。`workingMemory.schema` フィールドには、`PublicSchema` と互換性のある任意のスキーマ（Zod v3、Zod v4、JSON Schema、すでに標準化されたスキーマなど）を指定できます。スキーマは**マージセマンティクス**を使用し、Agent は更新するフィールドだけを指定すれば、既存のフィールドは保持されます。
+- 一度に有効にできるモードは1つだけです。`template` と `schema` の同時指定はサポートされていません。
+
+## 例: 複数ステップにわたる保持
+
+次の例は、短いユーザー会話の中で `User Profile` テンプレートがどのように更新されるかを簡略化して示しています。
+
+```nohighlight
+# User Profile
+
+## Personal info
+
+- Name:
+- Location:
+- Timezone:
+
+--- After user says "My name is **Sam** and I'm from **Berlin**" ---
+
+# User Profile
+- Name: Sam
+- Location: Berlin
+- Timezone:
+
+--- After user adds "By the way I'm normally in **CET**" ---
+
+# User Profile
+- Name: Sam
+- Location: Berlin
+- Timezone: CET
+```
+
+情報が working memory に保存されたため、Agent は後の応答で再度尋ねることなく `Sam` や `Berlin` を参照できます。
+
+期待どおりに Agent が working memory を更新しない場合は、このテンプレートを「どのように」「いつ」使用するかについて、Agent の `instructions` 設定にシステム指示を追加できます。
+
+## Working memory の初期値を設定する
+
+通常、Agent は `updateWorkingMemory` Tool を通じて working memory を更新しますが、スレッドの作成時または更新時に、working memory の初期値をプログラムから設定することもできます。名前、好み、その他の情報など、リクエストのたびに渡すことなく Agent から利用できるようにしたいユーザーデータを注入する場合に便利です。
+
+### スレッドメタデータによる Working Memory の設定
+
+スレッドの作成時に、メタデータの `workingMemory` キーを通じて working memory の初期値を指定できます。
+
+```typescript title="src/app/medical-consultation.ts"
+// Create a thread with initial working memory
+const thread = await memory.createThread({
+  threadId: 'thread-123',
+  resourceId: 'user-456',
+  title: 'Medical Consultation',
+  metadata: {
+    workingMemory: `# Patient Profile
+- Name: John Doe
+- Blood Type: O+
+- Allergies: Penicillin
+- Current Medications: None
+- Medical History: Hypertension (controlled)
+`,
+  },
+})
+
+// The agent will now have access to this information in all messages
+await agent.generate("What's my blood type?", {
+  memory: {
+    thread: thread.id,
+    resource: 'user-456',
+  },
+})
+// Response: "Your blood type is O+."
+```
+
+### プログラムによる Working Memory の更新
+
+既存のスレッドの working memory を更新することもできます。
+
+```typescript title="src/app/medical-consultation.ts"
+// Update thread metadata to add/modify working memory
+await memory.updateThread({
+  id: 'thread-123',
+  title: thread.title,
+  metadata: {
+    ...thread.metadata,
+    workingMemory: `# Patient Profile
+- Name: John Doe
+- Blood Type: O+
+- Allergies: Penicillin, Ibuprofen  // Updated
+- Current Medications: Lisinopril 10mg daily  // Added
+- Medical History: Hypertension (controlled)
+`,
+  },
+})
+```
+
+### Memory の直接更新
+
+別の方法として、`updateWorkingMemory` メソッドを直接使用できます。
+
+```typescript title="src/app/medical-consultation.ts"
+await memory.updateWorkingMemory({
+  threadId: 'thread-123',
+  resourceId: 'user-456', // Required for resource-scoped memory
+  workingMemory: 'Updated memory content...',
+})
+```
+
+## 読み取り専用の working memory
+
+状況によっては、Agent に working memory のデータへのアクセスを許可しつつ、変更は許可したくない場合があります。これは次の用途に便利です。
+
+- コンテキストは必要だが、ユーザープロフィールを更新すべきではない**ルーティング Agent**
+- Memory を所有せず参照だけを行う、マルチ Agent システム内の**サブ Agent**
+
+読み取り専用モードを有効にするには、Memory オプションに `readOnly: true` を設定します。
+
+```typescript
+const response = await agent.generate('What do you know about me?', {
+  memory: {
+    thread: 'conversation-123',
+    resource: 'user-alice-456',
+    options: {
+      readOnly: true, // Working memory is provided but cannot be updated
+    },
+  },
+})
+```
+
+## State signal を有効にする（実験的機能）
+
+デフォルトでは、working memory はシステムメッセージの一部としてモデルに渡されます。`useStateSignals: true` を設定すると、代わりに [state signal](/docs/long-running-agents/signals) として配信できます。
+
+```typescript
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'mastra-storage', url: 'file:./mastra.db' }),
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: '# User\n- name:\n- location:',
+      useStateSignals: true, // experimental: deliver as state signal
+    },
+  },
+})
+```
+
+変更点は次のとおりです。
+
+- **ストレージは同一です。** 同じリソース／スレッドの `workingMemory` フィールドが読み書きされます。
+- **Tool の形式は同じで、新しい名前で公開されます。** 書き込みは引き続き同じ基盤 Tool を通じて行われますが、この経路では `updateWorkingMemory` ではなく `setWorkingMemory` として登録されます。この名前変更により、従来の除去フィルターが Tool 呼び出し部分を削除しなくなり、通常の監査証跡として保持され、次のモデルステップで新しい値が自動的に取得されます。
+- **配信方法だけが変わります。** システムプロンプトに組み込む代わりに、`Memory` が `WorkingMemoryStateProcessor` を自動的に追加し、現在の working memory を `stateId: 'working-memory'` の `state` signal として出力します。
+
+標準の state signal の利点をそのまま利用できます。これには、スレッドスコープの追跡メタデータ、同一スナップショットを一度だけ出力する `cacheKey` による重複排除、古いスナップショットがウィンドウ外へ移動したときの `contextWindow.hasSnapshot` による再注入が含まれます。
+
+デフォルト（`useStateSignals: false`）では、既存のシステムメッセージの動作は変わりません。`useStateSignals` は、テンプレート形式の working memory で `version: 'vnext'` を使用する場合にはサポートされません。
+
+## 例
+
+- [テンプレートを使用する working memory](https://github.com/mastra-ai/mastra/tree/main/examples/memory-with-template)
+- [スキーマを使用する working memory](https://github.com/mastra-ai/mastra/tree/main/examples/memory-with-schema)
+- [リソース単位の working memory](https://github.com/mastra-ai/mastra/tree/main/examples/memory-per-resource-example): リソーススコープの Memory 永続化を示す完全な例

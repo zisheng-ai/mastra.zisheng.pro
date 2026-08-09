@@ -1,0 +1,166 @@
+---
+title: "部署 Mastra 伺服器 | 部署"
+description: "了解如何建置及部署 Mastra 伺服器。"
+packages:
+  - "@mastra/deployer"
+---
+
+# 部署 Mastra 伺服器
+
+Mastra 會將你的應用程式編譯成獨立的 Node.js 伺服器，可在任何支援 Node.js、Bun 或 Deno 的平台上運行。
+
+:::tip
+
+本指南介紹如何部署由 `mastra build` 產生的獨立伺服器。如果你需要將 Mastra 整合至現有的 Express 或 Hono 應用程式，請改為參閱[伺服器配接器](/docs/server/server-adapters)。
+
+:::
+
+## 建置應用程式
+
+在項目根目錄執行建置命令：
+
+```bash
+mastra build
+```
+
+這會建立一個 `.mastra` 目錄，當中包含可用於生產環境的伺服器。請參閱 [`mastra build`](/reference/cli/mastra#mastra-build) 參考文件，了解所有可用的旗標。
+
+## 建置輸出
+
+建置完成後，Mastra 會建立以下結構：
+
+```
+.mastra/
+├── .build/                # Intermediate build artifacts (module maps, analysis)
+└── output/
+    ├── index.mjs          # Server entry point
+    ├── mastra.mjs         # Your bundled Mastra configuration
+    ├── tools.mjs          # Aggregated tool exports
+    ├── tools/             # Individual tool bundles
+    ├── package.json       # Production dependencies
+    ├── node_modules/      # Installed dependencies
+    ├── .npmrc             # Copied from your project (if present)
+    ├── public/            # Static assets (if src/mastra/public exists)
+    └── playground/        # Studio UI (if --studio flag used)
+```
+
+`output` 目錄本身已包含所需的一切。你可以將它複製到任何伺服器並直接運行。
+
+## 運行伺服器
+
+使用 Mastra CLI 啟動伺服器：
+
+```bash
+mastra start
+```
+
+或使用 Node.js 直接運行：
+
+```bash
+node .mastra/output/index.mjs
+```
+
+`mastra start` 命令提供額外功能：
+
+- 從 `.env.production` 及 `.env` 載入環境變數
+- 在缺少模組時提供實用的錯誤訊息
+- 處理程序訊號，以便平穩關閉
+
+請參閱 [`mastra start`](/reference/cli/mastra#mastra-start) 參考文件，了解所有可用的旗標。
+
+## 建置設定
+
+### 建置時設定
+
+Mastra 在建置應用程式時會讀取 `bundler`、`deployer` 及 `server` 選項。請將這些選項保留為傳入 `new Mastra()` 的物件的直接屬性，讓建置程序可以擷取它們。
+
+以下進入點檔案結構可以正常運作：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+
+export const mastra = new Mastra({
+  bundler: {
+    externals: ['sharp'],
+  },
+  server: {
+    port: 4111,
+  },
+})
+```
+
+每個選項的值可以來自變數、import 或函式呼叫，但選項本身必須維持為直接屬性。不要將建置時選項隱藏於工廠函式呼叫或物件展開之中：
+
+```typescript title="src/mastra/index.ts"
+const options = {
+  bundler: {
+    externals: ['sharp'],
+  },
+}
+
+// These patterns prevent Mastra from extracting `bundler` during the build.
+export const mastra = new Mastra(createMastraOptions())
+export const otherMastra = new Mastra({ ...options })
+```
+
+當 Mastra 無法擷取某個選項時，便會對該選項採用預設建置行為。請參閱[設定參考文件](/reference/configuration)，了解可用的 `bundler`、`deployer` 及 `server` 設定。
+
+### 公開資料夾
+
+如果你的 Mastra 目錄中存在 `public` 資料夾（`src/mastra/public`），建置期間其內容會複製到輸出目錄。伺服器會將這些檔案作為靜態資源提供。
+
+### Mastra 設定
+
+建置程序會採用 Mastra 實例中的設定。如要了解 CORS、逾時及中介軟件等伺服器行為，請參閱[伺服器概覽](/docs/server/mastra-server)。如要了解所有可用選項，請參閱[設定參考文件](/reference/configuration)。
+
+## 建置程序
+
+建置會依照以下步驟進行：
+
+1. **找出進入點檔案**：在 Mastra 目錄中尋找 `index.ts` 或 `index.js`。
+1. **探索 Tool**：掃描符合 `{mastraDir}/tools/**/*.{js,ts}` 的 Tool 檔案，並排除測試檔案。
+1. **分析依賴套件**：判斷哪些套件要打包，以及哪些套件要在外部安裝。
+1. **打包程式碼**：使用具備 tree-shaking 及選用 source map 功能的 Rollup。
+1. **產生伺服器**：建立以 Hono 為基礎的 HTTP 伺服器，並儲存為 `index.mjs`。
+1. **安裝依賴套件**：在輸出目錄中執行 `npm install`。
+1. **複製資源**：複製 `public` 資料夾，以及存在時的 `.npmrc`。
+
+## 環境變數
+
+| 變數 | 說明 |
+| - | - |
+| `PORT` | 伺服器連接埠（預設值：`4111`） |
+| `MASTRA_STUDIO_PATH` | Studio 建置目錄的路徑（預設值：`./playground`） |
+| `MASTRA_SKIP_DOTENV` | 設定後略過載入 `.env` 檔案 |
+| `NODE_OPTIONS` | Node.js 選項（例如，遇到建置記憶體問題時使用 `--max-old-space-size=4096`） |
+
+## 伺服器端點
+
+建置後的伺服器會公開健康狀態檢查、Agent、Workflow 等端點：
+
+| 端點 | 說明 |
+| - | - |
+| `GET /health` | 健康狀態檢查端點，傳回 `200 OK` |
+| `GET /api/openapi.json` | OpenAPI 規格（如果已啟用 `server.build.openAPIDocs`）。 |
+| `GET /swagger-ui` | 互動式 API 文件（如果已啟用 `server.build.swaggerUI`） |
+
+此清單並非詳盡無遺。如要查看所有端點，請執行 `mastra dev` 並前往 `http://localhost:4111/swagger-ui`。
+
+如要加入自訂端點，請參閱[自訂 API 路由](/docs/server/custom-api-routes)。
+
+## 疑難排解
+
+### 建置期間的記憶體錯誤
+
+如果遇到 `JavaScript heap out of memory` 錯誤：
+
+```bash
+NODE_OPTIONS="--max-old-space-size=4096" mastra build
+```
+
+## 相關內容
+
+- [伺服器概覽](/docs/server/mastra-server)：設定伺服器行為、中介軟件及驗證
+- [伺服器配接器](/docs/server/server-adapters)：使用 Express 或 Hono 取代 `mastra build`
+- [自訂 API 路由](/docs/server/custom-api-routes)：加入自訂 HTTP 端點
+- [設定參考文件](/reference/configuration)：完整設定選項

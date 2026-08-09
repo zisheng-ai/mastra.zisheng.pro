@@ -1,0 +1,123 @@
+---
+title: "参考：CloudflareDeployer | Deployer"
+description: "CloudflareDeployer 类的文档，该类用于将 Mastra 应用部署到 Cloudflare Workers。"
+packages:
+  - "@mastra/deployer-cloudflare"
+---
+
+# CloudflareDeployer
+
+`CloudflareDeployer` 会打包你的 Mastra 服务器，并生成符合 Cloudflare [wrangler 配置](https://developers.cloudflare.com/workers/wrangler/configuration/)的 `wrangler.jsonc` 文件。Cloudflare 会将其部署为 Cloudflare Worker。
+
+## 安装
+
+要使用 `CloudflareDeployer`，请安装 `@mastra/deployer-cloudflare` 包：
+
+```bash npm2yarn
+npm install @mastra/deployer-cloudflare@latest
+```
+
+## 使用示例
+
+导入 `CloudflareDeployer`，并在 Mastra 配置中将其设为 deployer：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { CloudflareDeployer } from '@mastra/deployer-cloudflare'
+
+export const mastra = new Mastra({
+  deployer: new CloudflareDeployer({
+    name: 'your-project-name',
+    routes: [
+      {
+        pattern: 'example.com/*',
+        zone_name: 'example.com',
+        custom_domain: true,
+      },
+    ],
+    vars: {
+      NODE_ENV: 'production',
+    },
+    d1_databases: [
+      {
+        binding: 'DB',
+        database_name: 'my-database',
+        database_id: 'd1-database-id',
+        preview_database_id: 'your-preview-database-id',
+      },
+    ],
+    kv_namespaces: [
+      {
+        binding: 'CACHE',
+        id: 'kv-namespace-id',
+      },
+    ],
+  }),
+})
+```
+
+## 构造函数选项
+
+`CloudflareDeployer` 构造函数接受与 `wrangler.jsonc` 相同的配置选项。有关所有可用选项，请参阅 [Wrangler 配置文档](https://developers.cloudflare.com/workers/wrangler/configuration/)。
+
+## Secret
+
+`.env` 文件中的环境变量不会写入 `wrangler.jsonc`，从而避免将 secret 提交到源代码管理系统。
+
+要让 Cloudflare Worker 能够使用 `.env` 中的 secret，请将其上传为 [Cloudflare Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)：
+
+```bash
+npx wrangler secret bulk .env
+```
+
+仅将 `CloudflareDeployer` 构造函数中的 `vars` 用于 `NODE_ENV` 等非敏感配置值。
+
+## 构建输出
+
+运行 `mastra build` 后，deployer 会生成符合 Cloudflare [wrangler 配置](https://developers.cloudflare.com/workers/wrangler/configuration/)的 `wrangler.jsonc` 文件。该文件指向 `.mastra/output` 内的文件，因此使用 Wrangler 部署前需要先运行 `mastra build`。
+
+## Cloudflare 绑定
+
+使用 Cloudflare deployer 时，可以在 Mastra 配置文件中从 `cloudflare:workers` 导入运行时 binding。执行 `mastra build` 时，Mastra 会自动保留 `cloudflare:workers` 这类基于协议的运行时导入，而不会尝试将它们作为 npm 依赖安装。
+
+```typescript title="src/mastra/index.ts"
+import { env } from 'cloudflare:workers'
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+import { CloudflareDeployer } from '@mastra/deployer-cloudflare'
+
+export const mastra = new Mastra({
+  deployer: new CloudflareDeployer({
+    name: 'my-worker',
+    kv_namespaces: [{ binding: 'CACHE', id: 'your-kv-namespace-id' }],
+  }),
+  server: {
+    apiRoutes: [
+      registerApiRoute('/bindings', {
+        method: 'GET',
+        requiresAuth: false,
+        handler: async c => {
+          await env.CACHE.put('status', 'ok')
+          return c.json({ status: await env.CACHE.get('status') })
+        },
+      }),
+    ],
+  },
+})
+```
+
+:::note[将 binding 内联在 `new Mastra({...})` 中]
+Mastra 的 Babel 插件会延迟执行 `new Mastra(...)`，以便运行时 `env` 已可用。该调用之外的代码会在模块加载时求值，此时 `env` 尚未填充。
+
+```typescript
+// ✅ Works — binding is inside new Mastra(), so it's deferred
+export const mastra = new Mastra({
+  storage: new D1Store({ binding: env.DB }),
+})
+
+// ❌ Breaks — env.DB is undefined at module load
+const storage = new D1Store({ binding: env.DB })
+export const mastra = new Mastra({ storage })
+```
+
+:::

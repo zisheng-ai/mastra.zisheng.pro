@@ -1,0 +1,222 @@
+---
+title: "リファレンス：PinoLogger | Observability"
+description: さまざまな重大度レベルでイベントを記録するメソッドを提供する PinoLogger のドキュメント。
+packages:
+  - "@mastra/core"
+  - "@mastra/loggers"
+---
+
+# PinoLogger
+
+Logger インスタンスは `new PinoLogger()` で作成し、各重大度レベルでイベントを記録するメソッドを提供します。
+
+## 使用例
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { PinoLogger } from '@mastra/loggers'
+
+export const mastra = new Mastra({
+  logger: new PinoLogger({
+    name: 'Mastra',
+    level: 'info',
+  }),
+})
+```
+
+## パラメータ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'name',
+    type: 'string',
+    description: 'この logger のログをグループ化し、識別するためのラベル。',
+  },
+  {
+    name: 'level',
+    type: `"debug" | "info" | "warn" | "error"`,
+    description: '最小ログレベルを設定します。これを下回るレベルのメッセージは無視されます。',
+  },
+  {
+    name: 'transports',
+    type: 'Record<string, LoggerTransport>',
+    description: 'ログの永続化に使用する transport インスタンスのマップ。',
+  },
+  {
+    name: 'overrideDefaultTransports',
+    type: 'boolean',
+    isOptional: true,
+    description: 'true の場合、デフォルトの console transport を無効にします。',
+  },
+  {
+    name: 'formatters',
+    type: "pino.LoggerOptions['formatters']",
+    isOptional: true,
+    description: 'ログのシリアライズに使用するカスタム Pino formatter。',
+  },
+  {
+    name: 'redact',
+    type: "pino.LoggerOptions['redact']",
+    isOptional: true,
+    description: 'ログ出力から機密フィールドを秘匿するパスまたはオプション（Pino `redact`）。',
+  },
+  {
+    name: 'prettyPrint',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'true',
+    description: 'false の場合、`pino-pretty` を無効にして生の JSON 行を書き込みます（ログ集約サービスに便利です）。',
+  },
+  {
+    name: 'mixin',
+    type: 'pino.MixinFn',
+    isOptional: true,
+    description:
+      'すべてのログオブジェクトにマージされる Pino mixin 関数（リクエスト単位の `traceId` やその他の共有メタデータなど）。',
+  },
+  {
+    name: 'customLevels',
+    type: 'Record<string, number>',
+    isOptional: true,
+    description:
+      'Pino に渡されるカスタムログレベルと数値。標準の重大度は引き続き `debug`、`info`、`warn`、`error` で記録され、追加レベルは Pino のカスタムレベルの動作に従います。',
+  },
+]}
+/>
+
+## `mixin` によるログの拡充
+
+すべての行に同じ構造化フィールドを追加し、他のサービスと関連付けるには `mixin` を使用します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { PinoLogger } from '@mastra/loggers'
+
+function getTraceContext() {
+  return { traceId: 'abc-123' }
+}
+
+export const mastra = new Mastra({
+  logger: new PinoLogger({
+    name: 'Mastra',
+    level: 'info',
+    mixin() {
+      return getTraceContext()
+    },
+  }),
+})
+```
+
+## カスタムレベル
+
+`customLevels` はそのまま Pino に渡されます。`PinoLogger` が公開するのは `debug`、`info`、`warn`、`error` のみです。追加のレベル名（`audit` など）を使用するには、サブクラスを作成して基盤となる Pino インスタンスへ転送します。
+
+```typescript title="src/mastra/logger.ts"
+import { Mastra } from '@mastra/core'
+import { PinoLogger } from '@mastra/loggers'
+
+type AuditLevel = 'audit'
+
+class MastraPinoWithAudit extends PinoLogger<AuditLevel> {
+  audit(message: string, meta: Record<string, unknown> = {}) {
+    this.logger.audit(meta, message)
+  }
+}
+
+const logger = new MastraPinoWithAudit({
+  name: 'Mastra',
+  level: 'info',
+  customLevels: { audit: 35 },
+})
+
+export const mastra = new Mastra({ logger })
+```
+
+数値は Pino の順序に従います（組み込みレベルでは10から60を使用）。`35` は `info`（30）と `warn`（40）の間にあるため、`level: 'info'` では `info` と `audit` の両方の行が出力されます。
+
+## File transport（構造化ログ）
+
+`FileTransport` を使用して構造化ログをファイルに書き込みます。logger は第1引数にプレーンなメッセージ、第2引数に構造化メタデータを受け取ります。これらは内部で `BaseLogMessage` に変換され、設定されたファイルパスに永続化されます。
+
+```typescript title="src/mastra/loggers/file-transport.ts"
+import { FileTransport } from '@mastra/loggers/file'
+import { PinoLogger } from '@mastra/loggers/pino'
+
+export const fileLogger = new PinoLogger({
+  name: 'Mastra',
+  transports: { file: new FileTransport({ path: 'test-dir/test.log' }) },
+  level: 'warn',
+})
+```
+
+### File transport の使用方法
+
+```typescript
+fileLogger.warn('Low disk space', {
+  destinationPath: 'system',
+  type: 'WORKFLOW',
+})
+```
+
+## Upstash transport（リモートログ転送）
+
+`UpstashTransport` を使用して、構造化ログをリモートの Redis list にストリーミングします。logger は文字列メッセージと構造化メタデータオブジェクトを受け取ります。分散環境でログを一元管理し、`destinationPath`、`type`、`runId` でフィルタリングできます。
+
+```typescript title="src/mastra/loggers/upstash-transport.ts"
+import { UpstashTransport } from '@mastra/loggers/upstash'
+import { PinoLogger } from '@mastra/loggers/pino'
+
+export const upstashLogger = new PinoLogger({
+  name: 'Mastra',
+  transports: {
+    upstash: new UpstashTransport({
+      listName: 'production-logs',
+      upstashUrl: process.env.UPSTASH_URL!,
+      upstashToken: process.env.UPSTASH_TOKEN!,
+    }),
+  },
+  level: 'info',
+})
+```
+
+### Upstash transport の使用方法
+
+```typescript
+upstashLogger.info('User signed in', {
+  destinationPath: 'auth',
+  type: 'AGENT',
+  runId: 'run_123',
+})
+```
+
+## カスタム transport
+
+`createCustomTransport` ユーティリティを使用すると、任意のログサービスやストリームと連携するカスタム transport を作成できます。
+
+### Sentry transport の例
+
+`createCustomTransport` でカスタム transport を作成し、`pino-sentry-transport` などのサードパーティ製ログストリームと連携します。これにより、高度な監視と Observability のためにログを Sentry などの外部システムへ転送できます。
+
+```typescript title="src/mastra/loggers/sentry-transport.ts"
+import { createCustomTransport } from '@mastra/core/loggers'
+import { PinoLogger } from '@mastra/loggers/pino'
+import pinoSentry from 'pino-sentry-transport'
+
+const sentryStream = await pinoSentry({
+  sentry: {
+    dsn: 'YOUR_SENTRY_DSN',
+    _experiments: {
+      enableLogs: true,
+    },
+  },
+})
+
+const customTransport = createCustomTransport(sentryStream)
+
+export const sentryLogger = new PinoLogger({
+  name: 'Mastra',
+  level: 'info',
+  transports: { sentry: customTransport },
+})
+```

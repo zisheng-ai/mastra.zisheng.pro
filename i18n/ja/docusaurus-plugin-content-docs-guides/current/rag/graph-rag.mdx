@@ -1,0 +1,223 @@
+---
+title: "GraphRAG | RAG"
+description: 複雑な関係を持つドキュメントを対象に、Mastra の RAG システムでグラフベースの取得を行う方法を説明します。
+packages:
+  - "@mastra/core"
+  - "@mastra/rag"
+---
+
+# GraphRAG
+
+グラフベースの取得は、情報チャンク間の関係をたどることで、従来のベクトル検索を強化します。この手法は、情報が複数のドキュメントに分散している場合や、ドキュメントが相互に参照している場合に役立ちます。
+
+## GraphRAG を使用する場面
+
+GraphRAG は、特に次のような場合に効果的です。
+
+- 情報が複数のドキュメントに分散している
+- ドキュメントが相互に参照している
+- 完全な回答を得るために関係をたどる必要がある
+- 概念間のつながりを理解することが重要である
+- 単純なベクトル類似性では重要な文脈上の関係を見逃す
+
+関係をたどらない単純なセマンティック検索には、[標準の取得方法](/guides/rag/retrieval)を使用してください。
+
+## GraphRAG の仕組み
+
+GraphRAG は、ベクトル類似性とナレッジグラフの走査を組み合わせます。
+
+1. 最初のベクトル検索で、意味的な類似性に基づいて関連チャンクを取得する
+1. 取得したチャンクからナレッジグラフを構築する
+1. グラフを走査して、つながりのある情報を探す
+1. 結果に、直接関連するチャンクと関連コンテンツの両方を含める
+
+この処理により、クエリと意味的には似ていなくても、つながりを通じて文脈上関連する情報を見つけられます。
+
+## グラフクエリ Tool を作成する
+
+Graph Query Tool を使用すると、Agent はグラフベースの取得を実行できます。
+
+```ts
+import { createGraphRAGTool } from '@mastra/rag'
+import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
+
+const graphQueryTool = createGraphRAGTool({
+  vectorStoreName: 'pgVector',
+  indexName: 'embeddings',
+  model: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+  graphOptions: {
+    threshold: 0.7,
+  },
+})
+```
+
+### 設定オプション
+
+`graphOptions` パラメーターは、ナレッジグラフの構築方法と走査方法を制御します。
+
+- `threshold`: どのチャンクを関連付けるかを決める類似性のしきい値（0〜1）。値を高くすると、つながりの強い疎なグラフになります。値を低くすると、関係の候補が多い密なグラフになります。
+- `dimension`: ベクトル埋め込みの次元数。埋め込みモデルの出力次元数と一致する必要があります（例: OpenAI の text-embedding-3-small は 1536）。
+
+```ts
+const graphQueryTool = createGraphRAGTool({
+  vectorStoreName: 'pgVector',
+  indexName: 'embeddings',
+  model: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+  graphOptions: {
+    dimension: 1536,
+    threshold: 0.7,
+  },
+})
+```
+
+## Agent で GraphRAG を使用する
+
+グラフクエリ Tool を Agent に統合して、グラフベースの取得を有効にします。
+
+```ts
+import { Agent } from '@mastra/core/agent'
+
+const ragAgent = new Agent({
+  id: 'rag-agent',
+  name: 'GraphRAG Agent',
+  instructions: `You are a helpful assistant that answers questions based on the provided context.
+When answering questions, use the graph query tool to find relevant information and relationships.
+Base your answers on the context provided by the tool, and clearly state if the context doesn't contain enough information.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: {
+    graphQueryTool,
+  },
+})
+```
+
+## ドキュメントの処理と保存
+
+グラフベースの取得を使用する前に、ドキュメントをチャンクに分割して埋め込みを保存します。
+
+```ts
+import { MDocument } from '@mastra/rag'
+import { embedMany } from 'ai'
+import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
+
+// Create and chunk document
+const doc = MDocument.fromText('Your document content here...')
+
+const chunks = await doc.chunk({
+  strategy: 'recursive',
+  size: 512,
+  overlap: 50,
+  separator: '\n',
+})
+
+// Generate embeddings
+const { embeddings } = await embedMany({
+  model: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+  values: chunks.map(chunk => chunk.text),
+})
+
+// Store in vector database
+const vectorStore = mastra.getVector('pgVector')
+await vectorStore.createIndex({
+  indexName: 'embeddings',
+  dimension: 1536,
+})
+await vectorStore.upsert({
+  indexName: 'embeddings',
+  vectors: embeddings,
+  metadata: chunks?.map(chunk => ({ text: chunk.text })),
+})
+```
+
+## GraphRAG でクエリする
+
+設定後、Agent はグラフベースのクエリを実行できます。
+
+```ts
+const query = 'What are the effects of infrastructure changes on local businesses?'
+const response = await ragAgent.generate(query)
+console.log(response.text)
+```
+
+Agent はグラフクエリ Tool を使って、次の処理を行います。
+
+1. クエリを埋め込みに変換する
+1. ベクトルストアから意味的に類似するチャンクを探す
+1. 関連チャンクからナレッジグラフを構築する
+1. グラフを走査して、つながりのある情報を探す
+1. 回答生成に必要な完全なコンテキストを返す
+
+## 適切なしきい値を選ぶ
+
+しきい値パラメーターは、取得品質に大きく影響します。
+
+- **高いしきい値（0.8〜0.9）**: 関係を厳密に絞り、数を減らします。結果の精度は上がりますが、不完全になる可能性があります
+- **中程度のしきい値（0.6〜0.8）**: バランスの取れた設定で、ほとんどのユースケースに適しています
+- **低いしきい値（0.4〜0.6）**: つながりとコンテキストが増えますが、関連性の低い情報が含まれる可能性があります
+
+まず 0.7 から始め、ユースケースに合わせて調整してください。
+
+```ts
+// Strict connections for precise answers
+const strictGraphTool = createGraphRAGTool({
+  vectorStoreName: 'pgVector',
+  indexName: 'embeddings',
+  model: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+  graphOptions: {
+    threshold: 0.85,
+  },
+})
+
+// Broader connections for exploratory queries
+const broadGraphTool = createGraphRAGTool({
+  vectorStoreName: 'pgVector',
+  indexName: 'embeddings',
+  model: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+  graphOptions: {
+    threshold: 0.5,
+  },
+})
+```
+
+## 他の取得方法と組み合わせる
+
+GraphRAG は、他の取得方法と併用できます。
+
+```ts
+import { createVectorQueryTool } from '@mastra/rag'
+
+const vectorQueryTool = createVectorQueryTool({
+  vectorStoreName: 'pgVector',
+  indexName: 'embeddings',
+  model: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+})
+
+const graphQueryTool = createGraphRAGTool({
+  vectorStoreName: 'pgVector',
+  indexName: 'embeddings',
+  model: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+  graphOptions: {
+    threshold: 0.7,
+  },
+})
+
+const agent = new Agent({
+  id: 'rag-agent',
+  name: 'RAG Agent',
+  instructions: `Use vector search for simple fact-finding queries.
+Use graph search when you need to understand relationships or find connected information.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: {
+    vectorQueryTool,
+    graphQueryTool,
+  },
+})
+```
+
+これにより、Agent はクエリに応じて適切な取得方法を柔軟に選べます。
+
+## リファレンス
+
+API の詳細については、次を参照してください。
+
+- [GraphRAG クラス](/reference/rag/graph-rag)
+- [createGraphRAGTool()](/reference/tools/graph-rag-tool)

@@ -1,0 +1,151 @@
+---
+title: "參考文件：createCodingAgent() | Coding Agent"
+description: "createCodingAgent() 的 API 參考文件。此 factory 會建立 Coding Agent，並提供 Workspace、task signal、錯誤重試與 goal judge 的可攜式預設值。"
+packages:
+  - "@mastra/core"
+---
+
+# createCodingAgent()
+
+`createCodingAgent()` 會建立 Coding [`Agent`](/reference/agents/agent)，並為 Coding Agent 一定需要的元件提供可攜式預設值：本機 Workspace、task-list signal Provider、網路重試錯誤 processor 與 goal judge prompt。只要提供 `model`、`instructions` 與 `tools` 即可取得可運作的 Agent，也可以覆寫任何預設值。
+
+傳回值是標準 `Agent`，因此可用於任何接受 `Agent` 的位置，包括傳給 [`AgentController`](/reference/agent-controller/agent-controller-class) 的 Agent。
+
+## 使用範例
+
+傳入模型、instructions 與 Tool。factory 會填入 Workspace、task signal、錯誤 processor 與 goal prompt：
+
+```typescript title="src/mastra/coding-agent.ts"
+import { createCodingAgent } from '@mastra/core/coding-agent'
+
+const agent = createCodingAgent({
+  id: 'my-coding-agent',
+  name: 'My Coding Agent',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  instructions: 'You are a helpful coding assistant.',
+  tools: {},
+})
+```
+
+## 參數
+
+`createCodingAgent()` 接受 [`AgentConfig`](/reference/agents/agent#constructor-parameters) 的所有欄位，以及下列欄位。你提供的欄位一律優先於 factory 預設值。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraLanguageModel | DynamicArgument<MastraLanguageModel>',
+    description: 'Agent 使用的語言模型。會直接傳遞給 Agent。',
+  },
+  {
+    name: 'instructions',
+    type: 'string | DynamicArgument<string>',
+    description: 'Agent 的 system instructions。會直接傳遞給 Agent。',
+  },
+  {
+    name: 'tools',
+    type: 'ToolsInput | DynamicArgument<ToolsInput>',
+    description: 'Agent 可使用的 Tool。會直接傳遞給 Agent。',
+    isOptional: true,
+  },
+  {
+    name: 'workspace',
+    type: 'AnyWorkspace | undefined',
+    description:
+      '支援 Agent 的 Workspace。省略此 key 時，會建立預設的本機 Workspace。明確設為 undefined 時，factory 不會建立預設值；若 Workspace 已在其他位置接線（例如 AgentController 層級），可使用此方式停用。',
+    isOptional: true,
+  },
+  {
+    name: 'basePath',
+    type: 'string',
+    description: '省略 workspace 時，所建立預設 Workspace 的基底路徑。',
+    isOptional: true,
+    defaultValue: 'process.cwd()',
+  },
+  {
+    name: 'signals',
+    type: 'SignalProvider[]',
+    description: 'Agent 的 signal Provider。省略時，預設為單一 TaskSignalProvider。',
+    isOptional: true,
+  },
+  {
+    name: 'errorProcessors',
+    type: 'Processor[]',
+    description:
+      'Agent 的錯誤 processor。省略時，預設會針對未知 stream 錯誤重試，並提供專用的 ECONNRESET 與 bad-request policy，另外也包含 PrefillErrorHandler 與 ProviderHistoryCompat。',
+    isOptional: true,
+  },
+  {
+    name: 'goal',
+    type: 'AgentGoalConfig',
+    description: 'Goal 設定。若提供設定但未提供 prompt，prompt 預設為 DEFAULT_GOAL_JUDGE_PROMPT。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'Agent',
+    description: '已套用解析後 Workspace、signal、錯誤 processor 與 goal 的 Coding Agent。',
+  },
+]}
+/>
+
+## 預設值
+
+只有在你未提供對應欄位時，factory 才會填入預設值。呼叫端提供的值一律優先。
+
+| 欄位 | 省略時的預設值 |
+| - | - |
+| `workspace` | 由 `LocalFilesystem` 與 `LocalSandbox` 支援，且根目錄設在基底路徑的 [`Workspace`](/reference/workspace/workspace-class)。 |
+| `signals` | 單一 [`TaskSignalProvider`](/reference/signals/task-signal-provider)。 |
+| `errorProcessors` | 針對未知 stream 錯誤重試，搭配專用的 ECONNRESET 與 bad-request policy，另外也包含 `PrefillErrorHandler` 與 `ProviderHistoryCompat`。 |
+| `goal.prompt` | `DEFAULT_GOAL_JUDGE_PROMPT`（僅在設定 `goal` 時）。 |
+
+### Workspace
+
+省略 `workspace` key 時，factory 會建立根目錄位於 `basePath`（預設為 `process.cwd()`）的本機 Workspace：
+
+```typescript
+import { Workspace, LocalFilesystem, LocalSandbox } from '@mastra/core/workspace'
+
+new Workspace({
+  filesystem: new LocalFilesystem({ basePath }),
+  sandbox: new LocalSandbox({ workingDirectory: basePath }),
+})
+```
+
+若要停用此預設值（例如在 [`AgentController`](/reference/agent-controller/agent-controller-class) 層級注入 Workspace），請明確傳入 `workspace: undefined`：
+
+```typescript
+const agent = createCodingAgent({
+  id: 'my-coding-agent',
+  name: 'My Coding Agent',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  instructions: 'You are a helpful coding assistant.',
+  tools: {},
+  workspace: undefined, // opt out of the default workspace
+})
+```
+
+### 錯誤 processor
+
+預設的 [`StreamErrorRetryProcessor`](/reference/processors/stream-error-retry-processor) 會套用下列重試 policy：
+
+- Provider 中繼資料或特定 matcher 未比對到的未知錯誤最多重試兩次，每次延遲 `3000ms`。已知的授權失敗則會立即顯示。
+- 網路重設（`ECONNRESET` / `socket hang up`）最多重試兩次，並使用指數退避（`1000ms * 2^retryCount`，上限為 `30000ms`）。
+- Bad-request 錯誤會在 `2000ms` 後重試一次。
+
+專用的網路重設與 bad-request policy 優先於未知錯誤 policy。傳入 `errorProcessors` 會取代預設 processor stack。為了與 Provider 相容，預設也包含 `PrefillErrorHandler` 與 `ProviderHistoryCompat`。
+
+## 相關內容
+
+- [`buildBasePrompt()`](/reference/coding-agent/build-base-prompt)
+- [`Agent`](/reference/agents/agent)
+- [`AgentController`](/reference/agent-controller/agent-controller-class)

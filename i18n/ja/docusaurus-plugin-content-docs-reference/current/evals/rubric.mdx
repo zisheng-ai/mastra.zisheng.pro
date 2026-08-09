@@ -1,0 +1,188 @@
+---
+title: "リファレンス：ルーブリックスコアラー | Evals"
+description: Mastra のルーブリックスコアラーのドキュメント。基準のチェックリストに照らして Agent の出力を採点し、基準ごとのフィードバックと二値判定を返す LLM-as-judge スコアラーで、isTaskComplete ループ向けに設計されています。
+packages:
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# ルーブリックスコアラー
+
+**追加バージョン：** `@mastra/evals@1.3.0`
+
+`createRubricScorer()` 関数は、ルーブリック（基準のチェックリスト）に照らして Agent の出力を採点する LLM-as-judge スコアラーを作成します。必須基準をすべて満たした場合のみ `1`、それ以外は `0` という**二値**スコアを返します。`reason` には各基準の判定が列挙されるため、Agent は修正箇所を正確に把握できます。
+
+このスコアラーは [`isTaskComplete`](/reference/streaming/agents/stream) にそのまま組み込めるよう設計されています。`isTaskComplete` は `score === 1` を「タスク完了」とみなし、`reason` をフィードバックとして会話へ戻すため、Agent はルーブリックを満たすか `maxSteps` に達するまで反復します。
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description:
+      'ルーブリックに照らして出力を採点する言語モデル。通常、採点には小型で低コストのモデルで十分です。',
+    required: true,
+  },
+  {
+    name: 'criteria',
+    type: 'RubricCriterion[] | string',
+    description:
+      '採点に使用するルーブリック。文字列は改行区切りのチェックリストとして扱われます（各行が必須基準になります）。省略すると、実行時に request/additional context の `rubric` 値から読み取ります。値を解決できない場合、スコアラーは何もせず 1 を返します。',
+    required: false,
+    children: [
+      {
+        name: 'description',
+        type: 'string',
+        description: '出力が満たす必要のある条件（例："All tests pass"、"Includes a recommendations section"）。',
+        required: true,
+      },
+      {
+        name: 'required',
+        type: 'boolean',
+        description:
+          'タスクを完了するためにこの基準を満たす必要があるか。デフォルトは true。任意の基準も採点、報告されますが、完了判定には影響しません。',
+        required: false,
+      },
+      {
+        name: 'id',
+        type: 'string',
+        description: '基準の任意の安定した識別子。',
+        required: false,
+      },
+    ],
+  },
+  {
+    name: 'options',
+    type: 'RubricScorerOptions',
+    description: 'スコアラーの設定オプション',
+    required: false,
+    children: [
+      {
+        name: 'scale',
+        type: 'number',
+        description:
+          'スコアに適用する倍率（デフォルト：1）。単独の eval でのみ意味があります。isTaskComplete はスコアが 1 かどうかで判定します。',
+        required: false,
+      },
+    ],
+  },
+]}
+/>
+
+## `.run()` の戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'score',
+    type: 'number',
+    description: '必須基準をすべて満たす場合は 1、それ以外は 0（scale を乗算）。',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description:
+      '満たした基準と満たしていない基準、およびその理由を列挙する基準ごとの説明。isTaskComplete がフィードバックとして会話へ戻すテキストです。',
+  },
+]}
+/>
+
+## isTaskComplete での使用
+
+ルーブリックを一度定義してスコアラーを `isTaskComplete` に設定すると、Agent はルーブリックを満たすまで自己修正します。
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+// highlight-next-line
+import { createRubricScorer } from '@mastra/evals/scorers/prebuilt'
+
+const supervisor = new Agent({
+  id: 'supervisor',
+  instructions: `You coordinate research and writing using specialized agents. Delegate to research-agent for facts, then writing-agent for content.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  agents: { researchAgent, writingAgent },
+})
+
+// highlight-start
+const rubricScorer = createRubricScorer({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  criteria: [
+    { description: 'The response includes an analysis section' },
+    { description: 'The response includes concrete recommendations' },
+  ],
+})
+// highlight-end
+
+const stream = await supervisor.stream('Research AI in education', {
+  maxSteps: 10,
+  // highlight-start
+  isTaskComplete: {
+    scorers: [rubricScorer],
+    strategy: 'all',
+  },
+  // highlight-end
+})
+```
+
+## 文字列形式のルーブリック
+
+改行区切りの文字列は基準として解析され、一般的なリスト記号（`-`、`*`、`1.`）は除去されます。各行が必須基準になります。
+
+```typescript
+const rubricScorer = createRubricScorer({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  criteria: `- All tests pass in the test suite
+- The function is named find_duplicates and accepts a single list argument`,
+})
+```
+
+## 任意の基準
+
+基準を任意として指定すると、完了判定には影響させずに採点、報告できます。
+
+```typescript
+const rubricScorer = createRubricScorer({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  criteria: [
+    { description: 'Includes an analysis section', required: true },
+    { description: 'Includes citations', required: false },
+  ],
+})
+```
+
+## 実行ごとの動的ルーブリック
+
+ファクトリに `criteria` を渡さない場合、スコアラーは実行時の request context、additional context、または入力から `rubric` 値を解決します。これにより、単一のスコアラーインスタンスを再作成せず、実行ごとに異なるルーブリックを採点できます。
+
+```typescript
+const rubricScorer = createRubricScorer({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+})
+
+await supervisor.stream('Write find_duplicates', {
+  isTaskComplete: { scorers: [rubricScorer] },
+  requestContext: {
+    rubric: '- All tests pass\n- The function is named find_duplicates',
+  },
+})
+```
+
+ルーブリックを解決できない場合、スコアラーは `1` を返し、ループを妨げません。
+
+## スコアリングの詳細
+
+スコアラーは 2 つのフェーズで実行されます。
+
+1. **採点**：判定モデルが各基準を個別に評価し、理由とともに基準ごとの判定（`satisfied` / それ以外）を返します。
+1. **スコア**：必須基準がすべて `satisfied` の場合のみ `1`、それ以外は `0` です。必須として指定された基準がない場合、すべての基準を必須として扱います。
+
+`reason` は結果を要約し、各基準とその判定を列挙します。そのため、不合格時には一般的な「もう一度試してください」ではなく、Agent に的確で有用なフィードバックを提供できます。
+
+## 関連項目
+
+- [stream() の isTaskComplete](/reference/streaming/agents/stream)
+- [Supervisor Agent](/docs/capabilities/subagents)
+- [createScorer](/reference/evals/create-scorer)

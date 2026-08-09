@@ -1,0 +1,136 @@
+---
+title: "PubSub | 服务器"
+description: 了解 Mastra 如何使用 pub/sub 在组件之间传递事件，以及何时应为多进程或多实例部署配置分布式后端。
+packages:
+  - "@mastra/core"
+  - "@mastra/redis-streams"
+  - "@mastra/google-cloud-pubsub"
+---
+
+# PubSub
+
+Mastra 使用发布/订阅 (pub/sub) 系统作为内部事件总线。组件将事件发布到主题，其他组件订阅这些主题并作出响应。配置的后端决定事件的传递范围：单个进程内、同一主机的多个进程间，或不同实例间。
+
+只需在 `Mastra` 实例上设置一次后端，系统的其余部分即可直接使用，无需更改。默认情况下，Mastra 使用无需设置的进程内后端。
+
+## Mastra 如何使用 PubSub
+
+多个内置系统通过同一个 pub/sub 总线发布和订阅事件：
+
+- **Workflow 执行**：调度器发布 `workflow.start` 事件，长期运行的 Worker 消费该事件以运行 Workflow。执行期间，步骤和生命周期事件通过 pub/sub 传递。
+- **计划 Workflow**：调度器通过发布到 Workflow 主题来分派到期运行。请参阅[计划 Workflow](/docs/workflows/scheduled-workflows)。
+- **后台任务**：任务管理器将工作分派给 Worker 组，并将任务生命周期更新扇出到订阅者，这正是后台任务流保持活动的方式。请参阅[后台任务流式传输](/docs/long-running-agents/background-tasks#subscribe-to-all-task-events)。
+- **Agent 信号**：向活动 Agent 运行发送信号会在 Thread 主题上发布事件，使另一个进程中执行的运行能够收到该信号。
+- **可恢复流**：每次运行都会发布流数据块，因此重新连接的客户端可以重放错过的内容。
+
+由于这些系统在同一总线上运行，所选后端会同时应用于所有系统。
+
+## 传递模式
+
+后端以 [`PubSub`](/reference/pubsub/base) 契约定义的两种模式之一传递事件：
+
+- **Pull**：消费者自行从后端读取，Mastra 通过长期运行的 Worker 循环完成此操作。[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) 等分布式后端使用此模式。
+- **Push**：事件无需消费者请求即可在进程内或通过 HTTP 到达。默认的 [`EventEmitterPubSub`](/reference/pubsub/event-emitter) 在进程内以这种方式传递。
+
+订阅者还可以通过消费者组分配工作。同一组中的成员分担事件，使每个事件只处理一次。没有加入组的订阅者会接收所有事件，从而将流扇出到所有未分组的订阅者。
+
+## 默认后端
+
+未设置 `pubsub` 选项时，Mastra 使用 [`EventEmitterPubSub`](/reference/pubsub/event-emitter)。它使用 Node.js [`EventEmitter`](https://nodejs.org/api/events.html#class-eventemitter) 在进程内传递事件，因此无需任何外部服务。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+
+// No pubsub option: Mastra uses EventEmitterPubSub
+export const mastra = new Mastra({})
+```
+
+由于在进程内运行，事件不会持久化，也不会到达其他进程。默认设置适用于单实例，可满足大多数应用。
+
+## 选择后端
+
+在 `Mastra` 实例上设置 `pubsub` 选项以选择后端。每个后端都实现相同的 [`PubSub`](/reference/pubsub/base) 契约，因此应用的其余部分无需更改。
+
+决定因素是订阅者在哪里运行。
+
+| 后端 | 范围 | 模式 | 包 |
+| - | - | - | - |
+| [`EventEmitterPubSub`](/reference/pubsub/event-emitter) | 单个进程 | Pull 和 Push | `@mastra/core` |
+| [`UnixSocketPubSub`](/reference/pubsub/unix-socket-pubsub) | 同一主机上的多个进程 | Push | `@mastra/core` |
+| [`RedisStreamsPubSub`](/reference/pubsub/redis-streams) | 分布式、多台主机 | Pull | `@mastra/redis-streams` |
+| [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub) | 分布式、多台主机 | Pull | `@mastra/google-cloud-pubsub` |
+
+### 同一主机上的多个进程
+
+当同一计算机上的多个进程需要共享流时，请使用 [`UnixSocketPubSub`](/reference/pubsub/unix-socket-pubsub)。它通过 Unix 域套接字传递事件，并选举一个进程作为 broker。如果 broker 退出，其余进程会选举新的 broker。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { UnixSocketPubSub } from '@mastra/core/events'
+
+export const mastra = new Mastra({
+  pubsub: new UnixSocketPubSub('/tmp/mastra/events.sock'),
+})
+```
+
+### 分布式部署
+
+运行多个实例或主机时，请使用分布式后端，使每个实例都能收到相同事件。当一个实例处理的请求必须到达另一个实例上运行的工作时，这一点至关重要。
+
+例如，向 Agent 运行发送信号时，信号事件必须跨越进程边界到达拥有该运行的实例。使用默认的进程内后端时，该实例永远无法收到事件。
+
+以下两个后端都能跨进程和主机传递事件，并持久化事件以便重新传递。
+
+以下示例使用 [Redis Streams](https://redis.io/docs/latest/develop/data-types/streams/)：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RedisStreamsPubSub } from '@mastra/redis-streams'
+
+export const mastra = new Mastra({
+  pubsub: new RedisStreamsPubSub({
+    url: 'redis://localhost:6379',
+  }),
+})
+```
+
+以下示例使用 [Google Cloud Pub/Sub](https://cloud.google.com/pubsub/docs)：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { GoogleCloudPubSub } from '@mastra/google-cloud-pubsub'
+
+export const mastra = new Mastra({
+  pubsub: new GoogleCloudPubSub({
+    projectId: 'my-project',
+  }),
+})
+```
+
+## 可恢复流
+
+可恢复流允许客户端重新连接并重放错过的事件，这要求后端保留近期历史记录。[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) 等分布式后端会持久化事件，因此自身支持重放。
+
+进程内传递不会保留历史记录。要在 [`EventEmitterPubSub`](/reference/pubsub/event-emitter) 之上添加重放，请使用 [`CachingPubSub`](/reference/pubsub/caching-pubsub) 包装它。后者会按主题记录已发布事件，使延迟加入或重新连接的订阅者能够先追上进度，再继续接收实时事件。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { CachingPubSub, EventEmitterPubSub } from '@mastra/core/events'
+import { InMemoryServerCache } from '@mastra/core/cache'
+
+const cache = new InMemoryServerCache()
+
+export const mastra = new Mastra({
+  pubsub: new CachingPubSub(new EventEmitterPubSub(), cache),
+})
+```
+
+有关完整传递契约和各后端的配置选项，请参阅 [PubSub 参考](/reference/pubsub/base)。
+
+## 相关内容
+
+- [PubSub reference](/reference/pubsub/base)
+- [Mastra class](/reference/core/mastra-class)
+- [Workers](/docs/deployment/workers)：使用 PubSub 在专用进程中运行 Workflow 编排和后台任务
+- [Background task streaming](/docs/long-running-agents/background-tasks#subscribe-to-all-task-events)
+- [Scheduled workflows](/docs/workflows/scheduled-workflows)

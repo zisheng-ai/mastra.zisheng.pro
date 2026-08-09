@@ -1,0 +1,290 @@
+---
+title: "Mastra の Speech-to-Speech 機能 | Voice"
+description: リアルタイム対話やイベント駆動アーキテクチャなど、Mastra の Speech-to-Speech 機能の概要を説明します。
+packages:
+  - "@mastra/core"
+  - "@mastra/node-audio"
+  - "@mastra/voice-aws-nova-sonic"
+  - "@mastra/voice-google-gemini-live"
+  - "@mastra/voice-inworld"
+  - "@mastra/voice-openai-realtime"
+---
+
+# Mastra の Speech-to-Speech 機能
+
+## はじめに
+
+Mastra の Speech-to-Speech（STS）は、複数の Provider でリアルタイム対話を行うための標準化されたインターフェースを提供します。
+STS は Realtime モデルのイベントをリッスンし、継続的な双方向音声通信を実現します。TTS と STT を個別に実行する場合とは異なり、STS は接続を維持し、双方向の音声を継続的に処理します。
+
+## 設定
+
+- **`apiKey`**: OpenAI API キー。未指定の場合は `OPENAI_API_KEY` 環境変数を使用します。
+- **`model`**: リアルタイム音声対話に使用するモデル ID（例: `gpt-5.1-realtime`）。
+- **`speaker`**: 音声合成に使用するデフォルトの Voice ID。音声出力に使用する Voice を指定できます。
+
+```typescript
+const voice = new OpenAIRealtimeVoice({
+  apiKey: 'your-openai-api-key',
+  model: 'gpt-5.1-realtime',
+  speaker: 'alloy', // Default voice
+})
+
+// If using default settings the configuration can be simplified to:
+const voice = new OpenAIRealtimeVoice()
+```
+
+## STS を使用する
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { OpenAIRealtimeVoice } from '@mastra/voice-openai-realtime'
+import { playAudio, getMicrophoneStream } from '@mastra/node-audio'
+
+const agent = new Agent({
+  id: 'agent',
+  name: 'OpenAI Realtime Agent',
+  instructions: `You are a helpful assistant with real-time voice capabilities.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  voice: new OpenAIRealtimeVoice(),
+})
+
+// Connect to the voice service
+await agent.voice.connect()
+
+// Listen for agent audio responses
+agent.voice.on('speaker', ({ audio }) => {
+  playAudio(audio)
+})
+
+// Initiate the conversation
+await agent.voice.speak('How can I help you today?')
+
+// Send continuous audio from the microphone
+const micStream = getMicrophoneStream()
+await agent.voice.send(micStream)
+```
+
+Agent で利用できる Voice Provider の概要については、[Mastra の Voice](/guides/voice/overview)を参照してください。
+
+## リアルタイムセッションで Tools を使用する
+
+Realtime Voice Provider は、Agent に設定された Tools を使用できます。`Agent` の定義に Tools を追加し、Voice Provider を通じて接続して音声を送信します。
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { OpenAIRealtimeVoice } from '@mastra/voice-openai-realtime'
+import { calculate, search } from '../tools'
+
+export const agent = new Agent({
+  id: 'speech-to-speech-agent',
+  name: 'Speech-to-Speech Agent',
+  instructions: 'You are a helpful assistant with speech-to-speech capabilities.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: {
+    search,
+    calculate,
+  },
+  voice: new OpenAIRealtimeVoice(),
+})
+```
+
+## リアルタイムイベントをリッスンする
+
+Realtime Voice Provider は、UI の更新、assistant 音声の再生、文字起こしの記録、エラー処理に使用できるイベントを発行します。
+
+```typescript
+agent.voice.on('speaking', ({ audio }) => {
+  playAudio(audio)
+})
+
+agent.voice.on('writing', ({ text, role }) => {
+  console.log(`${role}: ${text}`)
+})
+
+agent.voice.on('error', error => {
+  console.error('Voice error:', error)
+})
+```
+
+イベント名とペイロードは Provider によって異なります。すべてのイベントについては、以下の Provider セクションまたは各 Provider のリファレンスを確認してください。
+
+## セッションごとの Voice インスタンス
+
+静的な `voice` インスタンスは、すべてのリクエストで共有されます。単発の Text-to-Speech では問題ありませんが、Realtime および Speech-to-Speech Provider は、WebSocket 接続、Tools、instructions、RequestContext などのセッション状態を保持します。1 つの Agent が複数のライブセッションを同時に処理すると、共有インスタンスにより、あるセッションが別のセッションの状態を上書きする可能性があります。
+
+各ライブセッションに固有の Voice インスタンスが必要な場合は、`voice` をリゾルバーとして指定します。Mastra は `getVoice()` の呼び出しごとにリゾルバーを実行し、その RequestContext 用の新しいインスタンスを返します。
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { RequestContext } from '@mastra/core/request-context'
+import { OpenAIRealtimeVoice } from '@mastra/voice-openai-realtime'
+
+export const agent = new Agent({
+  id: 'support-line',
+  name: 'Support Line',
+  instructions: ({ requestContext }) => `Help user ${requestContext.get('user')}.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  voice: ({ requestContext }) =>
+    new OpenAIRealtimeVoice({
+      apiKey: requestContext.get('apiKey'),
+    }),
+})
+
+const requestContext = new RequestContext()
+requestContext.set('user', 'user-123')
+requestContext.set('apiKey', process.env.OPENAI_API_KEY)
+
+const voice = await agent.getVoice({ requestContext })
+await voice.connect()
+```
+
+リゾルバーを使用する場合は、次の点に注意してください。
+
+- `getVoice()` を呼び出すたびに新しいインスタンスが返されるため、同時セッション間で状態は共有されません。
+- Mastra はリゾルバーのインスタンスに Tools や instructions を追加しません。リゾルバー内または Provider で設定してください。
+- 返されたインスタンスのライフサイクルは呼び出し側で管理するため、セッション終了時に `disconnect()` または `close()` を呼び出してください。
+
+`agent.voice` ゲッターには RequestContext がないため、`voice` がリゾルバーの場合はエラーをスローします。代わりに `agent.getVoice({ requestContext })` を使用してください。
+
+## Google Gemini Live（Realtime）
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { GeminiLiveVoice } from '@mastra/voice-google-gemini-live'
+import { playAudio, getMicrophoneStream } from '@mastra/node-audio'
+
+const agent = new Agent({
+  id: 'agent',
+  name: 'Gemini Live Agent',
+  instructions: 'You are a helpful assistant with real-time voice capabilities.',
+  // Model used for text generation; voice provider handles realtime audio
+  model: '__GATEWAY_OPENAI_MODEL__',
+  voice: new GeminiLiveVoice({
+    apiKey: process.env.GOOGLE_API_KEY,
+    model: 'gemini-2.0-flash-exp',
+    speaker: 'Puck',
+    debug: true,
+    // Vertex AI option:
+    // vertexAI: true,
+    // project: 'your-gcp-project',
+    // location: 'us-central1',
+    // serviceAccountKeyFile: '/path/to/service-account.json',
+  }),
+})
+
+await agent.voice.connect()
+
+agent.voice.on('speaker', ({ audio }) => {
+  playAudio(audio)
+})
+
+agent.voice.on('writing', ({ role, text }) => {
+  console.log(`${role}: ${text}`)
+})
+
+await agent.voice.speak('How can I help you today?')
+
+const micStream = getMicrophoneStream()
+await agent.voice.send(micStream)
+```
+
+注:
+
+- Live API には `GOOGLE_API_KEY` が必要です。Vertex AI にはプロジェクト、ロケーション、サービスアカウントの認証情報が必要です。
+- イベント: `speaker`（音声ストリーム）、`writing`（テキスト）、`turnComplete`、`usage`、`error`。
+
+## AWS Nova Sonic（Realtime）
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { NovaSonicVoice } from '@mastra/voice-aws-nova-sonic'
+import { playAudio, getMicrophoneStream } from '@mastra/node-audio'
+
+const agent = new Agent({
+  id: 'agent',
+  name: 'Nova Sonic Agent',
+  instructions: 'You are a helpful assistant with real-time voice capabilities.',
+  // Model used for text generation; voice provider handles realtime audio
+  model: '__GATEWAY_OPENAI_MODEL__',
+  voice: new NovaSonicVoice({
+    region: 'us-east-1',
+    speaker: 'matthew',
+    // Static credentials are optional. The default AWS credential provider
+    // chain is used when none are passed.
+  }),
+})
+
+await agent.voice.connect()
+
+// Assistant audio is emitted as 16-bit PCM on the `speaking` event
+agent.voice.on('speaking', ({ audioData }) => {
+  if (audioData) playAudio(audioData)
+})
+
+agent.voice.on('writing', ({ role, text }) => {
+  console.log(`${role}: ${text}`)
+})
+
+await agent.voice.speak('How can I help you today?')
+
+const micStream = getMicrophoneStream()
+await agent.voice.send(micStream)
+```
+
+注:
+
+- 利用可能なリージョン: `us-east-1`、`us-west-2`、`ap-northeast-1`。
+- 標準の AWS credential provider chain で認証します。上書きするには `credentials` を渡します。
+- イベント: `speaking`（Int16Array 音声）、`writing`（`generationStage` を含むテキスト）、`toolCall`、`interrupt`、`turnComplete`、`usage`、`session`、`error`。
+
+## Inworld Realtime
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { InworldRealtimeVoice } from '@mastra/voice-inworld'
+import { playAudio, getMicrophoneStream } from '@mastra/node-audio'
+
+const agent = new Agent({
+  id: 'agent',
+  name: 'Inworld Realtime Agent',
+  instructions: 'You are a helpful assistant with real-time voice capabilities.',
+  // Model used for text generation; voice provider handles realtime audio
+  model: '__GATEWAY_OPENAI_MODEL__',
+  voice: new InworldRealtimeVoice({
+    apiKey: process.env.INWORLD_API_KEY,
+    model: 'inworld/models/gemma-4-26b-a4b-it',
+    speaker: 'Sarah',
+    // Typed Inworld realtime knobs (semantic VAD, playback speed, etc.)
+    // session: {
+    //   audio: {
+    //     output: { speed: 1.1 },
+    //     input: { turn_detection: { type: 'semantic_vad', eagerness: 'high' } },
+    //   },
+    // },
+  }),
+})
+
+await agent.voice.connect()
+
+agent.voice.on('speaker', stream => {
+  playAudio(stream)
+})
+
+agent.voice.on('writing', ({ role, text }) => {
+  console.log(`${role}: ${text}`)
+})
+
+await agent.voice.speak('How can I help you today?')
+
+const micStream = getMicrophoneStream()
+await agent.voice.send(micStream)
+```
+
+注:
+
+- `INWORLD_API_KEY` が必要です。Inworld API キーは事前に Basic エンコードされているため、そのまま貼り付けてください。
+- WebSocket URL には、クライアントが生成した `?key=...&protocol=realtime` が追加されます。モデルは URL ではなく、最初の `session.update` で設定します。
+- Inworld のワイヤープロトコルは OpenAI Realtime GA 仕様に準拠しているため、イベント名は `@mastra/voice-openai-realtime` と一致します。
+- 型付きの Inworld Realtime 設定（MCP Tool のルーティング、semantic VAD の eagerness、再生速度、文字起こしモデル、出力モダリティなど）は、`session` コンストラクターフィールドで指定できます。型なしの `providerData` エスケープハッチもディープマージされ、新しい Inworld 機能との前方互換性を確保します。
+- イベント: `speaker`（PCM 音声ストリーム）、`speaking`（delta ごとの音声 Buffer）、`writing`（テキスト）、`conversation.item.added`、`conversation.item.done`、`function_call.arguments`、`tool-call-start`、`tool-call-result`、`error`。

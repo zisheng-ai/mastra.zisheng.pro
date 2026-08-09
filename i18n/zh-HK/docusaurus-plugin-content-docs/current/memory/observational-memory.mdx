@@ -1,0 +1,864 @@
+---
+title: '觀察式記憶 | 記憶'
+description: "了解觀察式記憶如何在跨對話保留長期記憶的同時，維持較小的 Agent 上下文視窗。"
+packages:
+  - '@mastra/core'
+  - '@mastra/memory'
+  - '@mastra/oracledb'
+---
+
+import OmContextOverTimeImage from '@site/src/components/OmContextOverTimeImage'
+
+# 觀察式記憶
+
+**新增於：**`@mastra/memory@1.1.0`
+
+觀察式記憶（OM）是 Mastra 用於長上下文 Agent 記憶的記憶系統。兩個背景 Agent——**Observer** 及 **Reflector**——會監察 Agent 的對話，並維護精簡而資訊密集的觀察記錄，在原始訊息歷史增加時取而代之。
+
+## 快速開始
+
+確保項目已安裝 `@mastra/memory`。在 Memory 設定中設定 `observationalMemory: true`，以啟用觀察式記憶。
+
+```typescript title="src/mastra/agents/agent.ts"
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+
+export const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  memory: new Memory({
+    options: {
+      // highlight-next-line
+      observationalMemory: true,
+    },
+  }),
+})
+```
+
+<Inject>
+  **給 AI Agent：**使用觀察式記憶必須有儲存 Provider！你需要在 `src/mastra/index.ts` 的 Mastra 執行個體上設定，或將它傳入 Agent 建構函式。
+
+  以下指令碼會建立本機 LibSQL 資料庫、啟用觀察式記憶，並在兩次 Agent 呼叫中使用同一項資源及執行緒：
+
+  ```typescript title="src/observational-memory.ts"
+  import { Agent } from '@mastra/core/agent'
+  import { LibSQLStore } from '@mastra/libsql'
+  import { Memory } from '@mastra/memory'
+
+  const memory = new Memory({
+    storage: new LibSQLStore({
+      id: 'memory-storage',
+      url: 'file:./memory.db',
+    }),
+    options: {
+      observationalMemory: {
+        model: '__GATEWAY_OPENAI_MODEL_MINI__',
+      },
+    },
+  })
+
+  const agent = new Agent({
+    id: 'memory-agent',
+    name: 'Memory Agent',
+    instructions: 'You are a helpful assistant.',
+    model: '__GATEWAY_OPENAI_MODEL_MINI__',
+    memory,
+  })
+
+  const memoryOptions = {
+    resource: 'user-123',
+    thread: 'conversation-123',
+  }
+
+  const firstResponse = await agent.generate('Remember that my favorite color is blue.', {
+    memory: memoryOptions,
+  })
+  console.log(firstResponse.text)
+
+  const secondResponse = await agent.generate('What is my favorite color?', {
+    memory: memoryOptions,
+  })
+  console.log(secondResponse.text)
+  ```
+
+  `resource` 用來識別使用者或實體，`thread` 則用來識別對話。重複使用兩個值即可延續同一段對話。觀察式記憶會在已儲存歷史增加時處理內容，並在符合啟用條件時以觀察取代較舊的訊息。
+</Inject>
+
+Agent 現在擁有可跨對話持久保留、近似人類的長期記憶。設定 `observationalMemory: true` 會預設使用 `__GATEWAY_GOOGLE_MODEL_FLASH__`。如要使用其他模型，請在設定物件中傳入：
+
+```typescript
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'deepseek/deepseek-reasoner',
+    },
+  },
+})
+```
+
+如需完整 API 詳情，請參閱[設定選項](/reference/memory/observational-memory)。
+
+:::warning
+當你在客戶端應用程式中使用 OM 時，客戶端應**只傳送新訊息**，而不是完整的對話歷史。
+
+觀察式記憶仍然依賴已儲存的對話歷史。傳送完整歷史並無必要，而且當客戶端時間戳記與已儲存的時間戳記衝突時，可能引致訊息排序錯誤。
+
+如需 AI SDK 範例，請參閱[使用 Mastra Memory](/guides/build-your-ui/ai-sdk-ui#using-mastra-memory)。
+:::
+
+:::note
+
+OM 目前只支援 `@mastra/pg`、`@mastra/libsql`、`@mastra/mysql`、`@mastra/mongodb`、`@mastra/convex` 及 `@mastra/oracledb` 儲存配接器。
+它使用背景 Agent 管理記憶。未有設定模型時，預設模型為 `google/gemini-2.5-flash`。
+
+:::
+
+## 時間間隔標記
+
+當執行緒中上一則訊息與新使用者訊息之間相隔足夠時間，時間間隔標記會在新訊息之前插入簡短提示。它們可協助 Agent 及 UI 看出對話在一段具意義的停頓後恢復。
+
+時間間隔標記預設為停用。在 `observationalMemory` 設定中使用 `temporalMarkers: true` 啟用：
+
+```typescript title="src/mastra/agents/agent.ts"
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+
+export const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  memory: new Memory({
+    options: {
+      observationalMemory: {
+        model: 'google/gemini-2.5-flash',
+        temporalMarkers: true,
+      },
+    },
+  }),
+})
+```
+
+當間隔至少為 10 分鐘時，Mastra 會插入時間間隔標記。標記會儲存在記憶中，亦會以暫時提示事件的形式發出，讓客戶端可將它呈現為簡潔的時間軸提示。
+
+Observer 處理執行緒時亦會看到這些標記，因此它寫入的觀察可以標示記憶發生的時間（例如「使用者在相隔 2 天後詢問部署」）。
+
+如需完整設定結構，請參閱 [API 參考資料](/reference/memory/observational-memory#configuration)。
+
+## 提早啟用
+
+OM 可以在達到 token 閾值前啟用已緩衝的觀察。當提示快取可能即將到期，或 Agent 更換模型 Provider 時，這項功能十分有用。
+
+頂層提早啟用設定預設套用至觀察：
+
+```typescript title="src/mastra/agents/agent.ts"
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'google/gemini-2.5-flash',
+      activateAfterIdle: 'auto',
+      activateOnProviderChange: true,
+    },
+  },
+})
+```
+
+使用巢狀 `observation` 及 `reflection` 設定，分別控制每個階段。反思的提早啟用須選擇加入，因此頂層設定只會影響觀察。
+
+```typescript title="src/mastra/agents/agent.ts"
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'google/gemini-2.5-flash',
+      activateAfterIdle: '5m',
+      observation: {
+        activateAfterIdle: false,
+      },
+      reflection: {
+        activateAfterIdle: '10m',
+        activateOnProviderChange: true,
+      },
+    },
+  },
+})
+```
+
+在此範例中，觀察會停用頂層閒置設定，而反思則選擇加入閒置啟用及 Provider 變更啟用。
+
+### 閒置時緩衝
+
+將 `observation.bufferOnIdle` 設定為 `true`，即可在 Agent 的對話輪次結束並進入閒置狀態時，於背景執行觀察緩衝。對於希望短對話輪次毋須等到下一輪或達到 `messageTokens` 閾值便接受觀察的應用程式，這項功能十分有用。
+
+```typescript title="src/mastra/agents/agent.ts"
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: '__GATEWAY_OPENAI_MODEL_MINI__',
+      observation: {
+        bufferOnIdle: true,
+      },
+    },
+  },
+})
+```
+
+`bufferOnIdle` 預設為停用，並與 `bufferTokens` 分開：`bufferTokens` 控制步驟期間的非同步緩衝，而 `bufferOnIdle` 則控制閒置對話輪次結束時的緩衝。
+
+如需完整設定結構，請參閱 [API 參考資料](/reference/memory/observational-memory#configuration)。
+
+## 優點
+
+- **提示快取**：OM 的上下文保持穩定，觀察會隨時間附加，而非在每一輪執行期間擷取。這令提示前綴可以快取，從而降低成本。
+- **壓縮**：原始訊息歷史及 Tool 結果會壓縮成精簡而資訊密集的觀察記錄。較小的上下文可帶來更快的回應及更長而連貫的對話。
+- **零上下文劣化**：Agent 會看到相關資訊，而不是嘈雜的 Tool 呼叫及無關 token，因此在長時間工作階段中仍能專注於工作。
+
+## 運作方式
+
+你不會記得每次對話的每一個字。你會在潛意識中觀察所發生的事情，然後大腦進行反思、重新整理、合併及濃縮，形成長期記憶。OM 的運作方式亦一樣。
+
+Agent 每次回應時，都會看到包含系統提示、近期訊息歷史及任何已注入上下文的上下文視窗。上下文視窗容量有限，即使 token 限制很大的模型，在視窗已滿時效能亦會下降。這會造成兩個問題：
+
+- **上下文劣化**：Agent 攜帶的原始訊息歷史越多，效能越差。
+- **上下文浪費**：大部分歷史都包含 Agent 繼續處理工作時不再需要的 token。
+
+OM 透過將舊上下文壓縮成資訊密集的觀察，解決這兩個問題。
+
+### 觀察
+
+當訊息歷史的 token 超出閾值（預設：30,000）時，Observer 會建立觀察，亦即對所發生事情的簡潔筆記：
+
+OM 使用快速的本機 token 估算來執行這項閾值判斷工作。文字以 `tokenx` 估算，圖像部分則使用可識別 Provider 的啟發式規則，令多模態對話仍能在適當時間觸發觀察。當傳輸層將上載的圖像正規化為檔案而非圖像部分時，類似圖像的 `file` 部分亦同樣處理。例如，OpenAI 圖像詳細程度設定可大幅改變 OM 決定進行觀察的時間。
+
+Observer 亦可以看到它所審閱歷史中的附件。OM 會在文字記錄中保留 `[Image #1: reference-board.png]` 或 `[File #1: floorplan.pdf]` 等可讀的預留位置，並將實際附件部分連同文字轉交。可行情況下，類似圖像的 `file` 部分會升級為 Observer 的圖像輸入；非圖像附件則會作為檔案部分轉交，並使用正規化 token 計算。一般執行緒觀察及批次資源作用域觀察均採用此做法。
+
+### 擷取器
+
+如要 OM 在觀察旁邊持久儲存特定值，請使用擷取器。**目前工作**、**建議回應**及**執行緒標題**等內置值，會與自訂值使用相同的擷取管線。
+
+以下範例會從觀察中擷取精簡的使用者設定檔：
+
+```typescript title="src/mastra/agents/agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Extractor, Memory } from '@mastra/memory'
+import { z } from 'zod'
+
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: '__GATEWAY_OPENAI_MODEL_MINI__',
+      observation: {
+        extract: [
+          new Extractor({
+            name: 'User profile',
+            instructions: 'Extract stable user profile facts that should be remembered.',
+            schema: z.object({
+              preferredName: z.string().optional(),
+              timezone: z.string().optional(),
+              tools: z.array(z.string()).optional(),
+            }),
+          }),
+        ],
+      },
+    },
+  },
+})
+
+export const agent = new Agent({
+  id: 'assistant',
+  name: 'assistant',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  memory,
+})
+```
+
+加入 `schema` 會令擷取器以後續的結構化輸出請求運行。不使用 schema 的擷取器是直接在 Observer 或 Reflector 回應中發出的內嵌字串擷取器。
+
+```typescript title="src/mastra/agents/agent.ts"
+new Extractor({
+  name: 'Mood',
+  instructions: 'Extract the user mood as a short phrase.',
+})
+```
+
+OM 預設會在之後的運行中向擷取器顯示上次擷取的值。如果 Observer 不應看到上一個值，請設定 `includePreviousExtraction: false`。
+
+```typescript title="src/mastra/agents/agent.ts"
+new Extractor({
+  name: 'Latest blocker',
+  instructions: 'Extract any blockers the agent is running into.',
+  includePreviousExtraction: false,
+})
+```
+
+如果擷取器需要運行階段上下文，例如目前的記憶執行個體或請求上下文，請使用運行階段 `instructions` 或 `schema` 函式：
+
+```typescript title="src/mastra/agents/agent.ts"
+new Extractor({
+  name: 'Workspace summary',
+  instructions: ({ memory }) =>
+    memory ? 'Extract workspace facts for this memory instance.' : 'Extract workspace facts.',
+})
+```
+
+#### 從串流讀取擷取值
+
+OM 完成觀察或反思時會發出擷取器結果。請從串流讀取兩種完成資料部分：
+
+```typescript title="src/mastra/run.ts"
+const stream = await agent.stream('Remember that I prefer dark mode.')
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'data-om-observation-end' || chunk.type === 'data-om-buffering-end') {
+    const { operationType, extractedValues = {}, extractionFailures = [] } = chunk.data
+
+    for (const [slug, value] of Object.entries(extractedValues)) {
+      console.log(`${operationType} extractor ${slug}:`, value)
+    }
+
+    for (const failure of extractionFailures) {
+      console.error(`Extractor ${failure.slug} failed:`, failure.error)
+    }
+  }
+}
+```
+
+`extractedValues` 會使用每個擷取器的 slug 作為鍵。兩個結果欄位都是可選，而擷取器失敗亦不會移除成功擷取器的值。
+
+`data-om-observation-end` 表示同步完成。`data-om-buffering-end` 表示背景工作已完成。其擷取器 metadata 會立即持久儲存，但已緩衝內容在啟用前仍維持非使用中狀態。請檢查 `operationType`，判斷已完成的工作屬於觀察還是反思。
+
+如需完整 payload，請參閱 [`data-om-observation-end`](/reference/memory/observational-memory#data-om-observation-end) 及 [`data-om-buffering-end`](/reference/memory/observational-memory#data-om-buffering-end) 參考資料表。
+
+### 工作記憶更新
+
+使用 `observationalMemory.observation.manageWorkingMemory`，讓 Observer 自動管理工作記憶。主要 Agent 處理使用者請求時不再需要呼叫工作記憶 Tool，因此工作記憶更新不再取決於 Agent 是否記得執行呼叫。
+
+這亦令工作記憶適合使用提示快取。工作記憶通常位於系統提示中，因此更新可能令提示快取失效。由 OM 管理的工作記憶會將 `workingMemory.useStateSignals` 預設為 `true`，改為將工作記憶移至狀態訊號。
+
+```typescript title="src/mastra/agents/agent.ts"
+import { Memory } from '@mastra/memory'
+
+const memory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+    },
+    observationalMemory: {
+      enabled: true,
+      observation: {
+        manageWorkingMemory: true,
+      },
+    },
+  },
+})
+```
+
+此設定會加入 `WorkingMemoryExtractor`，將 `workingMemory.agentManaged` 預設為 `false`，並將 `workingMemory.useStateSignals` 預設為 `true`。如果主要 Agent 仍應收到工作記憶 Tool 及指示注入，請設定 `workingMemory.agentManaged: true`。
+
+使用 `onExtracted`，在自訂擷取值持久儲存前進行正規化或作出反應：
+
+```typescript title="src/mastra/agents/agent.ts"
+new Extractor({
+  name: 'Project status',
+  instructions: 'Extract the current project status.',
+  schema: z.string(),
+  async onExtracted({ current, sendSignal }) {
+    await sendSignal?.({
+      type: 'user-message',
+      contents: `Project status extracted: ${current}`,
+    })
+    return current.trim().toLowerCase()
+  },
+})
+```
+
+擷取器失敗會在 OM 標記中報告，但不會阻礙其他成功擷取器的值。如需完整 `Extractor` 結構，請參閱 [API 參考資料](/reference/memory/observational-memory#extractor-api)。
+
+如果 Observer 模型只支援文字，或其 API 拒絕多模態輸入，請將 `observation.observeAttachments` 設定為 `false`，在附件到達 Observer 前捨棄。可讀的預留位置（`[Image #1: ...]`、`[File #1: ...]`）會保留在文字記錄中，因此即使 Observer 未收到二進制 payload，仍可推斷所分享的內容。相同篩選器亦會套用至包含圖像或檔案部分的 Tool 結果：
+
+```typescript
+new Agent({
+  id: 'assistant',
+  name: 'assistant',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  memory: new Memory({
+    options: {
+      observationalMemory: {
+        observation: {
+          model: 'deepseek/deepseek-reasoner',
+          observeAttachments: false,
+        },
+      },
+    },
+  }),
+})
+```
+
+你亦可以傳入 mimeType glob 的允許清單（例如 `['image/*']`），只轉交 Observer 能夠處理的類型。另一做法是設定 `observeAttachments: 'auto'`，讓 Mastra 根據 Provider 功能登記冊決定：Observer 模型支援多模態輸入時會轉交附件，否則會捨棄；如果沒有該模型的功能資料，則退回 `true`。
+
+```md
+Date: 2026-01-15
+
+- 🔴 12:10 User is building a Next.js app with Supabase auth, due in 1 week (meaning January 22nd 2026)
+  - 🔴 12:10 App uses server components with client-side hydration
+  - 🟡 12:12 User asked about middleware configuration for protected routes
+  - 🔴 12:15 User stated the app name is "Acme Dashboard"
+```
+
+壓縮率一般介乎 5 倍至 40 倍。Observer 亦會追蹤**目前工作**及**建議回應**，讓 Agent 可以從上次停止的位置繼續。
+
+如果啟用 `observation.threadTitle`，Observer 亦可在對話主題出現重大變化時建議簡短的執行緒標題。產生執行緒標題須選擇加入，並會更新執行緒 metadata，因此 Mastra Code 等應用程式可以在執行緒清單及狀態 UI 中顯示最新標題。
+
+範例：使用 Playwright MCP 的 Agent 可能在每個頁面快照中看到超過 50,000 個 token。使用 OM 後，Observer 會監察互動，並就頁面內容及所執行的動作，建立數百個 token 的觀察。Agent 毋須攜帶每個原始快照，仍能專注於工作。
+
+### 反思
+
+當觀察超出閾值（預設：40,000 個 token）時，Reflector 會濃縮觀察、合併相關項目，並反思當中的模式。
+
+反思不會累積成另一個不斷增長的獨立記憶層。每次反思都會重寫整份觀察記錄。Reflector 的輸出會成為新的記錄，而新觀察則附加在其後。記錄下次達到閾值時，Reflector 會重新處理所有內容，包括較早的反思。它會更積極地濃縮較舊資訊，同時保留近期細節。無論對話運行多久，記憶都會維持在反思閾值附近的有限範圍內。
+
+結果是一個三層系統：
+
+1. **近期訊息**：目前工作的確切對話歷史
+1. **觀察**：Observer 所見內容的記錄
+1. **反思**：記憶過長時經濃縮的觀察
+
+### 上下文如何隨時間改變
+
+使用預設設定時，上下文視窗不會無限增長，而會循環進行觀察及縮減：
+
+<OmContextOverTimeImage />
+
+1. **0 → 30k token**：訊息歷史正常增加。在背景中，Observer 每約 6k 個 token 緩衝一次觀察（`bufferTokens: 0.2`）。
+1. **達到 30k**：已緩衝的觀察會即時啟用。已觀察的訊息會從上下文視窗移除，只保留約 6k 個 token 的近期歷史（`bufferActivation: 0.8` 會保留閾值的 20%）。以一般 5 至 40 倍壓縮率計算，被移除的約 24k 個訊息 token 會變成約 1 至 5k 個觀察 token。
+1. **重複**：歷史會從約 6k 再增長至接近 30k，然後再次縮減。每個循環都會附加至觀察記錄，而觀察記錄的增長速度遠低於原始歷史。
+1. **觀察達到 40k**：Reflector 會根據目前觀察及任何較早的反思建立較小的記錄。
+
+在一般緩衝循環中，原始歷史會在約 6k 至 30k 個 token 之間變動。無論對話運行多久，觀察記錄都會維持在約 40k 個 token。這些是啟用閾值，而非硬性上限。如果背景緩衝未能趕上，歷史可以增長至超出閾值，直至 `blockAfter`（預設 `1.2`）在約 36k 個 token（反思則約 48k）強制同步觀察，作為安全上限。
+
+啟用 [`shareTokenBudget`](/reference/memory/observational-memory#shared-token-budget) 後，兩項額度會彙集共用。當觀察記錄較小時，訊息歷史可以擴展至未使用的觀察空間（使用預設值時最多約 70k 個 token），然後才觸發觀察。隨觀察累積，訊息歷史便會縮減。
+
+### 擷取模式
+
+一般 OM 會將訊息壓縮成觀察，非常適合讓 Agent 專注於工作，但會失去原始措辭。擷取模式透過將每組觀察連結至產生它的原始訊息，解決這個問題。當 Agent 需要摘要壓縮掉的確切措辭、Tool 輸出或時間次序時，可以呼叫 `recall` Tool，分頁瀏覽來源訊息。
+
+#### 只供瀏覽
+
+設定 `retrieval: true`，啟用 recall Tool 以瀏覽原始訊息。毋須使用向量儲存空間。Recall Tool 預設可瀏覽目前資源的所有執行緒。
+
+```typescript
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'google/gemini-2.5-flash',
+      retrieval: true,
+    },
+  },
+})
+```
+
+#### 配合語義搜尋
+
+設定 `retrieval: { vector: true }`，同時啟用語義搜尋。這會重複使用已在 Memory 執行個體上設定的向量儲存空間及 embedder：
+
+```typescript
+const memory = new Memory({
+  storage,
+  vector: myVectorStore,
+  embedder: myEmbedder,
+  options: {
+    observationalMemory: {
+      model: 'google/gemini-2.5-flash',
+      retrieval: { vector: true },
+    },
+  },
+})
+```
+
+設定向量搜尋後，新的觀察組會在緩衝時及同步觀察期間自動建立索引（即發即棄、非阻塞）。語義搜尋會傳回觀察組配對及其原始來源訊息 ID 範圍，讓 recall Tool 可以顯示摘要記憶及其來源位置。
+
+#### 限制為目前執行緒
+
+Recall Tool 的預設作用域為 `'resource'`；Agent 可以列出執行緒、瀏覽其他執行緒，並搜尋所有對話。設定 `scope: 'thread'`，可將 Agent 限制為只能使用目前執行緒：
+
+```typescript
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'google/gemini-2.5-flash',
+      retrieval: { vector: true, scope: 'thread' },
+    },
+  },
+})
+```
+
+#### 自訂召回指引
+
+Mastra 會注入可識別作用域的指示，教導 Agent 何時搜尋、列出執行緒，或讀取特定執行緒。使用 `instructions`，在這些內置指示後附加應用程式特定指引。內置指示永遠不會被取代：
+
+```typescript
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'google/gemini-2.5-flash',
+      retrieval: {
+        vector: true,
+        instructions: `
+          Prefer the current conversation when it already contains the answer.
+          For an initial scan, use a small limit with detail="low".
+        `,
+      },
+    },
+  },
+})
+```
+
+這可將召回特定的指引附於 recall Tool，而非 Agent 的全域指示，因此不會影響無關的工作。
+
+#### 擷取會啟用的功能
+
+啟用擷取模式後，OM 會：
+
+- 在每個觀察組儲存一個 `range`（例如 `startId:endId`），指向衍生該觀察組的訊息
+- 在 Agent 上下文中保持範圍 metadata 可見，讓 Agent 知道哪些觀察對應哪些訊息
+- 註冊 Agent 可呼叫的 `recall` Tool，以：
+  - 分頁瀏覽任何觀察組範圍背後的原始訊息
+  - 按語義相似度搜尋（使用 `query` 字串的 `mode: "search"`）；需要 `vector: true`
+  - 列出所有執行緒（`mode: "threads"`）、瀏覽其他執行緒（`threadId`），以及搜尋所有執行緒（預設 `scope: 'resource'`）
+  - 使用 `scope: 'thread'` 時：將瀏覽及搜尋限制於目前執行緒
+
+如需完整 API（詳細程度、部分索引、分頁、跨執行緒瀏覽及 token 限制），請參閱 [recall Tool 參考資料](/reference/memory/observational-memory#recall-tool)。
+
+## Studio
+
+如要查看實際運作方式，請開啟 [Studio](/docs/studio/overview)，然後前往已啟用 OM 的 Agent。**Memory** 分頁會顯示：
+
+- **Token 進度列**：訊息及觀察目前的 token 數目，顯示兩者與各自閾值的距離。將游標停留在資訊圖示上，可查看 Observer 及 Reflector 的模型與閾值。
+
+- **使用中的觀察**：目前的觀察記錄會以內嵌方式顯示。如有較早的觀察或反思記錄，可展開「Previous observations」瀏覽。
+
+- **背景處理**：在對話期間，Agent 於背景處理時會顯示已緩衝的觀察區塊及反思狀態。
+
+Agent 進行觀察或反思時，進度列會即時更新，顯示已用時間及狀態徽章。
+
+## 模型
+
+Observer 及 Reflector 會在背景運行。任何可配合 Mastra [模型路由](/models)（`provider/model`）使用的模型均可使用。未有設定模型時，預設模型為 `google/gemini-2.5-flash`。
+
+Mastra 建議使用具有大型上下文視窗（128K+ token），並且速度足以在背景運行而不會拖慢操作的模型。
+
+如果不確定應使用哪個模型，請先使用預設的 `google/gemini-2.5-flash`。我們亦已成功測試 `__GATEWAY_OPENAI_MODEL_MINI__`、`__GATEWAY_ANTHROPIC_MODEL_HAIKU__`、`deepseek/deepseek-reasoner`、`deepseek/deepseek-v4-pro`、`deepseek/deepseek-v4-flash`、`xai/grok-4-1-fast`、`qwen3` 及 `glm-4.7`。
+
+```typescript
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'deepseek/deepseek-reasoner',
+    },
+  },
+})
+```
+
+如要了解如何為每個 Agent 使用不同模型，請參閱[模型設定](/reference/memory/observational-memory#custom-model)。
+
+:::note
+
+`google/gemini-2.5-flash` 在長輸出中保留細節的能力異常出色。因此，即使經過最多次壓縮重試，Reflector 產生的反思仍可能高於已設定的 `reflection.observationTokens` 閾值。發生這種情況時，Reflector 會傳回重試期間產生且不失真的最小候選項目，令循環終止，而不是永遠運行。
+
+如果你希望 Reflector 進行更積極的壓縮，請改用較容易濃縮內容的模型，例如 `xai/grok-4-1-fast`、`deepseek/deepseek-v4-pro` 或 `deepseek/deepseek-v4-flash`。你可以繼續為 Observer 使用 `google/gemini-2.5-flash`，並為 Reflector 使用其他模型。請參閱[每個 Agent 使用不同模型](/reference/memory/observational-memory#different-models-per-agent)。
+
+:::
+
+### 按 token 層級選擇模型
+
+**新增於：**`@mastra/memory@1.10.0`
+
+你可以使用 `ModelByInputTokens`，按輸入 token 數目指定不同的 Observer 或 Reflector 模型。OM 會在運行階段根據已設定的 `upTo` 閾值，選擇相符的模型層級。
+
+```typescript
+import { Memory, ModelByInputTokens } from '@mastra/memory'
+
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      observation: {
+        model: new ModelByInputTokens({
+          upTo: {
+            // Faster, cheaper models for smaller inputs; stronger models for larger contexts
+            5_000: 'openrouter/mistralai/ministral-8b-2512',
+            20_000: 'openrouter/mistralai/mistral-small-2603',
+            40_000: '__GATEWAY_OPENAI_MODEL_MINI__',
+            1_000_000: 'google/gemini-3.1-flash-lite-preview',
+          },
+        }),
+      },
+      reflection: {
+        model: new ModelByInputTokens({
+          upTo: {
+            20_000: '__GATEWAY_OPENAI_MODEL_MINI__',
+            100_000: 'google/gemini-2.5-flash',
+          },
+        }),
+      },
+    },
+  },
+})
+```
+
+`upTo` 鍵是包含端點的上限。OM 會計算 Observer 或 Reflector 呼叫的實際輸入 token 數目，直接解析相符的層級，並在該次運行中使用具體模型。
+
+如果輸入超出已設定的最大閾值，系統會擲回錯誤。請確保閾值涵蓋所有可能的輸入大小，或在最高層級使用上下文視窗足夠大的模型。
+
+## 作用域
+
+### 執行緒作用域（預設）
+
+每個執行緒都有自己的觀察。這個作用域已經過充分測試，適合作為一般用途的記憶系統，尤其是長期運行的 Agent 使用情境。
+
+```typescript
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'google/gemini-2.5-flash',
+      scope: 'thread',
+    },
+  },
+})
+```
+
+呼叫 Agent 時，執行緒作用域必須提供有效的 `threadId`。如果缺少 `threadId`，觀察式記憶會擲回錯誤。這可防止多個執行緒在未有提示的情況下共用單一觀察記錄，避免引致資料庫死鎖。
+
+### 資源作用域（實驗性功能）
+
+同一項資源（通常是使用者）的所有執行緒會共用觀察，從而啟用跨對話記憶。
+
+```typescript
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'google/gemini-2.5-flash',
+      scope: 'resource',
+    },
+  },
+})
+```
+
+資源作用域可以運作，但目前仍標示為實驗性功能，直至我們證實在多個持續且同時進行的執行緒之間，仍能遵循及延續工作。
+目前你可能需要調整系統提示，以防止一個執行緒延續另一個執行緒已開始但尚未完成的工作。
+
+這是因為在資源作用域中，每個執行緒都是該資源_所有_執行緒的其中一個視角。
+
+視乎你的使用情境，這可能並非問題，因此實際效果因情況而異。
+
+:::warning
+
+在資源作用域中，_所有_執行緒中尚未觀察的訊息會一併處理。對於已有大量執行緒的使用者，處理速度可能很慢。現有應用程式請使用執行緒作用域。
+
+:::
+
+## Token 額度
+
+OM 使用 token 閾值決定何時進行觀察及反思。詳情請參閱 [token 額度設定](/reference/memory/observational-memory#shared-token-budget)。
+
+```typescript
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'google/gemini-2.5-flash',
+      observation: {
+        // when to run the Observer (default: 30,000)
+        messageTokens: 30_000,
+      },
+      reflection: {
+        // when to run the Reflector (default: 40,000)
+        observationTokens: 40_000,
+      },
+      // let message history borrow from observation budget
+      // requires bufferTokens: false (temporary limitation)
+      shareTokenBudget: false,
+    },
+  },
+})
+```
+
+### Token 計算快取
+
+OM 會在訊息 metadata 中快取 token 估算，以減少在閾值檢查及緩衝決策期間重複計算。
+
+- 每個部分的估算會儲存在 `part.providerMetadata.mastra`，並在快取版本／tokenizer 來源相符時，於之後的處理中重複使用。
+- 對於只含字串的訊息內容（不含部分），OM 會使用訊息層級的 metadata 後備快取。
+- 每次處理仍會重新計算訊息及對話開銷。快取只儲存 payload 估算，因此計算語義維持不變。
+- 仍會略過 `data-*` 及 `reasoning` 部分，而且不會快取。
+
+### 呼叫者為檔案部分提供的 token 估算
+
+你可以使用 `providerMetadata.mastra.tokenEstimate`，直接將 token 估算附加至 `image` 或 `file` 部分。Token Counter 會原樣採用此值，並略過自己的估算器：
+
+```typescript
+const filePart = {
+  type: 'file',
+  data: 'storage://bucket/large-report.pdf',
+  mimeType: 'application/pdf',
+  filename: 'large-report.pdf',
+  providerMetadata: {
+    mastra: {
+      tokenEstimate: {
+        v: 0,
+        source: 'client',
+        key: 'client',
+        tokens: 100_000,
+      },
+    },
+  },
+}
+```
+
+`tokenEstimate` 物件的結構與 Token Counter 內部用於快取估算的結構相同：
+
+- `v`：快取 schema 版本。設定為 `0`。呼叫者提供的項目不受框架版本檢查限制，因此不會讀取此值。
+- `source`：快取沿襲標記。必須為 `'client'`。它會告知 Token Counter 此項目具有權威性，應原樣採用，而不是重新計算或覆寫。
+- `key`：內容指紋欄位。設定為 `'client'`。框架項目會在此使用內容雜湊，讓 payload 變更時項目失效。`'client'` sentinel 可令呼叫者估算在多次寫入之間保持穩定。
+- `tokens`：要使用的 token 數目。必須是有限的非負數字。
+
+其他注意事項：
+
+- 只會對 `image` 及 `file` 部分採用估算。`text` 及 `tool-invocation` 部分一律正常計算，即使它們帶有 `tokenEstimate` 亦然。
+
+## 非同步緩衝
+
+如果沒有非同步緩衝，Observer 會在達到訊息閾值時同步運行，而 Agent 會在對話中途暫停，等待 Observer LLM 呼叫完成。使用非同步緩衝（預設啟用）時，觀察會在對話增加期間於背景預先計算。達到閾值時，已緩衝的觀察會立即啟用，不會暫停。
+
+### 運作方式
+
+Agent 進行對話時，訊息 token 會持續累積。背景 Observer 呼叫會按固定間隔（`bufferTokens`）運行，而不會阻塞 Agent。每次呼叫都會產生一個觀察「區塊」，並儲存在緩衝區中。
+
+訊息 token 達到 `messageTokens` 閾值時，已緩衝區塊會啟用：它們的觀察會移至使用中的觀察記錄，而相應的原始訊息則從上下文視窗移除。Agent 永不需要暫停。
+
+已緩衝的觀察亦包括延續提示、建議的下一個回應及目前工作，令主要 Agent 在啟用功能縮減上下文視窗後仍可保持對話連貫。
+
+如果 Agent 產生訊息的速度高於 Observer 的處理速度，`blockAfter` 安全閾值會在萬不得已時強制進行同步觀察。緩衝啟用仍會保留最小的剩餘上下文（約 1k 個 token 或已設定的保留下限，以較小者為準）。
+
+反思的運作方式類似：當觀察達到反思閾值的一定比例時，Reflector 會在背景運行。
+
+### 設定
+
+| 設定 | 預設值 | 控制內容 |
+| - | - | - |
+| `observation.bufferTokens` | `0.2` | 緩衝頻率。`0.2` 表示每達到 `messageTokens` 的 20% 便緩衝一次。使用預設 30k 閾值時，即約每 6k 個 token。亦可使用絕對 token 數目（例如 `5000`）。 |
+| `observation.bufferActivation` | `0.8` | 啟用時清除訊息視窗的積極程度。`0.8` 表示移除足夠訊息，只保留 `messageTokens` 的 20%。值越低，保留的訊息歷史越多。 |
+| `observation.blockAfter` | `1.2` | 緩衝無法趕上時的安全網。由 1 至小於 100 的值會乘以 `messageTokens`：設定為 `1.2` 時，會在 36k 個 token（1.2 × 30k）強制同步觀察。100 或以上的值是絕對 token 數目（例如 `50_000`）。 |
+| `activateAfterIdle` | 無 | 即使尚未達到 `observation.messageTokens`，亦會在閒置一段時間後強制啟用已緩衝的觀察。接受數值形式的毫秒值（例如 `300_000`）、`"5m"` 或 `"1hr"` 等持續時間字串，或使用 `"auto"` 取得可識別 Provider 的提示快取 TTL。 |
+| `activateOnProviderChange` | `false` | 當下一步所用的 `provider/model` 與產生最新助手步驟的模型不同時，強制啟用已緩衝的觀察。當切換 Provider 或模型會令提示快取無法重複使用時，請使用此設定。 |
+| `reflection.bufferActivation` | `0.5` | 開始背景反思的時間。`0.5` 表示當觀察達到 `observationTokens` 閾值的 50% 時開始反思。 |
+| `reflection.activateAfterIdle` | 無 | 選擇讓已緩衝的反思加入閒置啟用。反思不會繼承頂層 `activateAfterIdle`。 |
+| `reflection.activateOnProviderChange` | `false` | 選擇讓已緩衝的反思加入 Provider 變更啟用。反思不會繼承頂層 `activateOnProviderChange`。 |
+| `reflection.blockAfter` | `1.2` | 反思的安全閾值，邏輯與觀察相同。 |
+
+如果你依賴提示快取，請將 `activateAfterIdle` 設定為 `"auto"` 或特定的快取 TTL。這樣，當執行緒的閒置時間已足以令快取到期，下一個請求便可先啟用已緩衝的觀察，並傳送較小的壓縮上下文視窗。
+
+使用 `"auto"` 時，Mastra 會從使用中的模型 Provider 選擇閒置啟用 TTL：
+
+| Provider | 自動 TTL |
+| - | - |
+| Anthropic、OpenRouter、未知 Provider、xAI | 5 分鐘 |
+| DeepSeek | 1 小時 |
+| Google Gemini | 24 小時 |
+| Groq | 2 小時 |
+| 使用 `providerOptions.openai.promptCacheRetention: "24h"` 的 OpenAI | 1 小時 |
+| 使用 `providerOptions.openai.promptCacheRetention: "in_memory"` 的 OpenAI | 5 分鐘 |
+| 透過 OpenAI 使用的 `gpt-4*`、`gpt-5`、`gpt-5-*` 及 `gpt-5.1` 至 `gpt-5.4`（包括帶 `-` 後綴的變體） | 5 分鐘 |
+| 其他 OpenAI 模型 | 1 小時 |
+
+```typescript
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'google/gemini-2.5-flash',
+      activateAfterIdle: 'auto',
+      activateOnProviderChange: true,
+    },
+  },
+})
+```
+
+使用 `"auto"` 時，系統會根據使用中 Provider 的提示快取行為啟用已緩衝的觀察，令下一個未快取的提示使用壓縮觀察，而非較大的原始訊息視窗。如果偏好固定的 5 分鐘 TTL，請使用 `"5m"` 或 `300_000`。
+
+在執行緒中途變更模型或 Provider 會令提示快取失效。如果 Agent 可以在執行緒中途切換 Provider 或模型，`activateOnProviderChange: true` 會在新 Provider 運行前強制啟用已緩衝的觀察，避免將大型原始視窗傳送給無法重複使用先前提示快取的 Provider。
+
+### 停用
+
+如要停用非同步緩衝，改為使用同步觀察／反思：
+
+```typescript
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'google/gemini-2.5-flash',
+      observation: {
+        bufferTokens: false,
+      },
+    },
+  },
+})
+```
+
+設定 `bufferTokens: false` 會同時停用觀察及反思的非同步緩衝。如需完整 API，請參閱[非同步緩衝設定](/reference/memory/observational-memory#async-buffering)。
+
+:::note
+
+`scope: 'resource'` 不支援非同步緩衝。系統會在資源作用域中自動停用。
+
+:::
+
+## Observer 上下文最佳化
+
+Observer 預設會在處理新訊息時，接收完整觀察歷史作為上下文。Observer 亦會接收先前的 `current-task` 及 `suggested-response` metadata（如有），因此即使觀察上下文遭截斷，仍能掌握方向。對於觀察增長至很大的長時間對話，你可以選擇啟用上下文最佳化，以降低 Observer 輸入成本。
+
+設定 `observation.previousObserverTokens`，限制傳送至 Observer 的先前觀察 token 數目。觀察會從尾部截斷，保留最新項目。如有待處理的已緩衝反思，在套用截斷前，已反思的行會自動以反思摘要取代。
+
+```typescript
+const memory = new Memory({
+  options: {
+    observationalMemory: {
+      model: 'google/gemini-2.5-flash',
+      observation: {
+        previousObserverTokens: 10_000, // keep only ~10k tokens of recent observations
+      },
+    },
+  },
+})
+```
+
+- `previousObserverTokens: 2000` → 預設值。保留約 2k 個 token 的近期觀察。
+- `previousObserverTokens: 0` → 完全略過先前觀察。
+- `previousObserverTokens: false` → 停用截斷並保留完整的先前觀察。
+
+## 遷移現有執行緒
+
+毋須手動遷移。OM 會讀取現有訊息，並在超出閾值時延遲觀察。
+
+- **執行緒作用域**：執行緒首次超出 `observation.messageTokens` 時，Observer 會處理積壓內容。
+- **資源作用域**：同一項資源的所有執行緒中，所有尚未觀察的訊息會一併處理。對於已有大量執行緒的使用者，這可能需要相當長時間。
+
+## OM 與其他記憶功能的比較
+
+- **[訊息歷史](/docs/memory/message-history)**：目前對話的高精確度記錄
+- **[工作記憶](/docs/memory/working-memory)**：用於使用者偏好、姓名及目標的小型結構化狀態（JSON 或 markdown）
+- **[語義召回](/docs/memory/semantic-recall)**：以 RAG 為基礎，擷取相關過往訊息
+- **[多使用者執行緒](/docs/memory/multi-user-threads)**：多人共用單一執行緒時，OM 如何將事實歸屬於個別使用者
+
+如果你正使用工作記憶儲存對話摘要，或儲存隨時間增長的持續狀態，OM 會更適合。工作記憶適用於小型結構化資料，OM 則適用於長時間運行的事件記錄。OM 亦會自動管理訊息歷史；`messageTokens` 設定會控制進行觀察前保留多少原始歷史。
+
+實際上，OM 同時取代工作記憶及訊息歷史，而且準確度比語義召回更高（成本亦更低）。
+
+## 相關內容
+
+- [觀察式記憶參考資料](/reference/memory/observational-memory)
+- [記憶概覽](/docs/memory/overview)
+- [訊息歷史](/docs/memory/message-history)
+- [記憶處理器](/docs/memory/memory-processors)
+- [Mastra Code](https://code.mastra.ai/)：使用觀察式記憶的編程助手
+- 📹 [Mastra 處理器及觀察式記憶工作坊](https://www.youtube.com/watch?v=4Vpp7xQYvl0)

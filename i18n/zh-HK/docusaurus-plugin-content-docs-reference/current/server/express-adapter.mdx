@@ -1,0 +1,247 @@
+---
+title: "參考：Express adapter | Server"
+description: "@mastra/express server adapter 的 API 參考。"
+packages:
+  - "@mastra/express"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Express adapter
+
+`@mastra/express` 套件提供 server adapter，讓 Mastra 可配合 [Express](https://expressjs.com) 運行。有關一般 adapter 概念（constructor 選項、初始化流程等），請參閱 [Server adapter](/docs/server/server-adapters)。
+
+## 安裝
+
+安裝 Express adapter 及 Express framework：
+
+```bash npm2yarn
+npm install @mastra/express@latest express
+```
+
+## 使用範例
+
+```typescript title="server.ts"
+import express from 'express'
+import { MastraServer } from '@mastra/express'
+import { mastra } from './mastra'
+
+const app = express()
+app.use(express.json()) // Required for body parsing
+
+const server = new MastraServer({ app, mastra })
+await server.init()
+
+app.listen(4111, () => {
+  console.log('Server running on port 4111')
+})
+```
+
+:::note
+
+Express 需要 `express.json()` middleware 才能解析 JSON body。請在建立 `MastraServer` 前加入。
+
+:::
+
+## Constructor 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'app',
+    type: 'Application',
+    description: 'Express app instance',
+    isOptional: false,
+  },
+  {
+    name: 'mastra',
+    type: 'Mastra',
+    description: 'Mastra instance',
+    isOptional: false,
+  },
+  {
+    name: 'prefix',
+    type: 'string',
+    description: 'Route 路徑前綴（例如 `/api/v2`）',
+    isOptional: true,
+    defaultValue: "''",
+  },
+  {
+    name: 'openapiPath',
+    type: 'string',
+    description: '提供 OpenAPI 規格的路徑（例如 `/openapi.json`）',
+    isOptional: true,
+    defaultValue: "''",
+  },
+  {
+    name: 'bodyLimitOptions',
+    type: '{ maxSize: number, onError: (err) => unknown }',
+    description: 'Request body 大小限制',
+    isOptional: true,
+  },
+  {
+    name: 'streamOptions',
+    type: '{ redact?: boolean }',
+    description: 'Stream 遮蔽設定。設為 true 時，會從 stream 遮蔽敏感資料。',
+    isOptional: true,
+    defaultValue: '{ redact: true }',
+  },
+  {
+    name: 'customRouteAuthConfig',
+    type: 'Map<string, boolean>',
+    description:
+      '各 route 的 auth 覆寫設定。Key 為 `METHOD:PATH`（例如 `GET:/api/health`）。值為 `false` 時 route 會公開，`true` 則需要 auth。',
+    isOptional: true,
+  },
+  {
+    name: 'tools',
+    type: 'Record<string, Tool>',
+    description: 'Server 可用的 Tool',
+    isOptional: true,
+  },
+  {
+    name: 'taskStore',
+    type: 'InMemoryTaskStore',
+    description: 'A2A（Agent-to-Agent）操作的 task store',
+    isOptional: true,
+  },
+  {
+    name: 'mcpOptions',
+    type: 'MCPOptions',
+    typeDescription: '{ serverless?: boolean, sessionIdGenerator?: () => string }',
+    description:
+      'MCP transport 選項。對 Cloudflare Workers 或 Vercel Edge 等無狀態環境，請設定 `serverless: true`。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 與 Hono 的分別
+
+| 項目 | Express | Hono |
+| - | - | - |
+| Body 解析 | 需要 `express.json()` | 由 framework 處理 |
+| Context 儲存 | `res.locals` | `c.get()` / `c.set()` |
+| Middleware signature | `(req, res, next)` | `(c, next)` |
+| Streaming | `res.write()` / `res.end()` | `stream()` helper |
+| AbortSignal | 從 `req.on('close')` 建立 | `c.req.raw.signal` |
+
+## 新增自訂 route
+
+直接將 route 新增至 Express app：
+
+```typescript title="server.ts"
+const app = express()
+app.use(express.json())
+
+const server = new MastraServer({ app, mastra })
+
+// Before init - runs before Mastra middleware
+app.get('/early-health', (req, res) => res.json({ status: 'ok' }))
+
+await server.init()
+
+// After init - has access to Mastra context
+app.get('/custom', (req, res) => {
+  const mastraInstance = res.locals.mastra
+  res.json({ agents: Object.keys(mastraInstance.listAgents()) })
+})
+
+app.listen(4111)
+```
+
+:::tip
+
+在 `init()` 前新增的 route 會在沒有 Mastra context 的情況下運行。如要存取 Mastra instance 及 request context，請在 `init()` 後新增 route。
+
+:::
+
+如需 Mastra 管理的 auth，以及 `requiresAuth` 等 route metadata，建議使用 [`registerApiRoute()`](/reference/server/register-api-route)。對於直接掛載到 `app` 的原始 Express route，請使用 `createAuthMiddleware()`：
+
+```typescript title="server.ts"
+import express from 'express'
+import { createAuthMiddleware, MastraServer } from '@mastra/express'
+import { mastra } from './mastra'
+
+const app = express()
+app.use(express.json())
+
+const server = new MastraServer({ app, mastra })
+await server.init()
+
+app.get('/custom/protected', createAuthMiddleware({ mastra }), (req, res) => {
+  const user = res.locals.requestContext.get('user')
+  res.json({ user })
+})
+
+app.get('/custom/public', createAuthMiddleware({ mastra, requiresAuth: false }), (req, res) => {
+  res.json({ ok: true })
+})
+```
+
+## 存取 context
+
+在 Express middleware 及 route 中，透過 `res.locals` 存取 Mastra context：
+
+```typescript
+app.get('/custom', (req, res) => {
+  const mastra = res.locals.mastra
+  const requestContext = res.locals.requestContext
+  const abortSignal = res.locals.abortSignal
+
+  const agent = mastra.getAgent('myAgent')
+  res.json({ agent: agent.name })
+})
+```
+
+`res.locals` 的可用 property：
+
+| Key | 說明 |
+| - | - |
+| `mastra` | Mastra instance |
+| `requestContext` | Request context map |
+| `abortSignal` | Request 取消訊號 |
+| `tools` | 可用的 Tool |
+| `taskStore` | A2A 操作的 task store |
+| `customRouteAuthConfig` | 各 route 的 auth 覆寫設定 |
+| `user` | 已驗證的使用者（如已設定 auth） |
+
+## 新增 middleware
+
+在 `init()` 前或後新增 Express middleware：
+
+```typescript title="server.ts"
+const app = express()
+app.use(express.json())
+
+// Middleware before init
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.url}`)
+  next()
+})
+
+const server = new MastraServer({ app, mastra })
+await server.init()
+
+// Middleware after init has access to Mastra context
+app.use((req, res, next) => {
+  const mastra = res.locals.mastra
+  next()
+})
+```
+
+## 手動初始化
+
+如要自訂 middleware 順序，請分別呼叫各個 method，而非使用 `init()`。詳情請參閱[手動初始化](/docs/server/server-adapters#manual-initialization)。
+
+## 範例
+
+- [Express adapter](https://github.com/mastra-ai/mastra/tree/main/examples/server-express-adapter)：基本 Express server 設定
+
+## 相關內容
+
+- [Server adapter](/docs/server/server-adapters)：共用 adapter 概念
+- [MastraServer 參考](/reference/server/mastra-server)：完整 API 參考
+- [createRoute() 參考](/reference/server/create-route)：建立 type-safe 自訂 route

@@ -1,0 +1,207 @@
+---
+title: "リファレンス: WebhookSignalProvider | Signal"
+description: "受信した Webhook Payload を購読中の Agent Thread にルーティングする Push 型 Signal Provider、WebhookSignalProvider の API リファレンスです。"
+packages:
+  - "@mastra/core"
+---
+
+# WebhookSignalProvider
+
+**追加バージョン:** `@mastra/core@1.39.0`
+
+Push 型イベント配信のための具象 Signal Provider です。設定可能な Resource ID 抽出関数を使用して Payload を照合し、受信した Webhook Payload を購読中の Agent Thread にルーティングします。
+
+[`SignalProvider`](/reference/signals/signal-provider) を拡張し、公開 Subscription 管理機能と組み込みの `handleWebhook()` 実装を提供します。
+
+## 使用例
+
+GitHub Webhook イベントを購読中の Thread にルーティングします。
+
+```typescript title="src/signals/webhook.ts"
+import { WebhookSignalProvider } from '@mastra/core/signals'
+
+const webhookProvider = new WebhookSignalProvider({
+  extractResourceId: payload => `${payload.repository?.full_name}`,
+  buildNotification: (payload, subscription) => ({
+    source: 'github-webhook',
+    kind: payload.action ?? 'event',
+    summary: `${payload.action} on ${subscription.externalResourceId}`,
+    payload,
+  }),
+})
+```
+
+Agent に登録し、Thread を購読します。
+
+```typescript title="src/mastra/index.ts"
+import { Agent } from '@mastra/core/agent'
+
+const agent = new Agent({
+  id: 'agent',
+  signals: [webhookProvider],
+})
+
+// subscribe a thread to a specific repo
+webhookProvider.subscribeThread({ threadId: 'thread-1', resourceId: 'user-1' }, 'mastra-ai/mastra')
+
+// handle an incoming webhook
+const result = await webhookProvider.handleWebhook({
+  body: { repository: { full_name: 'mastra-ai/mastra' }, action: 'push' },
+  headers: {},
+})
+// result.matched === 1
+```
+
+## コンストラクターのパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'Provider インスタンスの一意の識別子。',
+    isOptional: true,
+    defaultValue: "'webhook-signals'",
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: '人が読める名前。',
+    isOptional: true,
+    defaultValue: "'Webhook Signals'",
+  },
+  {
+    name: 'extractResourceId',
+    type: '(payload: unknown) => string | string[] | undefined',
+    description:
+      'Webhook Payload から外部 Resource ID を抽出します。イベントをスキップするには `undefined` を返します。複数の Resource と照合するために配列を返すこともできます。',
+    isOptional: true,
+    defaultValue: 'Returns `payload.resource` or `payload.externalResourceId` if present',
+  },
+  {
+    name: 'buildNotification',
+    type: '(payload: unknown, subscription: SignalSubscription) => SendNotificationSignalInput',
+    description: 'Webhook Payload と一致した Subscription から通知オブジェクトを構築します。',
+    isOptional: true,
+    defaultValue: "Returns `{ source: id, kind: 'webhook-event', summary, payload }`",
+  },
+]}
+/>
+
+## メソッド
+
+### Subscription の管理
+
+#### `subscribeThread(target, externalResourceId, metadata?)`
+
+特定の外部 Resource の Webhook イベントを受信するよう Thread を購読します。
+
+```typescript prettier:false
+webhookProvider.subscribeThread(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'mastra-ai/mastra',
+  { watchType: 'push' },
+)
+```
+
+戻り値: `SignalSubscription`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'target',
+    type: 'SignalProviderTarget',
+    description: '購読する Thread。`threadId` と `resourceId` を含める必要があります。',
+  },
+  {
+    name: 'externalResourceId',
+    type: 'string',
+    description: '監視する外部 Resource（たとえば、リポジトリの完全な名前）。',
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown>',
+    description: 'Subscription とともに保存する追加データ。',
+    isOptional: true,
+  },
+]}
+/>
+
+#### `unsubscribeThread(target, externalResourceId)`
+
+特定の外部 Resource に対する Thread の購読を解除します。
+
+```typescript prettier:false
+const removed = webhookProvider.unsubscribeThread(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'mastra-ai/mastra',
+)
+```
+
+戻り値: `boolean`
+
+### Webhook の処理
+
+#### `handleWebhook(request)`
+
+受信した Webhook リクエストを処理します。Payload から Resource ID を抽出し、一致する Subscription を検索して、それぞれの通知を構築し、`notify()` を呼び出します。
+
+```typescript prettier:false
+const result = await webhookProvider.handleWebhook({
+  body: { repository: { full_name: 'mastra-ai/mastra' }, action: 'push' },
+  headers: { 'x-github-event': 'push' },
+})
+```
+
+戻り値: `Promise<{ status: number; body: { matched: number } }>`
+
+通知を受信した Subscription 数を `N` として、`{ status: 200, body: { matched: N } }` を返します。Resource ID を抽出できない場合や、一致する Subscription がない場合は `matched: 0` を返します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'request',
+    type: 'object',
+    description: '受信した Webhook リクエスト。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'body',
+            type: 'unknown',
+            description: '解析済みの Webhook Payload。',
+          },
+          {
+            name: 'headers',
+            type: 'Record<string, string>',
+            description: 'Webhook リクエストの HTTP Header。',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+### 静的 Signal Factory
+
+#### `WebhookSignalProvider.signals.subscribe(externalResourceId)`
+
+現在の Thread が外部 Resource を購読する Reactive Signal Input を作成します。
+
+```typescript prettier:false
+const signal = WebhookSignalProvider.signals.subscribe('mastra-ai/mastra')
+```
+
+戻り値: `{ type: 'reactive'; tagName: string; contents: string; attributes: { resource: string } }`
+
+#### `WebhookSignalProvider.signals.unsubscribe(externalResourceId)`
+
+現在の Thread が外部 Resource の購読を解除する Reactive Signal Input を作成します。
+
+```typescript prettier:false
+const signal = WebhookSignalProvider.signals.unsubscribe('mastra-ai/mastra')
+```
+
+戻り値: `{ type: 'reactive'; tagName: string; contents: string; attributes: { resource: string } }`

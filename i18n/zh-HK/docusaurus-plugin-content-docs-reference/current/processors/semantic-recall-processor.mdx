@@ -1,0 +1,202 @@
+---
+title: "參考：SemanticRecall | Processors"
+description: "Mastra 中 SemanticRecall processor 的文件；此 processor 使用向量 embedding 對對話歷史記錄進行語意搜尋。"
+packages:
+  - "@mastra/core"
+  - "@mastra/pg"
+---
+
+# SemanticRecall
+
+`SemanticRecall` 是一個**混合 processor**，可使用向量 embedding 對對話歷史記錄進行語意搜尋。處理輸入時，它會執行語意搜尋，以找出相關的歷史訊息。處理輸出時，它會為新訊息建立 embedding，以便日後進行語意擷取。
+
+## 使用範例
+
+```typescript
+import { SemanticRecall } from '@mastra/core/processors'
+import { openai } from '@ai-sdk/openai'
+
+const processor = new SemanticRecall({
+  storage: memoryStorage,
+  vector: vectorStore,
+  embedder: openai.embedding('text-embedding-3-small'),
+  topK: 5,
+  messageRange: 2,
+  scope: 'resource',
+})
+```
+
+## Constructor 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'SemanticRecallOptions',
+    description: '語意回憶 processor 的設定選項',
+    isOptional: false,
+    properties: [
+      {
+        type: 'SemanticRecallOptions',
+        parameters: [
+          {
+            name: 'storage',
+            type: 'MemoryStorage',
+            description: '用於擷取訊息的儲存空間實例',
+            isOptional: false,
+          },
+          {
+            name: 'vector',
+            type: 'MastraVector',
+            description: '用於語意搜尋的向量儲存空間',
+            isOptional: false,
+          },
+          {
+            name: 'embedder',
+            type: 'MastraEmbeddingModel<string>',
+            description: '用於產生查詢 embedding 的 embedder',
+            isOptional: false,
+          },
+          {
+            name: 'topK',
+            type: 'number',
+            description: '要擷取的最相似訊息數目',
+            isOptional: true,
+            default: '4',
+          },
+          {
+            name: 'messageRange',
+            type: 'number | { before: number; after: number }',
+            description:
+              '每個配對項目前後要包含的 context 訊息數目。可以是單一數字（前後相同），亦可以是分別指定數值的物件',
+            isOptional: true,
+            default: '1',
+          },
+          {
+            name: 'scope',
+            type: "'thread' | 'resource'",
+            description:
+              "語意搜尋的範圍。'thread' 只會搜尋目前 thread。'resource' 會搜尋該 resource 的所有 thread",
+            isOptional: true,
+            default: "'resource'",
+          },
+          {
+            name: 'threshold',
+            type: 'number',
+            description: '相似度分數的最低門檻（0 至 1）。低於此門檻的訊息會被篩走',
+            isOptional: true,
+          },
+          {
+            name: 'indexName',
+            type: 'string',
+            description: '向量儲存空間的索引名稱。如未提供，則會根據 embedder 模型自動產生',
+            isOptional: true,
+          },
+          {
+            name: 'logger',
+            type: 'IMastraLogger',
+            description: '用於結構化 logging 的可選 logger 實例',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "Processor 標識符，設為 'semantic-recall'",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: "Processor 顯示名稱，設為 'SemanticRecall'",
+    isOptional: false,
+  },
+  {
+    name: 'processInput',
+    type: '(args: { messages: MastraDBMessage[]; messageList: MessageList; abort: (reason?: string) => never; tracingContext?: TracingContext; requestContext?: RequestContext }) => Promise<MessageList | MastraDBMessage[]>',
+    description: '對歷史訊息執行語意搜尋，並將相關 context 加入訊息清單',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputResult',
+    type: '(args: { messages: MastraDBMessage[]; messageList?: MessageList; abort: (reason?: string) => never; tracingContext?: TracingContext; requestContext?: RequestContext }) => Promise<MessageList | MastraDBMessage[]>',
+    description: '為新訊息建立 embedding，以便日後進行語意搜尋',
+    isOptional: false,
+  },
+]}
+/>
+
+## 進階使用範例
+
+```typescript title="src/mastra/agents/semantic-memory-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { SemanticRecall, MessageHistory } from '@mastra/core/processors'
+import { PostgresStorage } from '@mastra/pg'
+import { PgVector } from '@mastra/pg'
+import { openai } from '@ai-sdk/openai'
+
+const storage = new PostgresStorage({
+  id: 'pg-storage',
+  connectionString: process.env.DATABASE_URL,
+})
+
+const vector = new PgVector({
+  id: 'pg-vector',
+  connectionString: process.env.DATABASE_URL,
+})
+
+const semanticRecall = new SemanticRecall({
+  storage,
+  vector,
+  embedder: openai.embedding('text-embedding-3-small'),
+  topK: 5,
+  messageRange: { before: 2, after: 1 },
+  scope: 'resource',
+  threshold: 0.7,
+})
+
+export const agent = new Agent({
+  id: 'semantic-memory-agent',
+  name: 'semantic-memory-agent',
+  instructions: 'You are a helpful assistant with semantic memory recall',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [semanticRecall, new MessageHistory({ storage, lastMessages: 50 })],
+  outputProcessors: [semanticRecall, new MessageHistory({ storage })],
+})
+```
+
+## 行為
+
+### 輸入處理
+
+1. 從最後一則使用者訊息擷取使用者查詢
+1. 為查詢產生 embedding
+1. 執行向量搜尋，以找出語意相似的訊息
+1. 擷取配對的訊息及其前後 context（根據 `messageRange`）
+1. 對於 `scope: 'resource'`，將跨 thread 訊息格式化為包含 timestamp 的系統訊息
+1. 加入帶有 `source: 'memory'` tag 的已回憶訊息
+
+### 輸出處理
+
+1. 從新的使用者及 assistant 訊息擷取文字內容
+1. 為每則訊息產生 embedding
+1. 將 embedding 連同 metadata（訊息 ID、thread ID、resource ID、role、內容、timestamp）儲存在向量儲存空間中
+1. 對 embedding 使用 LRU cache，避免重複的 API 呼叫
+
+### 跨 thread 回憶
+
+當 `scope` 設為 `'resource'` 時，processor 可以回憶其他 thread 中的訊息。這些跨 thread 訊息會格式化為包含 timestamp 及對話標籤的系統訊息，提供對話在何時及何處發生的 context。
+
+## 相關內容
+
+- [Guardrails](/docs/agents/guardrails)

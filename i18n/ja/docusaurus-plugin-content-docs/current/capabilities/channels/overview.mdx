@@ -1,0 +1,274 @@
+---
+title: "Channels の概要"
+description: "Channels は Mastra Agent を Slack、Discord、Telegram などのメッセージングプラットフォームに接続します。"
+packages:
+  - "@mastra/core"
+---
+
+# Channels の概要
+
+**追加バージョン:** `@mastra/core@1.22.0`
+
+Channels は Agent を Slack、Microsoft Teams、Discord、Telegram、WhatsApp、GitHub、Linear などのメッセージングおよびコラボレーションプラットフォームに接続します。ユーザーがプラットフォーム上でメッセージやコメントを送信すると、Agent はそれを受信し、通常の Agent パイプラインで処理して、応答を会話へストリーミングします。Mastra はこの channel レイヤーに [Chat SDK](https://chat-sdk.dev/) を使用します。
+
+使用するプラットフォームのページから始めてください。
+
+- [Slack](/docs/capabilities/channels/slack)
+- [Microsoft Teams](/docs/capabilities/channels/teams)
+- [Discord](/docs/capabilities/channels/discord)
+- [Telegram](/docs/capabilities/channels/telegram)
+- [WhatsApp](/docs/capabilities/channels/whatsapp)
+- [iMessage](/docs/capabilities/channels/imessage)
+
+[その他](/docs/capabilities/channels/other-adapters)には、追加のプラットフォームが掲載されています。Mastra channels は、ここに記載されていない互換性のある [Chat SDK アダプター](https://chat-sdk.dev/adapters)でも動作し、どのアダプターでも同じ Mastra の設定パターンを使用できます。
+
+## Channels を使用する場面
+
+Agent に次の機能が必要な場合は Channels を使用します。
+
+- ユーザーが普段会話したり作業したりしている場所で対応する。
+- Slack、Microsoft Teams、Discord、Telegram、WhatsApp などのチャットプラットフォームで応答する。
+- 複数のユーザーが共有 channel やスレッド内で同じ Agent とやり取りする、マルチユーザー Agent をサポートする。
+- GitHub の Issue、プルリクエストのスレッド、Linear のコメントなどのコラボレーションワークフローと連携する。
+
+## Agent の設定
+
+Channels は Chat SDK アダプターを使用し、Mastra 側では共通のパターンに従います。channel アダプターを作成し、Agent に追加します。
+
+```typescript title="src/mastra/agents/your-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createSlackAdapter } from '@chat-adapter/slack'
+
+export const yourAgent = new Agent({
+  id: 'your-agent',
+  name: 'Your Agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  channels: {
+    adapters: {
+      slack: createSlackAdapter(),
+    },
+  },
+})
+```
+
+:::note
+
+Channel アダプターでは、認証情報とリクエスト検証のために、Bot トークン、署名シークレット、アプリ ID、Webhook 検証トークンなど、Provider 固有の環境変数が必要です。正確な変数名は、使用するプラットフォームのガイドまたは [Chat SDK アダプターカタログ](https://chat-sdk.dev/adapters)を確認してください。
+
+:::
+
+Channels には [storage](/docs/storage/overview) の設定を推奨します。storage を使用すると、Mastra は channel の状態、スレッドの購読、Tool の承認、Memory を再起動後も保持できます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+import { yourAgent } from './agents/your-agent'
+
+export const mastra = new Mastra({
+  agents: { yourAgent },
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: process.env.DATABASE_URL,
+  }),
+})
+```
+
+## Webhook ルート
+
+プラットフォームは Webhook を通じて channel のアクティビティを Mastra に送信します。Webhook とは、新しいメッセージやメンション、ユーザーによる対話型 Tool 承認カードの「Approve」の選択など、何らかのイベントが発生したときにプラットフォームから呼び出される HTTP エンドポイントです。これにより、Agent は新しいメッセージを受信して処理を開始し、同じ channel に応答します。
+
+Mastra は設定済みのアダプターごとに Webhook ルートを登録し、リクエストを処理します。
+
+```text
+/api/agents/<AGENT_ID>/channels/<PLATFORM>/webhook
+```
+
+たとえば、ID が `your-agent` の Agent に設定された Slack アダプターは、次のルートを使用します。
+
+```text
+/api/agents/your-agent/channels/slack/webhook
+```
+
+プラットフォームの Webhook、イベント、インタラクション URL にこのパスを指定します。使用するプラットフォームのガイドまたは [Chat SDK ドキュメント](https://chat-sdk.dev/adapters)に従ってください。
+
+ローカル開発では、プラットフォームの Webhook がローカルサーバーにアクセスできるよう、公開 URL が必要です。[cloudflared](https://github.com/cloudflare/cloudflared) や [ngrok](https://ngrok.com/) などのトンネルを使用して、デフォルトでは `localhost:4111` で稼働するサーバーを公開します。
+
+```bash npm2yarn
+npx cloudflared tunnel --url http://localhost:4111
+```
+
+生成された公開 URL を Webhook パスのベース URL として使用します。例: `https://abc123.trycloudflare.com/api/agents/your-agent/channels/slack/webhook`
+
+:::note
+
+トンネル URL はローカル開発用です。Mastra サーバーをデプロイしたら、プラットフォームの Webhook、イベント、インタラクション URL を本番環境の URL に更新してください。
+
+:::
+
+## スレッドコンテキスト
+
+ユーザーが channel のスレッドで会話の途中に Agent をメンションした場合、Agent にはそれまでのコンテキストがない可能性があります。デフォルトでは、最初のメンション時に Mastra がプラットフォームから直近 10 件のメッセージを取得します。
+
+1. スレッドで最初にメンションされると、Agent はプラットフォームから直近のメッセージを取得します。
+1. これらのメッセージは、会話のコンテキストとしてユーザーのメッセージの前に追加されます。
+1. 応答後、Agent はスレッドを購読し、Mastra Memory を通じて完全な履歴を保持します。
+1. そのスレッドの後続メッセージでは、プラットフォームから再取得しません。
+
+この動作を無効にするには、`threadContext: { maxMessages: 0 }` を設定します。この設定はダイレクトメッセージ以外のスレッドにのみ適用されます。
+
+Mastra は、リクエストがどの channel とプラットフォームから届いたか、たとえばダイレクトメッセージと公開 channel のどちらから届いたかを Agent に伝える短い system message も追加します。追加しない場合は、`threadContext: { addSystemMessage: false }` を設定します。
+
+## Tool の承認
+
+`requireApproval: true` が設定された Tool は、「Approve」と「Deny」ボタンを備えた対話型カードとして表示されます。
+
+```typescript title="src/mastra/tools/delete-file.ts"
+import { promises as fs } from 'node:fs'
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const deleteFile = createTool({
+  id: 'delete-file',
+  description: 'Delete a file from the system',
+  inputSchema: z.object({
+    path: z.string().describe('Path to the file to delete'),
+  }),
+  requireApproval: true,
+  execute: async ({ path }) => {
+    await fs.unlink(path)
+    return { deleted: path }
+  },
+})
+```
+
+Agent がこの Tool を呼び出すと、Tool 名、引数、「Approve」と「Deny」のアクションを含むカードがユーザーに表示されます。Tool は承認後にのみ実行されます。
+
+対話型カードではなくプレーンテキストで Tool 呼び出しを表示するには、アダプターに `toolDisplay: 'text'` を設定します。`'hidden'` モードでは、同じスレッドに後続のユーザーメッセージが届いたとき、`autoResumeSuspendedTools` が一時停止中の Tool を再開できます。これには Memory が必要です。hidden モードで非表示になるのは承認ボタンだけです。
+
+## 応答のフォーマット
+
+Agent の応答は、デフォルトで markdown として投稿されます。Slack など markdown をネイティブにレンダリングするプラットフォームでは、太字、リンク、テーブルがそのまま表示されます。ほかのプラットフォームでは、markdown が各プラットフォームの形式に変換されます。Agent は標準の markdown を記述するだけで、Studio と同じように、どのプラットフォームでも正しく表示されます。
+
+応答をリテラルなプレーンテキストとして投稿するには、アダプターに `textFormat: 'plain'` を設定します。
+
+```typescript title="src/mastra/agents/your-agent.ts"
+channels: {
+  adapters: {
+    slack: {
+      adapter: createSlackAdapter(),
+      textFormat: 'plain',
+    },
+  },
+},
+```
+
+Agent に標準 markdown ではなく Slack mrkdwn などプラットフォーム固有の記法を出力させる場合は、この回避策を使用してください。markdown がリテラル表示される問題を回避するために、そのようなプロンプト指示を追加していた場合は、代わりに削除してください。現在、標準 markdown はデフォルトでネイティブにレンダリングされます。`textFormat` が影響するのは最終的な応答テキストだけです。Tool カード、エラーメッセージ、ネイティブにストリーミングされるテキストには影響しません。
+
+## 複数ユーザーの識別
+
+グループ会話では、Agent が発言者を区別できるよう、Mastra が各メッセージの先頭に送信者の名前とプラットフォーム ID を付加します。
+
+```text
+[Alice (@U123ABC)]: Can you help me with this?
+[Bob (@U456DEF)]: I have a question too.
+```
+
+## マルチモーダルコンテンツ
+
+Gemini などのモデルは、画像、動画、音声をネイティブに処理できます。`inlineMedia` と `inlineLinks` を組み合わせると、ユーザーは複数のプラットフォームから Agent とリッチコンテンツを共有できます。
+
+```typescript title="src/mastra/agents/vision-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createDiscordAdapter } from '@chat-adapter/discord'
+
+export const visionAgent = new Agent({
+  id: 'vision-agent',
+  name: 'Vision Agent',
+  instructions: 'You can see images, watch videos, and listen to audio.',
+  model: '__GATEWAY_GOOGLE_MODEL_FLASH__',
+  channels: {
+    adapters: {
+      discord: createDiscordAdapter(),
+    },
+    inlineMedia: ['image/*', 'video/*', 'audio/*'],
+    inlineLinks: [
+      { match: 'youtube.com', mimeType: 'video/*' },
+      { match: 'youtu.be', mimeType: 'video/*' },
+      'imgur.com',
+    ],
+  },
+})
+```
+
+この設定により、次の処理が可能になります。
+
+- ユーザーがスクリーンショットをアップロードすると、Agent がその内容を説明する。
+- ユーザーが `.mp4` クリップをアップロードすると、Agent が動画を要約する。
+- ユーザーが YouTube のリンクを貼り付けると、Agent が動画を視聴して内容について応答する。
+- ユーザーが imgur のリンクを貼り付けると、Agent が画像を直接認識する。
+
+デフォルトでは、画像だけがインライン送信されます（`inlineMedia: ['image/*']`）。サポートされていない形式はテキストの要約として記述されるため、該当形式を拒否するモデルでもエラーを起こさず、Agent がファイルの存在を認識できます。すべての `inlineMedia` パターンについては [Channels リファレンス](/reference/agents/channels#inline-media)を、ドメインマッチング、HEAD 検出、MIME タイプの強制指定については [inlineLinks リファレンス](/reference/agents/channels#inline-links)を参照してください。
+
+## サーバーレスへのデプロイ
+
+Vercel などのサーバーレスプラットフォームでは、リクエストごとに独立した短命なインスタンスが実行されます。この環境で Channels を確実に動作させるには、Agent が応答する間 Function を稼働させる仕組みと、インスタンス間を連携させる共有 pub/sub の 2 つが必要です。
+
+### `waitUntil` で Function を稼働させる
+
+Channel の Webhook はすぐに `200` レスポンスを返し、その後 Agent がバックグラウンドで実行されて応答を投稿します。ほとんどのサーバーレスプラットフォームでは、応答直後に Function が凍結されるため、Agent が回答する前に実行が停止します。実行が完了するまでプラットフォームがインスタンスを稼働させるよう、`waitUntil` 関数を渡します。
+
+Vercel では、`@vercel/functions` の `waitUntil` を渡します。
+
+```typescript title="src/mastra/agents/your-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createSlackAdapter } from '@chat-adapter/slack'
+import { waitUntil } from '@vercel/functions'
+
+export const yourAgent = new Agent({
+  id: 'your-agent',
+  name: 'Your Agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  channels: {
+    adapters: {
+      slack: createSlackAdapter(),
+    },
+    waitUntil,
+  },
+})
+```
+
+Vercel と AWS Lambda は応答送信直後に Function を凍結するため、`waitUntil` が必要です。Cloudflare Workers と Netlify Functions はリクエストコンテキストから自動検出されるため、設定は不要です。`waitUntil` がリクエストコンテキストに存在しても自動検出されないランタイムでは、`resolveWaitUntil` を使用します。詳しくは [Channels リファレンス](/reference/agents/channels#parameters)を参照してください。
+
+### 共有 pub/sub でインスタンスを連携させる
+
+Channels は Agent の [signal パイプライン](/docs/long-running-agents/signals)を通じてメッセージをルーティングし、各実行がスレッドのリースを取得することで、一度に 1 つの実行だけが会話を処理します。
+
+デフォルトのインメモリ pub/sub はインスタンスの境界を越えられないため、サーバーレス環境では、後続メッセージが Agent を実行しているインスタンスとは別のインスタンスにルーティングされる場合があります。
+
+共有 pub/sub がない場合、そのインスタンスは実行中の処理にアクセスできず、独自の処理を開始します。その結果、元の処理は変更されないまま、スレッドが二重に処理されます。
+
+インスタンス間でリースと signal を連携させるには、`Mastra` インスタンスに Redis Streams を使用した共有 pub/sub を設定します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RedisStreamsPubSub } from '@mastra/redis-streams'
+import { yourAgent } from './agents/your-agent'
+
+export const mastra = new Mastra({
+  agents: { yourAgent },
+  pubsub: new RedisStreamsPubSub({
+    url: process.env.REDIS_URL,
+    keyPrefix: 'mastra:my-app',
+  }),
+})
+```
+
+Vercel のマネージド Redis 連携と Upstash Redis は、どちらも適しています。分散 pub/sub が必要になる状況について詳しくは、[PubSub ガイド](/docs/server/pubsub)および [`RedisStreamsPubSub` リファレンス](/reference/pubsub/redis-streams)を参照してください。
+
+## 関連情報
+
+- [Channels リファレンス](/reference/agents/channels)
+- [AgentController channels](/docs/harness/agent-controller#connect-chat-channels)
+- 📹 [Mastra channels ワークショップ](https://www.youtube.com/watch?v=E9KFsZEnQO8\&t=5s)

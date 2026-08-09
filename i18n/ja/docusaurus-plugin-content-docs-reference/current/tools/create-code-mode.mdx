@@ -1,0 +1,221 @@
+---
+title: "リファレンス：createCodeMode() | Tools and MCP"
+description: "Sandbox 内で複数 Tool を使った処理を実行する createCodeMode() の API リファレンス。"
+packages:
+  - "@mastra/core"
+---
+
+# createCodeMode()
+
+**追加されたバージョン：** `@mastra/core@1.38.0`
+
+`createCodeMode()` 関数は、Agent が複数 Tool を使った処理を 1 つの TypeScript 関数として実行できるようにする Tool と生成済みの指示を返します。生成されたコードは Workspace の Sandbox 内で実行され、各 `external_*` 呼び出しは、検証、リクエストコンテキスト、トレースを伴ってホスト上の実際の Tool を実行します。
+
+概念の概要については、[Code mode](/docs/agents/code-mode) を参照してください。
+
+## 使用例
+
+Code mode Tool を作成し、生成された指示を Agent に追加して、返された Tool を同じ ID で登録します。
+
+```typescript title="src/mastra/agents/shop-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createCodeMode, createTool } from '@mastra/core/tools'
+import { LocalSandbox } from '@mastra/core/workspace'
+import { z } from 'zod'
+
+const getTopProducts = createTool({
+  id: 'getTopProducts',
+  description: 'Get top selling products',
+  inputSchema: z.object({ limit: z.number() }),
+  outputSchema: z.object({
+    products: z.array(z.object({ id: z.string(), name: z.string(), totalSales: z.number() })),
+  }),
+  execute: async ({ limit }) => fetchTopProducts(limit),
+})
+
+const getProductRatings = createTool({
+  id: 'getProductRatings',
+  description: 'Get ratings for a product',
+  inputSchema: z.object({ productId: z.string() }),
+  outputSchema: z.object({ ratings: z.array(z.object({ score: z.number() })) }),
+  execute: async ({ productId }) => fetchRatings(productId),
+})
+
+const { tool, instructions } = createCodeMode({
+  tools: { getTopProducts, getProductRatings },
+  sandbox: new LocalSandbox(),
+})
+
+export const shopAgent = new Agent({
+  id: 'shop-assistant',
+  name: 'shop-assistant',
+  instructions: ['You are a helpful shopping assistant.', instructions],
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { execute_typescript: tool },
+})
+```
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'config',
+    type: 'CodeModeConfig',
+    description: 'Code mode Tool と生成される指示の設定。',
+    properties: [
+      {
+        type: 'CodeModeConfig',
+        parameters: [
+          {
+            name: 'tools',
+            type: 'ToolsInput',
+            description:
+              '生成されたコードに `external_<id>` 関数として公開される Tool。呼び出せるのは、ここで指定した Tool だけです。',
+          },
+          {
+            name: 'sandbox',
+            type: 'WorkspaceSandbox',
+            description:
+              '生成されたコードの実行に使用する Sandbox。Agent が Sandbox を提供する Workspace 内で実行される場合、または Transport が独自の実行境界（`IsolatedVmCodeModeTransport` など）を提供する場合を除き、必須です。ホスト上で明示的に実行するには `new LocalSandbox()` を渡します。',
+            isOptional: true,
+          },
+          {
+            name: 'timeout',
+            type: 'number',
+            description: '実行タイムアウト（ミリ秒）。',
+            isOptional: true,
+            defaultValue: '30000',
+          },
+          {
+            name: 'id',
+            type: 'string',
+            description: '生成される Tool の ID。',
+            isOptional: true,
+            defaultValue: 'execute_typescript',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'transport',
+    type: 'CodeModeTransport',
+    description:
+      'Sandbox 内で生成されたコードを実行するための、任意の Transport 実装。デフォルトの Transport は、Workspace の Sandbox プロセス API を介した stdio JSON-RPC を使用します。`requiresSandbox: false` を宣言する Transport（[IsolatedVmCodeModeTransport](/reference/tools/isolated-vm-transport) など）は、Sandbox なしで実行されます。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 戻り値
+
+`CodeModeResult` オブジェクトを返します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'tool',
+    type: 'Tool<any, any>',
+    description: '生成された Code mode Tool。デフォルトの ID は `execute_typescript` です。',
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description: '設定された Tool の型付き `external_*` 宣言を含む、生成済みのモデル向け指示。',
+  },
+]}
+/>
+
+## CodeModeToolResult
+
+生成された Tool は `CodeModeToolResult` を返します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'success',
+    type: 'boolean',
+    description: '生成されたコードが例外をスローせず、最後まで実行されたかどうか。',
+  },
+  {
+    name: 'result',
+    type: 'unknown',
+    description: '生成されたコードが返した値。',
+    isOptional: true,
+  },
+  {
+    name: 'logs',
+    type: 'string[]',
+    description:
+      '`console.log`、`console.info`、`console.warn`、`console.error` から取得したコンソール出力（出力順）。',
+    isOptional: true,
+  },
+  {
+    name: 'error',
+    type: '{ message: string; name?: string; line?: number }',
+    description: '生成されたコードが例外をスローした場合、または実行に失敗した場合のエラー詳細。',
+    isOptional: true,
+    properties: [
+      {
+        type: '{ message: string; name?: string; line?: number }',
+        parameters: [
+          {
+            name: 'message',
+            type: 'string',
+            description: 'エラーメッセージ。',
+          },
+          {
+            name: 'name',
+            type: 'string',
+            description: 'エラー名（取得できる場合）。',
+            isOptional: true,
+          },
+          {
+            name: 'line',
+            type: 'number',
+            description: 'エラーに関連する行番号（取得できる場合）。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 指示の確認
+
+指定した Tool のセットに対して生成されるプロンプトの正確な内容を確認するには、`createCodeModeInstructions()` を使用します。
+
+```typescript title="src/mastra/tools/code-mode-instructions.ts"
+import { createCodeModeInstructions } from '@mastra/core/tools'
+
+console.log(
+  createCodeModeInstructions({
+    tools: { getTopProducts, getProductRatings },
+  }),
+)
+```
+
+指示には、使用規約と、設定された各 Tool に対応する型付きの `declare function external_<id>(...)` 行が含まれます。Tool の ID は有効な TypeScript 関数名に変換され、変換後の名前が競合するとエラーがスローされます。
+
+## createCodeModeTool()
+
+Tool だけが必要で、指示を別に管理する場合は `createCodeModeTool()` を使用します。Tool と対応する指示を一緒に管理できるよう、ほとんどの Agent では `createCodeMode()` を使用してください。
+
+```typescript title="src/mastra/tools/code-mode-tool.ts"
+import { createCodeModeTool } from '@mastra/core/tools'
+import { LocalSandbox } from '@mastra/core/workspace'
+
+export const codeModeTool = createCodeModeTool({
+  tools: { getTopProducts, getProductRatings },
+  sandbox: new LocalSandbox(),
+})
+```
+
+## 関連項目
+
+- [Code mode](/docs/agents/code-mode)
+- [createTool()](/reference/tools/create-tool)
+- [Workspace の概要](/docs/workspace/overview)

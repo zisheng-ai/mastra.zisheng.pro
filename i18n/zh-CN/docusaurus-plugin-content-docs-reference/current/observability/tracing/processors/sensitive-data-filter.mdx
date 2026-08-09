@@ -1,0 +1,204 @@
+---
+title: "参考：SensitiveDataFilter | Observability"
+description: SensitiveDataFilter 处理器的 API 参考
+packages:
+  - "@mastra/core"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# SensitiveDataFilter
+
+一个用于从 Span 字段中遮盖敏感信息的 SpanOutputProcessor。
+
+## 默认自动应用
+
+`Observability` 会自动将 `SensitiveDataFilter` 追加到每个已配置实例的 `spanOutputProcessors` 中，以便在机密信息到达 Mastra cloud exporter 等 Exporter 之前将其遮盖。该过滤器最后运行（在所有用户提供的处理器之后），因此上游处理器引入或暴露的敏感数据仍会被遮盖。除非要自定义其选项，否则无需手动添加。
+
+要停用或自定义自动应用的过滤器，请使用 [`Observability` 注册表配置](/reference/observability/tracing/configuration#observabilityregistryconfig)中的 `sensitiveDataFilter` 选项：
+
+```typescript
+import { Observability } from '@mastra/observability'
+
+new Observability({
+  configs: {/* ... */},
+  // disable the auto-applied filter
+  sensitiveDataFilter: false,
+  // or customize it
+  // sensitiveDataFilter: { sensitiveFields: ['mySecret'], redactionStyle: 'partial' },
+})
+```
+
+如果配置的 `spanOutputProcessors` 中已包含 `SensitiveDataFilter`，系统会跳过自动应用的过滤器，以避免重复遮盖。预先实例化的 `ObservabilityInstance` 值不会被修改。如有需要，请自行向其处理器添加 `SensitiveDataFilter`。
+
+## 构造函数
+
+```typescript prettier:false
+new SensitiveDataFilter(options?: SensitiveDataFilterOptions)
+```
+
+## `SensitiveDataFilterOptions`
+
+```typescript
+interface SensitiveDataFilterOptions {
+  /**
+   * List of sensitive field names to redact.
+   * Matching is case-insensitive and normalizes separators
+   * (api-key, api_key, Api Key → apikey).
+   * Defaults include: password, token, secret, key, apikey, auth,
+   * authorization, bearer, bearertoken, jwt, credential,
+   * clientsecret, privatekey, refresh, ssn.
+   */
+  sensitiveFields?: string[]
+
+  /**
+   * The token used for full redaction.
+   * Default: "[REDACTED]"
+   */
+  redactionToken?: string
+
+  /**
+   * Style of redaction to use:
+   * - "full": always replace with redactionToken
+   * - "partial": show 3 characters from the start and end, redact the middle
+   * Default: "full"
+   */
+  redactionStyle?: RedactionStyle
+}
+```
+
+<PropertiesTable
+  props={[
+  {
+    name: 'sensitiveFields',
+    type: 'string[]',
+    description: '要遮盖的字段名（不区分大小写，忽略分隔符差异）',
+    required: false,
+  },
+  {
+    name: 'redactionToken',
+    type: 'string',
+    description: '完全遮盖时使用的替换 token',
+    required: false,
+  },
+  {
+    name: 'redactionStyle',
+    type: "'full' | 'partial'",
+    description: '遮盖样式',
+    required: false,
+  },
+]}
+/>
+
+## `RedactionStyle`
+
+```typescript
+type RedactionStyle = 'full' | 'partial'
+```
+
+## 方法
+
+### process
+
+```typescript prettier:false
+process(span: AnySpan): AnySpan
+```
+
+通过过滤关键字段中的敏感数据来处理 Span，这些字段包括 attributes、metadata、input、output 和 errorInfo。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'span',
+    type: 'AnySpan',
+    description: '要过滤的输入 Span',
+    required: true,
+  },
+]}
+/>
+
+**返回：** 敏感值已被遮盖的新 Span。
+
+### shutdown
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+该处理器无需清理。
+
+## 属性
+
+```typescript prettier:false
+readonly name = 'sensitive-data-filter';
+```
+
+## 默认敏感字段
+
+未提供自定义字段时：
+
+```typescript
+[
+  'password',
+  'token',
+  'secret',
+  'key',
+  'apikey',
+  'auth',
+  'authorization',
+  'bearer',
+  'bearertoken',
+  'jwt',
+  'credential',
+  'clientsecret',
+  'privatekey',
+  'refresh',
+  'ssn',
+]
+```
+
+## 处理行为
+
+### 字段匹配
+
+- **不区分大小写**：`APIKey`、`apikey` 和 `ApiKey` 都会匹配
+- **忽略分隔符差异**：`api-key`、`api_key` 和 `apiKey` 会被视为相同字段
+- **精确匹配**：规范化后，字段必须完全匹配
+  - `token` 会匹配 `token`、`Token` 和 `TOKEN`
+  - `token` 不会匹配 `promptTokens` 或 `tokenCount`
+
+### 遮盖样式
+
+#### 完全遮盖（默认）
+
+所有匹配值都会替换为 redactionToken。
+
+#### 部分遮盖
+
+- 显示开头和结尾各 3 个字符
+- 长度不超过 6 个字符的值会被完全遮盖
+- 非字符串值会先转换为字符串，再进行部分遮盖
+
+### 错误处理
+
+如果过滤字段失败，该字段会替换为：
+
+```typescript
+{
+  error: {
+    processor: 'sensitive-data-filter'
+  }
+}
+```
+
+### 处理的字段
+
+过滤器会递归处理：
+
+- `span.attributes` - Span 元数据和属性
+- `span.metadata` - 自定义元数据
+- `span.input` - 输入数据
+- `span.output` - 输出数据
+- `span.errorInfo` - 错误信息
+
+能够安全处理嵌套对象、数组和循环引用。

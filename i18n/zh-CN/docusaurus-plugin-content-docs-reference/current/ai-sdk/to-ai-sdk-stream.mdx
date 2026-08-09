@@ -1,0 +1,352 @@
+---
+title: "参考：toAISdkStream() | AI SDK"
+description: toAISdkStream() 的 API 参考；该函数用于将 Mastra stream 转换为 AI SDK 兼容的 stream。
+packages:
+  - "@mastra/ai-sdk"
+  - "@mastra/client-js"
+  - "@mastra/core"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# toAISdkStream()
+
+将 Mastra stream（Agent、network 或 Workflow）转换为 AI SDK 兼容的 stream。当需要手动转换 Mastra stream，以便配合 AI SDK 的 `createUIMessageStream()` 和 `createUIMessageStreamResponse()` 使用时，请使用此函数。
+
+在 Mastra 提供的 [`chatRoute()`](/reference/ai-sdk/chat-route) 或 [`workflowRoute()`](/reference/ai-sdk/workflow-route) 等路由 helper 之外构建自定义流式 endpoint 时，此函数非常有用。
+
+`toAISdkStream()` 保留现有的 AI SDK v5 默认行为。如果应用使用 AI SDK v6 类型，请在 options 对象中传入 `version: 'v6'`。
+
+## UI stream 中的结构化输出
+
+当源 Agent stream 包含最终结构化输出对象时，`toAISdkStream()` 会将其作为自定义 AI SDK UI data part 发送：
+
+```json
+{
+  "type": "data-structured-output",
+  "data": {
+    "object": {}
+  }
+}
+```
+
+`object` 字段包含完整的结构化输出值。它会将 Mastra 的最终结构化输出 chunk 映射到 AI SDK UI stream；不会发送部分结构化输出 chunk。
+
+## 使用示例
+
+Next.js App Router 示例：
+
+```typescript title="app/api/chat/route.ts"
+import { mastra } from '../../mastra'
+import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
+import { toAISdkStream } from '@mastra/ai-sdk'
+
+export async function POST(req: Request) {
+  const { messages } = await req.json()
+  const myAgent = mastra.getAgent('weatherAgent')
+  const stream = await myAgent.stream(messages)
+
+  const uiMessageStream = createUIMessageStream({
+    originalMessages: messages,
+    execute: async ({ writer }) => {
+      for await (const part of toAISdkStream(stream, { from: 'agent' })) {
+        await writer.write(part)
+      }
+    },
+  })
+
+  return createUIMessageStreamResponse({
+    stream: uiMessageStream,
+  })
+}
+```
+
+:::tip
+
+在 `createUIMessageStream()` 中将 `messages` 传给 `originalMessages`，可避免 UI 中出现重复的 assistant 消息。详情请参阅[故障排除：assistant 消息重复](https://ai-sdk.dev/docs/troubleshooting/repeated-assistant-messages)。
+
+:::
+
+## 参数
+
+第一个参数是要转换的 Mastra stream，可以是以下类型之一：
+
+- `MastraModelOutput` — 来自 `agent.stream()` 的 Agent stream
+- `MastraAgentNetworkStream` — 来自 `agent.network()` 的 network stream
+- `MastraWorkflowStream` 或 `WorkflowRunOutput` — Workflow stream
+
+第二个参数是 options 对象：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'version',
+    type: "'v5' | 'v6'",
+    description:
+      "选择要输出的 AI SDK stream 协议。省略此项或传入 `'v5'` 可使用现有默认行为；当应用使用 AI SDK v6 response helper 的类型时，传入 `'v6'`。",
+    isOptional: true,
+    defaultValue: "'v5'",
+  },
+  {
+    name: 'from',
+    type: "'agent' | 'network' | 'workflow'",
+    description: '正在转换的 Mastra stream 类型。',
+    isOptional: false,
+    defaultValue: "'agent'",
+  },
+  {
+    name: 'lastMessageId',
+    type: 'string',
+    description: '（仅 Agent）对话中最后一条消息的 ID。',
+    isOptional: true,
+  },
+  {
+    name: 'sendStart',
+    type: 'boolean',
+    description: '（仅 Agent）是否在 stream 中发送开始事件。',
+    isOptional: true,
+    defaultValue: 'true',
+  },
+  {
+    name: 'sendFinish',
+    type: 'boolean',
+    description: '（仅 Agent）是否在 stream 中发送结束事件。',
+    isOptional: true,
+    defaultValue: 'true',
+  },
+  {
+    name: 'sendReasoning',
+    type: 'boolean',
+    description:
+      '（仅 Agent）是否在 stream 中包含 reasoning-delta chunk。设为 true 可流式传输支持 extended thinking 的模型所生成的推理内容。',
+    isOptional: true,
+    defaultValue: 'false',
+  },
+  {
+    name: 'sendSources',
+    type: 'boolean',
+    description: '（仅 Agent）是否在输出中包含来源引用。',
+    isOptional: true,
+    defaultValue: 'false',
+  },
+  {
+    name: 'includeTextStreamParts',
+    type: 'boolean',
+    description: '（仅 Workflow）是否在输出中包含文本 stream part。',
+    isOptional: true,
+    defaultValue: 'true',
+  },
+  {
+    name: 'messageMetadata',
+    type: '(options: { part: UIMessageStreamPart }) => Record<string, unknown> | undefined',
+    description:
+      '（仅 Agent）接收当前 stream part 并返回 metadata 的函数，返回值将附加到开始和结束 chunk。',
+    isOptional: true,
+  },
+  {
+    name: 'onError',
+    type: '(error: unknown) => string',
+    description:
+      '（仅 Agent）用于处理 stream 转换期间错误的函数。它接收错误，并应返回其字符串表示。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 示例
+
+### 转换 Workflow stream
+
+```typescript title="app/api/workflow/route.ts" {13}
+import { mastra } from '../../mastra'
+import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
+import { toAISdkStream } from '@mastra/ai-sdk'
+
+export async function POST(req: Request) {
+  const { input } = await req.json()
+  const workflow = mastra.getWorkflow('myWorkflow')
+  const run = workflow.createRun()
+  const stream = await run.stream({ inputData: input })
+
+  const uiMessageStream = createUIMessageStream({
+    execute: async ({ writer }) => {
+      for await (const part of toAISdkStream(stream, { from: 'workflow' })) {
+        await writer.write(part)
+      }
+    },
+  })
+
+  return createUIMessageStreamResponse({
+    stream: uiMessageStream,
+  })
+}
+```
+
+### 转换 network stream
+
+```typescript title="app/api/network/route.ts" {12}
+import { mastra } from '../../mastra'
+import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
+import { toAISdkStream } from '@mastra/ai-sdk'
+
+export async function POST(req: Request) {
+  const { messages } = await req.json()
+  const routingAgent = mastra.getAgent('routingAgent')
+  const stream = await routingAgent.network(messages)
+
+  const uiMessageStream = createUIMessageStream({
+    execute: async ({ writer }) => {
+      for await (const part of toAISdkStream(stream, { from: 'network' })) {
+        await writer.write(part)
+      }
+    },
+  })
+
+  return createUIMessageStreamResponse({
+    stream: uiMessageStream,
+  })
+}
+```
+
+### 转换已启用推理的 Agent stream
+
+```typescript title="app/api/reasoning/route.ts" {8-12,17-20}
+import { mastra } from '../../mastra'
+import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
+import { toAISdkStream } from '@mastra/ai-sdk'
+
+export async function POST(req: Request) {
+  const { messages } = await req.json()
+  const reasoningAgent = mastra.getAgent('reasoningAgent')
+  const stream = await reasoningAgent.stream(messages, {
+    providerOptions: {
+      openai: { reasoningEffort: 'high' },
+    },
+  })
+
+  const uiMessageStream = createUIMessageStream({
+    originalMessages: messages,
+    execute: async ({ writer }) => {
+      for await (const part of toAISdkStream(stream, {
+        from: 'agent',
+        sendReasoning: true,
+      })) {
+        await writer.write(part)
+      }
+    },
+  })
+
+  return createUIMessageStreamResponse({
+    stream: uiMessageStream,
+  })
+}
+```
+
+### 为 AI SDK v6 转换 Agent stream
+
+```typescript title="app/api/chat-v6/route.ts" {14-18}
+import { mastra } from '../../mastra'
+import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
+import { toAISdkStream } from '@mastra/ai-sdk'
+
+export async function POST(req: Request) {
+  const { messages } = await req.json()
+  const myAgent = mastra.getAgent('weatherAgent')
+  const stream = await myAgent.stream(messages)
+
+  const uiMessageStream = createUIMessageStream({
+    originalMessages: messages,
+    execute: async ({ writer }) => {
+      for await (const part of toAISdkStream(stream, {
+        from: 'agent',
+        version: 'v6',
+      })) {
+        await writer.write(part)
+      }
+    },
+  })
+
+  return createUIMessageStreamResponse({
+    stream: uiMessageStream,
+  })
+}
+```
+
+### 使用 `messageMetadata`
+
+```typescript title="app/api/chat-with-metadata/route.ts" {13-19}
+import { mastra } from '../../mastra'
+import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
+import { toAISdkStream } from '@mastra/ai-sdk'
+
+export async function POST(req: Request) {
+  const { messages } = await req.json()
+  const myAgent = mastra.getAgent('weatherAgent')
+  const stream = await myAgent.stream(messages)
+
+  const uiMessageStream = createUIMessageStream({
+    originalMessages: messages,
+    execute: async ({ writer }) => {
+      for await (const part of toAISdkStream(stream, {
+        from: 'agent',
+        messageMetadata: ({ part }) => ({
+          timestamp: Date.now(),
+          partType: part.type,
+        }),
+      })) {
+        await writer.write(part)
+      }
+    },
+  })
+
+  return createUIMessageStreamResponse({
+    stream: uiMessageStream,
+  })
+}
+```
+
+### 客户端 stream 转换
+
+如果在客户端使用 Mastra client SDK（`@mastra/client-js`），并希望将 stream 转换为 AI SDK 格式：
+
+```typescript title="client-stream-to-ai-sdk.ts" {14-23,25-35}
+import { MastraClient } from '@mastra/client-js'
+import { createUIMessageStream } from 'ai'
+import { toAISdkStream } from '@mastra/ai-sdk'
+import type { ChunkType, MastraModelOutput } from '@mastra/core/stream'
+
+const client = new MastraClient({
+  baseUrl: 'http://localhost:4111',
+})
+
+const agent = client.getAgent('weatherAgent')
+const response = await agent.stream('What is the weather in Tokyo?')
+
+// Convert the client SDK stream to a ReadableStream<ChunkType>
+const chunkStream = new ReadableStream<ChunkType>({
+  async start(controller) {
+    await response.processDataStream({
+      onChunk: async chunk => {
+        controller.enqueue(chunk)
+      },
+    })
+    controller.close()
+  },
+})
+
+// Transform to AI SDK format
+const uiMessageStream = createUIMessageStream({
+  execute: async ({ writer }) => {
+    for await (const part of toAISdkStream(chunkStream as unknown as MastraModelOutput, {
+      from: 'agent',
+    })) {
+      await writer.write(part)
+    }
+  },
+})
+
+for await (const part of uiMessageStream) {
+  console.log(part)
+}
+```
+

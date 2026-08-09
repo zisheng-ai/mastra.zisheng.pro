@@ -1,0 +1,352 @@
+---
+title: "メッセージ履歴 | Memory"
+description: "現在の会話の直近のメッセージを保存するために、Mastra でメッセージ履歴を設定する方法を説明します。"
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+  - "@mastra/libsql"
+  - "@mastra/ai-sdk"
+---
+
+# メッセージ履歴
+
+メッセージ履歴は、Memory の最も基本的かつ重要な形式です。LLM はコンテキストウィンドウ内で直近のメッセージを参照できるため、Agent は以前のやり取りを踏まえて一貫した応答を返せます。
+
+メッセージ履歴を取得し、UI に過去の会話を表示することもできます。
+
+:::info
+各メッセージは、スレッド（会話）とリソース（関連付けられたユーザーまたはエンティティ）に属します。詳しくは[スレッドとリソース](#threads-and-resources)を参照してください。
+:::
+
+:::warning
+クライアントアプリケーションで Memory を使用する場合は、会話履歴全体ではなく、クライアントから**新しいメッセージのみ**を送信してください。
+
+Mastra はストレージからメッセージを読み込むため、履歴全体の送信は冗長です。また、クライアント側のタイムスタンプが保存済みのタイムスタンプと競合すると、メッセージの順序に問題が生じる可能性があります。
+
+AI SDK の例については、[Mastra Memory の使用](/guides/build-your-ui/ai-sdk-ui#using-mastra-memory)を参照してください。
+:::
+
+## スレッドとリソース
+
+Mastra は、次の2つの識別子を使用して会話を整理します。
+
+- **スレッド**：一連のメッセージを含む会話セッション。
+- **リソース**：ユーザー、組織、プロジェクト、またはアプリケーション内の別のドメインエンティティなど、スレッドを所有するエンティティ。
+
+Studio はスレッド ID とリソース ID を自動的に生成します。`stream()` または `generate()` を直接呼び出す場合は、これらの識別子を明示的に指定してください。
+
+## はじめに
+
+Mastra の Memory モジュールと、データベース用の[ストレージアダプター](/docs/storage/overview#supported-providers)をインストールします。以下の例では、データをローカルの `mastra.db` ファイルに保存する `@mastra/libsql` を使用します。
+
+```bash npm2yarn
+npm install @mastra/memory@latest @mastra/libsql@latest
+```
+
+会話を永続化するには、メッセージ履歴にストレージアダプターが必要です。まだ設定していない場合は、Mastra インスタンスでストレージを設定します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+})
+```
+
+Agent で [`Memory`](/reference/memory/memory-class) インスタンスを作成します。
+
+```typescript title="src/mastra/agents/test-agent.ts"
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+
+export const agent = new Agent({
+  id: 'test-agent',
+  memory: new Memory({
+    options: {
+      lastMessages: 10,
+    },
+  }),
+})
+```
+
+Agent を呼び出すと、メッセージはデータベースに自動保存されます。`threadId`、`resourceId`、および任意の `metadata` を指定できます。
+
+<Tabs>
+  <TabItem value="generate" label=".generate()">
+    ```typescript
+    await agent.generate('Hello', {
+      memory: {
+        thread: {
+          id: 'thread-123',
+          title: 'Support conversation',
+          metadata: { category: 'billing' },
+        },
+        resource: 'user-456',
+      },
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="stream" label=".stream()">
+    ```typescript
+    await agent.stream('Hello', {
+      memory: {
+        thread: {
+          id: 'thread-123',
+          title: 'Support conversation',
+          metadata: { category: 'billing' },
+        },
+        resource: 'user-456',
+      },
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+:::info
+
+`agent.generate()` または `agent.stream()` を呼び出すと、スレッドとメッセージが自動的に作成されます。[`createThread()`](/reference/memory/createThread) と [`saveMessages()`](/reference/memory/memory-class) を使用して手動で作成することもできます。
+
+:::
+
+この履歴は次の2つの方法で使用できます。
+
+- **自動的に含める**：Mastra は直近のメッセージを自動的に取得し、コンテキストウィンドウに含めます。デフォルトでは直近の10件が含まれるため、Agent は会話の文脈を維持できます。この件数は `lastMessages` で調整できますが、ほとんどの場合、意識する必要はありません。
+- [**手動クエリ**](#querying)：より細かく制御するには、`recall()` 関数を使用してスレッドとメッセージを直接検索します。コンテキストウィンドウに含める Memory を正確に選択したり、UI に会話履歴を表示するためのメッセージを取得したりできます。
+
+:::tip
+
+Memory が有効な場合、[Studio](/docs/studio/overview) はメッセージ履歴を使用して、チャットのサイドバーに過去の会話を表示します。
+
+:::
+
+## スレッドタイトルの生成
+
+`generateTitle` を有効にすると、Mastra は会話のトランスクリプトから内容を表すスレッドタイトルを自動生成できます。スレッド一覧やサイドバーに会話タイトルを表示するチャットインターフェースを構築する場合に、このオプションを使用します。
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support agent',
+  instructions: 'Answer customer support questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    options: {
+      generateTitle: true,
+    },
+  }),
+})
+```
+
+タイトル生成は Agent の応答後に非同期で実行され、応答時間には影響しません。
+
+コストや動作を最適化するには、より小さな [`model`](/models) とカスタム `instructions` を指定します。
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support agent',
+  instructions: 'Answer customer support questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    options: {
+      generateTitle: {
+        model: '__GATEWAY_OPENAI_MODEL_MINI__',
+        instructions: 'Generate a one-word title.',
+      },
+    },
+  }),
+})
+```
+
+## Memory にアクセスする
+
+スレッドやメッセージの検索、複製、削除を行う Memory 関数にアクセスするには、Agent で `getMemory()` を呼び出します。
+
+```typescript
+const agent = mastra.getAgentById('test-agent')
+const memory = await agent.getMemory()
+```
+
+`Memory` インスタンスを使用すると、スレッドの一覧取得、メッセージの呼び戻し、会話の複製などを行う関数にアクセスできます。
+
+## クエリ
+
+会話履歴を UI に表示したり、独自の Memory 取得ロジックを実装したりするには、次のメソッドを使用してスレッドとメッセージを取得します。
+
+:::warning
+Memory システムはアクセス制御を適用しません。クエリを実行する前に、現在のユーザーが照会対象の `resourceId` にアクセスする権限を持つことを、アプリケーションロジックで確認してください。
+:::
+
+### スレッド
+
+リソースのスレッドを取得するには、[`listThreads()`](/reference/memory/listThreads) を使用します。
+
+```typescript
+const result = await memory.listThreads({
+  filter: { resourceId: 'user-123' },
+  perPage: false,
+})
+```
+
+スレッドをページ分割して取得します。
+
+```typescript
+const result = await memory.listThreads({
+  filter: { resourceId: 'user-123' },
+  page: 0,
+  perPage: 10,
+})
+
+console.log(result.threads) // thread objects
+console.log(result.hasMore) // more pages available?
+```
+
+メタデータで絞り込み、並び順を制御することもできます。
+
+```typescript
+const result = await memory.listThreads({
+  filter: {
+    resourceId: 'user-123',
+    metadata: { status: 'active' },
+  },
+  orderBy: { field: 'createdAt', direction: 'DESC' },
+})
+```
+
+ID で単一のスレッドを取得するには、[`getThreadById()`](/reference/memory/getThreadById) を使用します。
+
+```typescript
+const thread = await memory.getThreadById({ threadId: 'thread-123' })
+```
+
+### メッセージ
+
+スレッドを取得したら、[`recall()`](/reference/memory/recall) を使用してメッセージを取得します。ページネーション、日付による絞り込み、[セマンティック検索](/docs/memory/semantic-recall)に対応しています。
+
+基本的な呼び戻しでは、スレッドのすべてのメッセージを返します。
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  perPage: false,
+})
+```
+
+メッセージをページ分割して取得します。
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  page: 0,
+  perPage: 50,
+})
+```
+
+日付範囲で絞り込みます。
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  filter: {
+    dateRange: {
+      start: new Date('2025-01-01'),
+      end: new Date('2025-06-01'),
+    },
+  },
+})
+```
+
+浅い階層のメッセージメタデータで絞り込みます。
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  filter: {
+    metadata: {
+      category: 'billing',
+      escalated: true,
+      priority: 2,
+      archivedAt: null,
+    },
+  },
+})
+```
+
+メタデータフィルターが照合するのは、浅い階層のスカラー値（`string`、有限の `number`、`boolean`、`null`）のみです。
+
+指定したすべてのメタデータキーには AND 条件が適用されます。`null` フィルターは、明示的な `null` 値にのみ一致します。存在しないメタデータキーには一致しません。
+
+メタデータキーは英字またはアンダースコアで始まり、英数字のみを含める必要があります。128文字以内でなければならず、`__proto__`、`constructor`、`prototype` などの予約済みプロトタイプキーは使用できません。
+
+パフォーマンスはストレージバックエンドによって異なります。フィルターの一部をデータベースに渡せるバックエンドもあれば、スレッド、リソース、日付の制約を適用した後、ページネーションの前に候補メッセージを走査するバックエンドもあります。
+
+ID で単一のメッセージを取得します。
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  include: [{ id: 'msg-123' }],
+})
+```
+
+前後のコンテキストを含め、ID で複数のメッセージを取得します。
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  include: [
+    { id: 'msg-123' },
+    {
+      id: 'msg-456',
+      withPreviousMessages: 3,
+      withNextMessages: 1,
+    },
+  ],
+})
+```
+
+意味に基づいて検索します（設定については[セマンティック呼び戻し](/docs/memory/semantic-recall)を参照してください）。
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  vectorSearchString: 'project deadline discussion',
+  threadConfig: {
+    semanticRecall: true,
+  },
+})
+```
+
+### UI 形式
+
+メッセージクエリは `MastraDBMessage[]` 形式を返します。フロントエンドにメッセージを表示するには、UI ライブラリが想定する形式への変換が必要になる場合があります。たとえば、[`toAISdkV5Messages`](/reference/ai-sdk/to-ai-sdk-v5-messages) はメッセージを AI SDK UI 形式に変換します。
+
+## スレッドの複製
+
+スレッドの複製では、既存のスレッドとそのメッセージのコピーを作成します。会話を分岐させる場合、破壊的な操作を行う前にチェックポイントを作成する場合、または会話のバリエーションをテストする場合に役立ちます。
+
+```typescript
+const { thread, clonedMessages } = await memory.cloneThread({
+  sourceThreadId: 'thread-123',
+  title: 'Branched conversation',
+})
+```
+
+複製するメッセージを件数または日付範囲で絞り込み、独自のスレッド ID を指定し、ユーティリティメソッドで複製関係を確認できます。
+
+API の全容については、[`cloneThread()`](/reference/memory/cloneThread) と[複製ユーティリティ](/reference/memory/clone-utilities)を参照してください。
+
+## メッセージを削除する
+
+スレッドからメッセージを削除するには、[`deleteMessages()`](/reference/memory/deleteMessages) を使用します。メッセージ ID を指定して削除することも、スレッド内のすべてのメッセージを消去することもできます。

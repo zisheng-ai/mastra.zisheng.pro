@@ -1,0 +1,825 @@
+---
+title: "參考：Trajectory accuracy scorers | Evals"
+description: Mastra Trajectory Accuracy Scorers 的說明文件，用於評估 Agent 或 Workflow 是否依照預期的動作次序執行。
+packages:
+  - "@mastra/evals"
+  - "@mastra/core"
+---
+
+# Trajectory accuracy scorers
+
+Mastra 提供兩種 trajectory accuracy scorer，用於評估 Agent 或 Workflow 是否依照預期的動作次序執行：
+
+1. **以程式碼為基礎的 scorer** — 透過精確配對步驟及次序進行確定性評估
+1. **以 LLM 為基礎的 scorer** — 使用 AI 進行語義評估，以判斷 trajectory 的質素及合適程度
+
+兩種 scorer 均適用於 Agent 及 Workflow。`runEvals` pipeline 會自動擷取 trajectory，因此 scorer 會直接收到 `Trajectory` 物件。
+
+## 擷取 trajectory
+
+`runEvals` pipeline 會按 observability storage 是否已設定，採用兩種擷取策略：
+
+### 以 Trace 為基礎的擷取方式（建議）
+
+當目標的 `Mastra` instance 已設定 storage，pipeline 會從 observability store 取得完整的執行 Trace，並呼叫 `extractTrajectoryFromTrace()`。這會產生包含巢狀 `children` 的階層式 trajectory，記錄完整執行樹。執行樹包括 Workflow 步驟內巢狀的 Agent 執行及 Tool 呼叫，亦包括模型生成。
+
+例如，某個 Workflow 呼叫 Agent，而該 Agent 再呼叫 Tool，便會產生：
+
+```
+workflow_run
+  └─ workflow_step (validate-input)
+  └─ workflow_step (process-data)
+       └─ agent_run (my-agent)
+            └─ model_generation
+            └─ tool_call (search)
+            └─ model_generation
+            └─ tool_call (summarize)
+  └─ workflow_step (save-result)
+```
+
+### 後備擷取方式
+
+當 storage 不可用時，pipeline 會改用以下方式：
+
+- **Agent：**`extractTrajectory()` 從 Agent 訊息輸出的 `toolInvocations` 擷取 `ToolCallStep` 項目，產生 Tool 呼叫的扁平清單。
+- **Workflow：**`extractWorkflowTrajectory()` 從 `stepResults` 擷取 `WorkflowStepStep` 項目，產生 Workflow 步驟的扁平清單。
+
+這些後備方式不會記錄巢狀執行或非 Tool 呼叫的 span。
+
+## Trajectory 類型
+
+Trajectory 步驟在 `stepType` 使用可辨識聯合類型。每種步驟類型都有特定屬性：
+
+### `ToolCallStep`
+
+代表 Agent 的 Tool 呼叫。
+
+<PropertiesTable
+  content={[
+  { name: 'stepType', type: "'tool_call'", description: '辨識欄位。', required: true },
+  { name: 'name', type: 'string', description: 'Tool 名稱。', required: true },
+  { name: 'toolArgs', type: 'Record<string, unknown>', description: '傳送至 Tool 的引數。', isOptional: true },
+  {
+    name: 'toolResult',
+    type: 'Record<string, unknown>',
+    description: 'Tool 傳回的結果。',
+    isOptional: true,
+  },
+  { name: 'success', type: 'boolean', description: '呼叫是否成功。', isOptional: true },
+  { name: 'durationMs', type: 'number', description: '執行時間（毫秒）。', isOptional: true },
+  { name: 'metadata', type: 'Record<string, unknown>', description: '任意 metadata。', isOptional: true },
+  { name: 'children', type: 'TrajectoryStep[]', description: '巢狀子步驟。', isOptional: true },
+]}
+/>
+
+### `WorkflowStepStep`
+
+代表 Workflow 步驟的一次執行。
+
+<PropertiesTable
+  content={[
+  { name: 'stepType', type: "'workflow_step'", description: '辨識欄位。', required: true },
+  { name: 'name', type: 'string', description: '步驟識別碼。', required: true },
+  { name: 'stepId', type: 'string', description: 'Workflow 中的步驟 ID。', isOptional: true },
+  {
+    name: 'status',
+    type: 'string',
+    description: '步驟結果狀態（success、failed、suspended 等）。',
+    isOptional: true,
+  },
+  { name: 'output', type: 'Record<string, unknown>', description: '步驟輸出資料。', isOptional: true },
+  { name: 'durationMs', type: 'number', description: '執行時間（毫秒）。', isOptional: true },
+  { name: 'metadata', type: 'Record<string, unknown>', description: '任意 metadata。', isOptional: true },
+  {
+    name: 'children',
+    type: 'TrajectoryStep[]',
+    description: '巢狀子步驟（例如步驟內的 Tool 呼叫）。',
+    isOptional: true,
+  },
+]}
+/>
+
+### 其他步驟類型
+
+此可辨識聯合類型亦包括以下步驟類型：
+
+| 步驟類型 | 主要屬性 |
+| - | - |
+| `mcp_tool_call` | `toolArgs`, `toolResult`, `mcpServer`, `success` |
+| `model_generation` | `modelId`, `promptTokens`, `completionTokens`, `finishReason` |
+| `agent_run` | `agentId` |
+| `workflow_run` | `workflowId`, `status` |
+| `workflow_conditional` | `conditionCount`, `selectedSteps` |
+| `workflow_parallel` | `branchCount`, `parallelSteps` |
+| `workflow_loop` | `loopType`, `totalIterations` |
+| `workflow_sleep` | `durationMs`, `sleepType` |
+| `workflow_wait_event` | `eventName`, `eventReceived` |
+| `processor_run` | `processorId` |
+
+所有步驟類型都共用基礎屬性 `name`、`durationMs`、`metadata` 及 `children`。
+
+## 預期步驟
+
+定義預期 trajectory 時，請使用 `ExpectedStep`，而非完整的 `TrajectoryStep` 可辨識聯合類型。`ExpectedStep` 是對應 `TrajectoryStep` 的可辨識聯合類型：指定 `stepType` 後，便可自動完成該 variant 的欄位（例如 `tool_call` 的 `toolArgs`、`model_generation` 的 `modelId`）。所有 variant 專屬欄位均為選填，因此只需斷言你關注的內容。
+
+完全省略 `stepType`，即可只按名稱配對任何步驟。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'name',
+    type: 'string',
+    description: '要配對的步驟名稱（Tool 名稱、Agent ID、Workflow 步驟名稱等）。',
+    required: true,
+  },
+  {
+    name: 'stepType',
+    type: 'TrajectoryStepType',
+    description:
+      "步驟類型辨識欄位。設定後會啟用該 variant 欄位的自動完成功能。如省略，則配對具有指定名稱的任何步驟類型。",
+    isOptional: true,
+  },
+  {
+    name: '(variant fields)',
+    type: 'varies',
+    description:
+      '對應 TrajectoryStep variant 的類型專屬欄位。例如 `tool_call` 的 `toolArgs` 及 `toolResult`、`model_generation` 的 `modelId`、`workflow_step` 的 `output`。全部均為選填，只會比較已指定的欄位。',
+    isOptional: true,
+  },
+  {
+    name: 'children',
+    type: 'TrajectoryExpectation',
+    description:
+      "此步驟 children 的巢狀預期設定。評估此步驟的 children 時會覆寫上層設定。",
+    isOptional: true,
+  },
+]}
+/>
+
+### 簡單的預期步驟
+
+```typescript
+const steps: ExpectedStep[] = [
+  // Match by name only (any step type)
+  { name: 'search' },
+
+  // Match by name and step type (autocomplete for tool_call fields)
+  { name: 'search', stepType: 'tool_call' },
+
+  // Match with specific toolArgs (auto-compared when present)
+  { name: 'search', stepType: 'tool_call', toolArgs: { query: 'weather' } },
+
+  // Match a model generation step by model ID
+  { name: 'gpt-4o', stepType: 'model_generation', modelId: 'gpt-4o' },
+]
+```
+
+### 巢狀預期設定
+
+每個預期步驟都可包含具有獨立評估規則的 `children` 設定，讓你為階層中的每一層設定不同的排序或比較規則。
+
+```typescript
+const scorer = createTrajectoryScorerCode({
+  defaults: {
+    ordering: 'strict',
+    steps: [
+      { name: 'validate-input', stepType: 'workflow_step' },
+      {
+        name: 'research-agent',
+        stepType: 'agent_run',
+        children: {
+          // Sub-agent can call tools in any order
+          ordering: 'unordered',
+          steps: [
+            { name: 'search', stepType: 'tool_call' },
+            { name: 'summarize', stepType: 'tool_call' },
+          ],
+        },
+      },
+      { name: 'save-result', stepType: 'workflow_step' },
+    ],
+  },
+})
+```
+
+在此例中，上層 Workflow 要求步驟嚴格排序，但巢狀的 `research-agent` 允許其 Tool 呼叫以任何次序出現。
+
+## 選擇 scorer
+
+### 適合使用以程式碼為基礎的 scorer 的情況
+
+- 你需要**確定且可重現**的結果
+- 你有**已知的預期 trajectory** 可供比較
+- 你想驗證**精確的步驟次序**
+- 速度及成本是首要考慮（無需呼叫 LLM）
+- 你正在 CI/CD 中執行自動化測試
+
+### 適合使用以 LLM 為基礎的 scorer 的情況
+
+- 你需要從**語義層面理解**步驟是否恰當
+- 最佳 trajectory **並非預先決定**（按任務要求評估）
+- 你想偵測**不必要、重複或遺漏**的步驟
+- 你需要評分決定的**解釋**
+- 你正在評估**生產環境中的 Agent 行為**
+
+## 以程式碼為基礎的 trajectory accuracy scorer
+
+`@mastra/evals/scorers/prebuilt` 的 `createTrajectoryAccuracyScorerCode()` 函式會將步驟與預期 trajectory 配對並比較次序，從而提供確定性評分。
+
+### 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'expectedTrajectory',
+    type: 'Trajectory | ExpectedStep[]',
+    description:
+      '用於比較的靜態預期 trajectory。接受完整 Trajectory 或 ExpectedStep matcher 陣列。如省略，scorer 會在執行階段從每個 dataset 項目讀取 expectedTrajectory。',
+    isOptional: true,
+  },
+  {
+    name: 'comparisonOptions',
+    type: 'TrajectoryComparisonOptions',
+    description: '控制比較的執行方式。',
+    isOptional: true,
+    properties: [
+      {
+        name: 'strictOrder',
+        type: 'boolean',
+        description:
+          '要求 trajectory 完全配對（相同步驟、相同次序，而且沒有額外步驟）。設為 false 時，只要預期步驟依次出現，便允許額外步驟。',
+        isOptional: true,
+        defaultValue: 'false',
+      },
+      {
+        name: 'allowRepeatedSteps',
+        type: 'boolean',
+        description: '是否允許 trajectory 中出現重複步驟而不扣分。',
+        isOptional: true,
+        defaultValue: 'true',
+      },
+    ],
+  },
+]}
+/>
+
+此函式會傳回 MastraScorer class 的 instance。有關 `.run()` 方法及其輸入／輸出的詳情，請參閱 [MastraScorer 參考](./mastra-scorer)。
+
+### 預期 trajectory 的來源
+
+以程式碼為基礎的 scorer 會按優先次序從兩個來源解析 `expectedTrajectory`：
+
+1. **Constructor 選項**：建立 scorer 時傳入的靜態 trajectory，套用於所有 dataset 項目。
+1. **Dataset 項目**：dataset 項目上的 `expectedTrajectory` 欄位，經 `runEvals` pipeline 傳遞，讓每個項目可使用不同的預期 trajectory。
+
+```typescript title="src/static-expected.ts"
+// Static: same expected trajectory for all items
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'search' },
+      { stepType: 'tool_call', name: 'summarize' },
+    ],
+  },
+})
+```
+
+```typescript title="src/per-item-expected.ts"
+// Per-item: each dataset item has its own expectedTrajectory
+const scorer = createTrajectoryAccuracyScorerCode()
+
+await runEvals({
+  target: myAgent,
+  scorers: { trajectory: [scorer] },
+  data: [
+    {
+      input: 'Search and summarize weather',
+      expectedTrajectory: {
+        steps: [
+          { stepType: 'tool_call', name: 'search' },
+          { stepType: 'tool_call', name: 'summarize' },
+        ],
+      },
+    },
+    {
+      input: 'Just search for weather',
+      expectedTrajectory: {
+        steps: [{ stepType: 'tool_call', name: 'search' }],
+      },
+    },
+  ],
+})
+```
+
+### 評估模式
+
+以程式碼為基礎的 scorer 會按 `strictOrder` 以兩種模式運作：
+
+#### 嚴格模式（`strictOrder: true`）
+
+要求完全配對。實際步驟必須按相同次序與預期步驟配對，不得有額外或遺漏步驟。完全配對時傳回 `1.0`，否則傳回 `0.0`。
+
+#### 寬鬆模式（`strictOrder: false`，預設）
+
+允許額外步驟。預期步驟必須按正確的相對次序出現。分數按已配對的預期步驟數目計算，亦可就額外或重複步驟扣分。
+
+## 以程式碼為基礎的評分詳情
+
+- **連續分數**：寬鬆模式傳回 0.0 至 1.0 之間的值；嚴格模式傳回二元值（0 或 1）
+- **確定性**：相同輸入必定產生相同輸出
+- **快速**：無需呼叫外部 API
+
+### 以程式碼為基礎的 scorer 結果
+
+```typescript prettier:false
+{
+  runId: string,
+  preprocessStepResult: {
+    actualTrajectory: Trajectory,
+    expectedTrajectory: Trajectory,
+    comparison: {
+      score: number,
+      matchedSteps: number,
+      totalExpectedSteps: number,
+      totalActualSteps: number,
+      missingSteps: string[],
+      extraSteps: string[],
+      outOfOrderSteps: string[],
+      repeatedSteps: string[]
+    },
+    actualStepNames: string[],
+    expectedStepNames: string[]
+  },
+  score: number
+}
+```
+
+## 以程式碼為基礎的 scorer 範例
+
+### 採用嚴格排序的 Agent trajectory
+
+驗證 Agent 是否依照精確的 Tool 呼叫次序執行：
+
+```typescript title="src/example-strict-trajectory.ts"
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'auth-tool' },
+      { stepType: 'tool_call', name: 'fetch-tool' },
+    ],
+  },
+  comparisonOptions: { strictOrder: true },
+})
+
+const result = await runEvals({
+  target: myAgent,
+  scorers: { trajectory: [scorer] },
+  data: [{ input: 'Get my data' }],
+})
+
+console.log(result.scores.trajectory['trajectory-accuracy']) // 1.0
+```
+
+### 採用寬鬆排序的 Agent trajectory
+
+只要預期步驟按正確的相對次序出現，便允許額外步驟：
+
+```typescript title="src/example-relaxed-trajectory.ts"
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'search-tool' },
+      { stepType: 'tool_call', name: 'summarize-tool' },
+    ],
+  },
+  comparisonOptions: { strictOrder: false },
+})
+
+// Agent called search-tool → log-tool → summarize-tool
+// The extra log-tool is allowed in relaxed mode
+// score: 0.75 — all expected steps matched, small penalty for extra step
+```
+
+### Workflow trajectory
+
+評估 Workflow 的執行路徑：
+
+```typescript title="src/example-workflow-trajectory.ts"
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'workflow_step', name: 'validate-input' },
+      { stepType: 'workflow_step', name: 'process-data' },
+      { stepType: 'workflow_step', name: 'save-result' },
+    ],
+  },
+})
+
+const result = await runEvals({
+  target: myWorkflow,
+  scorers: { trajectory: [scorer] },
+  data: [{ input: { data: 'test' } }],
+})
+
+console.log(result.scores.trajectory['trajectory-accuracy'])
+```
+
+### 比較步驟資料
+
+驗證步驟名稱及步驟專屬資料。對於 Tool 呼叫，會比較 `toolArgs` 及 `toolResult`；對於 Workflow 步驟，則比較 `output`。
+
+```typescript title="src/example-trajectory-with-data.ts"
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      {
+        stepType: 'tool_call',
+        name: 'search-tool',
+        toolArgs: { query: 'weather in NYC' },
+      },
+    ],
+  },
+})
+// Data fields like toolArgs are auto-compared when present on expected steps
+```
+
+## 以 LLM 為基礎的 trajectory accuracy scorer
+
+`@mastra/evals/scorers/prebuilt` 的 `createTrajectoryAccuracyScorerLLM()` 函式使用 LLM，評估 Agent 或 Workflow 的 trajectory 是否合適、有效率且完整。
+
+### Parameters
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description: '用於評估 trajectory 質素的 LLM 模型。',
+    required: true,
+  },
+  {
+    name: 'expectedTrajectory',
+    type: 'Trajectory | ExpectedStep[]',
+    description:
+      '用於比較的選填靜態預期 trajectory。接受完整 Trajectory 或 ExpectedStep matcher 陣列。如省略，LLM 只會按任務要求評估 trajectory。亦可在執行階段由 dataset 項目提供。',
+    isOptional: true,
+  },
+]}
+/>
+
+### 功能
+
+以 LLM 為基礎的 scorer 提供：
+
+- **感知任務的評估**：按使用者要求判斷每個步驟是否必要
+- **次序評估**：評估步驟是否按合乎邏輯的次序執行
+- **遺漏步驟偵測**：識別本應執行的步驟
+- **重複偵測**：標示不必要或重複的步驟
+- **生成推理說明**：為評分決定提供易於理解的解釋
+
+### 評估流程
+
+1. **接收 trajectory**：從 pipeline 取得預先擷取的 `Trajectory` 物件
+1. **分析步驟**：使用 LLM 評估每個步驟的必要性及次序
+1. **生成分數**：按必要性 60%、次序 30% 的權重計分，再減去 10% 的遺漏懲罰
+1. **生成推理說明**：提供易於理解的解釋
+
+## 以 LLM 為基礎的評分詳情
+
+- **小數分數**：傳回 0.0 至 1.0 之間的值
+- **感知語境**：考慮使用者意圖及任務要求
+- **具解釋性**：提供評分的推理說明
+- **靈活**：無論有否預期 trajectory 均可運作
+
+### 以 LLM 為基礎的 scorer 選項
+
+```typescript
+// Evaluate based on task requirements (no expected trajectory)
+const openScorer = createTrajectoryAccuracyScorerLLM({
+  model: { provider: 'openai', name: 'gpt-5.4' },
+})
+
+// Evaluate against a static expected trajectory
+const guidedScorer = createTrajectoryAccuracyScorerLLM({
+  model: { provider: 'openai', name: 'gpt-5.4' },
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'search-tool' },
+      { stepType: 'tool_call', name: 'summarize-tool' },
+    ],
+  },
+})
+```
+
+### 以 LLM 為基礎的 scorer 結果
+
+```typescript prettier:false
+{
+  runId: string,
+  preprocessStepResult: {
+    actualTrajectory: Trajectory,
+    actualTrajectoryFormatted: string,
+    expectedTrajectoryFormatted?: string,
+    hasSteps: boolean
+  },
+  analyzeStepResult: {
+    stepEvaluations: Array<{
+      stepName: string,
+      wasNecessary: boolean,
+      wasInOrder: boolean,
+      reasoning: string
+    }>,
+    missingSteps?: string[],
+    extraSteps?: string[],
+    overallAssessment: string
+  },
+  score: number,
+  reason: string
+}
+```
+
+## 統一 trajectory scorer
+
+`@mastra/evals/scorers/prebuilt` 的 `createTrajectoryScorerCode()` 函式提供多維度 trajectory 評估，可在一次執行中檢查準確度、效率、列入黑名單的 Tool，以及 Tool 失敗模式。
+
+### Parameters
+
+<PropertiesTable
+  content={[
+  {
+    name: 'defaults',
+    type: 'TrajectoryExpectation',
+    description:
+      '套用至所有 dataset 項目的預設預期設定。各項目的 expectedTrajectory 值會覆寫這些預設值。',
+    isOptional: true,
+    properties: [
+      {
+        name: 'steps',
+        type: 'ExpectedStep[]',
+        description: '準確度評分的預期步驟。請參閱[預期步驟](#expected-steps)。',
+        isOptional: true,
+      },
+      {
+        name: 'ordering',
+        type: "'strict' | 'relaxed' | 'unordered'",
+        description:
+          "評估步驟次序的方式。'strict' 要求完全配對，'relaxed'（預設）允許額外步驟，'unordered' 只檢查是否存在。",
+        isOptional: true,
+        defaultValue: "'relaxed'",
+      },
+      {
+        name: 'allowRepeatedSteps',
+        type: 'boolean',
+        description: '是否允許重複步驟而不扣分。',
+        isOptional: true,
+        defaultValue: 'true',
+      },
+      {
+        name: 'maxSteps',
+        type: 'number',
+        description: '允許的步驟數目上限。超出此預算的步驟會降低效率分數。',
+        isOptional: true,
+      },
+      {
+        name: 'maxTotalTokens',
+        type: 'number',
+        description: '所有 model_generation 步驟的 token 總數上限。',
+        isOptional: true,
+      },
+      {
+        name: 'maxTotalDurationMs',
+        type: 'number',
+        description: '所有步驟的總時長上限。',
+        isOptional: true,
+      },
+      {
+        name: 'noRedundantCalls',
+        type: 'boolean',
+        description: '是否對重複呼叫（以相同引數呼叫相同 Tool）扣分。',
+        isOptional: true,
+        defaultValue: 'true',
+      },
+      {
+        name: 'blacklistedTools',
+        type: 'string[]',
+        description: '不得呼叫的 Tool。出現任何列入黑名單的 Tool 都會令分數變為 0。',
+        isOptional: true,
+      },
+      {
+        name: 'blacklistedSequences',
+        type: 'string[][]',
+        description:
+          '不得依次出現的 Tool 名稱序列。任何配對序列都會令分數變為 0。',
+        isOptional: true,
+      },
+      {
+        name: 'maxRetriesPerTool',
+        type: 'number',
+        description: '每個 Tool 在標示為失敗模式前的重試次數上限。',
+        isOptional: true,
+        defaultValue: '2',
+      },
+    ],
+  },
+  {
+    name: 'weights',
+    type: 'TrajectoryScoreWeights',
+    description: '用於組合各維度分數的自訂權重。權重會正規化至總和為 1.0。',
+    isOptional: true,
+    properties: [
+      {
+        name: 'accuracy',
+        type: 'number',
+        description: '準確度評分的權重。',
+        isOptional: true,
+        defaultValue: '0.4',
+      },
+      {
+        name: 'efficiency',
+        type: 'number',
+        description: '效率評分的權重。',
+        isOptional: true,
+        defaultValue: '0.3',
+      },
+      {
+        name: 'toolFailures',
+        type: 'number',
+        description: 'Tool 失敗分析的權重。',
+        isOptional: true,
+        defaultValue: '0.2',
+      },
+      {
+        name: 'blacklist',
+        type: 'number',
+        description: '黑名單評分的權重（沒有違規時）。',
+        isOptional: true,
+        defaultValue: '0.1',
+      },
+    ],
+  },
+]}
+/>
+
+### 評分行為
+
+統一 scorer 會評估四個維度：
+
+1. **準確度**：將實際步驟與預期步驟配對（如已設定 `steps`），並使用 `ordering` 模式。
+1. **效率**：檢查步驟預算（`maxSteps`、`maxTotalTokens`、`maxTotalDurationMs`）及重複呼叫（`noRedundantCalls`）。
+1. **黑名單**：檢查禁止的 Tool 或次序。任何違規均會立即令分數變為 **0.0**，不受其他維度影響。
+1. **Tool 失敗**：偵測重試及後備模式，亦會偵測引數修正模式。
+
+最終分數是各個已啟用維度的加權組合，並按實際啟用的維度正規化。預設權重為準確度 0.4、效率 0.3、Tool 失敗 0.2、黑名單 0.1；你可透過 `weights` 選項自訂。違反黑名單會凌駕所有其他結果，令分數變為 0。如有巢狀評估，分數由頂層的 70% 及巢狀平均值的 30% 組成。
+
+### 統一 scorer 結果
+
+```typescript prettier:false
+{
+  runId: string,
+  preprocessStepResult: {
+    accuracy?: TrajectoryComparisonResult,
+    efficiency?: TrajectoryEfficiencyResult,
+    blacklist?: TrajectoryBlacklistResult,
+    toolFailures?: ToolFailureAnalysisResult,
+    nested?: NestedEvaluationResult[],
+  },
+  score: number,
+  reason: string
+}
+```
+
+### 各項目的預期設定
+
+每個 dataset 項目都可使用本身的 `expectedTrajectory` 覆寫預設值，讓你按每個 prompt 設定不同預期：
+
+```typescript title="src/unified-per-item.ts"
+import { createTrajectoryScorerCode } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+
+// Default blacklist applies to all items
+const scorer = createTrajectoryScorerCode({
+  defaults: {
+    blacklistedTools: ['deleteAll'],
+    maxSteps: 5,
+  },
+})
+
+const result = await runEvals({
+  target: myAgent,
+  scorers: { trajectory: [scorer] },
+  data: [
+    {
+      input: 'Search for weather',
+      expectedTrajectory: {
+        steps: [{ stepType: 'tool_call', name: 'search' }],
+        maxSteps: 2,
+      },
+    },
+    {
+      input: 'Search and summarize',
+      expectedTrajectory: {
+        steps: [
+          { stepType: 'tool_call', name: 'search' },
+          { stepType: 'tool_call', name: 'summarize' },
+        ],
+      },
+    },
+  ],
+})
+```
+
+### 範例：效率及黑名單
+
+```typescript title="src/unified-scorer.ts"
+import { createTrajectoryScorerCode } from '@mastra/evals/scorers/prebuilt'
+
+const scorer = createTrajectoryScorerCode({
+  defaults: {
+    blacklistedTools: ['escalate', 'admin-override'],
+    blacklistedSequences: [['escalate', 'admin-override']],
+    maxSteps: 10,
+    noRedundantCalls: true,
+    maxRetriesPerTool: 2,
+  },
+  // Customize how dimensions contribute to the final score
+  weights: {
+    accuracy: 0.5, // prioritize step accuracy
+    efficiency: 0.3,
+    toolFailures: 0.1,
+    blacklist: 0.1,
+  },
+})
+```
+
+## 配合 `runEvals` 使用 trajectory scorer
+
+Trajectory scorer 在 scorer 設定的 `trajectory` key 下配置。`runEvals` pipeline 會自動處理 trajectory 擷取。
+
+### Agent trajectory 評估
+
+```typescript title="src/agent-trajectory-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt'
+
+const trajectoryScorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'search' },
+      { stepType: 'tool_call', name: 'format' },
+    ],
+  },
+})
+
+const result = await runEvals({
+  target: myAgent,
+  scorers: {
+    agent: [qualityScorer], // receives raw MastraDBMessage[] output
+    trajectory: [trajectoryScorer], // receives pre-extracted Trajectory
+  },
+  data: [{ input: 'Find and format the data' }],
+})
+
+// result.scores.agent['quality'] — agent-level score
+// result.scores.trajectory['trajectory-accuracy'] — trajectory score
+```
+
+### Workflow trajectory 評估
+
+```typescript title="src/workflow-trajectory-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt'
+
+const workflowTrajectoryScorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'workflow_step', name: 'validate' },
+      { stepType: 'workflow_step', name: 'process' },
+      { stepType: 'workflow_step', name: 'notify' },
+    ],
+  },
+})
+
+const result = await runEvals({
+  target: myWorkflow,
+  scorers: {
+    workflow: [outputScorer], // receives workflow output
+    trajectory: [workflowTrajectoryScorer], // receives pre-extracted Trajectory from step results
+  },
+  data: [{ input: { userId: '123' } }],
+})
+
+// result.scores.workflow['output-quality'] — workflow-level score
+// result.scores.trajectory['trajectory-accuracy'] — trajectory score
+```
+
+## 相關內容
+
+- [runEvals 參考](./run-evals)：擷取 trajectory 並傳送至 scorer 的 pipeline
+- [MastraScorer 參考](./mastra-scorer)：scorer 基礎介面
+- [Scorer 工具函式](./scorer-utils)：包括 `extractTrajectory` 及 `compareTrajectories` 的工具函式

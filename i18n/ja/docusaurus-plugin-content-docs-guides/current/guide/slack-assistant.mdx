@@ -1,0 +1,162 @@
+---
+title: "ガイド：Slack アシスタントの構築"
+description: Channel Adapter を使用して Slack のメッセージやメンションに応答する Mastra Agent を構築します。
+---
+
+# Slack アシスタントの構築
+
+このガイドでは、Slack のメッセージやメンションに応答する Mastra Agent を構築します。Channel Adapter の設定、適切な権限を持つ Slack アプリのセットアップ、webhook を介した Agent への接続、やり取りのテスト方法を説明します。
+
+## 前提条件
+
+- Node.js `v22.13.0` 以降がインストールされていること
+- サポートされている [Model Provider](/models) の API キー
+- 既存の Mastra プロジェクト。必要に応じて[インストールガイド](/guides/getting-started/quickstart)に従ってください。
+- アプリを作成できる [Slack Workspace](https://slack.com/)
+
+## Agent の作成
+
+Slack アダプターをインストールします。
+
+```bash npm2yarn
+npm install @chat-adapter/slack
+```
+
+新しいファイル `src/mastra/agents/slack-agent.ts` を作成し、Agent を定義します。
+
+```ts title="src/mastra/agents/slack-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createSlackAdapter } from '@chat-adapter/slack'
+
+export const slackAgent = new Agent({
+  id: 'slack-agent',
+  name: 'Slack Agent',
+  instructions:
+    'You are a helpful assistant. Answer questions, help with tasks, and have natural conversations.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_OPUS__',
+  channels: {
+    adapters: {
+      slack: createSlackAdapter(),
+    },
+  },
+})
+```
+
+`channels` プロパティは、各アダプターの webhook エンドポイントを生成するよう Mastra に指示します。この場合、Slack アダプターがイベント検証、署名検証、メッセージ整形を自動的に処理します。
+
+`src/mastra/index.ts` ファイルに Agent を登録します。
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+// highlight-next-line
+import { slackAgent } from './agents/slack-agent'
+
+export const mastra = new Mastra({
+  // highlight-next-line
+  agents: { slackAgent },
+})
+```
+
+## Slack app の作成
+
+Agent を Workspace に接続するには Slack アプリが必要です。
+
+[https://api.slack.com/apps](https://api.slack.com/apps) に移動し、**Create New App** > **From scratch** を選択します。名前を付け、Workspace を選択します。
+
+**OAuth & Permissions** に移動し、**Bot Token Scopes** までスクロールします。次のスコープを追加します。
+
+- `app_mentions:read`
+- `channels:history`
+- `channels:read`
+- `chat:write`
+- `users:read`
+
+**OAuth & Permissions** の上部で **Install to Workspace** を選択します。**Bot User OAuth Token**（`xoxb-...`）をコピーします。
+
+**Basic Information** > **App Credentials** に移動し、**Signing Secret**（例：`c3a4...`）をコピーします。
+
+**Settings** > **Socket Mode** で **Socket Mode** が **off** になっていることを確認します。
+
+認証情報を `.env` ファイルに追加します。
+
+```bash title=".env"
+SLACK_SIGNING_SECRET=your-signing-secret
+SLACK_BOT_TOKEN=xoxb-your-bot-token
+```
+
+アダプターはデフォルトでこれらの環境変数を読み取ります。詳しくは [Chat SDK Slack アダプターのドキュメント](https://chat-sdk.dev/adapters/slack)を参照してください。
+
+## Webhook の接続
+
+Slack は webhook を介して Agent にイベントを配信します。Mastra は channel アダプターごとにこのエンドポイントを自動生成します。
+
+開発サーバーを起動します。
+
+```bash npm2yarn
+npm run dev
+```
+
+ローカル開発では、Slack がローカルサーバーに到達するための公開 URL が必要です。新しいターミナルを開き、tunnel を起動します。
+
+```bash
+npx cloudflared tunnel --url http://localhost:4111
+```
+
+`https://triple-arms-solutions-kit.trycloudflare.com` のような一時的な公開 URL が出力されます。tunnel を再起動するたびに URL は変わります。
+
+Slack app の設定で **Event Subscriptions** に移動し、**Enable Events** を **On** に切り替えます。
+
+**Request URL** に、Agent の webhook path を追加した tunnel URL を設定します。
+
+```text
+https://<your-tunnel-url>/api/agents/slack-agent/channels/slack/webhook
+```
+
+Slack が検証リクエストを送信します。開発サーバーが起動していれば、緑色のチェックマークが表示されます。
+
+**Subscribe to bot events** で、次を追加します。
+
+- `app_mention`
+- `message.channels`
+
+**Save Changes** を選択します。イベントサブスクリプションを変更した後は、Slack アプリの再インストールが必要です。**OAuth & Permissions** に移動し、**Reinstall to Workspace** を選択して更新後の権限を適用します。
+
+:::note
+
+トンネル URL はローカル開発専用です。[アプリケーションをデプロイ](/docs/deployment/overview)したら、Slack アプリの **Event Subscriptions** にある **Request URL** を本番環境の URL（例：`https://your-app.example.com/api/agents/slack-agent/channels/slack/webhook`）に更新してください。
+
+:::
+
+## Agent のテスト
+
+Slack でテストする前に、[Studio](/docs/studio/overview) で Agent の動作を調整できます。[http://localhost:4111/](http://localhost:4111/) を開いて Agent とチャットし、指示を調整します。Trace を確認すると、応答がどのように生成されたかを把握できます。
+
+Agent の応答に問題がなければ、Slack 連携をテストします。Slack のチャンネルに bot を招待します。
+
+```text
+/invite @your-bot-name
+```
+
+チャンネルで bot をメンションします。
+
+```text
+@your-bot-name What can you help me with?
+```
+
+Agent はスレッド内で応答します。出力はモデルと指示によって異なる場合があります。
+
+## 次のステップ
+
+この Agent は次のように拡張できます。
+
+- [アプリケーションをデプロイ](/docs/deployment/overview)し、Slack の **Request URL** を本番環境のエンドポイントに更新する
+- 同じ Agent にアダプター（Discord、Telegram）を追加し、複数のプラットフォームで応答できるようにする
+- [マルチモーダルコンテンツ](/docs/capabilities/channels/overview#multimodal-content)を設定し、チャットで共有された画像、動画、音声を Agent が処理できるようにする
+- [Tool](/docs/agents/using-tools)を追加し、Agent から外部 API やデータにアクセスできるようにする
+
+関連情報：
+
+- [Channels の概要](/docs/capabilities/channels/overview)
+- [Studio](/docs/studio/overview)
+- [Deployment の概要](/docs/deployment/overview)
+- [Chat SDK アダプターのドキュメント](https://chat-sdk.dev)

@@ -24,12 +24,14 @@ interface SidebarDoc {
   type: 'doc'
   id: string
   label: string
+  key?: string
   customProps?: Record<string, unknown>
 }
 
 interface SidebarCategory {
   type: 'category'
   label: string
+  key?: string
   collapsed?: boolean
   customProps?: Record<string, unknown>
   items: SidebarItem[]
@@ -170,12 +172,16 @@ function serializeItem(item: SidebarItem, indent: number): string {
   if (isDoc(item)) {
     const idStr = `id: '${escapeJsString(item.id)}'`
     const labelStr = `label: '${escapeJsString(item.label)}'`
+    const keyStr = item.key ? `, key: '${escapeJsString(item.key)}'` : ''
     const customPropsStr = item.customProps ? `, customProps: ${JSON.stringify(item.customProps)}` : ''
-    const oneLine = `${pad}{ type: 'doc', ${idStr}, ${labelStr}${customPropsStr} },`
+    const oneLine = `${pad}{ type: 'doc', ${idStr}, ${labelStr}${keyStr}${customPropsStr} },`
     if (oneLine.length <= 100) {
       return oneLine
     }
     const parts = [`${pad}{`, `${innerPad}type: 'doc',`, `${innerPad}${idStr},`, `${innerPad}${labelStr},`]
+    if (item.key) {
+      parts.push(`${innerPad}key: '${escapeJsString(item.key)}',`)
+    }
     if (item.customProps) {
       parts.push(serializeCustomProps(item.customProps, indent + 2))
     }
@@ -189,6 +195,9 @@ function serializeItem(item: SidebarItem, indent: number): string {
   lines.push(`${pad}{`)
   lines.push(`${innerPad}type: 'category',`)
   lines.push(`${innerPad}label: '${escapeJsString(cat.label)}',`)
+  if (cat.key) {
+    lines.push(`${innerPad}key: '${escapeJsString(cat.key)}',`)
+  }
   if (cat.collapsed !== undefined) {
     lines.push(`${innerPad}collapsed: ${cat.collapsed},`)
   }
@@ -233,8 +242,8 @@ function formatLabels(labels: string[]): string {
   return labels.slice(0, 4).join(', ') + ', ..., ' + labels.slice(-2).join(', ')
 }
 
-const KNOWN_DOC_KEYS = new Set(['type', 'id', 'label', 'customProps'])
-const KNOWN_CATEGORY_KEYS = new Set(['type', 'label', 'collapsed', 'customProps', 'items'])
+const KNOWN_DOC_KEYS = new Set(['type', 'id', 'label', 'key', 'customProps'])
+const KNOWN_CATEGORY_KEYS = new Set(['type', 'label', 'key', 'collapsed', 'customProps', 'items'])
 
 /** Warn about item types that the script doesn't know how to sort/serialize. */
 function validateItemTypes(items: SidebarItem[], contextPath: string): SortError[] {

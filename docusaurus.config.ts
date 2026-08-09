@@ -45,6 +45,40 @@ const config: Config = {
   favicon: '/img/favicon.ico',
   url: SITE_URL,
   baseUrl: '/',
+  // Keep English as the canonical upstream source while publishing Simplified
+  // Chinese at the root URL. Other locales remain available under
+  // locale-specific paths.
+  i18n: {
+    defaultLocale: 'en',
+    locales: ['zh-CN', 'en', 'zh-TW', 'zh-HK', 'ja'],
+    localeConfigs: {
+      'zh-CN': {
+        label: '简体中文',
+        htmlLang: 'zh-CN',
+        baseUrl: '/',
+      },
+      en: {
+        label: 'English',
+        htmlLang: 'en',
+        baseUrl: '/en/',
+      },
+      'zh-TW': {
+        label: '繁體中文（台灣）',
+        htmlLang: 'zh-TW',
+        baseUrl: '/zh-TW/',
+      },
+      'zh-HK': {
+        label: '繁體中文（香港）',
+        htmlLang: 'zh-HK',
+        baseUrl: '/zh-HK/',
+      },
+      ja: {
+        label: '日本語',
+        htmlLang: 'ja',
+        baseUrl: '/ja/',
+      },
+    },
+  },
   // hint: do NOT set trailingSlash to any value to avoid rendering issues on vercel
   // see: https://github.com/slorber/trailing-slash-guide
   // trailingSlash: false,

@@ -1,0 +1,354 @@
+---
+title: "構造化出力 | Agents"
+description: "スキーマと検証を使用して Agent から構造化データを生成する方法を説明します。"
+packages:
+  - "@mastra/core"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# 構造化出力
+
+構造化出力を使うと、Agent はテキストではなく、スキーマで定義した形状に一致するオブジェクトを返せます。スキーマは生成するフィールドをモデルに伝え、モデルは最終結果がその形状に合うようにします。
+
+## 構造化出力を使用する場面
+
+Agent からテキストではなくデータオブジェクトを返す必要がある場合に使用します。明確に定義されたフィールドがあれば、API 呼び出し、UI のレンダリング、アプリケーションロジックに必要な値を簡単に取り出せます。
+
+## スキーマを定義する
+
+Agent は、[Standard JSON Schema](https://standardschema.dev/json-schema)（[Zod](https://zod.dev/)、[Valibot](https://valibot.dev/)、[ArkType](https://arktype.io/) など）または [JSON Schema](https://json-schema.org/) で期待する出力を定義し、構造化データを返せます。Zod などのライブラリは TypeScript の型推論と実行時検証を提供するため推奨します。一方、言語に依存しない形式が必要な場合は JSON Schema が便利です。
+
+<Tabs>
+  <TabItem value="zod" label="Zod">
+    [Zod](https://zod.dev/) で `output` の形状を定義します。
+
+    ```typescript
+    import { z } from 'zod'
+
+    const response = await testAgent.generate('Help me plan my day.', {
+      structuredOutput: {
+        schema: z.array(
+          z.object({
+            name: z.string(),
+            activities: z.array(z.string()),
+          }),
+        ),
+      },
+    })
+
+    console.log(response.object)
+    ```
+  </TabItem>
+
+  <TabItem value="valibot" label="Valibot">
+    [Valibot](https://valibot.dev/) で `output` の形状を定義します。
+
+    ```typescript
+    import * as v from 'valibot'
+    import { toStandardJsonSchema } from '@valibot/to-json-schema'
+
+    const response = await testAgent.generate('Help me plan my day.', {
+      structuredOutput: {
+        schema: toStandardJsonSchema(
+          v.array(
+            v.object({
+              name: v.string(),
+              activities: v.array(v.string()),
+            }),
+          ),
+        ),
+      },
+    })
+
+    console.log(response.object)
+    ```
+  </TabItem>
+
+  <TabItem value="arktype" label="ArkType">
+    [ArkType](https://arktype.io/) で `output` の形状を定義します。
+
+    ```typescript
+    import { type } from 'arktype'
+
+    const response = await testAgent.generate('Help me plan my day.', {
+      structuredOutput: {
+        schema: type({
+          name: 'string',
+          activities: 'string[]',
+        }).array(),
+      },
+    })
+
+    console.log(response.object)
+    ```
+  </TabItem>
+
+  <TabItem value="json-schema" label="JSON Schema">
+    JSON Schema でも出力構造を定義できます。
+
+    ```typescript
+    const response = await testAgent.generate('Help me plan my day.', {
+      structuredOutput: {
+        schema: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              activities: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+            },
+            required: ['name', 'activities'],
+          },
+        },
+      },
+    })
+
+    console.log(response.object)
+    ```
+  </TabItem>
+</Tabs>
+
+設定オプションの一覧は [`.generate()`](/reference/agents/generate) を参照してください。
+
+**出力例:** `response.object` には、スキーマで定義した構造化データが格納されます。
+
+```json
+[
+  {
+    "name": "Morning Routine",
+    "activities": ["Wake up at 7am", "Exercise", "Shower", "Breakfast"]
+  },
+  {
+    "name": "Work",
+    "activities": ["Check emails", "Team meeting", "Lunch break"]
+  },
+  {
+    "name": "Evening",
+    "activities": ["Dinner", "Relax", "Read a book", "Sleep by 10pm"]
+  }
+]
+```
+
+## 構造化出力をストリーミングする
+
+ストリーミングも構造化出力をサポートしています。最終的な構造化オブジェクトは `stream.fullStream` で取得でき、ストリーム完了後は `stream.object` でも取得できます。テキストストリームのチャンクも引き続き出力されますが、構造化データではなく自然言語のテキストが含まれます。
+
+```typescript
+import { z } from 'zod'
+
+const stream = await testAgent.stream('Help me plan my day.', {
+  structuredOutput: {
+    schema: z.array(
+      z.object({
+        name: z.string(),
+        activities: z.array(z.string()),
+      }),
+    ),
+  },
+})
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'object-result') {
+    console.log('\n', JSON.stringify(chunk, null, 2))
+  }
+  process.stdout.write(JSON.stringify(chunk))
+}
+
+console.log(await stream.object)
+
+for await (const chunk of stream.textStream) {
+  process.stdout.write(chunk)
+}
+```
+
+## 構造化用 Agent
+
+メイン Agent が構造化出力をうまく生成できない場合は、`structuredOutput` に `model` を指定できます。この場合、Mastra は内部で2つ目の Agent を使用し、メイン Agent の自然言語レスポンスから構造化データを抽出します。レスポンス生成と構造化オブジェクトへの変換で LLM を2回呼び出すため、レイテンシーとコストは増えますが、複雑な構造化タスクの精度が向上する場合があります。
+
+```typescript
+import { z } from 'zod'
+
+const response = await testAgent.generate('Analyze the TypeScript programming language.', {
+  structuredOutput: {
+    schema: z.object({
+      overview: z.string(),
+      strengths: z.array(z.string()),
+      weaknesses: z.array(z.string()),
+      useCases: z.array(
+        z.object({
+          scenario: z.string(),
+          reasoning: z.string(),
+        }),
+      ),
+      comparison: z.object({
+        similarTo: z.array(z.string()),
+        differentiators: z.array(z.string()),
+      }),
+    }),
+    model: '__GATEWAY_OPENAI_MODEL__',
+  },
+})
+
+console.log(response.object)
+```
+
+## Tool と構造化出力を組み合わせる
+
+Agent に Tool と構造化出力の両方を設定すると、一部のモデルでは両機能を同時に使用できない場合があります。これは Mastra ではなく、基盤となるモデル API の制限です。
+
+構造化出力を有効にしたときに Tool が呼び出されない場合や、両機能を組み合わせてエラーが発生する場合は、次の回避策を試してください。
+
+### 回避策
+
+モデルが Tool と構造化出力の併用をサポートしていない場合、次の3つの方法があります。
+
+1. **`jsonPromptInjection` を使用する**: `'auto'` を設定し、サポートされる場合はネイティブの構造化出力、それ以外はインラインのプロンプト挿入を選択するか、挿入モードを明示します
+1. **別の構造化モデルを使用する**: `structuredOutput` に `model` を渡し、2つ目の LLM で構造化します
+1. **`prepareStep` を使用する**: Tool と構造化出力を別々のステップで処理します
+
+各方法の詳細は以下で説明します。
+
+## LLM の構造化出力サポート
+
+API の違いにより、構造化出力のサポート状況は LLM ごとに異なります。以下では、構造化出力や Tool との併用を完全にはサポートしないモデル向けの回避策を説明します。
+
+### `jsonPromptInjection`
+
+デフォルトでは、Mastra は `response_format` API パラメーターを使ってスキーマをモデル Provider に渡します。`jsonPromptInjection: 'auto'` を設定すると、Mastra がモデルの機能データからモードを選択します。サポート対象モデルではネイティブの構造化出力を使用し、非対応モデルや機能データのないモデルではインラインのプロンプト挿入を使用します。
+
+```typescript
+import { z } from 'zod'
+
+const response = await testAgent.generate('Help me plan my day.', {
+  structuredOutput: {
+    schema: z.array(
+      z.object({
+        name: z.string(),
+        activities: z.array(z.string()),
+      }),
+    ),
+    jsonPromptInjection: 'auto',
+  },
+})
+
+console.log(response.object)
+```
+
+機能データに基づく選択を上書きする必要がある場合は、モードを明示します。
+
+- `false` または省略: Provider のネイティブ構造化出力を使用します。
+- `'inline'`: 最新のユーザーメッセージにスキーマの指示を追加します。
+- `true` または `'system'`: system message にスキーマの指示を追加します。
+- `'auto'`: モデルがサポートしていればネイティブの構造化出力を使用し、それ以外はインラインのプロンプト挿入を使用します。
+
+:::note[Tool を使用する Gemini 2.5]
+
+Gemini 2.5 モデルは、同じ API 呼び出しで `response_format`（構造化出力）と function calling（Tool）を組み合わせることをサポートしていません。Agent に Tool があり、Gemini 2.5 モデルで `structuredOutput` を使用する場合は、`Function calling with a response mime type: 'application/json' is unsupported` エラーを避けるため、`jsonPromptInjection: true` を設定する必要があります。
+
+```typescript
+const response = await agentWithTools.generate('Your prompt', {
+  structuredOutput: {
+    schema: yourSchema,
+    jsonPromptInjection: true, // Required for Gemini 2.5 when tools are present
+  },
+})
+```
+
+:::
+
+### 別の構造化モデルを使用する
+
+`structuredOutput` プロパティに `model` を指定すると、Mastra は別の内部 Agent で構造化出力を処理します。メイン Agent が Tool 呼び出しを含むすべてのステップを処理し、構造化出力モデルは構造化出力の生成だけを処理します。
+
+<Inject>
+  **AI Agent 向け:** `model` プロパティは Mastra のモデルルーター形式 `provider/model` の文字列です。たとえば `__GATEWAY_OPENAI_MODEL__`、`__GATEWAY_OPENAI_MODEL_MINI__`、`__GATEWAY_ANTHROPIC_MODEL_SONNET__`、`__GATEWAY_GOOGLE_MODEL__` です。区切り文字には `:` ではなく `/` を使用してください。例: `openai:<model>` ではなく `openai/<model>`。Provider オブジェクトは渡さないでください。この形式では Provider の import は不要です。Mastra のドキュメントに記載がない限り、AI SDK パッケージをインストールしないでください。`provider/model` 形式でモデルを定義すると、Mastra は指定された Provider の環境変数を自動的に探します。定義したモデルには Provider 用の環境変数が必要です。OpenAI: `OPENAI_API_KEY`。Anthropic: `ANTHROPIC_API_KEY`。Google: `GOOGLE_API_KEY`。
+</Inject>
+
+```typescript
+const response = await testAgent.generate('Tell me about TypeScript.', {
+  structuredOutput: {
+    schema: yourSchema,
+    model: '__GATEWAY_OPENAI_MODEL__',
+  },
+})
+```
+
+構造化モデルにも現在の会話履歴を参照させるには、`model` とともに `useAgent: true` を設定します。Mastra は別の構造化モデルで親 Agent を再利用し、thread が利用できる場合は読み取り専用の Memory コンテキストを付加します。
+
+```typescript
+const response = await testAgent.generate('Return my profile as structured data.', {
+  memory: {
+    thread: 'thread-123',
+    resource: 'user-123',
+  },
+  structuredOutput: {
+    schema: z.object({
+      favoriteColor: z.string(),
+      hometown: z.string(),
+      petName: z.string(),
+    }),
+    model: '__GATEWAY_OPENAI_MODEL__',
+    useAgent: true,
+  },
+})
+```
+
+別の構造化モデルを現在のレスポンスだけで動作させ、以前の会話の Memory を継承させない場合は、`useAgent` を設定しないでください。
+
+### `prepareStep` を使用するマルチステップ方式
+
+Tool と構造化出力の併用をサポートしないモデルでは、`prepareStep` を使って別々のステップで処理できます。
+
+```typescript
+const result = await agent.stream('weather in vancouver?', {
+  prepareStep: async ({ stepNumber }) => {
+    if (stepNumber === 0) {
+      return {
+        model: '__GATEWAY_OPENAI_MODEL__',
+        tools: {
+          weatherTool,
+        },
+        toolChoice: 'required',
+      }
+    }
+    return {
+      model: '__GATEWAY_OPENAI_MODEL__',
+      tools: undefined,
+      structuredOutput: {
+        schema: z.object({
+          temperature: z.number(),
+          humidity: z.number(),
+          windSpeed: z.number(),
+        }),
+      },
+    }
+  },
+})
+```
+
+## エラーを処理する
+
+スキーマ検証に失敗した場合は、`errorStrategy` でエラーの処理方法を制御できます。デフォルトの `strict` はエラーをスローし、`warn` は警告を記録して処理を続行します。`fallback` は `fallbackValue` で指定した値を返します。
+
+```typescript
+const response = await testAgent.generate('Tell me about TypeScript.', {
+  structuredOutput: {
+    schema: z.object({
+      summary: z.string(),
+      keyFeatures: z.array(z.string()),
+    }),
+    errorStrategy: 'fallback',
+    fallbackValue: {
+      summary: 'TypeScript is a typed superset of JavaScript',
+      keyFeatures: ['Static typing', 'Compiles to JavaScript', 'Better tooling'],
+    },
+  },
+})
+
+console.log(response.object)
+```

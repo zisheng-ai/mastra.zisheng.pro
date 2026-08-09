@@ -1,0 +1,320 @@
+---
+title: "參考：DatadogBridge | 可觀測性"
+description: 用於 Tracing 的 Datadog bridge
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+  - "@mastra/datadog"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# DatadogBridge
+
+:::warning
+
+Datadog Bridge 目前仍是**實驗性功能**。API 與設定選項可能在未來版本中變更。
+
+:::
+
+在 Mastra tracing 與 Datadog 之間啟用雙向整合。即時建立原生 `dd-trace` APM span，讓 Tool 與 processor 內經過自動檢測的操作，能正確巢狀置於其父 Mastra span 下。Span 結束時，會透過 `dd-trace` pipeline 產生 LLM Observability 資料。
+
+## 建構函式
+
+```typescript prettier:false
+new DatadogBridge(config?: DatadogBridgeConfig)
+```
+
+## `DatadogBridgeConfig`
+
+```typescript
+interface DatadogBridgeConfig extends BaseExporterConfig {
+  apiKey?: string
+  mlApp?: string
+  site?: string
+  service?: string
+  env?: string
+  agentless?: boolean
+  integrationsEnabled?: boolean
+  requestContextKeys?: string[]
+}
+```
+
+擴充 `BaseExporterConfig`，其中包括：
+
+- `logger?: IMastraLogger` - Logger 執行個體
+- `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'` - Log 層級（預設：INFO）
+
+<PropertiesTable
+  props={[
+  {
+    name: 'mlApp',
+    type: 'string',
+    description:
+      '用於將 LLM Observability trace 分組的 ML 應用程式名稱。若未設定 DD_LLMOBS_ML_APP，則為必填；否則會使用該環境變數。',
+    required: false,
+  },
+  {
+    name: 'apiKey',
+    type: 'string',
+    description: 'Datadog API key。只有啟用 agentless 模式時才需要。若未設定，則使用 DD_API_KEY 環境變數。',
+    required: false,
+  },
+  {
+    name: 'site',
+    type: 'string',
+    description:
+      "Datadog site（例如 'datadoghq.com'、'datadoghq.eu'、'us3.datadoghq.com'）。若未設定，則使用 DD_SITE 環境變數。預設：'datadoghq.com'。",
+    required: false,
+  },
+  {
+    name: 'service',
+    type: 'string',
+    description: '應用程式的服務名稱。預設使用 mlApp 值。',
+    required: false,
+  },
+  {
+    name: 'env',
+    type: 'string',
+    description: "環境名稱（例如 'production'、'staging'）。若未設定，則使用 DD_ENV 環境變數。",
+    required: false,
+  },
+  {
+    name: 'agentless',
+    type: 'boolean',
+    description:
+      '使用直接 HTTPS 接收端（true）或本機 Datadog Agent（false）。預設：false。多數 bridge 使用者應保留 false，因為 dd-trace APM 資料一律透過 Agent 路由。',
+    required: false,
+  },
+  {
+    name: 'integrationsEnabled',
+    type: 'boolean',
+    description:
+      '啟用 dd-trace 自動整合（HTTP、資料庫等）。預設：true。Bridge 預設啟用此選項，因為 APM context 傳播仰賴自動檢測。',
+    required: false,
+  },
+  {
+    name: 'requestContextKeys',
+    type: 'string[]',
+    description:
+      '從請求 context 或 span 屬性中提升為扁平、可搜尋之 LLM Observability 標籤的 key（例如 tenantId、agentId）。已提升的 key 會從 annotations.metadata 移除。',
+    required: false,
+  },
+]}
+/>
+
+## 方法
+
+### `createSpan`
+
+```typescript prettier:false
+createSpan(options: CreateSpanOptions<SpanType>): SpanIds | undefined
+```
+
+由 Mastra 可觀測性執行個體在建構 span 期間呼叫。透過 `tracer.startSpan()` 立即建立 dd-trace APM span，並傳回與 Mastra 相容的識別碼。傳回的 ID 會由 Mastra 在 span 的整個生命週期中使用。dd-trace span 物件會儲存於內部，供 scope 啟用使用。
+
+**傳回：**`SpanIds | undefined` - `{ spanId, traceId, parentSpanId }`；若 bridge 已停用，則為 `undefined`。
+
+### `executeInContext`
+
+```typescript prettier:false
+executeInContext<T>(spanId: string, fn: () => Promise<T>): Promise<T>
+```
+
+在 Mastra span 的 dd-trace context 中執行非同步函式。在函式內執行且經 dd-trace 自動檢測的操作（HTTP、資料庫等），會以此 span 為父層。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'spanId',
+    type: 'string',
+    description: '要作為 context 使用的 Mastra span ID',
+    required: true,
+  },
+  {
+    name: 'fn',
+    type: '() => Promise<T>',
+    description: '要在 span context 中執行的非同步函式',
+    required: true,
+  },
+]}
+/>
+
+**傳回：**`Promise<T>` - 函式執行結果。
+
+### `executeInContextSync`
+
+```typescript prettier:false
+executeInContextSync<T>(spanId: string, fn: () => T): T
+```
+
+在 Mastra span 的 dd-trace context 中執行同步函式。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'spanId',
+    type: 'string',
+    description: '要作為 context 使用的 Mastra span ID',
+    required: true,
+  },
+  {
+    name: 'fn',
+    type: '() => T',
+    description: '要在 span context 中執行的同步函式',
+    required: true,
+  },
+]}
+/>
+
+**傳回：**`T` - 函式執行結果。
+
+### `flush`
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+強制將所有緩衝的 LLM Observability 資料 flush 至 Datadog，而不關閉 bridge。這在 serverless 環境中特別實用，可確保 runtime 結束前已匯出資料。
+
+### `shutdown`
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+強制結束所有未正確關閉的 APM span、flush 待處理的 LLM Observability 資料、停用 LLM Observability 整合，並清除所有內部狀態。
+
+## 使用範例
+
+### 基本使用方式
+
+```typescript
+import tracer from 'dd-trace'
+
+tracer.init({
+  service: process.env.DD_SERVICE || 'my-mastra-app',
+  env: process.env.DD_ENV || 'production',
+})
+
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { DatadogBridge } from '@mastra/datadog'
+
+const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-mastra-app',
+        bridge: new DatadogBridge({
+          mlApp: process.env.DD_LLMOBS_ML_APP!,
+        }),
+      },
+    },
+  }),
+  agents: { myAgent },
+})
+```
+
+### Agentless 模式（僅 LLM Observability，無本機 Agent）
+
+如果您沒有本機 Datadog Agent，且只需要 LLM Observability 資料，請啟用 agentless 模式：
+
+```typescript
+new DatadogBridge({
+  mlApp: process.env.DD_LLMOBS_ML_APP!,
+  apiKey: process.env.DD_API_KEY!,
+  agentless: true,
+})
+```
+
+注意：Agentless 模式無法傳送 APM 資料。如果只需要 LLM Observability 資料，不需要 `dd-trace` APM，使用 [Datadog Exporter](/reference/observability/tracing/exporters/datadog) 會更簡單。
+
+### 搭配其他 Exporter
+
+Bridge 可與非 Datadog exporter 搭配使用，將 trace 傳送至其他目的地：
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+import { DatadogBridge } from '@mastra/datadog'
+
+const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-mastra-app',
+        bridge: new DatadogBridge({
+          mlApp: process.env.DD_LLMOBS_ML_APP!,
+        }),
+        exporters: [
+          new MastraStorageExporter(), // Studio access
+        ],
+      },
+    },
+  }),
+})
+```
+
+:::note
+請勿在同一設定中結合 `DatadogBridge` 與 `DatadogExporter`。兩者都會將資料送至 LLM Observability，因而重複寫入相同資料。
+:::
+
+## 設定需求
+
+DatadogBridge 要求在任何其他 import 之前初始化 `dd-trace`，讓自動檢測能在載入時修補 HTTP、資料庫與 framework library。
+
+如需完整設定說明，包括 dd-trace 初始化、bundler external 與 Agent 設定，請參閱 [DatadogBridge 指南](/docs/observability/integrations/bridges/datadog#configuration)。
+
+## Span 對應
+
+Mastra span 類型會對應至 Datadog LLM Observability span kind：
+
+| Mastra SpanType | Datadog 種類 |
+| - | - |
+| `AGENT_RUN` | `agent` |
+| `MODEL_GENERATION` | `workflow` |
+| `MODEL_STEP` | `llm` |
+| `TOOL_CALL` | `tool` |
+| `MCP_TOOL_CALL` | `tool` |
+| `WORKFLOW_RUN` | `workflow` |
+| 所有其他類型 | `task` |
+
+## 標籤支援
+
+`tracingOptions.tags` 值會成為結構化的 LLM Observability annotation 標籤：`key:value` 項目會拆分成 key/value 配對，而不含冒號的標籤會設為 `true`。
+
+```typescript
+const result = await agent.generate('Hello', {
+  tracingOptions: {
+    tags: ['production', 'instance_name:career-scout-api'],
+  },
+})
+```
+
+這會產生：
+
+```json
+{
+  "production": true,
+  "instance_name": "career-scout-api"
+}
+```
+
+## 環境變數
+
+Bridge 會從下列環境變數讀取設定：
+
+| 變數 | 說明 |
+| - | - |
+| `DD_API_KEY` | Datadog API key（只有 agentless 模式需要） |
+| `DD_LLMOBS_ML_APP` | ML 應用程式名稱 |
+| `DD_SITE` | Datadog site |
+| `DD_ENV` | 環境名稱 |
+| `DD_LLMOBS_AGENTLESS_ENABLED` | 設為 `'true'` 或 `'1'` 以啟用 agentless 模式 |
+
+## 相關內容
+
+- [DatadogBridge 指南](/docs/observability/integrations/bridges/datadog) - 含範例的設定指南
+- [Tracing 概覽](/docs/observability/tracing/overview) - 一般 tracing 概念
+- [DatadogExporter 參考](/reference/observability/tracing/exporters/datadog) - 僅 LLM Observability，不含 `dd-trace` APM

@@ -1,0 +1,162 @@
+---
+title: "閘門與判定結果 | Evals"
+description: "為 Eval 執行定義必要要求與品質臨界值，並計算通過／失敗判定結果。"
+packages:
+  - "@mastra/core"
+---
+
+# 閘門與判定結果
+
+閘門與判定結果會為 `runEvals` 加入嚴重程度語意。閘門是分數必須達到 1.0 的評分器，代表會阻止執行通過的必要要求。臨界值則是受追蹤指標可接受的最低分數。判定結果會將結果彙整為 `passed`、`scored` 或 `failed`。
+
+## 閘門與判定結果的適用時機
+
+- 在 CI 中強制執行必要要求（例如「Agent 必須呼叫正確的 Tool」）
+- 使用最低臨界值追蹤品質指標（例如「忠實度高於 0.7」）
+- 無須撰寫自訂斷言邏輯，即可從 Eval 執行取得單一判定訊號（`passed`、`scored` 或 `failed`）
+- 將「必須通過」的閘門與「最好達成」的追蹤指標分開
+
+## 快速入門
+
+```typescript title="src/evals/weather-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { weatherAgent } from '../agents'
+import { faithfulnessScorer } from '../scorers'
+
+const result = await runEvals({
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  target: weatherAgent,
+
+  // Gates: must all score 1.0 or the run fails
+  gates: [checks.calledTool('get_weather'), checks.noToolErrors()],
+
+  // Scorers: tracked with optional thresholds
+  scorers: [
+    { scorer: faithfulnessScorer, threshold: 0.7 },
+    checks.includes('Brooklyn'), // no threshold = tracked only
+  ],
+})
+
+console.log(result.verdict) // 'passed' | 'scored' | 'failed'
+```
+
+## 判定結果的運作方式
+
+處理完所有資料項目後，系統會依閘門與臨界值計算判定結果：
+
+- `failed`：至少一個閘門在所有資料項目中的平均分數低於 1.0
+- `scored`：所有閘門皆通過，但至少一個設定臨界值的評分器未達臨界值
+- `passed`：所有閘門皆得到 1.0，且所有臨界值皆已達成
+
+若未提供閘門或設定臨界值的評分器，系統會省略判定結果欄位，而 `runEvals` 的行為會與先前完全相同。
+
+## 閘門
+
+閘門是透過 `gates` 欄位傳入的評分器。在每個資料項目中，它們會先於一般評分器執行。閘門必須在所有資料項目中取得 1.0 的平均分數，才算通過。
+
+```typescript title="src/evals/tool-gate.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+
+const result = await runEvals({
+  data: [{ input: 'What is the weather?' }],
+  target: weatherAgent,
+  gates: [checks.calledTool('get_weather')],
+  scorers: [qualityScorer],
+})
+
+// result.gateResults: [{ id: 'check-called-tool', passed: true, score: 1 }]
+```
+
+任何評分器都能作為閘門。Quick Checks 會傳回二元的 1／0 分數，因此很適合這項用途。請參閱 [`runEvals()` 參考](/reference/evals/run-evals)，了解完整的參數與傳回型別文件。
+
+### 僅執行閘門
+
+只要提供至少一個閘門，`scorers` 就是選填欄位。這適合只在意閘門通過／失敗、不需要追蹤任何品質指標的確定性 CI 檢查。
+
+```typescript title="src/evals/gate-only.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+
+const result = await runEvals({
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  target: weatherAgent,
+  gates: [checks.calledTool('get_weather'), checks.noToolErrors()],
+})
+```
+
+你必須提供至少一個評分器或閘門；若兩者皆未提供，執行時會擲回錯誤。
+
+## 臨界值
+
+將評分器包裝在 `{ scorer, threshold }` 中，即可設定通過／失敗界線。系統會將臨界值與評分器在所有資料項目中的平均分數比較。
+
+`threshold` 可以是：
+
+- **數字**：代表最低值（分數等於或高於該值即通過）：`{ scorer, threshold: 0.7 }`
+- **含有 `min` 和／或 `max` 的物件**：用於範圍式檢查：`{ scorer, threshold: { max: 0.3 } }`
+
+對分數越高表示越差的評分器（例如幻覺、毒性），請使用 `max`。若分數應落在特定區間內，請使用 `{ min, max }`。
+
+```typescript title="src/evals/threshold-example.ts"
+import { runEvals } from '@mastra/core/evals'
+
+const result = await runEvals({
+  data: [{ input: 'Explain quantum computing' }],
+  target: myAgent,
+  scorers: [
+    { scorer: faithfulnessScorer, threshold: 0.7 }, // min threshold (number shorthand)
+    { scorer: hallucinationScorer, threshold: { max: 0.3 } }, // max threshold — high score = bad
+    { scorer: verbosityScorer, threshold: { min: 0.3, max: 0.8 } }, // range threshold
+    toneScorer, // bare scorer, no threshold — tracked only
+  ],
+})
+
+// result.thresholdResults:
+// [
+//   { id: 'faithfulness', passed: true, averageScore: 0.85, threshold: 0.7 },
+//   { id: 'hallucination', passed: true, averageScore: 0.1, threshold: { max: 0.3 } },
+//   { id: 'verbosity', passed: false, averageScore: 0.9, threshold: { min: 0.3, max: 0.8 } },
+// ]
+```
+
+未設定臨界值的評分器仍會出現在 `result.scores` 中，但不會影響判定結果。
+
+## 在 CI 中使用判定結果
+
+判定結果可為 CI 管線提供單一訊號：
+
+```typescript title="src/evals/ci-check.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+
+const result = await runEvals({
+  data: testDataset,
+  target: myAgent,
+  gates: [checks.calledTool('search'), checks.noToolErrors()],
+  scorers: [{ scorer: faithfulnessScorer, threshold: 0.7 }],
+})
+
+if (result.verdict === 'failed') {
+  console.error(
+    'Gate failures:',
+    result.gateResults?.filter(g => !g.passed),
+  )
+  process.exit(1)
+}
+
+if (result.verdict === 'scored') {
+  console.warn(
+    'Threshold misses:',
+    result.thresholdResults?.filter(t => !t.passed),
+  )
+}
+```
+
+## 相關資源
+
+- [Quick Checks](/docs/evals/quick-checks)：不使用 LLM、很適合作為閘門的微型評分器
+- [`runEvals()` 參考](/reference/evals/run-evals)：完整 API 文件
+- [內建評分器](/docs/evals/built-in-scorers)：LLM 與程式碼式評分器
+- [在 CI 中執行 Evals](/docs/evals/running-in-ci)：CI 整合模式

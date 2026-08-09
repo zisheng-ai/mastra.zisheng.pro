@@ -1,0 +1,429 @@
+---
+title: "參考：Workflows API | Client SDK"
+description: 瞭解如何使用 client-js SDK 與 Mastra 中的自動化 Workflow 互動並執行它們。
+packages:
+  - "@mastra/client-js"
+---
+
+# Workflows API
+
+Workflows API 提供用於與 Mastra 中的自動化 Workflow 互動並執行它們的方法。
+
+## 取得所有 Workflow
+
+取得所有可用 Workflow 的清單：
+
+```typescript
+const workflows = await mastraClient.listWorkflows()
+```
+
+## 取得 Workflow run 數量
+
+透過單一請求取得每個 Workflow 的 `running` 和 [`suspended`](/docs/workflows/suspend-and-resume) run 數量。數量在伺服器上計算，並以 Workflow 的 registry 鍵為鍵。該鍵是指在 Mastra 設定中註冊 Workflow 時使用的鍵，可能與 Workflow 自身的 `id` 不同：
+
+```typescript
+const runCounts = await mastraClient.listWorkflowRunCounts()
+// { "cityWorkflow": { running: 2, suspended: 1 }, ... }
+```
+
+傳回：`Record<string, { running: number; suspended: number }>`
+
+伺服器可能會在兩次請求之間快取數量數秒。早於此 endpoint 的伺服器會回應 `404 Not Found`；當使用者端可能與較舊部署通訊時，請處理此錯誤。
+
+## 使用特定 Workflow
+
+透過 ID 取得特定 Workflow 的實例：
+
+```typescript title="src/mastra/workflows/test-workflow.ts"
+export const testWorkflow = createWorkflow({
+  id: 'city-workflow',
+})
+```
+
+```typescript
+const workflow = mastraClient.getWorkflow('city-workflow')
+```
+
+## Workflow 方法
+
+### `details()`
+
+取得 Workflow 的詳細資訊：
+
+```typescript
+const details = await workflow.details()
+```
+
+### `createRun()`
+
+建立新的 Workflow run 實例：
+
+```typescript
+const run = await workflow.createRun()
+
+// Or with an existing runId
+const run = await workflow.createRun({ runId: 'existing-run-id' })
+
+// Or with a resourceId to associate the run with a specific resource
+const run = await workflow.createRun({
+  runId: 'my-run-id',
+  resourceId: 'user-123',
+})
+```
+
+`resourceId` 參數將 Workflow run 與特定資源（例如使用者 ID、租戶 ID）關聯。此值會隨 run 一起持久儲存，之後可用於篩選和查詢 run。
+
+### `startAsync()`
+
+啟動 Workflow run 並等待其完成，將完整結果作為 Workflow 輸出傳回。
+
+```typescript
+const run = await workflow.createRun()
+
+const result = await run.startAsync({
+  inputData: {
+    city: 'New York',
+  },
+})
+```
+
+你也可以傳入 `initialState` 來設定 Workflow state 的初始值：
+
+```typescript
+const result = await run.startAsync({
+  inputData: {
+    city: 'New York',
+  },
+  initialState: {
+    count: 0,
+    items: [],
+  },
+})
+```
+
+`initialState` 物件應與 Workflow `stateSchema` 中定義的結構相符。更多詳情請參閱 [Workflow State](/docs/workflows/workflow-state)。
+
+要將 run 與特定資源關聯，請向 `createRun()` 傳入 `resourceId`：
+
+```typescript
+const run = await workflow.createRun({ resourceId: 'user-123' })
+
+const result = await run.startAsync({
+  inputData: {
+    city: 'New York',
+  },
+})
+```
+
+### `start()`
+
+啟動 Workflow run 而不等待其完成（觸發後即不再等待）。它會立即傳回成功訊息。之後可在 Workflow 實例上使用 `runById()` 檢查結果：
+
+```typescript
+const run = await workflow.createRun()
+
+await run.start({
+  inputData: {
+    city: 'New York',
+  },
+})
+
+// Poll for results later
+const result = await workflow.runById(run.runId)
+```
+
+這適用於需要啟動執行並在之後檢查結果的長時間執行 Workflow。
+
+### `resumeAsync()`
+
+復原暫停的 Workflow 步驟並等待完整結果：
+
+```typescript
+const run = await workflow.createRun({ runId: prevRunId })
+
+const result = await run.resumeAsync({
+  step: 'step-id',
+  resumeData: { key: 'value' },
+})
+```
+
+### `resume()`
+
+復原暫停的 Workflow 步驟而不等待其完成：
+
+```typescript
+const run = await workflow.createRun({ runId: prevRunId })
+
+await run.resume({
+  step: 'step-id',
+  resumeData: { key: 'value' },
+})
+```
+
+當 [`.foreach()`](/reference/workflows/workflow-methods/foreach) 步驟跨多個迭代暫停時，傳入 `forEachIndex`（從零開始；`0` 對應第一次迭代），一次復原一個迭代。未指定的迭代會保持暫停狀態。
+
+```typescript
+await run.resume({
+  step: 'approve',
+  resumeData: { ok: true },
+  forEachIndex: 1, // resumes the second iteration
+})
+```
+
+`resumeAsync()` 和 `resumeStream()` 也支援 `forEachIndex`。
+
+### `cancel()`
+
+取消正在執行的 Workflow：
+
+```typescript
+const run = await workflow.createRun({ runId: existingRunId })
+
+const result = await run.cancel()
+// Returns: { message: 'Workflow run canceled' }
+```
+
+此方法會停止所有正在執行的步驟，並阻止後續步驟執行。檢查 `abortSignal` 參數的步驟可以透過清理資源（逾時、網路請求等）來回應取消操作。
+
+有關取消的工作原理以及如何編寫回應取消操作的步驟，請參閱 [Run.cancel()](/reference/workflows/run-methods/cancel) 參考。
+
+### `stream()`
+
+串流傳輸 Workflow 執行以取得即時更新：
+
+```typescript
+const run = await workflow.createRun()
+
+const stream = await run.stream({
+  inputData: {
+    city: 'New York',
+  },
+})
+
+for await (const chunk of stream) {
+  console.log(JSON.stringify(chunk, null, 2))
+}
+```
+
+### `runById()`
+
+取得 Workflow run 的執行結果：
+
+```typescript
+const result = await workflow.runById(runId)
+
+// Or with options for performance optimization:
+const result = await workflow.runById(runId, {
+  fields: ['status', 'result'], // Only fetch specific fields
+  withNestedWorkflows: false, // Skip expensive nested workflow data
+  requestContext: { userId: 'user-123' }, // Optional request context
+})
+```
+
+<h3>Run 結果格式</h3>
+
+Workflow run 結果包含以下內容：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'runId',
+    type: 'string',
+    description: '此 Workflow run 實例的唯一識別碼',
+  },
+  {
+    name: 'eventTimestamp',
+    type: 'Date',
+    description: '事件的時間戳記',
+  },
+  {
+    name: 'payload',
+    type: 'object',
+    description: '包含 currentStep（id、status、output、payload）和 workflowState（status、steps 記錄）',
+  },
+]}
+/>
+
+## 動態 Workflow
+
+:::experimental
+
+動態 Workflow 處於 beta 階段。在 API 穩定之前，可能會發生不伴隨主版本升級的破壞性變更。
+
+:::
+
+動態 Workflow 是以 JSON 表示的 Workflow 定義。伺服器會持久儲存每個定義，並將其註冊為可執行的 Workflow。有關定義格式，請參閱[動態 Workflow](/docs/workflows/dynamic-workflows)。
+
+### `listDynamicWorkflows()`
+
+列出動態 Workflow 定義，並選擇依 `status`（`'active' | 'archived'`）和 `authorId` 篩選：
+
+```typescript
+const { definitions, total } = await mastraClient.listDynamicWorkflows({
+  status: 'active',
+})
+```
+
+### `upsertDynamicWorkflow()`
+
+建立或替換動態 Workflow 定義。伺服器會驗證並持久儲存定義，然後即時註冊它以供執行：
+
+```typescript
+const stored = await mastraClient.upsertDynamicWorkflow({
+  id: 'greeting-workflow',
+  description: 'Returns a greeting for the supplied name',
+  inputSchema: {
+    type: 'object',
+    properties: { name: { type: 'string' } },
+    required: ['name'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: { message: { type: 'string' } },
+    required: ['message'],
+  },
+  graph: [
+    {
+      type: 'mapping',
+      id: 'create-greeting',
+      mapConfig: JSON.stringify({
+        message: { template: 'Hello, ${initData.name}!' },
+      }),
+    },
+  ],
+})
+```
+
+當根定義巢狀了尚不存在的輔助 Workflow 時，請透過 `dependencies` 在同一請求中傳入這些 Workflow。伺服器會將整個 bundle 作為一個單元進行驗證和註冊，並透過 `dependencyIds` 回傳輔助 Workflow 的 ID：
+
+```typescript
+const stored = await mastraClient.upsertDynamicWorkflow({
+  id: 'root-workflow',
+  // ...schemas and graph referencing 'helper-workflow'...
+  dependencies: [helperDefinition],
+})
+
+console.log(stored.dependencyIds) // ['helper-workflow']
+```
+
+### `getDynamicWorkflow()`
+
+取得用於定義管理的動態 Workflow 實例。要執行動態 Workflow，請像處理其他 Workflow 一樣使用 `getWorkflow(id).createRun()`：
+
+```typescript
+const dynamicWorkflow = mastraClient.getDynamicWorkflow('greeting-workflow')
+```
+
+### `dynamicWorkflow.details()`
+
+取得持久儲存的定義，包括 schema、graph、狀態和時間戳記：
+
+```typescript
+const definition = await dynamicWorkflow.details()
+```
+
+### `dynamicWorkflow.delete()`
+
+刪除儲存的定義並註銷即時 Workflow：
+
+```typescript
+await dynamicWorkflow.delete()
+```
+
+### 執行動態 Workflow
+
+註冊後，動態 Workflow 將透過常規 Workflow API 執行：
+
+```typescript
+const workflow = mastraClient.getWorkflow('greeting-workflow')
+const run = await workflow.createRun()
+const result = await run.startAsync({ inputData: { name: 'Ada' } })
+```
+
+## 排程
+
+排程透過 `createWorkflow` 上的 `schedule` 欄位在程式碼中宣告。client SDK 提供讀取和操作方法，用於在執行階段管理 Workflow 排程。請參閱[排程的 Workflow](/docs/workflows/scheduled-workflows)。
+
+### `createSchedule()`
+
+透過傳入 `workflowId` 建立 Workflow 排程。
+
+```typescript
+const schedule = await mastraClient.createSchedule({
+  workflowId: 'daily-report',
+  cron: '0 9 * * *',
+  inputData: { reportType: 'summary' },
+})
+```
+
+### `listSchedules()`
+
+列出 Workflow 排程，並選擇依 Workflow ID 或狀態篩選。
+
+```typescript
+const schedules = await mastraClient.listSchedules({
+  workflowId: 'daily-report',
+  status: 'active',
+})
+```
+
+### `getSchedule()`
+
+依 ID 取得單一 Workflow 排程。
+
+```typescript
+const schedule = await mastraClient.getSchedule('daily-report')
+```
+
+### `updateSchedule()`
+
+更新 Workflow 排程。
+
+```typescript
+const updated = await mastraClient.updateSchedule('daily-report', {
+  cron: '0 10 * * *',
+  inputData: { reportType: 'summary' },
+})
+```
+
+### `deleteSchedule()`
+
+刪除 Workflow 排程。
+
+```typescript
+await mastraClient.deleteSchedule('daily-report')
+```
+
+### `runSchedule()`
+
+立即觸發一次 Workflow 排程，而不變更其 cron 週期。
+
+```typescript
+const run = await mastraClient.runSchedule('daily-report')
+```
+
+### `pauseSchedule()`
+
+暫停排程，使排程器停止觸發它。傳回更新後的排程。
+
+```typescript
+await mastraClient.pauseSchedule('daily-report')
+```
+
+### `resumeSchedule()`
+
+復原暫停的排程。下一次觸發時間將從目前時間重新計算，因此暫停很久的排程不會觸發積壓任務。傳回更新後的排程。
+
+```typescript
+await mastraClient.resumeSchedule('daily-report')
+```
+
+### `listScheduleTriggers()`
+
+列出 Workflow 排程的觸發歷史記錄，包括每次觸發所關聯的 run 摘要。
+
+```typescript
+const { triggers } = await mastraClient.listScheduleTriggers('daily-report', {
+  limit: 50,
+})
+```

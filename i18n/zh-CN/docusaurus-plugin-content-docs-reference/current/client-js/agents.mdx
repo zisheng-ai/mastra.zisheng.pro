@@ -1,0 +1,1024 @@
+---
+title: "参考：Agents API | Client SDK"
+description: 了解如何使用 client-js SDK 与 Mastra AI Agent 交互，包括生成响应、流式交互和管理 Agent Tool。
+packages:
+  - "@mastra/ai-sdk"
+  - "@mastra/client-js"
+  - "@mastra/core"
+---
+
+# Agents API
+
+Agents API 提供与 Mastra AI Agent 交互的方法，包括生成响应和流式交互。它还提供管理 Agent Tool 的方法。
+
+## 获取所有 Agent
+
+检索所有可用 Agent 的列表：
+
+```typescript
+const agents = await mastraClient.listAgents()
+```
+
+返回从 Agent ID 到其序列化 Agent 配置的记录。
+
+## 使用特定 Agent
+
+通过 ID 获取特定 Agent 的实例：
+
+```typescript title="src/mastra/agents/my-agent.ts"
+export const myAgent = new Agent({
+  id: 'my-agent',
+})
+```
+
+```typescript
+const agent = mastraClient.getAgent('my-agent')
+```
+
+## Agent 方法
+
+### `details()`
+
+检索 Agent 的详细信息：
+
+```typescript
+const details = await agent.details()
+```
+
+### `generate()`
+
+让 Agent 生成响应：
+
+```typescript
+const response = await agent.generate(
+  [
+    {
+      role: 'user',
+      content: 'Hello, how are you?',
+    },
+  ],
+  {
+    memory: {
+      thread: 'thread-abc', // Optional: Thread ID for conversation context
+      resource: 'user-123', // Optional: Resource ID
+    },
+    structuredOutput: {}, // Optional: Structured Output configuration
+  },
+)
+```
+
+你也可以使用简化的字符串格式并搭配 memory 选项：
+
+```typescript
+const response = await agent.generate('Hello, how are you?', {
+  memory: {
+    thread: 'thread-1',
+    resource: 'resource-1',
+  },
+})
+```
+
+### `stream()`
+
+流式传输 Agent 响应以进行实时交互：
+
+```typescript
+const response = await agent.stream('Tell me a story')
+
+// Process data stream with the processDataStream util
+response.processDataStream({
+  onChunk: async chunk => {
+    console.log(chunk)
+  },
+})
+```
+
+你也可以使用简化的字符串格式并搭配 memory 选项：
+
+```typescript
+const response = await agent.stream('Tell me a story', {
+  memory: {
+    thread: 'thread-1',
+    resource: 'resource-1',
+  },
+  clientTools: { colorChangeTool },
+})
+
+response.processDataStream({
+  onChunk: async chunk => {
+    if (chunk.type === 'text-delta') {
+      console.log(chunk.payload.text)
+    }
+  },
+})
+```
+
+你也可以直接从响应 body 读取：
+
+```typescript
+const reader = response.body.getReader()
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  console.log(new TextDecoder().decode(value))
+}
+```
+
+#### AI SDK 兼容格式
+
+要在客户端从 `agent.stream(...)` 响应流式传输 AI SDK 格式的 part，请将 `response.processDataStream` 包装为 `ReadableStream<ChunkType>` 并使用 `toAISdkStream`：
+
+```typescript title="client-ai-sdk-transform.ts"
+import { createUIMessageStream } from 'ai'
+import { toAISdkStream } from '@mastra/ai-sdk'
+import type { ChunkType, MastraModelOutput } from '@mastra/core/stream'
+
+const response = await agent.stream('Tell me a story')
+
+const chunkStream: ReadableStream<ChunkType> = new ReadableStream<ChunkType>({
+  start(controller) {
+    response
+      .processDataStream({
+        onChunk: async chunk => controller.enqueue(chunk as ChunkType),
+      })
+      .finally(() => controller.close())
+  },
+})
+
+const uiMessageStream = createUIMessageStream({
+  execute: async ({ writer }) => {
+    for await (const part of toAISdkStream(chunkStream as unknown as MastraModelOutput, {
+      from: 'agent',
+    })) {
+      writer.write(part)
+    }
+  },
+})
+
+for await (const part of uiMessageStream) {
+  console.log(part)
+}
+```
+
+### `sendMessage()`
+
+向活动的 Agent run 或空闲的 memory thread 发送用户编写的输入。请与 `subscribeToThread()` 搭配使用，以便客户端呈现被唤醒或接收到消息的流。
+
+```typescript
+const agent = mastraClient.getAgent('support-agent')
+
+const result = await agent.sendMessage({
+  message: {
+    contents: 'Also consider the customer note I just added.',
+    attributes: { sentFrom: 'web' },
+  },
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+
+console.log(result.runId)
+```
+
+`message` 接受字符串、文本/文件 part 数组，或包含 `contents`、`attributes`、`metadata` 和 `providerOptions` 的对象。
+
+### `queueMessage()`
+
+将用户编写的输入排入下一个 thread 轮次。如果 thread 处于活动状态，Mastra 会在当前 run 完成后启动新的 run。如果 thread 处于空闲状态，Mastra 会立即启动 run。
+
+```typescript
+await agent.queueMessage({
+  message: 'Also check whether the tests need updates.',
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+```
+
+### `sendSignal()`
+
+向活动的 Agent run 或 memory thread 发送较低层级的信号。可用于系统生成的上下文，例如响应式提醒，或无需存入收件箱的通知形态上下文。对于持久的通知记录，请使用服务器端 [`Agent.sendNotificationSignal()`](/reference/agents/agent#sendnotificationsignalnotification-options) API。对于用户编写的输入，应优先使用 `sendMessage()` 或 `queueMessage()`。
+
+```typescript
+const agent = mastraClient.getAgent('support-agent')
+
+const result = await agent.sendSignal({
+  signal: {
+    type: 'reactive',
+    tagName: 'system-reminder',
+    contents: 'Also consider the latest customer note.',
+  },
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+
+console.log(result.runId)
+```
+
+使用 `ifActive.behavior` 和 `ifIdle.behavior` 控制 Mastra 是投递、持久化、丢弃信号，还是通过信号唤醒：
+
+```typescript
+await agent.sendSignal({
+  signal: { type: 'reactive', tagName: 'system-reminder', contents: 'Store this for later.' },
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+  ifIdle: {
+    behavior: 'persist',
+  },
+})
+```
+
+当空闲唤醒流需要模型设置、Tool 或运行时上下文等选项时，请传入 `ifIdle.streamOptions`：
+
+```typescript
+await agent.sendSignal({
+  signal: { type: 'reactive', tagName: 'system-reminder', contents: 'Start from this signal.' },
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+  ifIdle: {
+    behavior: 'wake',
+    streamOptions: {
+      maxSteps: 3,
+    },
+  },
+})
+```
+
+返回 `{ accepted: true, runId: string }`。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'signal',
+    type: "{ type: 'user' | 'reactive' | 'notification' | string; tagName?: string; contents: string | Array<TextPart | FilePart>; attributes?: Record<string, JSONValue>; metadata?: Record<string, unknown>; providerOptions?: ProviderMetadata }",
+    description:
+      '较低层级的信号 payload。使用 `type` 指定信号的语义类别，使用 `tagName` 指定向模型显示的 XML 标签。`providerOptions` 会附加到生成的 prompt 轮次，并持久化到存储的信号消息中。',
+  },
+  {
+    name: 'runId',
+    type: 'string',
+    isOptional: true,
+    description: '要直接指定的 run ID。',
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    isOptional: true,
+    description: 'memory thread 的资源 ID。对于以 thread 为目标的信号，请与 `threadId` 一起使用。',
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    isOptional: true,
+    description: '目标 thread ID。对于以 thread 为目标的信号，请与 `resourceId` 一起使用。',
+  },
+  {
+    name: 'ifActive.behavior',
+    type: "'deliver' | 'persist' | 'discard'",
+    isOptional: true,
+    description: '控制目标 thread 处于活动状态时的行为。默认为 `deliver`。',
+  },
+  {
+    name: 'ifActive.attributes',
+    type: 'Record<string, string | number | boolean>',
+    isOptional: true,
+    description: '目标 thread 处于活动状态时，Mastra 接受信号后合并到信号中的属性。',
+  },
+  {
+    name: 'ifIdle.behavior',
+    type: "'wake' | 'persist' | 'discard'",
+    isOptional: true,
+    description: '控制目标 thread 处于空闲状态时的行为。默认为 `wake`。',
+  },
+  {
+    name: 'ifIdle.streamOptions',
+    type: "Omit<AgentExecutionOptions, 'messages'>",
+    isOptional: true,
+    description: '`ifIdle.behavior` 为 `wake` 时启动的流所用的选项。',
+  },
+  {
+    name: 'ifIdle.attributes',
+    type: 'Record<string, string | number | boolean>',
+    isOptional: true,
+    description: '目标 thread 处于空闲状态时，Mastra 接受信号后合并到信号中的属性。',
+  },
+]}
+/>
+
+### `subscribeToThread()`
+
+订阅 memory thread 的原始流 chunk。使用此方法呈现可能由 `sendMessage()`、`queueMessage()`、`sendSignal()` 或服务器端通知分派启动或继续的 thread 输出。
+
+```typescript
+const agent = mastraClient.getAgent('support-agent')
+
+const subscription = await agent.subscribeToThread({
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+
+await subscription.processDataStream({
+  onChunk: chunk => {
+    console.log(chunk)
+  },
+  reconnect: true,
+})
+```
+
+`subscribeToThread()` 返回底层 `Response` 和 `processDataStream()` 辅助方法。该辅助方法会读取订阅流，直到连接关闭或请求中止。传入 `reconnect: true`，可在 transport 关闭或重新连接请求失败时重新订阅，例如代理空闲超时后。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'resourceId',
+    type: 'string',
+    isOptional: true,
+    description: 'memory thread 的资源 ID。',
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    description: '要订阅的 thread ID。',
+  },
+  {
+    name: 'processDataStream().reconnect',
+    type: 'boolean | { maxRetries?: number; delayMs?: number }',
+    isOptional: true,
+    description:
+      '订阅流关闭或重新连接请求失败后重新连接。`true` 表示以一秒延迟无限重试。',
+  },
+]}
+/>
+
+### `streamUntilIdle()`
+
+流式传输响应，并保持流打开，直到 run 期间分派的每个[后台任务](/docs/long-running-agents/background-tasks)完成。每次任务完成时，服务器都会重新进入 Agent 循环，使 LLM 能够在同一次调用中响应结果。要求在 [Mastra 实例上启用后台任务](/reference/configuration#backgroundtasks)并使用 memory thread；否则调用将使用普通的 `stream()`。
+
+```typescript
+const response = await agent.streamUntilIdle('Research solana for me', {
+  memory: {
+    thread: 'thread-1',
+    resource: 'resource-1',
+  },
+  maxIdleMs: 5 * 60_000, //optional
+})
+
+response.processDataStream({
+  onChunk: async chunk => {
+    if (chunk.type === 'background-task-completed') {
+      console.log('task complete:', chunk.payload.taskId)
+    }
+  },
+})
+```
+
+### `resumeStreamUntilIdle()`
+
+使用自定义数据恢复已暂停的 Agent 流，并保持流打开，直到 run 期间分派的每个[后台任务](/docs/long-running-agents/background-tasks)完成。可使用此方法在暂停点之后继续执行，例如 Agent 内部的 Workflow suspend。要求在 [Mastra 实例上启用后台任务](/reference/configuration#backgroundtasks)并使用 memory thread；否则调用将使用普通的 `resumeStream()`：
+
+```typescript
+const response = await agent.resumeStreamUntilIdle(
+  { approved: true, selectedOption: 'plan-b' },
+  {
+    memory: {
+      thread: 'thread-1',
+      resource: 'resource-1',
+    },
+    runId: 'run-123',
+    toolCallId: 'tool-call-456', // optional
+    maxIdleMs: 5 * 60_000, //optional
+  },
+)
+
+await response.processDataStream({
+  onChunk: chunk => {
+    console.log(chunk)
+  },
+})
+```
+
+该流发出与 `stream()` 相同的 chunk 类型，此外还会发出用于任务生命周期事件的 `background-task-*` chunk。有关完整的服务器端 API，请参阅 [`Agent.streamUntilIdle()`](/reference/streaming/agents/streamUntilIdle)；有关 payload 结构，请参阅[后台任务 chunk](/reference/streaming/ChunkType#background-task-chunks)。
+
+### `getTool()`
+
+检索 Agent 可用的特定 Tool 的信息：
+
+```typescript
+const tool = await agent.getTool('tool-id')
+```
+
+### `executeTool()`
+
+为 Agent 执行特定 Tool：
+
+```typescript
+const result = await agent.executeTool('tool-id', {
+  data: { input: 'value' },
+})
+```
+
+### `network()`
+
+从 Agent network 流式传输用于多 Agent 交互的响应：
+
+```typescript
+const response = await agent.network('Research this topic and write a summary')
+
+response.processDataStream({
+  onChunk: async chunk => {
+    console.log(chunk)
+  },
+})
+```
+
+### `listSuspendedRuns()`
+
+从存储中列出 Agent 的暂停 run：即等待 Tool 调用审批，或因 Tool 暂停的 run。发现过程由存储支持，因此在服务器重启后以及跨服务器实例时仍然有效。将返回的 `runId` 传给 `approveToolCall()`、`declineToolCall()` 或 `resumeStream()`。
+
+```typescript
+const { runs, total } = await agent.listSuspendedRuns({
+  threadId: 'thread-456',
+  resourceId: 'user-123',
+})
+
+if (runs[0]) {
+  console.log(runs[0].toolCalls) // [{ toolCallId, toolName, args, requiresApproval }]
+  await agent.approveToolCall({
+    runId: runs[0].runId,
+    toolCallId: runs[0].toolCalls[0].toolCallId,
+  })
+}
+```
+
+接受可选筛选条件（`threadId`、`resourceId`、`fromDate`、`toDate`）和分页参数（`perPage`、`page`）。返回 `{ runs, total }`，其中 `total` 是分页前匹配的 run 数量。有关返回的 run 结构详情，请参阅 [`Agent.listSuspendedRuns()`](/reference/agents/listSuspendedRuns)。
+
+### `approveToolCall()`
+
+批准待处理的 Tool 调用并返回续接流。当你要呈现审批响应中恢复的 chunk 时，请使用此方法。
+
+```typescript
+const response = await agent.approveToolCall({
+  runId: 'run-123',
+  toolCallId: 'tool-call-456',
+})
+
+response.processDataStream({
+  onChunk: async chunk => {
+    console.log(chunk)
+  },
+})
+```
+
+### `sendToolApproval()`
+
+批准或拒绝已订阅 thread 的待处理 Tool 调用。当恢复的 chunk 应通过现有 thread 订阅到达，而不是通过单独的续接流到达时，请与 `subscribeToThread()` 搭配使用。
+
+```typescript
+const result = await agent.sendToolApproval({
+  resourceId: 'user-123',
+  threadId: 'thread-456',
+  toolCallId: 'tool-call-456',
+  approved: true,
+})
+
+console.log(result.accepted)
+```
+
+返回 `{ accepted: true, runId: string, toolCallId?: string }`。
+
+### `declineToolCall()`
+
+拒绝待处理的 Tool 调用并返回续接流。当你要呈现拒绝响应中恢复的 chunk 时，请使用此方法。
+
+```typescript
+const response = await agent.declineToolCall({
+  runId: 'run-123',
+  toolCallId: 'tool-call-456',
+})
+
+response.processDataStream({
+  onChunk: async chunk => {
+    console.log(chunk)
+  },
+})
+```
+
+### `resumeStream()`
+
+使用自定义数据恢复已暂停的 Agent 流。可使用此方法在暂停点之后继续执行，例如 Agent 内部的 Workflow suspend：
+
+```typescript
+const response = await agent.resumeStream(
+  { approved: true, selectedOption: 'plan-b' },
+  {
+    runId: 'run-123',
+    toolCallId: 'tool-call-456', // optional
+  },
+)
+
+await response.processDataStream({
+  onChunk: chunk => {
+    console.log(chunk)
+  },
+})
+```
+
+### `approveToolCallGenerate()`
+
+使用 `generate()`（非流式）时批准待处理的 Tool 调用。返回完整响应：
+
+```typescript
+const output = await agent.generate('Find user John', {
+  requireToolApproval: true,
+})
+
+if (output.finishReason === 'suspended') {
+  const result = await agent.approveToolCallGenerate({
+    runId: output.runId,
+    toolCallId: output.suspendPayload.toolCallId,
+  })
+
+  console.log(result.text)
+}
+```
+
+### `declineToolCallGenerate()`
+
+使用 `generate()`（非流式）时拒绝待处理的 Tool 调用。返回完整响应：
+
+```typescript
+const output = await agent.generate('Find user John', {
+  requireToolApproval: true,
+})
+
+if (output.finishReason === 'suspended') {
+  const result = await agent.declineToolCallGenerate({
+    runId: output.runId,
+    toolCallId: output.suspendPayload.toolCallId,
+  })
+
+  console.log(result.text)
+}
+```
+
+## Agent 调度
+
+使用 client SDK 的调度方法，通过 `/api/schedules` 路由管理持久化的 Agent 调度。有关概念和服务器端示例，请参阅[调度](/docs/long-running-agents/schedules)和 [`mastra.schedules` 参考](/reference/schedules/overview)。
+
+### `createSchedule()`
+
+通过传入 `agentId` 创建 Agent 调度。
+
+```typescript
+const schedule = await mastraClient.createSchedule({
+  agentId: 'pinger',
+  cron: '0 * * * *',
+  prompt: 'Give me a status update.',
+})
+```
+
+### `listSchedules()`
+
+列出 Agent 调度。可按 `agentId`、`threadId`、`resourceId`、`name` 或 `status` 等字段筛选。
+
+```typescript
+const schedules = await mastraClient.listSchedules({
+  agentId: 'pinger',
+  status: 'active',
+})
+```
+
+### `getSchedule()`
+
+按 ID 获取单个 Agent 调度。
+
+```typescript
+const schedule = await mastraClient.getSchedule('agent_pinger')
+```
+
+### `updateSchedule()`
+
+更新 Agent 调度。Agent 调度可以更新 `cron`、`timezone`、`prompt`、`name`、信号投递选项、元数据和 `status` 等字段。
+
+```typescript
+const updated = await mastraClient.updateSchedule('agent_pinger', {
+  cron: '*/30 * * * *',
+  prompt: 'Give me a status update every 30 minutes.',
+})
+```
+
+### `deleteSchedule()`
+
+删除 Agent 调度。
+
+```typescript
+await mastraClient.deleteSchedule('agent_pinger')
+```
+
+### `runSchedule()`
+
+立即触发一次 Agent 调度，而不更改其 cron 周期。
+
+```typescript
+const run = await mastraClient.runSchedule('agent_pinger')
+```
+
+### `pauseSchedule()`
+
+暂停 Agent 调度，使调度器停止触发它。返回更新后的调度。
+
+```typescript
+await mastraClient.pauseSchedule('agent_pinger')
+```
+
+### `resumeSchedule()`
+
+恢复暂停的 Agent 调度。下一次触发时间将从当前时间重新计算，因此暂停很久的调度不会触发积压任务。返回更新后的调度。
+
+```typescript
+await mastraClient.resumeSchedule('agent_pinger')
+```
+
+### `listScheduleTriggers()`
+
+列出 Agent 调度的触发历史记录，包括每次触发所关联的 run 摘要。
+
+```typescript
+const { triggers } = await mastraClient.listScheduleTriggers('agent_pinger', {
+  limit: 50,
+})
+```
+
+## Client Tool
+
+当 Agent 请求时，客户端 Tool 允许你在客户端执行自定义函数。
+
+```typescript
+import { createTool } from '@mastra/client-js'
+import { z } from 'zod'
+
+const colorChangeTool = createTool({
+  id: 'changeColor',
+  description: 'Changes the background color',
+  inputSchema: z.object({
+    color: z.string(),
+  }),
+  execute: async inputData => {
+    document.body.style.backgroundColor = inputData.color
+    return { success: true }
+  },
+})
+
+// Use with generate
+const response = await agent.generate('Change the background to blue', {
+  clientTools: { colorChangeTool },
+})
+
+// Use with stream
+const response = await agent.stream('Tell me a story', {
+  memory: {
+    thread: 'thread-1',
+    resource: 'resource-1',
+  },
+  clientTools: { colorChangeTool },
+})
+
+response.processDataStream({
+  onChunk: async chunk => {
+    if (chunk.type === 'text-delta') {
+      console.log(chunk.payload.text)
+    } else if (chunk.type === 'tool-call') {
+      console.log(
+        `calling tool ${chunk.payload.toolName} with args ${JSON.stringify(
+          chunk.payload.args,
+          null,
+          2,
+        )}`,
+      )
+    }
+  },
+})
+```
+
+### 为模型调整 Client Tool 输出结构
+
+Client Tool 支持使用 `toModelOutput` 控制模型收到的内容，包括图像等多模态内容。由于 Client Tool 在本地执行，映射也会在 `execute` 完成后在客户端运行。转换后的输出会与原始结果一起发回服务器，因此原始结果仍可供存储和应用逻辑使用。
+
+```typescript
+const screenshotTool = createTool({
+  id: 'takeScreenshot',
+  description: 'Takes a screenshot of the current page',
+  inputSchema: z.object({}),
+  execute: async () => {
+    const base64 = await captureScreenshot()
+    return { ok: true, data: base64 }
+  },
+  toModelOutput: output => ({
+    type: 'content',
+    value: [{ type: 'media', data: output.data, mediaType: 'image/jpeg' }],
+  }),
+})
+```
+
+### 追踪 Client Tool
+
+当服务器上安装并配置了 `@mastra/observability` 时，客户端 Tool 会记录一个 `CLIENT_TOOL_CALL` span，作为当前 `AGENT_RUN` span 的子级。当模型发出 Client Tool 调用时，服务器会创建该 span，并将 W3C Trace carrier 注入传出的 Tool 调用 chunk。Tool 参数可用后，该 span 会结束。如果未配置服务器端可观测性，Client Tool 追踪不会执行任何操作。
+
+client SDK 还会测量每个 Client Tool `execute` 函数的实际耗时，并将其发回服务器；服务器会将它作为 `mastra_tool_duration_ms` 指标发出，并带有 `toolType: "client"`。
+
+要从 Tool 的 `execute` 函数内部获得更丰富的 telemetry，请使用执行上下文中的 `observe` 辅助方法添加子 span 和结构化日志：
+
+```typescript
+import { createTool } from '@mastra/client-js'
+import { z } from 'zod'
+
+const fetchUserTool = createTool({
+  id: 'fetchUser',
+  description: 'Fetches the current user profile',
+  inputSchema: z.object({ userId: z.string() }),
+  execute: async ({ userId }, { observe }) => {
+    observe.log('info', 'fetching user', { userId })
+    const user = await observe.span('http GET /users', async () => {
+      const res = await fetch(`/api/users/${userId}`)
+      return res.json()
+    })
+    return user
+  },
+})
+```
+
+`observe` 始终可用：没有活动的追踪上下文时（例如在被追踪 Agent 之外运行），`span` 会直接运行函数，而 `log` 不执行任何操作。无需进行 null 检查。
+
+SDK 会将 collector 缓冲的所有内容序列化为 OTLP/JSON，并在下一个请求 body 中发回。服务器的 `@mastra/observability` 包会验证 span 属于正确的 Trace（防止跨 Trace 注入），并将每个 span/日志转发到服务器端 telemetry 使用的同一可观测性总线。配置可观测性后，现有 exporter 会自动接收它们。
+
+## 存储的 Agent
+
+存储的 Agent 是保存在数据库中的 Agent 配置，可以在运行时创建、更新和删除。它们通过键引用基本组件（Tool、Workflow、其他 Agent、Scorer），实例化 Agent 时会从 Mastra 注册表解析这些组件。Memory 以内联 `SerializedMemoryConfig` 对象的形式配置，并包含 `lastMessages` 和 `semanticRecall` 等选项。
+
+### `listStoredAgents()`
+
+检索所有存储的 Agent 的分页列表：
+
+```typescript
+const result = await mastraClient.listStoredAgents()
+console.log(result.agents) // Array of stored agents
+console.log(result.total) // Total count
+```
+
+使用分页和排序：
+
+```typescript
+const result = await mastraClient.listStoredAgents({
+  page: 0,
+  perPage: 20,
+  orderBy: {
+    field: 'createdAt',
+    direction: 'DESC',
+  },
+})
+```
+
+### `createStoredAgent()`
+
+创建新的存储 Agent：
+
+```typescript
+const agent = await mastraClient.createStoredAgent({
+  id: 'my-agent',
+  name: 'My Assistant',
+  instructions: 'You are a helpful assistant.',
+  model: {
+    provider: 'openai',
+    name: 'gpt-5.4',
+  },
+})
+```
+
+默认情况下，`createStoredAgent()` 会立即发布初始版本。将 `autoPublish` 设为 `false` 可创建未发布的草稿，以便在调用 [`activateVersion()`](#activateversion) 前进行审查：
+
+```typescript
+const draft = await mastraClient.createStoredAgent({
+  id: 'draft-agent',
+  name: 'Draft Assistant',
+  instructions: 'You are a helpful assistant.',
+  model: {
+    provider: 'openai',
+    name: '__AI_SDK_OPENAI_MODEL_BASE__',
+  },
+  autoPublish: false,
+})
+```
+
+配置了 `code` source 的 Editor 始终会发布初始版本，因为保存操作会将 Agent 配置写入文件系统。
+
+包含所有选项：
+
+```typescript
+const agent = await mastraClient.createStoredAgent({
+  id: 'full-agent',
+  name: 'Full Agent',
+  description: 'A fully configured agent',
+  instructions: 'You are a helpful assistant.',
+  model: {
+    provider: 'openai',
+    name: 'gpt-5.4',
+  },
+  tools: { calculator: {}, weather: {} },
+  workflows: { 'data-processing': {} },
+  agents: { 'subagent-1': {} },
+  memory: {
+    options: {
+      lastMessages: 20,
+      semanticRecall: false,
+    },
+  },
+  scorers: {
+    'quality-scorer': {
+      sampling: { type: 'ratio', rate: 0.1 },
+    },
+  },
+  defaultOptions: {
+    maxSteps: 10,
+  },
+  metadata: {
+    version: '1.0',
+    team: 'engineering',
+  },
+})
+```
+
+### `getStoredAgent()`
+
+获取特定存储 Agent 的实例：
+
+```typescript
+const storedAgent = mastraClient.getStoredAgent('my-agent')
+```
+
+## 存储 Agent 的方法
+
+### `details()`
+
+检索存储的 Agent 配置：
+
+```typescript
+const details = await storedAgent.details()
+console.log(details.name)
+console.log(details.instructions)
+console.log(details.model)
+```
+
+### `update()`
+
+更新存储 Agent 的特定字段。所有字段均为可选：
+
+```typescript
+const updated = await storedAgent.update({
+  name: 'Updated Agent Name',
+  instructions: 'New instructions for the agent.',
+})
+```
+
+```typescript
+// Update just the tools
+await storedAgent.update({
+  tools: { 'new-tool-1': {}, 'new-tool-2': {} },
+})
+
+// Update metadata
+await storedAgent.update({
+  metadata: {
+    version: '2.0',
+    lastModifiedBy: 'admin',
+  },
+})
+```
+
+### `delete()`
+
+删除存储的 Agent：
+
+```typescript
+const result = await storedAgent.delete()
+console.log(result.success) // true
+```
+
+## 版本管理
+
+`Agent`（代码定义）和 `StoredAgent` 实例都有用于管理配置版本的方法。有关生命周期和选择行为，请参阅 [Editor 版本控制](/docs/editor/overview#versioning)。
+
+### 获取特定版本的 Agent
+
+获取 Agent 时传入版本标识符：
+
+```typescript
+// Load the published version (default)
+const agent = mastraClient.getAgent('support-agent')
+
+// Load the latest draft
+const draftAgent = mastraClient.getAgent('support-agent', { status: 'draft' })
+
+// Load a specific version
+const versionedAgent = mastraClient.getAgent('support-agent', { versionId: 'abc-123' })
+```
+
+对于存储的 Agent，请向 `details()` 传入 status 选项：
+
+```typescript
+const storedAgent = mastraClient.getStoredAgent('my-agent')
+const draft = await storedAgent.details(undefined, { status: 'draft' })
+```
+
+### `listVersions()`
+
+列出 Agent 的所有版本：
+
+```typescript
+const versions = await agent.listVersions()
+console.log(versions.items) // Array of version snapshots
+console.log(versions.total)
+```
+
+使用分页和排序：
+
+```typescript
+const versions = await agent.listVersions({
+  page: 0,
+  perPage: 10,
+  orderBy: {
+    field: 'createdAt',
+    direction: 'DESC',
+  },
+})
+```
+
+### `createVersion()`
+
+创建新的版本快照：
+
+```typescript
+const version = await agent.createVersion({
+  changeMessage: 'Updated tone to be more friendly',
+})
+```
+
+### `getVersion()`
+
+按 ID 获取特定版本：
+
+```typescript
+const version = await agent.getVersion('version-123')
+console.log(version.versionNumber)
+console.log(version.changedFields)
+console.log(version.createdAt)
+```
+
+### `activateVersion()`
+
+将某一版本设为活动的已发布版本：
+
+```typescript
+await agent.activateVersion('version-123')
+```
+
+### `restoreVersion()`
+
+通过创建具有相同配置的新版本来恢复之前的版本：
+
+```typescript
+await agent.restoreVersion('version-456')
+```
+
+### `deleteVersion()`
+
+删除版本：
+
+```typescript
+await agent.deleteVersion('version-789')
+```
+
+### `compareVersions()`
+
+比较两个版本并返回差异：
+
+```typescript
+const diff = await agent.compareVersions('version-123', 'version-456')
+console.log(diff.changes) // Fields that changed between versions
+```
+
+### React SDK
+
+在 React SDK 中使用 `useChat` hook 时，通过 `requestContext` 传入 `agentVersionId`：
+
+```typescript title="Version targeting with React SDK"
+import { useChat } from '@mastra/react'
+
+function Chat() {
+  const { messages, input, handleInputChange, handleSubmit } = useChat({
+    agentId: 'support-agent',
+    requestContext: {
+      agentVersionId: 'abc-123',
+    },
+  })
+
+  // ... render chat UI
+}
+```

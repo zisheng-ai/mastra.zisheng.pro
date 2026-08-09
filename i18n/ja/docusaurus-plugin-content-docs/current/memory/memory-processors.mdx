@@ -1,0 +1,319 @@
+---
+title: "Memory Processor | Memory"
+description: "コンテキストウィンドウの制限を管理するため、言語モデルへ送信する前にメッセージを絞り込み、切り詰め、変換する Mastra の Memory Processor の使用方法を説明します。"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+  - "@mastra/openai"
+  - "@mastra/pinecone"
+---
+
+# Memory Processor
+
+Memory Processor は、Memory が有効な Agent をメッセージが通過するときに、メッセージを変換し、絞り込みます。コンテキストウィンドウの制限を管理して不要な内容を削除し、言語モデルへ送信する情報を最適化します。
+
+Agent で Memory を有効にすると、Mastra は Agent の Processor パイプラインに Memory Processor を追加します。これらの Processor は、メッセージ履歴、ワーキングメモリ、意味的に関連するメッセージを取得し、モデルの応答後に新しいメッセージを永続化します。
+
+Memory Processor は、Memory に関連するメッセージと状態を対象に動作する [Processor](/docs/agents/processors) です。
+
+## 組み込みの Memory Processor
+
+Memory を有効にすると、Mastra は次の Processor を自動的に追加します。
+
+### `MessageHistory`
+
+メッセージ履歴を取得し、新しいメッセージを永続化します。
+
+**次のように設定した場合：**
+
+```typescript
+memory: new Memory({
+  lastMessages: 10,
+})
+```
+
+**Mastra の内部処理：**
+
+1. `limit: 10` を指定して `MessageHistory` Processor を作成する
+1. Agent の入力 Processor に追加する（LLM の前に実行）
+1. Agent の出力 Processor に追加する（LLM の後に実行）
+
+**処理内容：**
+
+- **入力**：ストレージから直近の10件のメッセージを取得し、会話の先頭に追加する
+- **出力**：モデルの応答後に新しいメッセージをストレージへ永続化する
+
+**例：**
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+import { openai } from '@ai-sdk/openai'
+
+const agent = new Agent({
+  id: 'test-agent',
+  name: 'Test Agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({
+      id: 'memory-store',
+      url: 'file:memory.db',
+    }),
+    lastMessages: 10, // MessageHistory processor automatically added
+  }),
+})
+```
+
+### `SemanticRecall`
+
+現在の入力に基づいて意味的に関連するメッセージを取得し、新しいメッセージの埋め込みを作成します。
+
+**次のように設定した場合：**
+
+```typescript
+memory: new Memory({
+  semanticRecall: { enabled: true },
+  vector: myVectorStore,
+  embedder: myEmbedder,
+})
+```
+
+**Mastra の内部処理：**
+
+1. `SemanticRecall` Processor を作成する
+1. Agent の入力 Processor に追加する（LLM の前に実行）
+1. Agent の出力 Processor に追加する（LLM の後に実行）
+1. ベクトルストアと Embedder の両方が設定されていることを必要とする
+
+**処理内容：**
+
+- **入力**：ベクトル類似度検索を実行して関連する過去のメッセージを見つけ、会話の先頭に追加する
+- **出力**：新しいメッセージの埋め込みを作成し、後で取得できるようベクトルストアに保存する
+
+**例：**
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+import { PineconeVector } from '@mastra/pinecone'
+import { OpenAIEmbedder } from '@mastra/openai'
+import { openai } from '@ai-sdk/openai'
+
+const agent = new Agent({
+  name: 'semantic-agent',
+  instructions: 'You are a helpful assistant with semantic memory',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({
+      id: 'memory-store',
+      url: 'file:memory.db',
+    }),
+    vector: new PineconeVector({
+      id: 'memory-vector',
+      apiKey: process.env.PINECONE_API_KEY!,
+    }),
+    embedder: new OpenAIEmbedder({
+      model: 'text-embedding-3-small',
+      apiKey: process.env.OPENAI_API_KEY!,
+    }),
+    semanticRecall: { enabled: true }, // SemanticRecall processor automatically added
+  }),
+})
+```
+
+### `WorkingMemory`
+
+会話をまたいでワーキングメモリの状態を管理します。
+
+**次のように設定した場合：**
+
+```typescript
+memory: new Memory({
+  workingMemory: { enabled: true },
+})
+```
+
+**Mastra の内部処理：**
+
+1. `WorkingMemory` Processor を作成する
+1. Agent の入力 Processor に追加する（LLM の前に実行）
+1. ストレージアダプターが設定されていることを必要とする
+
+**処理内容：**
+
+- **入力**：現在のスレッドのワーキングメモリ状態を取得し、会話の先頭に追加する
+- **出力**：出力処理なし
+
+**例：**
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+import { openai } from '@ai-sdk/openai'
+
+const agent = new Agent({
+  name: 'working-memory-agent',
+  instructions: 'You are an assistant with working memory',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({
+      id: 'memory-store',
+      url: 'file:memory.db',
+    }),
+    workingMemory: { enabled: true }, // WorkingMemory processor automatically added
+  }),
+})
+```
+
+## 手動制御と重複排除
+
+Memory Processor を `inputProcessors` または `outputProcessors` に手動で追加した場合、Mastra はその Processor を自動的には追加しません。これにより、Processor の実行順序を完全に制御できます。
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { MessageHistory } from '@mastra/core/processors'
+import { TokenLimiter } from '@mastra/core/processors'
+import { LibSQLStore } from '@mastra/libsql'
+import { openai } from '@ai-sdk/openai'
+
+// Custom MessageHistory with different configuration
+const customMessageHistory = new MessageHistory({
+  storage: new LibSQLStore({ id: 'memory-store', url: 'file:memory.db' }),
+  lastMessages: 20,
+})
+
+const agent = new Agent({
+  name: 'custom-memory-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({ id: 'memory-store', url: 'file:memory.db' }),
+    lastMessages: 10, // This would normally add MessageHistory(10)
+  }),
+  inputProcessors: [
+    customMessageHistory, // Your custom one is used instead
+    new TokenLimiter({ limit: 4000 }), // Runs after your custom MessageHistory
+  ],
+})
+```
+
+## Processor の実行順序
+
+ガードレールと Memory を組み合わせる場合は、実行順序を理解しておくことが重要です。
+
+### 入力 Processor
+
+```
+[Memory Processors] → [Your inputProcessors]
+```
+
+1. **Memory Processor が最初に実行される**：`WorkingMemory`、`MessageHistory`、`SemanticRecall`
+1. **独自の入力 Processor が後に実行される**：ガードレール、フィルター、バリデーター
+
+そのため、Memory は独自の Processor が入力を検証または絞り込む前に、メッセージ履歴を読み込みます。
+
+### 出力 Processor
+
+```
+[Your outputProcessors] → [Memory Processors]
+```
+
+1. **独自の出力 Processor が最初に実行される**：ガードレール、フィルター、バリデーター
+1. **Memory Processor が後に実行される**：`SemanticRecall`（埋め込み）、`MessageHistory`（永続化）
+
+この順序は、**デフォルトで安全**になるよう設計されています。出力ガードレールが `abort()` を呼び出すと、Memory Processor は実行されず、**メッセージは保存されません**。
+
+## ガードレールと Memory
+
+デフォルトの実行順序により、ガードレールは安全に動作します。
+
+### 出力ガードレール（推奨）
+
+出力ガードレールは、Memory Processor がメッセージを保存する**前**に実行されます。ガードレールが中止した場合は、次のようになります。
+
+- トリップワイヤーが作動する
+- Memory Processor がスキップされる
+- **メッセージはストレージに永続化されない**
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { openai } from '@ai-sdk/openai'
+
+// Output guardrail that blocks inappropriate content
+const contentBlocker = {
+  id: 'content-blocker',
+  processOutputResult: async ({ messages, abort }) => {
+    const hasInappropriateContent = messages.some(msg => containsBadContent(msg))
+    if (hasInappropriateContent) {
+      abort('Content blocked by guardrail')
+    }
+    return messages
+  },
+}
+
+const agent = new Agent({
+  id: 'safe-agent',
+  name: 'safe-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({ lastMessages: 10 }),
+  // Your guardrail runs BEFORE memory saves
+  outputProcessors: [contentBlocker],
+})
+
+// If the guardrail aborts, nothing is saved to memory
+const result = await agent.generate('Hello')
+if (result.tripwire) {
+  console.log('Blocked:', result.tripwire.reason)
+  // Memory is empty - no messages were persisted
+}
+```
+
+### 入力ガードレール
+
+入力ガードレールは、Memory Processor が履歴を読み込んだ**後**に実行されます。ガードレールが中止した場合は、次のようになります。
+
+- トリップワイヤーが作動する
+- LLM は呼び出されない
+- 出力 Processor（Memory の永続化を含む）がスキップされる
+- **メッセージはストレージに永続化されない**
+
+```typescript
+// Input guardrail that validates user input
+const inputValidator = {
+  id: 'input-validator',
+  processInput: async ({ messages, abort }) => {
+    const lastUserMessage = messages.findLast(m => m.role === 'user')
+    if (isInvalidInput(lastUserMessage)) {
+      abort('Invalid input detected')
+    }
+    return messages
+  },
+}
+
+const agent = new Agent({
+  id: 'validated-agent',
+  name: 'validated-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({ lastMessages: 10 }),
+  // Your guardrail runs AFTER memory loads history
+  inputProcessors: [inputValidator],
+})
+```
+
+### まとめ
+
+| ガードレールの種類 | 実行タイミング | 中止した場合 |
+| - | - | - |
+| 入力 | Memory が履歴を読み込んだ後 | LLM は呼び出されず、何も保存されない |
+| 出力 | Memory が保存する前 | ストレージに何も保存されない |
+
+どちらの場合も安全です。ガードレールにより、不適切な内容が Memory に永続化されるのを防げます。

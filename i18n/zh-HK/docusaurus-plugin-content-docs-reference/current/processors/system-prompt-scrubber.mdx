@@ -1,0 +1,168 @@
+---
+title: "參考：SystemPromptScrubber | 處理器"
+description: "Mastra 中 SystemPromptScrubber 的文件；此處理器可偵測並遮蓋 AI 回應中的系統提示。"
+packages:
+  - "@mastra/core"
+---
+
+# SystemPromptScrubber
+
+`SystemPromptScrubber` 是一個**輸出處理器**，可偵測並處理系統提示、指示，以及其他可能洩露資料並引入安全漏洞的資訊。此處理器會識別各類系統提示，並提供靈活的處理策略（包括多種遮蓋方式），以確保敏感資料得到妥善清理，從而協助維持安全性。
+
+## 使用範例
+
+```typescript
+import { SystemPromptScrubber } from '@mastra/core/processors'
+
+const processor = new SystemPromptScrubber({
+  model: 'openrouter/openai/gpt-oss-safeguard-20b',
+  strategy: 'redact',
+  redactionMethod: 'mask',
+  includeDetections: true,
+  lastMessageOnly: true,
+})
+```
+
+## 建構函式參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'Options',
+    description: '系統提示偵測及處理的設定選項',
+    isOptional: false,
+    properties: [
+      {
+        type: 'Options',
+        parameters: [
+          {
+            name: 'model',
+            type: 'MastraModelConfig',
+            description: '偵測 Agent 的模型設定',
+            isOptional: false,
+          },
+          {
+            name: 'strategy',
+            type: "'block' | 'warn' | 'filter' | 'redact'",
+            description:
+              "偵測到系統提示時採用的策略：'block' 會拒絕並傳回錯誤；'warn' 會記錄警告但允許通過；'filter' 會移除被標記的訊息；'redact' 會以遮蓋後的版本取代原文",
+            isOptional: true,
+            default: "'redact'",
+          },
+          {
+            name: 'customPatterns',
+            type: 'string[]',
+            description: '用於偵測系統提示的自訂模式（正規表示式字串）',
+            isOptional: true,
+            default: '[]',
+          },
+          {
+            name: 'includeDetections',
+            type: 'boolean',
+            description: '是否在警告中包含偵測詳情。適合用於除錯及監察',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'lastMessageOnly',
+            type: 'boolean',
+            description:
+              '是否只檢查批次中最新的輸出訊息，而非檢查每一則訊息。可用此選項將基於 LLM 的清理限制於最新回應。',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'instructions',
+            type: 'string',
+            description: '偵測 Agent 的自訂指示。如未提供，則使用預設指示',
+            isOptional: true,
+            default: 'undefined',
+          },
+          {
+            name: 'redactionMethod',
+            type: "'mask' | 'placeholder' | 'remove'",
+            description:
+              "系統提示的遮蓋方式：'mask' 以星號取代；'placeholder' 以預留位置文字取代；'remove' 則完全移除",
+            isOptional: true,
+            default: "'mask'",
+          },
+          {
+            name: 'placeholderText',
+            type: 'string',
+            description: "當 redactionMethod 為 'placeholder' 時使用的自訂預留位置文字",
+            isOptional: true,
+            default: "'[SYSTEM_PROMPT]'",
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "設為 'system-prompt-scrubber' 的處理器識別碼",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: '可選的處理器顯示名稱',
+    isOptional: true,
+  },
+  {
+    name: 'processOutputStream',
+    type: '(args: { part: ChunkType; streamParts: ChunkType[]; state: Record<string, any>; abort: (reason?: string) => never; tracingContext?: TracingContext }) => Promise<ChunkType | null>',
+    description: '處理串流輸出部分，以在串流期間偵測及處理系統提示',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputResult',
+    type: '(args: { messages: MastraDBMessage[]; abort: (reason?: string) => never }) => Promise<MastraDBMessage[]>',
+    description: '處理最終輸出結果，以在非串流情況下偵測及處理系統提示',
+    isOptional: false,
+  },
+]}
+/>
+
+## 延伸使用範例
+
+將 `SystemPromptScrubber` 用作輸出處理器時，建議配合 `BatchPartsProcessor` 使用以改善效能。`BatchPartsProcessor` 會先把串流資料塊組成批次，再傳送至清理器，從而減少偵測所需的 LLM 呼叫次數。
+
+```typescript title="src/mastra/agents/scrubbed-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { BatchPartsProcessor, SystemPromptScrubber } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'scrubbed-agent',
+  name: 'scrubbed-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  outputProcessors: [
+    // Batch stream parts first to reduce LLM calls
+    new BatchPartsProcessor({
+      batchSize: 10,
+    }),
+    // Then apply system prompt detection on batched content
+    new SystemPromptScrubber({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      strategy: 'redact',
+      customPatterns: ['system prompt', 'internal instructions'],
+      includeDetections: true,
+      redactionMethod: 'placeholder',
+      placeholderText: '[REDACTED]',
+    }),
+  ],
+})
+```
+
+## 相關內容
+
+- [防護機制](/docs/agents/guardrails)

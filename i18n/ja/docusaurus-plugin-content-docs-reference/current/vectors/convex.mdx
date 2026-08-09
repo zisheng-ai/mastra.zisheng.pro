@@ -1,0 +1,553 @@
+---
+title: "リファレンス: Convex vector store | Vectors"
+description: Convex を使用したベクトル検索を提供する、Mastra の ConvexVector クラスのドキュメントです。
+packages:
+  - "@mastra/convex"
+---
+
+# Convex vector store
+
+`ConvexVector` クラスは、[Convex](https://convex.dev) を使用したベクトルストレージと類似度検索を提供します。埋め込みを Convex 内に保存し、Mastra アダプターでコサイン類似度検索を実行します。
+
+:::warning[開発規模の検索]
+
+`ConvexVector` は、Mastra のストレージハンドラーを介して一致するベクトルを読み込み、JavaScript でフィルタリングし、コサイン類似度を計算して結果を並べ替え、上位の一致を返します。ローカル開発、テスト、小規模なデータセットに使用してください。
+
+Convex で本番環境向けのベクトル検索を行うには、`ConvexNativeVector` を使用してください。Convex ネイティブの `vectorSearch` API を使用するため、デプロイ済みの Convex ベクトルインデックスと Convex action が必要です。
+
+:::
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/convex@latest
+```
+
+## Convex のセットアップ
+
+`ConvexVector` を使用する前に、Convex スキーマとストレージハンドラーをセットアップする必要があります。手順は [Convex ストレージのセットアップ](../storage/convex#convex-setup)を参照してください。
+
+## コンストラクターオプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'deploymentUrl',
+    type: 'string',
+    description: 'Convex のデプロイ URL（例: https://your-project.convex.cloud）',
+    isOptional: false,
+  },
+  {
+    name: 'adminAuthToken',
+    type: 'string',
+    description: 'Convex 管理者認証トークン',
+    isOptional: false,
+  },
+  {
+    name: 'storageFunction',
+    type: 'string',
+    description: 'ストレージ mutation 関数へのパス',
+    isOptional: true,
+    defaultValue: 'mastra/storage:handle',
+  },
+]}
+/>
+
+## コンストラクターの例
+
+### 基本設定
+
+```ts
+import { ConvexVector } from '@mastra/convex'
+
+const vectorStore = new ConvexVector({
+  id: 'convex-vectors',
+  deploymentUrl: 'https://your-project.convex.cloud',
+  adminAuthToken: 'your-admin-token',
+})
+```
+
+### Convex ネイティブベクトル検索
+
+本番環境のベクトルワークロードには `ConvexNativeVector` を使用します。専用の Convex テーブルにベクトルを保存し、スキーマで定義された Convex ベクトルインデックスを検索します。
+
+`convex/schema.ts` で、Mastra のベクトルインデックスごとに専用テーブルを定義します。
+
+```typescript title="convex/schema.ts"
+import { defineSchema } from 'convex/server'
+import { defineMastraNativeVectorTable } from '@mastra/convex/schema'
+
+export default defineSchema({
+  docs_vectors: defineMastraNativeVectorTable({
+    dimensions: 1536,
+  }),
+})
+```
+
+`convex/mastra/nativeVector.ts` で、ネイティブベクトルハンドラーをエクスポートします。
+
+```typescript title="convex/mastra/nativeVector.ts"
+import {
+  mastraNativeVectorAction,
+  mastraNativeVectorMutation,
+  mastraNativeVectorQuery,
+} from '@mastra/convex/server'
+
+export const query = mastraNativeVectorAction
+export const read = mastraNativeVectorQuery
+export const write = mastraNativeVectorMutation
+```
+
+Mastra アプリで、デプロイ済みのテーブルとベクトルインデックスを指定して `ConvexNativeVector` を設定します。
+
+```typescript title="src/mastra/index.ts"
+import { ConvexNativeVector } from '@mastra/convex'
+
+const vectorStore = new ConvexNativeVector({
+  id: 'convex-native-vectors',
+  deploymentUrl: process.env.CONVEX_URL!,
+  adminAuthToken: process.env.CONVEX_ADMIN_KEY!,
+  indexes: {
+    docs: {
+      tableName: 'docs_vectors',
+      vectorIndexName: 'by_embedding',
+      dimension: 1536,
+    },
+  },
+})
+
+const results = await vectorStore.query({
+  indexName: 'docs',
+  queryVector: embedding,
+  topK: 10,
+})
+```
+
+ネイティブフィルターを使用するには、Convex スキーマでフィルターフィールドを宣言します。ネイティブベクトルハンドラーは、ベクトルの書き込み時に一致するメタデータフィールドをドキュメントのトップレベルフィールドへコピーします。
+
+```typescript title="convex/schema.ts"
+import { defineSchema, defineTable } from 'convex/server'
+import { v } from 'convex/values'
+
+export default defineSchema({
+  docs_vectors: defineTable({
+    id: v.string(),
+    embedding: v.array(v.float64()),
+    metadata: v.optional(v.any()),
+    tenantId: v.string(),
+  })
+    .index('by_record_id', ['id'])
+    .vectorIndex('by_embedding', {
+      vectorField: 'embedding',
+      dimensions: 1536,
+      filterFields: ['tenantId'],
+    }),
+})
+```
+
+```typescript title="src/mastra/index.ts"
+const vectorStore = new ConvexNativeVector({
+  id: 'convex-native-vectors',
+  deploymentUrl: process.env.CONVEX_URL!,
+  adminAuthToken: process.env.CONVEX_ADMIN_KEY!,
+  indexes: {
+    docs: {
+      tableName: 'docs_vectors',
+      dimension: 1536,
+      filterFields: ['tenantId'],
+    },
+  },
+})
+
+await vectorStore.upsert({
+  indexName: 'docs',
+  ids: ['chunk-1'],
+  vectors: [embedding],
+  metadata: [{ tenantId: 'acme', text: 'Account setup guide' }],
+})
+
+const results = await vectorStore.query({
+  indexName: 'docs',
+  queryVector: embedding,
+  filter: { tenantId: 'acme' },
+})
+```
+
+`ConvexNativeVector` は、1 つの等価フィールド、または等価フィールドを指定した `$or` という Convex ネイティブのベクトルフィルター形式に対応しています。メタデータのみのクエリ、フィルターベースの更新、フィルターベースの削除には対応していません。更新と削除にはベクトル ID を使用してください。
+
+### カスタムストレージ関数
+
+```ts
+const vectorStore = new ConvexVector({
+  id: 'convex-vectors',
+  deploymentUrl: 'https://your-project.convex.cloud',
+  adminAuthToken: 'your-admin-token',
+  storageFunction: 'custom/path:handler',
+})
+```
+
+## メソッド
+
+### `createIndex()`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: '作成するインデックスの名前',
+  },
+  {
+    name: 'dimension',
+    type: 'number',
+    description: 'ベクトルの次元数（埋め込みモデルと一致させる必要があります）',
+  },
+  {
+    name: 'metric',
+    type: "'cosine' | 'euclidean' | 'dotproduct'",
+    isOptional: true,
+    defaultValue: 'cosine',
+    description: '類似度検索の距離指標（現在は cosine のみ対応）',
+  },
+]}
+/>
+
+```typescript
+await vectorStore.createIndex({
+  indexName: 'my_vectors',
+  dimension: 1536,
+})
+```
+
+### `upsert()`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'ベクトルの upsert 先となるインデックス名',
+  },
+  {
+    name: 'vectors',
+    type: 'number[][]',
+    description: '埋め込みベクトルの配列',
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, any>[]',
+    isOptional: true,
+    description: '各ベクトルのメタデータ',
+  },
+  {
+    name: 'ids',
+    type: 'string[]',
+    isOptional: true,
+    description: '省略可能なベクトル ID（未指定の場合は自動生成されます）',
+  },
+]}
+/>
+
+```typescript prettier:false
+await vectorStore.upsert({
+  indexName: "my_vectors",
+  vectors: [[0.1, 0.2, 0.3, ...]],
+  metadata: [{ label: "example" }],
+  ids: ["vec-1"],
+});
+```
+
+### `query()`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'クエリ対象のインデックス名',
+  },
+  {
+    name: 'queryVector',
+    type: 'number[]',
+    description: 'クエリベクトル',
+  },
+  {
+    name: 'topK',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '10',
+    description: '返す結果の数',
+  },
+  {
+    name: 'filter',
+    type: 'Record<string, any>',
+    isOptional: true,
+    description: 'メタデータフィルター',
+  },
+  {
+    name: 'includeVector',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'false',
+    description: '結果にベクトルを含めるかどうか',
+  },
+]}
+/>
+
+```typescript prettier:false
+const results = await vectorStore.query({
+  indexName: "my_vectors",
+  queryVector: [0.1, 0.2, 0.3, ...],
+  topK: 5,
+  filter: { category: "documents" },
+});
+```
+
+### `listIndexes()`
+
+インデックス名を文字列の配列として返します。
+
+```typescript
+const indexes = await vectorStore.listIndexes()
+// ["my_vectors", "embeddings", ...]
+```
+
+### `describeIndex()`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: '詳細を取得するインデックスの名前',
+  },
+]}
+/>
+
+戻り値:
+
+```typescript
+interface IndexStats {
+  dimension: number
+  count: number
+  metric: 'cosine' | 'euclidean' | 'dotproduct'
+}
+```
+
+### `deleteIndex()`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: '削除するインデックスの名前',
+  },
+]}
+/>
+
+インデックスとそのすべてのベクトルを削除します。
+
+```typescript
+await vectorStore.deleteIndex({ indexName: 'my_vectors' })
+```
+
+### `updateVector()`
+
+ID またはメタデータフィルターで単一のベクトルを更新します。`id` と `filter` のどちらか一方のみを指定する必要があります。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'ベクトルを含むインデックスの名前',
+  },
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: true,
+    description: '更新するベクトルの ID（filter とは同時に指定できません）',
+  },
+  {
+    name: 'filter',
+    type: 'Record<string, any>',
+    isOptional: true,
+    description: '更新するベクトルを特定するメタデータフィルター（id とは同時に指定できません）',
+  },
+  {
+    name: 'update',
+    type: '{ vector?: number[]; metadata?: Record<string, any>; }',
+    description: '更新するベクトルやメタデータを含むオブジェクト',
+  },
+]}
+/>
+
+```typescript
+// Update by ID
+await vectorStore.updateVector({
+  indexName: 'my_vectors',
+  id: 'vector123',
+  update: {
+    vector: [0.1, 0.2, 0.3],
+    metadata: { label: 'updated' },
+  },
+})
+
+// Update by filter
+await vectorStore.updateVector({
+  indexName: 'my_vectors',
+  filter: { category: 'product' },
+  update: {
+    metadata: { status: 'reviewed' },
+  },
+})
+```
+
+### `deleteVector()`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'ベクトルを含むインデックスの名前',
+  },
+  {
+    name: 'id',
+    type: 'string',
+    description: '削除するベクトルの ID',
+  },
+]}
+/>
+
+```typescript
+await vectorStore.deleteVector({ indexName: 'my_vectors', id: 'vector123' })
+```
+
+### `deleteVectors()`
+
+ID またはメタデータフィルターで複数のベクトルを削除します。`ids` と `filter` のどちらか一方のみを指定する必要があります。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: '削除するベクトルを含むインデックスの名前',
+  },
+  {
+    name: 'ids',
+    type: 'string[]',
+    isOptional: true,
+    description: '削除するベクトル ID の配列（filter とは同時に指定できません）',
+  },
+  {
+    name: 'filter',
+    type: 'Record<string, any>',
+    isOptional: true,
+    description: '削除するベクトルを特定するメタデータフィルター（ids とは同時に指定できません）',
+  },
+]}
+/>
+
+```typescript
+// Delete by IDs
+await vectorStore.deleteVectors({
+  indexName: 'my_vectors',
+  ids: ['vec1', 'vec2', 'vec3'],
+})
+
+// Delete by filter
+await vectorStore.deleteVectors({
+  indexName: 'my_vectors',
+  filter: { status: 'archived' },
+})
+```
+
+## レスポンス型
+
+クエリ結果は次の形式で返されます。
+
+```typescript
+interface QueryResult {
+  id: string
+  score: number
+  metadata: Record<string, any>
+  vector?: number[] // Only included if includeVector is true
+}
+```
+
+## メタデータフィルタリング
+
+`ConvexVector` は演算子を使用したメタデータフィルタリングに対応しています。ベクトルを Convex から読み込んだ後、アダプターがこれらのフィルターを適用します。
+
+```typescript
+// Simple equality
+const results = await vectorStore.query({
+  indexName: 'my_vectors',
+  queryVector: embedding,
+  filter: { category: 'documents' },
+})
+
+// Comparison operators
+const results = await vectorStore.query({
+  indexName: 'my_vectors',
+  queryVector: embedding,
+  filter: {
+    price: { $gt: 100 },
+    status: { $in: ['active', 'pending'] },
+  },
+})
+
+// Logical operators
+const results = await vectorStore.query({
+  indexName: 'my_vectors',
+  queryVector: embedding,
+  filter: {
+    $and: [{ category: 'electronics' }, { price: { $lte: 500 } }],
+  },
+})
+```
+
+### 対応するフィルター演算子
+
+| 演算子 | 説明 |
+| - | - |
+| `$eq` | 等しい |
+| `$ne` | 等しくない |
+| `$gt` | より大きい |
+| `$gte` | 以上 |
+| `$lt` | より小さい |
+| `$lte` | 以下 |
+| `$in` | 配列に含まれる |
+| `$nin` | 配列に含まれない |
+| `$and` | 論理 AND |
+| `$or` | 論理 OR |
+
+## アーキテクチャ
+
+`ConvexVector` は、次の構造でベクトルを `mastra_vectors` テーブルに保存します。
+
+- `id`: 一意のベクトル識別子
+- `indexName`: インデックス名
+- `embedding`: ベクトルデータ（浮動小数点数の配列）
+- `metadata`: 省略可能な JSON メタデータ
+
+ベクトル類似度検索は、Mastra アダプターでコサイン類似度を使用して実行されます。柔軟にセットアップできますが、大規模な本番ベクトルコレクション向けには設計されていません。
+
+`ConvexNativeVector` は、Mastra の各ベクトルインデックスを専用の Convex テーブルに保存します。クエリでは `ctx.vectorSearch` を使用する Convex action を呼び出し、一致したドキュメントを Convex query で読み込みます。これは Convex ネイティブのベクトル検索モデルに準拠しています。
+
+- ベクトルインデックスは `convex/schema.ts` で宣言します。
+- ベクトル検索は Convex action から実行します。
+- `topK` は `1` から `256` の範囲で指定する必要があります。
+- フィルターは Convex ベクトルインデックスの `filterFields` に列挙したフィールドを対象にする必要があります。
+- インデックスをまたぐ結果を避けるため、Mastra のベクトルインデックスごとに専用テーブルを使用します。
+
+実行時に定義するインデックス作成、メタデータのみのクエリ、複雑なフィルター演算子、フィルターベースの一括更新や削除、または Convex ネイティブベクトル検索の上限を超える結果数が必要な場合は、外部のベクトルデータベースを使用してください。
+
+## 関連情報
+
+- [Convex ストレージ](../storage/convex)
+- [メタデータフィルター](../rag/metadata-filters)
+- [Convex ドキュメント](https://docs.convex.dev/)

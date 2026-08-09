@@ -1,0 +1,255 @@
+---
+title: "WorkOS | Auth"
+description: "WorkOS 認証を使用して Mastra アプリケーションを認証する `@mastra/auth-workos` パッケージについて説明します。"
+packages:
+  - "@mastra/auth-workos"
+  - "@mastra/client-js"
+  - "@mastra/core"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# WorkOS
+
+`@mastra/auth-workos` パッケージは、WorkOS を使用した Mastra の認証を提供します。WorkOS アクセストークンを使って受信リクエストを検証し、`auth` オプションで Mastra サーバーと統合します。
+
+## 前提条件
+
+この例では WorkOS 認証を使用します。次の準備を行ってください。
+
+1. [workos.com](https://workos.com/) で WorkOS アカウントを作成する
+1. WorkOS Dashboard で Application を設定する
+1. リダイレクト URI と許可するオリジンを設定する
+1. 必要に応じて Organization を設定し、ユーザーロールを構成する
+
+```env title=".env"
+WORKOS_API_KEY=sk_live_...
+WORKOS_CLIENT_ID=client_...
+```
+
+:::note
+
+API キーと Client ID は、WorkOS Dashboard の API Keys と Applications でそれぞれ確認できます。
+
+詳しい設定手順については、使用するプラットフォーム向けの [WorkOS ドキュメント](https://workos.com/docs)を参照してください。
+
+:::
+
+## インストール
+
+`MastraAuthWorkos` クラスを使用するには、事前に `@mastra/auth-workos` パッケージをインストールする必要があります。
+
+```bash npm2yarn
+npm install @mastra/auth-workos@latest
+```
+
+## 使用例
+
+### 環境変数を使用する基本的な構成
+
+```typescript {2,6} title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthWorkos } from '@mastra/auth-workos'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthWorkos(),
+  },
+})
+```
+
+### カスタム設定
+
+```typescript {2,6-9} title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthWorkos } from '@mastra/auth-workos'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthWorkos({
+      apiKey: process.env.WORKOS_API_KEY,
+      clientId: process.env.WORKOS_CLIENT_ID,
+    }),
+  },
+})
+```
+
+## 設定
+
+### デフォルトの認可
+
+デフォルトでは、`MastraAuthWorkos` は認証済みのすべての WorkOS ユーザーにアクセスを許可します。解決されたユーザーオブジェクトに Mastra ユーザー ID と WorkOS ユーザー ID の両方が含まれていれば、認可チェックは成功します。
+
+### FGA メンバーシップの読み込み
+
+[`MastraFGAWorkos`](/docs/server/auth/fga) を使用する場合は、`fetchMemberships: true` を設定します。これにより認証時にユーザーの WorkOS Organization メンバーシップが読み込まれ、FGA チェックで正しい Organization メンバーシップ ID を解決できます。
+
+```typescript title="src/mastra/auth.ts"
+import { MastraAuthWorkos, MastraFGAWorkos } from '@mastra/auth-workos'
+
+const workosAuth = new MastraAuthWorkos({
+  apiKey: process.env.WORKOS_API_KEY,
+  clientId: process.env.WORKOS_CLIENT_ID,
+  fetchMemberships: true,
+})
+
+const workosFga = new MastraFGAWorkos({
+  apiKey: process.env.WORKOS_API_KEY,
+  clientId: process.env.WORKOS_CLIENT_ID,
+})
+```
+
+`fetchMemberships` が `false` の場合、Mastra は認証済みリクエストごとの追加の WorkOS `listOrganizationMemberships()` 呼び出しを省略します。
+
+### サービストークンとカスタム JWT テンプレート
+
+マシン間通信やサービスアカウントからのアクセスでは、WorkOS のカスタム JWT テンプレートによって検証された Bearer トークンのクレームを信頼するように `MastraAuthWorkos` を設定できます。
+
+```typescript title="src/mastra/auth.ts"
+import { MastraAuthWorkos } from '@mastra/auth-workos'
+
+const workosAuth = new MastraAuthWorkos({
+  apiKey: process.env.WORKOS_API_KEY,
+  clientId: process.env.WORKOS_CLIENT_ID,
+  redirectUri: process.env.WORKOS_REDIRECT_URI,
+  trustJwtClaims: true,
+  jwtClaims: {
+    organizationId: 'org_id',
+    organizationMembershipId: 'urn:mastra:organization_membership_id',
+  },
+})
+```
+
+これは、JWT テンプレートに `organizationMembershipId`、テナント ID、サービスプリンシパル識別子など、Mastra が必要とする正確な FGA コンテキストがすでに含まれている場合に役立ちます。`trustJwtClaims` を有効にすると、Bearer トークンが `workos.userManagement.getUser()` を経由する用途でない場合、Mastra は検証済みのクレームを代わりに使用できます。
+
+### カスタム認可
+
+より厳格な認可が必要な場合は、`MastraAuthWorkos` をサブクラス化し、`authorizeUser()` をオーバーライドします。
+
+```typescript title="src/mastra/auth.ts"
+import { MastraAuthWorkos } from '@mastra/auth-workos'
+import type { HonoRequest } from 'hono'
+
+class AdminOnlyWorkosAuth extends MastraAuthWorkos {
+  async authorizeUser(user: any, _request: HonoRequest): Promise<boolean> {
+    return user?.metadata?.role === 'admin'
+  }
+}
+
+const workosAuth = new AdminOnlyWorkosAuth({
+  apiKey: process.env.WORKOS_API_KEY,
+  clientId: process.env.WORKOS_CLIENT_ID,
+})
+```
+
+利用可能なすべての設定オプションについては、[MastraAuthWorkos](/reference/auth/workos) を参照してください。
+
+## クライアント側の設定
+
+WorkOS 認証を使用する場合は、認可コードをアクセストークンと交換する WorkOS 認証フローを実装し、そのトークンを Mastra へのリクエストで使用する必要があります。
+
+### WorkOS SDK のインストール
+
+まず、アプリケーションに WorkOS SDK をインストールします。
+
+```bash npm2yarn
+npm install @workos-inc/node
+```
+
+### コードとアクセストークンの交換
+
+ユーザーが WorkOS 認証フローを完了し、認可コードとともに戻ってきたら、そのコードをアクセストークンと交換します。
+
+```typescript title="lib/auth.ts"
+import { WorkOS } from '@workos-inc/node'
+
+const workos = new WorkOS(process.env.WORKOS_API_KEY)
+
+export const authenticateWithWorkos = async (code: string, clientId: string) => {
+  const authenticationResponse = await workos.userManagement.authenticateWithCode({
+    code,
+    clientId,
+  })
+
+  return authenticationResponse.accessToken
+}
+```
+
+:::note
+
+その他の認証方法と設定オプションについては、[WorkOS User Management ドキュメント](https://workos.com/docs/authkit/vanilla/nodejs)を参照してください。
+
+:::
+
+## `MastraClient` の設定
+
+`auth` を有効にすると、`MastraClient` から送信するすべてのリクエストで、`Authorization` ヘッダーに有効な WorkOS アクセストークンを含める必要があります。
+
+```typescript title="lib/mastra/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const createMastraClient = (accessToken: string) => {
+  return new MastraClient({
+    baseUrl: 'https://<mastra-api-url>',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  })
+}
+```
+
+:::info
+
+Authorization ヘッダーでは、アクセストークンに `Bearer` プレフィックスを付ける必要があります。
+
+その他の設定オプションについては、[Mastra Client SDK](/docs/server/mastra-client) を参照してください。
+
+:::
+
+### 認証済みリクエストの送信
+
+WorkOS アクセストークンを使って `MastraClient` を設定すると、認証済みリクエストを送信できます。
+
+<Tabs>
+  <TabItem value="react" label="React">
+    ```typescript title="src/api/agents.ts"
+    import { WorkOS } from '@workos-inc/node'
+    import { MastraClient } from '@mastra/client-js'
+
+    const workos = new WorkOS(process.env.WORKOS_API_KEY)
+
+    export const callMastraWithWorkos = async (code: string, clientId: string) => {
+      const authenticationResponse = await workos.userManagement.authenticateWithCode({
+        code,
+        clientId,
+      })
+
+      const token = authenticationResponse.accessToken
+
+      const mastra = new MastraClient({
+        baseUrl: 'http://localhost:4111',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
+      const weatherAgent = mastra.getAgent('weatherAgent')
+      const response = await weatherAgent.generate("What's the weather like in Nairobi")
+
+      return response.text
+    }
+    ```
+  </TabItem>
+
+  <TabItem value="curl" label="cURL">
+    ```bash
+    curl -X POST http://localhost:4111/api/agents/weatherAgent/generate \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer <your-workos-access-token>" \
+      -d '{
+        "messages": "Weather in London"
+      }'
+    ```
+  </TabItem>
+</Tabs>

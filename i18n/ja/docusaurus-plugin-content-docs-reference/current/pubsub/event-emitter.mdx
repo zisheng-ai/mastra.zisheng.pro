@@ -1,0 +1,148 @@
+---
+title: "リファレンス：EventEmitterPubSub | PubSub"
+description: Mastra のデフォルトのインプロセス pub/sub 実装である EventEmitterPubSub の API リファレンスです。
+packages:
+  - "@mastra/core"
+---
+
+# EventEmitterPubSub
+
+`EventEmitterPubSub` はデフォルトの [`PubSub`](/reference/pubsub/base) 実装です。Node.js の [`EventEmitter`](https://nodejs.org/api/events.html#class-eventemitter) を使用してインプロセスでイベントを配信するため、外部サービスなしで動作します。
+
+単一プロセスのアプリケーションで使用します。1台のホスト上でプロセスをまたいで配信する場合は [`UnixSocketPubSub`](/reference/pubsub/unix-socket-pubsub) を参照してください。分散配信には [`RedisStreamsPubSub`](/reference/pubsub/redis-streams) または [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub) を使用します。
+
+インプロセスで動作するため、イベントは永続化されず、他のプロセスとも共有されません。再開可能なストリームにリプレイが必要な場合は、[`CachingPubSub`](/reference/pubsub/caching-pubsub) でラップしてください。
+
+## 使用例
+
+`EventEmitterPubSub` は、`pubsub` オプションを設定しなければ自動的に使用されるため、ほとんどのアプリケーションでは直接インスタンス化しません。設定または共有したい場合にのみ、明示的に作成します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { EventEmitterPubSub } from '@mastra/core/events'
+
+export const mastra = new Mastra({
+  pubsub: new EventEmitterPubSub(),
+})
+```
+
+アプリケーションの他の部分と emitter を共有するには、既存の `EventEmitter` を渡します。
+
+```typescript
+import EventEmitter from 'node:events'
+import { EventEmitterPubSub } from '@mastra/core/events'
+
+const emitter = new EventEmitter()
+const pubsub = new EventEmitterPubSub(emitter)
+```
+
+バッチ配信のエラーを通知するには、logger を渡します。
+
+```typescript
+import { EventEmitterPubSub } from '@mastra/core/events'
+
+const pubsub = new EventEmitterPubSub(undefined, { logger })
+```
+
+## コンストラクターのパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'existingEmitter',
+    type: 'EventEmitter',
+    description: '配信に使用する既存の Node.js EventEmitter。省略すると、新しい EventEmitter が作成されます。',
+    isOptional: true,
+  },
+  {
+    name: 'options',
+    type: 'EventEmitterPubSubOptions',
+    description: '任意の設定。',
+    isOptional: true,
+    properties: [
+      {
+        name: 'logger',
+        type: 'IMastraLogger',
+        description:
+          '`coalesce` が例外をスローした場合など、バッチ配信のエラーを通知するための logger。省略すると `console.error` にフォールバックします。',
+        isOptional: true,
+      },
+    ],
+  },
+]}
+/>
+
+## プロパティ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'supportedModes',
+    type: 'ReadonlyArray<"pull" | "push">',
+    description:
+      '`["pull", "push"]` を返します。emitter は pull 形式の worker を提供することも、listener にイベントを直接 push することもできます。',
+  },
+  {
+    name: 'supportsNativeBatching',
+    type: 'boolean',
+    description: '`true` を返します。subscriber は `options.batch` を使用してバッチ配信を選択できます。',
+  },
+]}
+/>
+
+## メソッド
+
+`EventEmitterPubSub` は [`PubSub`](/reference/pubsub/base) の規約を実装します。以下のメソッドには、この実装に固有の動作があります。
+
+### `subscribe(topic, cb, options?)`
+
+トピックの callback を登録します。`options.group` を指定しない場合、すべての subscriber がすべてのイベントを受信します。グループを指定すると、そのグループのメンバーにイベントがラウンドロビン方式で分配されます。
+
+バッチ配信を選択するには `options.batch` を渡します。以下の[バッチ処理](#batching)を参照してください。
+
+```typescript
+await pubsub.subscribe('workflow.events', (event, ack, nack) => {
+  console.log(event)
+})
+```
+
+### `flush()`
+
+`nack` による保留中の再配信が実行されるまで待機してから完了します。
+
+```typescript
+await pubsub.flush()
+```
+
+### `close()`
+
+すべての listener を削除し、保留中の再配信をキャンセルします。正常終了時にこのメソッドを呼び出してください。
+
+```typescript
+await pubsub.close()
+```
+
+## 再配信
+
+グループ化された subscriber が `nack` を呼び出すと、少し遅れてイベントがグループに再配信され、`deliveryAttempt` の回数が増加します。`ack` を呼び出すと、そのイベントの追跡情報がクリアされます。fan-out subscriber では各イベントがすべての subscriber に一度ずつ届くため、何もしない `ack` 関数と `nack` 関数を受け取ります。
+
+## バッチ処理
+
+`EventEmitterPubSub` は `options.batch` をネイティブに処理します。subscriber がバッチ配信を選択すると、イベントは subscriber ごとのインメモリバッファに保持され、flush 条件を満たした時点で連続する callback 呼び出しとして配信されます。fan-out subscriber とグループ subscriber のどちらもバッチ処理を利用できます。ポリシーの詳細は [`SubscribeBatchOptions`](/reference/pubsub/base#subscribebatchoptions) を参照してください。
+
+```typescript
+await pubsub.subscribe(
+  'workflow.events',
+  event => {
+    console.log(event)
+  },
+  {
+    batch: {
+      maxSize: 10, // flush once 10 events have queued
+      maxWaitMs: 500, // ...or after 500ms, whichever comes first
+    },
+  },
+)
+```
+
+バッファはインメモリかつプロセス単位であるため、バッチの状態は永続化されず、再起動後には残りません。`maxWaitMs` によってトリガーされる flush はベストエフォートです。例外をスローする `coalesce` などのステップが失敗した場合、エラーはスローされず、設定された `logger` を通じて通知されます。`flush()` は、すべてのバッチ subscriber のバッファを空にしてから完了します。

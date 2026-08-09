@@ -1,0 +1,154 @@
+---
+title: "搭配記憶體使用 Evals | Evals"
+description: "使用 runEvals 與資料集實驗，對啟用記憶體的 Agent 執行評分器，包括 thread 範圍內的觀察式記憶體。"
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+---
+
+# 搭配記憶體使用 Evals
+
+使用 `thread` 範圍記憶體（包括觀察式記憶體）的 Agent，在執行時需要 thread ID。若 Eval 呼叫 Agent 時未提供 ID，你會看到：
+
+```
+ObservationalMemory (scope: 'thread') requires a threadId, but none was found in RequestContext or MessageList.
+```
+
+本頁說明對啟用記憶體的 Agent 執行 Mastra Evals 時，三種可行模式、各路徑支援的功能，以及該如何選擇。這三種做法的完整可執行重現範例位於 [`examples/evals-with-memory`](https://github.com/mastra-ai/mastra/tree/main/examples/evals-with-memory)。
+
+## 各做法的適用時機
+
+| 目標 | 做法 |
+| - | - |
+| 所有項目共用一段對話 | [搭配全域 `targetOptions.memory` 使用 `runEvals`](#shared-thread-with-runevals) |
+| 每個項目各自使用獨立 thread，適合專注的 CI 迴圈 | [每個項目分別使用 `runEvals`](#per-item-threads-with-runevals) |
+| 由已儲存的 `Dataset` 驅動各項目的 thread | [搭配行內 task 使用 `dataset.startExperiment`](#dataset-experiments-with-an-inline-task) |
+
+預先將 `MastraMemory` 植入 `RequestContext`，**不是**將記憶體傳入 Agent 的支援方式。thread 解析會讀取 `args.memory.thread`；Agent 已解析其 thread 之後，`prepare-memory-step` 才會填入 `RequestContext.MastraMemory`。
+
+## 透過 `runEvals` 共用 thread {#shared-thread-with-runevals}
+
+`runEvals` 接受會轉傳給 `agent.generate()` 的 `targetOptions`。傳入 `memory: { thread, resource }` 後，每個資料項目都會對同一個 thread 執行，適合測試多輪對話中的回想能力。
+
+```typescript title="src/mastra/agents/support-agent.test.ts"
+import { runEvals } from '@mastra/core/evals'
+import { supportAgent } from './support-agent'
+import { recallScorer } from '../scorers/recall-scorer'
+
+const memory = await supportAgent.getMemory()
+await memory!.createThread({ threadId: 'eval-thread', resourceId: 'ci-user' })
+
+const result = await runEvals({
+  target: supportAgent,
+  scorers: [recallScorer],
+  targetOptions: {
+    memory: { thread: 'eval-thread', resource: 'ci-user' },
+  },
+  data: [
+    { input: 'My order number is 12345' },
+    { input: 'What is my order number?', groundTruth: '12345' },
+  ],
+})
+```
+
+`targetOptions` **在每次呼叫中都是全域設定**。目前 `RunEvalsDataItem` 不提供逐項目覆寫功能。
+
+## 透過 `runEvals` 為每個項目建立 thread {#per-item-threads-with-runevals}
+
+當每個資料項目都需要自己的 thread（常見的 CI 形式）時，請為每個項目呼叫一次 `runEvals`、提供不重複的 `targetOptions.memory`，再自行彙總分數。
+
+```typescript title="src/mastra/agents/support-agent.test.ts"
+import { randomUUID } from 'node:crypto'
+import { runEvals } from '@mastra/core/evals'
+import { supportAgent } from './support-agent'
+import { recallScorer } from '../scorers/recall-scorer'
+
+const memory = await supportAgent.getMemory()
+const resourceId = 'ci-user'
+
+const items = [
+  { input: 'Cats are mammals', groundTruth: 'mammals' },
+  { input: 'Dogs are mammals too', groundTruth: 'mammals' },
+]
+
+// `runEvals` returns `{ scores: Record<string, number>; summary: { totalItems } }`.
+const scores: number[] = []
+for (const item of items) {
+  const threadId = `eval-${randomUUID()}`
+  await memory!.createThread({ threadId, resourceId, title: item.input })
+
+  const result = await runEvals({
+    target: supportAgent,
+    scorers: [recallScorer],
+    targetOptions: { memory: { thread: threadId, resource: resourceId } },
+    data: [item],
+  })
+
+  scores.push(result.scores[recallScorer.id])
+}
+
+const average = scores.reduce((a, b) => a + b, 0) / scores.length
+```
+
+:::note
+請先建立 thread，再執行 Eval。`thread` 範圍內的觀察式記憶體會從必須已存在的記錄中讀取資料。
+:::
+
+## 搭配行內 task 的資料集實驗 {#dataset-experiments-with-an-inline-task}
+
+`dataset.startExperiment({ target: agent })` **不會**將 `memory` 選項轉傳給 Agent，只會轉傳 `requestContext`。若要使用啟用記憶體的 Agent 執行已儲存資料集，請使用行內 `task` 函式，並將 `{ threadId, resourceId }` 存入各項目的 `metadata`。評分器管線仍會照常執行。
+
+```typescript title="src/mastra/evals/dataset-experiment.ts"
+import { randomUUID } from 'node:crypto'
+import { mastra } from '../index'
+import { supportAgent } from '../agents/support-agent'
+import { recallScorer } from '../scorers/recall-scorer'
+
+const memory = await supportAgent.getMemory()
+const resourceId = 'ci-user'
+
+const items = [
+  { input: 'Cats are mammals', groundTruth: 'mammals', thread: `ds-${randomUUID()}` },
+  { input: 'Dogs are mammals too', groundTruth: 'mammals', thread: `ds-${randomUUID()}` },
+]
+
+for (const it of items) {
+  await memory!.createThread({ threadId: it.thread, resourceId, title: it.input })
+}
+
+const dataset = await mastra.datasets.create({
+  name: 'support-recall',
+  description: 'Per-item memory via inline task + item metadata',
+})
+
+await dataset.addItems({
+  items: items.map(it => ({
+    input: it.input,
+    groundTruth: it.groundTruth,
+    metadata: { threadId: it.thread, resourceId },
+  })),
+})
+
+const summary = await dataset.startExperiment({
+  scorers: [recallScorer],
+  task: async ({ input, metadata }) => {
+    const { threadId, resourceId: rid } = (metadata ?? {}) as {
+      threadId: string
+      resourceId: string
+    }
+    const result = await supportAgent.generate(input as string, {
+      memory: { thread: threadId, resource: rid },
+    })
+    return result.text
+  },
+})
+```
+
+行內 `task` 會接收項目的 `metadata`，因此每一列都能驅動自己的 thread，不必變更 Agent 或任何評分器。如需完整設定，請參閱 [runEvals 參考](/reference/evals/run-evals)與 [Dataset 參考](/reference/datasets/dataset)。
+
+## 相關資源
+
+- [在 CI 中執行評分器](/docs/evals/running-in-ci)
+- [執行實驗](/docs/datasets/running-experiments)
+- [觀察式記憶體](/docs/memory/observational-memory)
+- [runEvals API 參考](/reference/evals/run-evals)

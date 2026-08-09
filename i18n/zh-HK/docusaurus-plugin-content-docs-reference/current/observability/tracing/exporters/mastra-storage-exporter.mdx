@@ -1,0 +1,240 @@
+---
+title: "參考：MastraStorageExporter | 可觀測性"
+description: MastraStorageExporter API 參考（前稱 DefaultExporter）
+packages:
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# MastraStorageExporter
+
+透過自動批次處理及重試邏輯，將 Trace 保存至 Mastra 已設定的儲存空間。
+
+:::note
+
+`MastraStorageExporter` 前稱 `DefaultExporter`。原有的 `DefaultExporter` 類別仍會從 `@mastra/observability` 匯出，讓現有 import 繼續運作，但此類別已棄用，並會在未來的主要版本中移除。新程式碼應使用 `MastraStorageExporter`。
+
+:::
+
+## 建構函式
+
+```typescript prettier:false
+new MastraStorageExporter(config?: MastraStorageExporterConfig)
+```
+
+<PropertiesTable
+  props={[
+  {
+    name: 'config',
+    type: 'MastraStorageExporterConfig',
+    description: '批次處理及設定選項',
+    required: false,
+  },
+]}
+/>
+
+## `MastraStorageExporterConfig`
+
+```typescript
+interface MastraStorageExporterConfig extends BaseExporterConfig {
+  /** Maximum number of spans per batch. Default: 1000 */
+  maxBatchSize?: number
+
+  /** Maximum total buffer size before emergency flush. Default: 10000 */
+  maxBufferSize?: number
+
+  /** Maximum time to wait before flushing batch in milliseconds. Default: 5000 */
+  maxBatchWaitMs?: number
+
+  /** Maximum number of retry attempts. Default: 4 */
+  maxRetries?: number
+
+  /** Base retry delay in milliseconds (uses exponential backoff). Default: 500 */
+  retryDelayMs?: number
+
+  /** Tracing storage strategy or 'auto' for automatic selection. Default: 'auto' */
+  strategy?: TracingStorageStrategy | 'auto'
+}
+```
+
+延伸自 `BaseExporterConfig`，當中包括：
+
+- `logger?: IMastraLogger` - Logger 實例
+- `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'` - 日誌級別（預設：INFO）
+
+## `TracingStorageStrategy`
+
+```typescript
+type TracingStorageStrategy = 'realtime' | 'batch-with-updates' | 'insert-only'
+```
+
+### 策略行為
+
+- **realtime**：立即將每個事件保存至儲存空間
+- **batch-with-updates**：分開批次處理建立及更新操作，並按次序套用
+- **insert-only**：只處理 SPAN\_ENDED 事件，忽略更新
+
+## 屬性
+
+```typescript prettier:false
+readonly name = 'mastra-storage-exporter';
+```
+
+為向後兼容，已棄用的 `DefaultExporter` 類別會繼續使用 `'mastra-default-observability-exporter'` 作為其 `name`。
+
+## 方法
+
+### init
+
+```typescript prettier:false
+init(options: InitExporterOptions): void
+```
+
+在依賴項準備就緒後初始化 exporter，並根據儲存空間的功能決定 Tracing 策略。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'options',
+    type: 'InitExporterOptions',
+    description: '包含 Mastra 實例及設定的初始化選項',
+    required: true,
+  },
+]}
+/>
+
+### `exportTracingEvent`
+
+```typescript prettier:false
+async exportTracingEvent(event: TracingEvent): Promise<void>
+```
+
+按照已決定的策略處理 Tracing 事件。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'event',
+    type: 'TracingEvent',
+    description: '要匯出的 Tracing 事件',
+    required: true,
+  },
+]}
+/>
+
+### flush
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+強制將所有已緩衝的事件寫入儲存空間，而不會關閉 exporter。這適用於無伺服器環境，讓你可確保 span 在執行階段終止前完成匯出。
+
+### shutdown
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+寫入剩餘的已緩衝事件並執行清理。
+
+## 自動選擇策略
+
+當 `strategy: 'auto'`（預設）時，exporter 會查詢儲存 adapter 支援的功能：
+
+```typescript
+interface TracingStrategy {
+  /** Strategies supported by this adapter */
+  supported: TracingStorageStrategy[]
+
+  /** Preferred strategy for optimal performance */
+  preferred: TracingStorageStrategy
+}
+```
+
+exporter 將會：
+
+1. 如儲存 adapter 的首選策略可用，便採用該策略
+1. 如首選策略不可用，便改用第一個支援的策略
+1. 如用戶指定的策略不受支援，便記錄警告
+
+## 批次處理行為
+
+### 寫入觸發條件
+
+符合以下任何條件時，緩衝區便會寫入：
+
+- 緩衝區大小達到 `maxBatchSize`
+- 自第一個事件加入緩衝區起計的時間超過 `maxBatchWaitMs`
+- 緩衝區大小達到 `maxBufferSize`（緊急寫入）
+- 呼叫 `shutdown()`
+
+### 重試邏輯
+
+寫入失敗時，系統會使用指數退避重試：
+
+- 重試延遲：`retryDelayMs * 2^attempt`
+- 嘗試次數上限：`maxRetries`
+- 所有重試失敗後，該批次會被捨棄
+
+### 處理次序錯亂
+
+使用 `batch-with-updates` 策略時：
+
+- 追蹤已建立的 span
+- 拒絕尚未建立的 span 的更新／結束事件
+- 為次序錯亂的事件記錄警告
+- 維護序列編號，確保按次序更新
+
+## 用法
+
+```typescript
+import { MastraStorageExporter } from '@mastra/observability'
+
+// Default configuration
+const exporter = new MastraStorageExporter()
+
+// Custom batching configuration
+const customExporter = new MastraStorageExporter({
+  maxBatchSize: 500,
+  maxBatchWaitMs: 2000,
+  strategy: 'batch-with-updates',
+  logLevel: 'debug',
+})
+```
+
+## 從 `DefaultExporter` 遷移
+
+兩個類別的建構函式簽名及行為相同。如要遷移，請取代 import 及建構函式：
+
+```typescript
+// Before
+import { DefaultExporter } from '@mastra/observability'
+const exporter = new DefaultExporter()
+
+// After
+import { MastraStorageExporter } from '@mastra/observability'
+const exporter = new MastraStorageExporter()
+```
+
+原有的 `DefaultExporter` 會保持不變，因此，符合先前 `mastra-default-observability-exporter` exporter 名稱的 dashboard 或警示規則，可在你完成遷移前繼續運作。
+
+## 另請參閱
+
+### 說明文件
+
+- [Tracing 概覽](/docs/observability/tracing/overview)：完整指南
+- [Exporters](/docs/observability/integrations/overview#exporters)：exporter 概念
+
+### 其他 Exporter
+
+- [MastraPlatformExporter](/reference/observability/tracing/exporters/mastra-platform-exporter)：Mastra 平台
+- [ConsoleExporter](/reference/observability/tracing/exporters/console-exporter)：除錯輸出
+- [Langfuse](/reference/observability/tracing/exporters/langfuse)：Langfuse 整合
+- [Braintrust](/reference/observability/tracing/exporters/braintrust)：Braintrust 整合
+
+### 參考
+
+- [設定](/reference/observability/tracing/configuration)：設定選項
+- [介面](/reference/observability/tracing/interfaces)：類型定義

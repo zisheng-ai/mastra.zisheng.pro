@@ -1,0 +1,163 @@
+---
+title: "參考：Memory.summarizeThread() | Memory"
+description: "Mastra `Memory.summarizeThread()` 方法的文件；此方法可一次過總結 thread 的對話，並從中擷取結構化值。"
+packages:
+  - "@mastra/memory"
+---
+
+# Memory.summarizeThread()
+
+`.summarizeThread()` 方法可一次過總結 thread 的對話。此方法會從儲存空間載入 thread 的訊息，並使用支援 [Observational Memory](/reference/memory/observational-memory) 的同一套 Observer 機制加以提煉；它可獨立呼叫，毋須把 Observational Memory 連接至 Agent。
+
+系統會由最新訊息開始逐頁載入，並受 `lastMessages` 及 `maxInputTokens` 限制，因此總結較長的 thread 時，不會從儲存空間讀取整段歷史記錄。
+
+此方法不會將任何內容寫回 memory。總結及擷取所得的值會傳回給你（亦會傳給每個 extractor 的 `onExtracted` hook），讓你決定儲存位置，例如你自己的資料庫。
+
+當 session 結束，而你想取得整段對話的總結或結構化擷取結果時，可使用此方法，例如語音通話掛線時。如要處理你手上已有的訊息（而非從 thread 載入），請改用獨立的 [`summarizeConversation()`](/reference/memory/summarizeConversation) 函式。兩者接受相同選項，但該函式使用 `messages` 而非 `threadId`。
+
+## 使用範例
+
+```typescript
+const result = await memory.summarizeThread({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  threadId: 'thread-123',
+  instructions: 'Summarize this voicemail call for the business owner.',
+})
+```
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'threadId',
+    type: 'string',
+    description: '要總結的 thread 的唯一標識符。',
+    isOptional: false,
+  },
+  {
+    name: 'model',
+    type: 'string | LanguageModel | DynamicModel',
+    description: "執行總結的 Model，例如路由字串 '__GATEWAY_OPENAI_MODEL_MINI__'。",
+    isOptional: false,
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    description:
+      '擁有此 thread 的資源 ID。如有提供，系統會驗證 thread 的擁有權，並會把它傳至 extractor context。',
+    isOptional: true,
+  },
+  {
+    name: 'lastMessages',
+    type: 'number',
+    description:
+      '只總結 thread 的最後 N 則訊息。預設會載入整個 thread，但受 `maxInputTokens` 限制。',
+    isOptional: true,
+  },
+  {
+    name: 'maxInputTokens',
+    type: 'number',
+    description:
+      '當收集到的訊息超出此預計 token 數量時，停止載入更舊的訊息。系統必定會包括最新一則訊息。',
+    isOptional: true,
+    defaultValue: '1000000',
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description:
+      "附加至 summarizer system prompt 的額外指引，例如應集中處理的內容，或總結的目標讀者。",
+    isOptional: true,
+  },
+  {
+    name: 'extract',
+    type: 'Extractor[]',
+    description:
+      "要在對話上執行的 extractor。具備 Zod schema 的 extractor 會透過後續的結構化輸出呼叫執行；沒有 schema 的 extractor 則會在同一過程內擷取。每個 extractor 的 `onExtracted` hook 都會收到擷取所得的值。",
+    isOptional: true,
+  },
+  {
+    name: 'requestContext',
+    type: 'RequestContext',
+    description: '轉發至 summarizer Model 及 extractor hook 的 request context。',
+    isOptional: true,
+  },
+  {
+    name: 'abortSignal',
+    type: 'AbortSignal',
+    description: '用於取消總結呼叫的 signal。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'summary',
+    type: 'string',
+    description: '從對話提煉所得的觀察結果，以內容密集的項目符號形式呈現。',
+  },
+  {
+    name: 'extracted',
+    type: 'Record<string, unknown>',
+    description: '由 `extract` extractor 產生的值，以 extractor slug 作為 key。',
+  },
+  {
+    name: 'extractionFailures',
+    type: '{ slug: string; error: string }[]',
+    description:
+      '未能產生有效值的 extractor，以及失敗原因。只有至少一個 extractor 失敗時才會出現。',
+  },
+  {
+    name: 'usage',
+    type: '{ inputTokens?: number; outputTokens?: number; totalTokens?: number }',
+    description: '總結呼叫的 token 使用量。',
+  },
+]}
+/>
+
+## 進階使用範例
+
+以下範例會總結已結束的語音通話，並將結構化記錄儲存至應用程式本身的資料庫：
+
+```typescript title="src/call-summary.ts"
+import { Extractor } from '@mastra/memory'
+import { z } from 'zod'
+import { memory } from './mastra/memory'
+import { callRecords } from './db'
+
+const callSummary = new Extractor({
+  name: 'call-summary',
+  instructions: 'Return a concise summary of the call.',
+  schema: z.object({
+    summary: z.string(),
+    sentiment: z.enum(['positive', 'neutral', 'negative']),
+    requestedServices: z.array(z.string()),
+  }),
+  metadataKeyPath: false, // don't persist into memory metadata — the hook owns storage
+  onExtracted: async ({ current, threadId, resourceId }) => {
+    await callRecords.upsert({ callId: threadId, callerId: resourceId, record: current })
+  },
+})
+
+export async function onCallEnd(threadId: string, resourceId: string) {
+  await memory.summarizeThread({
+    model: '__GATEWAY_OPENAI_MODEL_MINI__',
+    threadId,
+    resourceId,
+    instructions: 'Summarize this voicemail call for the business owner.',
+    extract: [callSummary],
+  })
+}
+```
+
+### 相關內容
+
+- [summarizeConversation()](/reference/memory/summarizeConversation)
+- [Memory Class 參考](/reference/memory/memory-class)
+- [Observational Memory](/reference/memory/observational-memory)
+- [.recall()](/reference/memory/recall)

@@ -1,0 +1,404 @@
+---
+title: "リファレンス: Amazon S3 vector store | Vectors"
+description: Amazon S3 Vectors（プレビュー）を使用したベクトル検索を提供する、Mastra の S3Vectors クラスのドキュメントです。
+packages:
+  - "@mastra/s3vectors"
+---
+
+# Amazon S3 vector store
+
+`S3Vectors` クラスは、[Amazon S3 Vectors（プレビュー）](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors.html)を使用したベクトル検索を提供します。ベクトルを **vector bucket** に保存し、JSON ベースのメタデータフィルターを使用して **vector index** で類似度検索を実行します。
+
+:::warning
+
+Amazon S3 Vectors はプレビューサービスです。プレビュー機能は予告なく変更または削除される可能性があり、AWS SLA の対象外です。動作、制限、利用可能なリージョンはいつでも変更される可能性があります。このライブラリでは、AWS との整合性を維持するために破壊的変更が加えられる場合があります。
+
+:::
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/s3vectors@latest
+```
+
+## 使用例
+
+```typescript
+import { S3Vectors } from '@mastra/s3vectors'
+
+const store = new S3Vectors({
+  vectorBucketName: process.env.S3_VECTORS_BUCKET_NAME!, // e.g. "my-vector-bucket"
+  clientConfig: {
+    region: process.env.AWS_REGION!, // credentials use the default AWS provider chain
+  },
+  // Optional: mark large/long-text fields as non-filterable at index creation time
+  nonFilterableMetadataKeys: ['content'],
+})
+
+// Create an index (names are normalized: "_" → "-" and lowercased)
+await store.createIndex({
+  indexName: 'my_index',
+  dimension: 1536,
+  metric: 'cosine', // "euclidean" also supported; "dotproduct" is NOT supported
+})
+
+// Upsert vectors (ids auto-generated if omitted). Date values in metadata are serialized to epoch ms.
+const ids = await store.upsert({
+  indexName: 'my_index',
+  vectors: [
+    [0.1, 0.2 /* … */],
+    [0.3, 0.4 /* … */],
+  ],
+  metadata: [
+    {
+      text: 'doc1',
+      genre: 'documentary',
+      year: 2023,
+      createdAt: new Date('2024-01-01'),
+    },
+    { text: 'doc2', genre: 'comedy', year: 2021 },
+  ],
+})
+
+// Query with metadata filters (implicit AND is canonicalized)
+const results = await store.query({
+  indexName: 'my-index',
+  queryVector: [0.1, 0.2 /* … */],
+  topK: 10, // Service-side limits may apply (commonly 30)
+  filter: { genre: { $in: ['documentary', 'comedy'] }, year: { $gte: 2020 } },
+  includeVector: false, // set true to include raw vectors (may trigger a secondary fetch)
+})
+
+// Clean up resources (closes the underlying HTTP handler)
+await store.disconnect()
+```
+
+## コンストラクターオプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'vectorBucketName',
+    type: 'string',
+    description: '対象となる S3 Vectors の vector bucket 名。',
+  },
+  {
+    name: 'clientConfig',
+    type: 'S3VectorsClientConfig',
+    isOptional: true,
+    description: 'AWS SDK v3 のクライアントオプション（`region`、`credentials` など）。',
+  },
+  {
+    name: 'nonFilterableMetadataKeys',
+    type: 'string[]',
+    isOptional: true,
+    description:
+      'フィルター対象外にするメタデータキー（インデックス作成時に適用）。`content` などの大きなテキストフィールドに使用します。',
+  },
+]}
+/>
+
+## メソッド
+
+### `createIndex()`
+
+設定した vector bucket に新しい vector index を作成します。インデックスがすでに存在する場合はスキーマを検証し、何も変更しません（既存の距離指標と次元数は維持されます）。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description:
+      '論理インデックス名。内部でアンダースコアをハイフンに置き換え、小文字に正規化します。',
+  },
+  {
+    name: 'dimension',
+    type: 'number',
+    description: 'ベクトルの次元数（埋め込みモデルと一致させる必要があります）',
+  },
+  {
+    name: 'metric',
+    type: "'cosine' | 'euclidean'",
+    isOptional: true,
+    defaultValue: 'cosine',
+    description: '類似度検索の距離指標。S3 Vectors は `dotproduct` をサポートしていません。',
+  },
+]}
+/>
+
+### `upsert()`
+
+ベクトルを追加または置換します（レコード全体を保存）。`ids` を指定しない場合は UUID が生成されます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'upsert 先のインデックス名',
+  },
+  {
+    name: 'vectors',
+    type: 'number[][]',
+    description: '埋め込みベクトルの配列',
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, any>[]',
+    isOptional: true,
+    description: '各ベクトルのメタデータ',
+  },
+  {
+    name: 'ids',
+    type: 'string[]',
+    isOptional: true,
+    description: '省略可能なベクトル ID（未指定の場合は自動生成されます）',
+  },
+]}
+/>
+
+### `query()`
+
+省略可能なメタデータフィルターを使用して最近傍を検索します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'クエリ対象のインデックス名',
+  },
+  {
+    name: 'queryVector',
+    type: 'number[]',
+    description: '類似ベクトルを検索するためのクエリベクトル',
+  },
+  {
+    name: 'topK',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '10',
+    description: '返す結果の数',
+  },
+  {
+    name: 'filter',
+    type: 'S3VectorsFilter',
+    isOptional: true,
+    description:
+      '`$and`、`$or`、`$eq`、`$ne`、`$gt`、`$gte`、`$lt`、`$lte`、`$in`、`$nin`、`$exists` をサポートする JSON ベースのメタデータフィルター。',
+  },
+  {
+    name: 'includeVector',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'false',
+    description: '結果にベクトルを含めるかどうか',
+  },
+]}
+/>
+
+:::note
+
+結果には `score = 1/(1 + distance)` が含まれます。基になる距離の順位を維持しながら、値が大きいほど類似度が高くなります。
+
+:::
+
+### `describeIndex()`
+
+インデックスの情報を返します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: '詳細を取得するインデックス名。',
+  },
+]}
+/>
+
+戻り値:
+
+```typescript
+interface IndexStats {
+  dimension: number
+  count: number // computed via ListVectors pagination (O(n))
+  metric: 'cosine' | 'euclidean'
+}
+```
+
+### `deleteIndex()`
+
+インデックスとそのデータを削除します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: '削除するインデックス。',
+  },
+]}
+/>
+
+### `listIndexes()`
+
+設定した vector bucket 内のすべてのインデックスを一覧表示します。
+
+戻り値: `Promise<string[]>`
+
+### `updateVector()`
+
+インデックス内の特定の ID に対応するベクトルまたはメタデータを更新します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'ベクトルを含むインデックス。',
+  },
+  {
+    name: 'id',
+    type: 'string',
+    description: '更新する ID。',
+  },
+  {
+    name: 'update',
+    type: 'object',
+    description: 'ベクトルやメタデータを含む更新データ',
+  },
+  {
+    name: 'update.vector',
+    type: 'number[]',
+    isOptional: true,
+    description: '更新する新しいベクトルデータ',
+  },
+  {
+    name: 'update.metadata',
+    type: 'Record<string, any>',
+    isOptional: true,
+    description: '更新する新しいメタデータ',
+  },
+]}
+/>
+
+### `deleteVector()`
+
+指定した ID のベクトルを削除します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'ベクトルを含むインデックス。',
+  },
+  {
+    name: 'id',
+    type: 'string',
+    description: '削除する ID。',
+  },
+]}
+/>
+
+### `disconnect()`
+
+基盤となる AWS SDK HTTP ハンドラーを閉じ、ソケットを解放します。
+
+## レスポンス型
+
+クエリ結果は次の形式で返されます。
+
+```typescript
+interface QueryResult {
+  id: string
+  score: number // 1/(1 + distance)
+  metadata: Record<string, any>
+  vector?: number[] // Only included if includeVector is true
+}
+```
+
+## フィルター構文
+
+S3 Vectors がサポートする演算子と値の型は、厳密に制限されています。Mastra のフィルタートランスレーターは次のように動作します。
+
+- **暗黙の AND を正規化**: `{a:1,b:2}` → `{ $and: [{a:1},{b:2}] }`。
+- **Date 値を正規化**: 数値比較と配列要素ではエポックミリ秒に変換します。
+- 等値条件（`field: value` または `$eq/$ne`）では **Date を使用できません**。等値には **string | number | boolean** の値のみ使用できます。
+- 等値条件の null/undefined は**拒否されます**。**配列の等値比較**はサポートされていません（`$in`/`$nin` を使用してください）。
+- トップレベルの論理演算子として使用できるのは **`$and` / `$or`** のみです。
+- 論理演算子には、直接の演算子ではなく**フィールド条件**を含める必要があります。
+
+**サポートされる演算子:**
+
+- **論理:** `$and`、`$or`（空でない配列）
+- **基本:** `$eq`、`$ne`（string | number | boolean）
+- **数値:** `$gt`、`$gte`、`$lt`、`$lte`（number または `Date` → エポックミリ秒）
+- **配列:** `$in`、`$nin`（string | number | boolean の空でない配列。`Date` → エポックミリ秒）
+- **要素:** `$exists`（boolean）
+
+**未サポート / 使用不可（拒否されます）:** `$not`、`$nor`、`$regex`、`$all`、`$elemMatch`、`$size`、`$text` など。
+
+**例:**
+
+```typescript prettier:false
+// Implicit AND
+{ genre: { $in: ["documentary", "comedy"] }, year: { $gte: 2020 } }
+
+// Explicit logicals and ranges
+{
+  $and: [
+    { price: { $gte: 100, $lte: 1000 } },
+    { $or: [{ stock: { $gt: 0 } }, { preorder: true }] }
+  ]
+}
+
+// Dates in range (converted to epoch ms)
+{ timestamp: { $gt: new Date("2024-01-01T00:00:00Z") } }
+```
+
+:::note
+
+インデックス作成時に `nonFilterableMetadataKeys` を設定すると、それらのキーは保存されますが、フィルターには使用**できません**。
+
+:::
+
+## エラー処理
+
+store は捕捉可能な型付きエラーをスローします。
+
+```typescript
+try {
+  await store.query({
+    indexName: 'index-name',
+    queryVector: queryVector,
+  })
+} catch (error) {
+  if (error instanceof VectorStoreError) {
+    console.log(error.code) // 'connection_failed' | 'invalid_dimension' | etc
+    console.log(error.details) // Additional error context
+  }
+}
+```
+
+## 環境変数
+
+アプリの接続に使用する一般的な環境変数:
+
+- `S3_VECTORS_BUCKET_NAME`: S3 の **vector bucket** 名（`vectorBucketName` の設定に使用）。
+- `AWS_REGION`: S3 Vectors bucket の AWS リージョン。
+- **AWS 認証情報**: 標準の AWS SDK Provider Chain（`AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`、`AWS_PROFILE` など）を介して指定します。
+
+## ベストプラクティス
+
+- 埋め込みモデルに合わせて距離指標（`cosine` または `euclidean`）を選択してください。`dotproduct` はサポートされていません。
+- **フィルター可能な**メタデータは小さく構造化された値（string/number/boolean）にしてください。大きなテキスト（`content` など）は**フィルター対象外**として保存します。
+- ネストされたメタデータには**ドット区切りのパス**を使用し、複雑なロジックには明示的な `$and`/`$or` を使用してください。
+- 頻繁に実行される処理で `describeIndex()` を呼び出さないでください。`count` はページ分割された `ListVectors` を使用して算出されます（**O(n)**）。
+- 生のベクトルが必要な場合にのみ `includeVector: true` を使用してください。
+
+## 関連情報
+
+- [メタデータフィルター](../rag/metadata-filters)

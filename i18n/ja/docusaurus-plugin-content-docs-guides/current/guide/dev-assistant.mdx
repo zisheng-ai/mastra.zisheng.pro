@@ -1,0 +1,279 @@
+---
+title: "ガイド：開発アシスタントの構築"
+description: Filesystem、Sandbox、Skill、Search を組み合わせ、ドキュメントを保守しながらコードの作成とテスト実行を行う総合的な開発アシスタントを構築します。
+---
+
+# 開発アシスタントを構築する
+
+このガイドでは、Workspace のすべての機能を組み合わせた総合的な開発アシスタントを構築します。
+
+- ファイル管理用の [Filesystem](/docs/workspace/filesystem)
+- コード実行用の [Sandbox](/docs/workspace/sandbox)
+- コーディング規約用の [Skill](/docs/workspace/skills)
+- サンプル検索用の [Search](/docs/workspace/search)
+
+サンプルプロジェクトを含む Workspace をセットアップし、コーディング規約を Skill として追加します。次に、TDD の手法に従ってコードを作成する Agent を作成します。最終的に Agent は、既存のコードを読み取って新しい実装を作成し、Sandbox 内でテストを実行して、その結果に基づいて反復できるようになります。
+
+## 前提条件
+
+- Node.js `v22.13.0` 以降がインストールされていること
+- サポートされている[モデル Provider](/models) の API キー
+- 既存の Mastra プロジェクト（新しいプロジェクトをセットアップするには、[インストールガイド](/guides/getting-started/quickstart)に従ってください）
+
+### Vitest をインストールする
+
+開発アシスタントは [Vitest](https://vitest.dev/) を使用して、Workspace の Sandbox 内でテストを実行します。プロジェクトの開発依存関係としてインストールします。
+
+```bash npm2yarn
+npm install -D vitest
+```
+
+## Workspace をセットアップする
+
+Workspace はローカル Filesystem を使用してドキュメントファイルを管理します。Agent は Workspace ディレクトリ内のファイルを読み書きします。`src/mastra/index.ts` ファイルで、[`Workspace`](/reference/workspace/workspace-class)、[`LocalFilesystem`](/reference/workspace/local-filesystem)、[`LocalSandbox`](/reference/workspace/local-sandbox) クラスを import します。
+
+さらに、BM25 検索インデックスを有効化し、`skills` ディレクトリから Skill を読み込みます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+// highlight-start
+import { resolve } from 'node:path'
+import { Workspace, LocalFilesystem, LocalSandbox } from '@mastra/core/workspace'
+// highlight-end
+
+// highlight-start
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: resolve(import.meta.dirname, '../../workspace') }),
+  sandbox: new LocalSandbox({ workingDirectory: resolve(import.meta.dirname, '../../workspace') }),
+  skills: ['skills'],
+  bm25: true,
+  autoIndexPaths: ['docs', 'src'],
+})
+// highlight-end
+
+export const mastra = new Mastra({
+  // highlight-next-line
+  workspace,
+})
+```
+
+プロジェクトのルートに、`workspace` という新しいフォルダーを作成します。すべてのファイルはここに保存され、Agent によって管理されます。
+
+## サンプルプロジェクトのファイルを追加する
+
+Workspace では、次のフォルダー構成を使用します。
+
+- `workspace/src/`：サンプルプロジェクトのソースコード
+- `workspace/tests/`：テストファイル
+- `workspace/docs/`：プロジェクトのドキュメント
+- `workspace/skills/`：[Agent Skill](https://agentskills.io) として定義するコーディング規約とガイドライン
+
+まず、ユーティリティ関数を含む `workspace/src/utils/string-helpers.ts` ファイルと、それに対応する `workspace/tests/string-helpers.test.ts` テストファイルを作成します。
+
+```typescript title="workspace/src/utils/string-helpers.ts"
+export function capitalize(str: string): string {
+  if (!str) return str
+  return str.charAt(0).toUpperCase() + str.slice(1)
+}
+
+export function slugify(str: string): string {
+  return str
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, '')
+    .replace(/\s+/g, '-')
+}
+```
+
+```typescript title="workspace/tests/string-helpers.test.ts"
+import { describe, it, expect } from 'vitest'
+import { capitalize, slugify } from '../src/utils/string-helpers'
+
+describe('String Helpers', () => {
+  describe('capitalize', () => {
+    it('capitalizes first letter', () => {
+      expect(capitalize('hello')).toBe('Hello')
+    })
+  })
+
+  describe('slugify', () => {
+    it('converts to lowercase and replaces spaces', () => {
+      expect(slugify('Hello World')).toBe('hello-world')
+    })
+  })
+})
+```
+
+`workspace/skills/coding-standards/SKILL.md` に Skill 定義を作成します。これにより、コードの作成方法とテスト方法を Agent に指示します。
+
+```markdown title="workspace/skills/coding-standards/SKILL.md"
+---
+name: coding-standards
+description: Project coding standards and testing guidelines
+---
+
+# Coding Standards
+
+## Code quality
+
+- Functions under 50 lines
+- Use descriptive variable names
+- Always add TypeScript types
+
+## Testing
+
+- Test all exported functions
+- Use AAA pattern: Arrange, Act, Assert
+- Cover happy paths and edge cases
+
+## Before committing
+
+1. Write implementation
+2. Write comprehensive tests
+3. Run tests: `npm test`
+4. All tests must pass
+```
+
+詳細なテストパターンを示すリファレンスファイル `workspace/skills/coding-standards/references/testing-guide.md` を作成します。
+
+````markdown title="workspace/skills/coding-standards/references/testing-guide.md"
+# Testing Guide
+
+## AAA pattern
+
+```typescript
+it('descriptive test name', () => {
+  // Arrange: Set up test data
+  const input = 'test'
+
+  // Act: Execute the function
+  const result = doSomething(input)
+
+  // Assert: Verify the result
+  expect(result).toBe('expected')
+})
+```
+
+## What to test
+
+- Happy paths (normal inputs)
+- Edge cases (empty, null, boundary values)
+- Error cases (invalid inputs, exceptions)
+````
+
+## 開発アシスタントを作成する
+
+Workspace のセットアップが完了したら、開発アシスタント Agent を作成します。この Agent には、テスト駆動開発（TDD）を使用して新機能を追加するための指示を与えます。
+
+新しいファイル `src/mastra/agents/dev-assistant.ts` を作成し、Agent を定義します。
+
+```typescript title="src/mastra/agents/dev-assistant.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const devAssistant = new Agent({
+  id: 'dev-assistant',
+  name: 'Dev Assistant',
+  instructions: `You are a development assistant.
+
+When adding features:
+1. Activate 'coding-standards' skill
+2. Search workspace for similar code examples
+3. Write the implementation following standards
+4. Write comprehensive tests. Leave existing tests in place, only add your new tests
+5. Execute the command \`npx vitest run\` to validate that all tests pass
+6. Update documentation if needed
+
+For every new feature: Write code → Write tests → Run tests → Update docs
+
+Always explain your reasoning and steps.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+`src/mastra/index.ts` 内で Agent を import し、`Mastra` インスタンスに登録します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { resolve } from 'node:path'
+import { Workspace, LocalFilesystem, LocalSandbox } from '@mastra/core/workspace'
+// highlight-next-line
+import { devAssistant } from './agents/dev-assistant'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: resolve(import.meta.dirname, '../../workspace') }),
+  sandbox: new LocalSandbox({ workingDirectory: resolve(import.meta.dirname, '../../workspace') }),
+  skills: ['skills'],
+  bm25: true,
+  autoIndexPaths: ['docs', 'src'],
+})
+
+export const mastra = new Mastra({
+  workspace,
+  // highlight-next-line
+  agents: { devAssistant },
+})
+```
+
+## アシスタントをテストする
+
+[Studio](/docs/studio/overview) を起動し、Agent と対話して動作を確認します。
+
+```bash npm2yarn
+npm run dev
+```
+
+[localhost:4111](http://localhost:4111) を開き、開発アシスタントに移動します。
+
+TDD を使用して新しい関数を追加するよう Agent に依頼します。
+
+```text
+Add a 'truncate' function to string-helpers.ts that shortens strings to a max length. Add '...' if truncated.
+
+Follow TDD: write tests first, then implementation.
+```
+
+Agent のレスポンスは非決定的なため、正確な出力は異なります。ただし、Agent が次のようなプロセスに従うことを確認できます。
+
+1. coding-standards Skill を有効化する
+
+1. Workspace で類似するコードパターンを検索する
+
+1. まずテストを作成する。例：
+
+   ```typescript
+   describe('truncate', () => {
+     it('truncates long strings', () => {
+       expect(truncate('Hello World', 5)).toBe('He...')
+     })
+
+     it('keeps short strings unchanged', () => {
+       expect(truncate('Hi', 10)).toBe('Hi')
+     })
+
+     it('handles edge cases', () => {
+       expect(truncate('', 5)).toBe('')
+     })
+   })
+   ```
+
+1. 実装を作成する。例：
+
+   ```typescript
+   export function truncate(str: string, maxLength: number): string {
+     if (!str || maxLength < 0) return str
+     if (str.length <= maxLength) return str
+     if (maxLength === 0) return '...'
+     return str.slice(0, maxLength - 3) + '...'
+   }
+   ```
+
+1. テストを実行し、合格することを確認する
+
+## 次のステップ
+
+このアシスタントは、次のように拡張できます。
+
+- 言語やフレームワークごとの Skill を追加する
+- バックエンド、フロントエンド、DevOps 用の専門 Agent を作成する
+- GitHub と統合し、PR を自動レビューする
+- CI/CD の自動化を構築する
+- Multi-Agent Workflow を追加する

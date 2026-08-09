@@ -1,0 +1,403 @@
+---
+title: "カスタム Adapter | Server"
+description: "Hono や Express 以外のフレームワーク向けにカスタム Server Adapter を作成します。"
+packages:
+  - "@mastra/core"
+  - "@mastra/express"
+  - "@mastra/hono"
+  - "@mastra/server"
+  - "@mastra/fastify"
+  - "@mastra/koa"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# カスタム Adapter
+
+事前構築済みの Server Adapter（Hono、Express、Fastify、Koa）が使用するフレームワークに対応していない場合や、リクエストとレスポンスの処理に固有の要件がある場合は、カスタム Adapter を作成します。
+
+カスタム Adapter は、Mastra のルート定義とフレームワークのルーティングシステムを相互に変換します。フレームワークの API を使用して、ミドルウェアの登録、リクエストの処理、レスポンスの送信を行うメソッドを実装します。
+
+:::info
+
+次の事前構築済み Server Adapter を使用できます。
+
+- [@mastra/hono](/reference/server/hono-adapter)
+- [@mastra/express](/reference/server/express-adapter)
+- [@mastra/fastify](/reference/server/fastify-adapter)
+- [@mastra/koa](/reference/server/koa-adapter)
+
+:::
+
+## 抽象クラス
+
+`@mastra/server/server-adapter` の抽象クラス `MastraServer` は、すべての Adapter の基盤です。ルート登録ロジック、パラメーター検証、その他の共通機能を処理します。カスタム Adapter はこのクラスを拡張し、フレームワーク固有の部分を実装します。
+
+このクラスは、フレームワークの型を表す3つの型パラメーターを受け取ります。
+
+```typescript title="my-framework-adapter.ts"
+import { MastraServer } from '@mastra/server/server-adapter'
+
+export class MyFrameworkServer extends MastraServer<
+  // Your framework's app type (e.g., FastifyInstance)
+  MyApp,
+  // Your framework's request type (e.g., FastifyRequest)
+  MyRequest,
+  // Your framework's response type (e.g., FastifyReply)
+  MyResponse
+> {
+  // Implement abstract methods
+}
+```
+
+これらの型パラメーターにより、Adapter の実装全体で型安全性が確保され、フレームワーク固有の API にアクセスする際に適切な型が適用されます。
+
+## 必須メソッド
+
+次の6つの抽象メソッドを実装する必要があります。それぞれが、コンテキストの付加からレスポンスの送信まで、リクエストのライフサイクルの特定部分を処理します。
+
+### `registerContextMiddleware()`
+
+このメソッドは最初に実行され、受信するすべてのリクエストに Mastra のコンテキストを付加します。ルートハンドラーが動作するには、Mastra インスタンス、Tool、その他のコンテキストへのアクセスが必要です。付加方法はフレームワークによって異なり、Express は `res.locals`、Hono は `c.set()` を使用します。他のフレームワークにもそれぞれのパターンがあります。
+
+```typescript prettier:false
+registerContextMiddleware(): void {
+  this.app.use('*', (req, res, next) => {
+    // Attach context to your framework's request/response
+    res.locals.mastra = this.mastra;
+    res.locals.requestContext = new RequestContext();
+    res.locals.tools = this.tools;
+    res.locals.abortSignal = createAbortSignal(req);
+    next();
+  });
+}
+```
+
+付加するコンテキストは次のとおりです。
+
+| キー | 型 | 説明 |
+| - | - | - |
+| `mastra` | `Mastra` | Mastra インスタンス |
+| `requestContext` | `RequestContext` | リクエストスコープのコンテキストマップ |
+| `tools` | `Record<string, Tool>` | 利用可能な Tool |
+| `abortSignal` | `AbortSignal` | リクエストのキャンセルシグナル |
+| `taskStore` | `InMemoryTaskStore` | A2A タスクストレージ（設定されている場合） |
+
+### `registerAuthMiddleware()`
+
+認証と認可のミドルウェアを登録します。このメソッドでは、Mastra インスタンスに認証が設定されているか確認し、設定されていなければ登録をすべて省略します。認証が設定されている場合、通常は2つのミドルウェア関数を登録します。1つは認証（トークンを検証してユーザーを設定）、もう1つは認可（ユーザーが要求されたリソースへアクセスできるか確認）を担当します。
+
+```typescript prettier:false
+registerAuthMiddleware(): void {
+  const authConfig = this.mastra.getServer()?.auth;
+  if (!authConfig) return;
+
+  // Register authentication (validate token, set user)
+  this.app.use('*', async (req, res, next) => {
+    const token = extractToken(req);
+    const user = await authConfig.authenticateToken?.(token, req);
+    if (!user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    res.locals.user = user;
+    next();
+  });
+
+  // Register authorization (check permissions)
+  this.app.use('*', async (req, res, next) => {
+    const allowed = await authConfig.authorize?.(
+      req.path,
+      req.method,
+      res.locals.user,
+      res
+    );
+    if (!allowed) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    next();
+  });
+}
+```
+
+### `registerRoute()`
+
+フレームワークに単一のルートを登録します。このメソッドは初期化時に Mastra のルートごとに1回呼び出されます。パス、HTTP メソッド、ハンドラー関数、検証用 Zod スキーマを含む `ServerRoute` オブジェクトを受け取ります。実装では、これをフレームワークのルーティングシステムに接続します。
+
+```typescript prettier:false
+async registerRoute(
+  app: MyApp,
+  route: ServerRoute,
+  { prefix }: { prefix?: string }
+): Promise<void> {
+  const path = `${prefix || ''}${route.path}`;
+  const method = route.method.toLowerCase();
+
+  app[method](path, async (req, res) => {
+    try {
+      // 1. Extract parameters
+      const params = await this.getParams(route, req);
+
+      // 2. Validate with Zod schemas
+      const queryParams = await this.parseQueryParams(route, params.queryParams);
+      const body = await this.parseBody(route, params.body);
+
+      // 3. Build handler params
+      const handlerParams = {
+        ...params.urlParams,
+        ...queryParams,
+        ...(typeof body === 'object' ? body : {}),
+        mastra: this.mastra,
+        requestContext: res.locals.requestContext,
+        tools: res.locals.tools,
+        abortSignal: res.locals.abortSignal,
+        taskStore: this.taskStore,
+      };
+
+      // 4. Call handler
+      const result = await route.handler(handlerParams);
+
+      // 5. Send response
+      return this.sendResponse(route, res, result);
+    } catch (error) {
+      const status = error.status ?? error.details?.status ?? 500;
+      return res.status(status).json({ error: error.message });
+    }
+  });
+}
+```
+
+### `getParams()`
+
+受信リクエストから URL パラメーター、クエリパラメーター、リクエスト本文を抽出します。値の公開方法はフレームワークによって異なります。Express は `req.params`、`req.query`、`req.body` を使用しますが、他のフレームワークでは別のプロパティ名やメソッド呼び出しが必要な場合があります。このメソッドは、フレームワークからの抽出を正規化します。
+
+```typescript prettier:false
+async getParams(
+  route: ServerRoute,
+  request: MyRequest
+): Promise<{
+  urlParams: Record<string, string>;
+  queryParams: Record<string, string>;
+  body: unknown;
+}> {
+  return {
+    // From route path (e.g., :agentId)
+    urlParams: request.params,
+    // From URL query string
+    queryParams: request.query,
+    // From request body
+    body: request.body,
+  };
+}
+```
+
+### `sendResponse()`
+
+ルートのレスポンス型に基づいてクライアントへレスポンスを返します。Mastra のルートは、ほとんどの API レスポンスに使用する JSON、Agent 生成用のストリーム、MCP トランスポート用の特殊な型など、異なるレスポンス型を返すことができます。実装では、フレームワークに合わせて各型を適切に処理します。
+
+```typescript prettier:false
+async sendResponse(
+  route: ServerRoute,
+  response: MyResponse,
+  result: unknown
+): Promise<unknown> {
+  switch (route.responseType) {
+    case 'json':
+      return response.json(result);
+
+    case 'stream':
+      return this.stream(route, response, result);
+
+    case 'datastream-response':
+      // Return AI SDK Response directly
+      return result;
+
+    case 'mcp-http':
+      // Handle MCP HTTP transport
+      return this.handleMcpHttp(response, result);
+
+    case 'mcp-sse':
+      // Handle MCP SSE transport
+      return this.handleMcpSse(response, result);
+
+    default:
+      return response.json(result);
+  }
+}
+```
+
+### `stream()`
+
+Agent 生成のストリーミングレスポンスを処理します。Agent がレスポンスを生成すると、チャンクのストリームが生成され、利用可能になった順にクライアントへ送信する必要があります。このメソッドはストリームを読み取り、必要に応じて機密データを隠す秘匿化を適用し、適切な形式（SSE または改行区切り JSON）でチャンクをレスポンスへ書き込みます。
+
+```typescript prettier:false
+async stream(
+  route: ServerRoute,
+  response: MyResponse,
+  result: unknown
+): Promise<unknown> {
+  const isSSE = route.streamFormat === 'sse';
+
+  // Set streaming headers based on format
+  response.setHeader('Content-Type', isSSE ? 'text/event-stream' : 'text/plain');
+  response.setHeader('Transfer-Encoding', 'chunked');
+
+  const reader = result.fullStream.getReader();
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      // Apply redaction if enabled
+      const chunk = this.streamOptions.redact
+        ? redactChunk(value)
+        : value;
+
+      // Format based on stream format
+      if (isSSE) {
+        response.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      } else {
+        response.write(JSON.stringify(chunk) + '\x1E');
+      }
+    }
+
+    // Send completion marker (SSE uses data: [DONE], other formats use record separator)
+    if (isSSE) {
+      response.write('data: [DONE]\n\n');
+    }
+    response.end();
+  } catch (error) {
+    reader.cancel();
+    throw error;
+  }
+}
+```
+
+## ヘルパーメソッド
+
+基底クラスには、実装で使用できるヘルパーメソッドがあります。パラメーター検証やルート登録などの共通処理を担うため、再実装は不要です。
+
+| メソッド | 説明 |
+| - | - |
+| `parsePathParams(route, params)` | Zod スキーマでパスパラメーターを検証 |
+| `parseQueryParams(route, params)` | Zod スキーマでクエリパラメーターを検証 |
+| `parseBody(route, body)` | Zod スキーマで本文を検証 |
+| `mergeRequestContext({ paramsRequestContext, bodyRequestContext })` | 複数のソースから Request Context を統合 |
+| `registerRoutes()` | Mastra の全ルートを登録（各ルートで `registerRoute` を呼び出す） |
+| `registerOpenAPIRoute(app, config, { prefix })` | OpenAPI 仕様のエンドポイントを登録 |
+
+`parse*` メソッドは各ルートで定義された Zod スキーマを使って入力を検証し、型付けされた結果を返します。検証に失敗すると、問題の詳細を含むエラーをスローします。
+
+## コンストラクター
+
+Adapter のコンストラクターは、基底クラスと同じオプションを受け取り、`super()` に渡す必要があります。必要に応じて、フレームワーク固有のオプションを追加できます。
+
+```typescript prettier:false
+constructor(options: {
+  app: MyApp;
+  mastra: Mastra;
+  prefix?: string;
+  openapiPath?: string;
+  bodyLimitOptions?: BodyLimitOptions;
+  streamOptions?: StreamOptions;
+  customRouteAuthConfig?: Map<string, boolean>;
+}) {
+  super(options);
+}
+```
+
+各オプションの詳細については、[Server Adapter](/docs/server/server-adapters) を参照してください。
+
+## 完全な例
+
+次は、すべての必須メソッドを示すスケルトン実装です。フレームワーク固有の部分には疑似コードを使用しているため、使用するフレームワークの実際の API に置き換えてください。
+
+```typescript title="my-framework-adapter.ts"
+import { MastraServer, ServerRoute } from '@mastra/server/server-adapter'
+import type { Mastra } from '@mastra/core'
+
+export class MyFrameworkServer extends MastraServer<MyApp, MyRequest, MyResponse> {
+  constructor(options: { app: MyApp; mastra: Mastra; prefix?: string }) {
+    super(options)
+  }
+
+  registerContextMiddleware(): void {
+    this.app.use('*', (req, res, next) => {
+      res.locals.mastra = this.mastra
+      res.locals.requestContext = this.mergeRequestContext({
+        paramsRequestContext: req.query.requestContext,
+        bodyRequestContext: req.body?.requestContext,
+      })
+      res.locals.tools = this.tools ?? {}
+      res.locals.abortSignal = createAbortSignal(req)
+      next()
+    })
+  }
+
+  registerAuthMiddleware(): void {
+    const authConfig = this.mastra.getServer()?.auth
+    if (!authConfig) return
+    // ... implement auth middleware
+  }
+
+  async registerRoute(
+    app: MyApp,
+    route: ServerRoute,
+    { prefix }: { prefix?: string },
+  ): Promise<void> {
+    // ... implement route registration
+  }
+
+  async getParams(route: ServerRoute, request: MyRequest) {
+    return {
+      urlParams: request.params,
+      queryParams: request.query,
+      body: request.body,
+    }
+  }
+
+  async sendResponse(route: ServerRoute, response: MyResponse, result: unknown) {
+    if (route.responseType === 'stream') {
+      return this.stream(route, response, result)
+    }
+    return response.json(result)
+  }
+
+  async stream(route: ServerRoute, response: MyResponse, result: unknown) {
+    // ... implement streaming
+  }
+}
+```
+
+## 使用方法
+
+Adapter を実装したら、提供済みの Adapter と同じ方法で使用します。
+
+```typescript title="server.ts"
+import { MyFrameworkServer } from './my-framework-adapter'
+import { mastra } from './mastra'
+
+const app = createMyFrameworkApp()
+const server = new MyFrameworkServer({ app, mastra })
+
+await server.init()
+
+app.listen(4111)
+```
+
+:::tip
+
+カスタム Adapter を構築する際は、既存の [@mastra/hono](https://github.com/mastra-ai/mastra/blob/main/server-adapters/hono/src/index.ts) と [@mastra/express](https://github.com/mastra-ai/mastra/blob/main/server-adapters/express/src/index.ts) の実装が参考になります。コンテキストの保存、ミドルウェアの登録、レスポンス処理について、フレームワーク固有のパターンを処理する方法を確認できます。
+
+Server Adapter で [Studio](/docs/studio/overview) を使用する場合は、[`mastra studio`](/reference/cli/mastra#mastra-studio) を使って Studio UI だけを起動します。
+
+:::
+
+## 関連項目
+
+- [Server Adapter](/docs/server/server-adapters): 概要と共通概念
+- [Hono Adapter](/reference/server/hono-adapter): リファレンス実装
+- [Express Adapter](/reference/server/express-adapter): リファレンス実装
+- [MastraServer リファレンス](/reference/server/mastra-server): 完全な API リファレンス
+- [createRoute() リファレンス](/reference/server/create-route): 型安全なカスタムルートの作成
+

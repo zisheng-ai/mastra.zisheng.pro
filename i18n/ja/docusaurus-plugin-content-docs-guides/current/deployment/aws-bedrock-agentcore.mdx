@@ -1,0 +1,297 @@
+---
+title: "Mastra を Amazon Bedrock AgentCore にデプロイする | Deployment"
+description: "AgentCore CLI を使用して Mastra アプリケーションを Amazon Bedrock AgentCore Runtime にデプロイする方法を説明します"
+---
+
+# Mastra を Amazon Bedrock AgentCore にデプロイする
+
+[AgentCore CLI](https://github.com/aws/agentcore-cli) を使用して、Mastra アプリケーションを [Amazon Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/) にデプロイします。CLI は Bring Your Own Code（BYO）の TypeScript プロジェクトを作成し、AWS CodeBuild でコンテナをビルドして Runtime をプロビジョニングします。デプロイにローカルの Docker Daemon は必要ありません。
+
+このガイドは[公式の AgentCore TypeScript チュートリアル](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-cli-typescript.html)に従い、Invocation Handler から Mastra Agent を呼び出すように変更しています。
+
+:::info
+
+Mastra サーバー全体を Lambda にデプロイする場合は [AWS Lambda ガイド](/guides/deployment/aws-lambda)、長時間稼働する仮想マシンを使用する場合は [Amazon EC2 ガイド](/guides/deployment/amazon-ec2)を参照してください。
+
+:::
+
+## 始める前に
+
+次のものが必要です。
+
+- Amazon Bedrock AgentCore、AWS CodeBuild、Amazon ECR、AWS IAM の権限を持つ [AWS アカウント](https://aws.amazon.com/)
+- インストールして認証済みの [AWS CLI](https://aws.amazon.com/cli/)（`aws configure` または `aws sso login`）
+- インストール済みの Node.js `v22.13.0` 以降
+- `agentcore dev` によるローカルテスト用の [Docker](https://www.docker.com/)、[Podman](https://podman.io/)、または [Finch](https://runfinch.com/)（`agentcore deploy` には不要）
+
+Amazon Bedrock AgentCore Runtime は、[一部の AWS リージョン](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html)で利用できます。AgentCore が利用でき、呼び出す Foundation Model が有効なリージョンを使用してください。
+
+## 新しい AgentCore プロジェクトを作成する
+
+次のコマンドを実行して、新しい AgentCore プロジェクトを作成します。
+
+```bash npm2yarn
+npx @aws/agentcore create --name MastraOnAgentCore --no-agent
+```
+
+新しく作成した `MastraOnAgentCore` ディレクトリに移動します。
+
+```bash
+cd MastraOnAgentCore
+```
+
+`app/MastraAgent` 内に作成される BYO TypeScript Agent を初期化します。
+
+```bash npm2yarn
+npx @aws/agentcore add agent --name MastraAgent --type byo --build Container --language TypeScript --framework Strands --model-provider Bedrock --code-location app/MastraAgent
+```
+
+CLI は `agentcore/agentcore.json` ファイルを変更し、空の `app/MastraAgent` ディレクトリを作成します。
+
+## Agent プロジェクトを設定する
+
+`app/MastraAgent` ディレクトリに移動し、新しい Node.js プロジェクトを初期化します。
+
+```bash
+cd app/MastraAgent
+npm init --init-type=module -y
+```
+
+必要な依存関係をインストールします。`bedrock-agentcore` パッケージは、[AgentCore Runtime のサービス契約](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-service-contract.html)を実装する `BedrockAgentCoreApp` HTTP サーバーを提供します。`@ai-sdk/amazon-bedrock` と `@aws-sdk/credential-providers` パッケージにより、Mastra Agent は AgentCore Runtime の実行 Role を介して Bedrock を呼び出せます。
+
+```bash npm2yarn
+npm install bedrock-agentcore @opentelemetry/auto-instrumentations-node @ai-sdk/amazon-bedrock @aws-sdk/credential-providers --legacy-peer-deps
+```
+
+TypeScript と関連する開発用依存関係もインストールします。
+
+```bash npm2yarn
+npm install --save-dev typescript @types/node tsx
+```
+
+[`mastra init`](/reference/cli/mastra#mastra-init) を実行して、新しい Mastra プロジェクトを設定します。プロンプトで選択した Provider は次の Step で上書きされるため、どの値でも構いません。
+
+```bash npm2yarn
+npx mastra@latest init
+```
+
+生成された `src/mastra/agents/weather-agent.ts` を置き換え、Amazon Bedrock を使用します。次の Step でストレージレイヤーを削除するため、元の `memory: new Memory()` は削除します。
+
+```ts title="app/MastraAgent/src/mastra/agents/weather-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock'
+import { fromNodeProviderChain } from '@aws-sdk/credential-providers'
+import { weatherTool } from '../tools/weather-tool.js'
+
+const bedrock = createAmazonBedrock({
+  credentialProvider: fromNodeProviderChain(),
+})
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions:
+    'You are a helpful weather assistant. Use the weatherTool to fetch current weather data.',
+  model: bedrock('us.anthropic.claude-sonnet-4-6'),
+  tools: { weatherTool },
+})
+```
+
+:::note
+
+`fromNodeProviderChain()` を使用すると、環境変数だけでなく、標準の SDK 解決 Chain（環境変数、共有設定ファイル、SSO、コンテナまたは EC2 Role）から AWS 認証情報を取得できます。
+
+:::
+
+生成された `src/mastra/index.ts` を置き換え、デフォルトのファイルベースストレージと Observability 設定を削除します。AgentCore Runtime コンテナは読み取り専用のアプリケーションディレクトリで非 Root ユーザーとして実行されるため、デフォルトの `LibSQLStore` は `./mastra.db` を開けず、Runtime が起動時に失敗します。
+
+```ts title="app/MastraAgent/src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { PinoLogger } from '@mastra/loggers'
+import { weatherWorkflow } from './workflows/weather-workflow.js'
+import { weatherAgent } from './agents/weather-agent.js'
+
+export const mastra = new Mastra({
+  workflows: { weatherWorkflow },
+  agents: { weatherAgent },
+  logger: new PinoLogger({
+    name: 'Mastra',
+    level: 'info',
+  }),
+})
+```
+
+次の内容で `tsconfig.json` ファイルを作成します。
+
+```json title="app/MastraAgent/tsconfig.json"
+{
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": ".",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["*.ts", "src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
+```
+
+:::note
+
+`tsconfig.json` ファイルを追加すると、生成された `src/mastra` プロジェクト内にエディターがエラーを表示します。設定で Import にファイル拡張子が必須になったためで、これは想定された動作です。次のように `.js` を追加すると修正できます。
+
+```ts title="app/MastraAgent/src/mastra/index.ts"
+// Before
+import { weatherWorkflow } from './workflows/weather-workflow'
+// After
+import { weatherWorkflow } from './workflows/weather-workflow.js'
+```
+
+:::
+
+`package.json` を更新し、Entry Point とビルドスクリプトを設定します。`npm pkg set` を使用すると、`mastra init` が追加した依存関係を維持できます。
+
+```bash
+npm pkg set main=dist/agent.js scripts.build=tsc scripts.start="node dist/agent.js" scripts.dev="npx tsx --watch agent.ts"
+```
+
+## Agent を初期化する
+
+`agent.ts` ファイルを作成します。この Handler は `POST /invocations` リクエストごとに呼び出されます。Mastra Agent を取得し、Handler 内で呼び出します。
+
+```ts title="app/MastraAgent/agent.ts"
+import { BedrockAgentCoreApp } from 'bedrock-agentcore/runtime'
+import { mastra } from './src/mastra/index.js'
+
+const app = new BedrockAgentCoreApp({
+  invocationHandler: {
+    process: async (payload, context) => {
+      const { prompt } = payload as { prompt: string }
+
+      const agent = mastra.getAgentById('weather-agent')
+      const response = await agent.generate(prompt, {
+        runId: context.sessionId,
+      })
+
+      return response.text
+    },
+  },
+})
+
+app.run()
+```
+
+`npm run build` を実行し、プロジェクトが正常にコンパイルされることを確認します。
+
+## Dockerfile を作成する
+
+`app/MastraAgent` ディレクトリに `Dockerfile` を作成します。コンテナベースのデプロイでは、複数 Stage の Docker ビルドを使用します。Builder Stage で TypeScript を JavaScript にコンパイルし、Production Stage ではコンパイル済みの出力だけを実行します。セキュリティのためイメージは非 Root ユーザーで実行され、ポート 8080（HTTP）、8000（MCP）、9000（A2A）を公開します。OpenTelemetry Instrumentation は起動時に自動的に組み込まれます。
+
+```dockerfile title="app/MastraAgent/Dockerfile"
+FROM node:22-slim AS builder
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:22-slim
+WORKDIR /app
+ENV AWS_REGION=us-east-1
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package*.json ./
+
+RUN useradd -m bedrock_agentcore
+USER bedrock_agentcore
+
+EXPOSE 8080 8000 9000
+CMD ["node", "--require", "@opentelemetry/auto-instrumentations-node/register", "dist/agent.js"]
+```
+
+:::note
+
+Bedrock のモデル ID Prefix（`us.`、`jp.`、`eu.`、`global.`）に対応する `AWS_REGION` を選択してください。
+
+:::
+
+Docker のビルド Context から不要なファイルを除外するため、`.dockerignore` ファイルも作成します。
+
+```bash
+node_modules
+dist
+.git
+*.log
+```
+
+## Agent をテストする
+
+プロジェクトルートに戻ります。
+
+```bash
+cd ../..
+```
+
+Agent をローカルでテストします。
+
+```bash npm2yarn
+npx @aws/agentcore dev --runtime MastraAgent
+```
+
+別のターミナルからテストリクエストを送信します。
+
+```bash npm2yarn
+npx @aws/agentcore dev "What is the weather in Tokyo?"
+```
+
+## Agent をデプロイする
+
+`agentcore/aws-targets.json` に AWS アカウントとリージョンを設定します。
+
+```json title="agentcore/aws-targets.json"
+[
+  {
+    "name": "default",
+    "account": "123456789012",
+    "region": "us-east-1"
+  }
+]
+```
+
+AgentCore Runtime にデプロイします。CLI は AWS CodeBuild でイメージをビルドして Amazon ECR にプッシュし、Runtime と `DEFAULT` エンドポイントを作成します。
+
+```bash npm2yarn
+npx @aws/agentcore deploy
+```
+
+:::note
+
+デプロイ前に、Provider の API キーやその他の Secret を `agentcore/agentcore.json` の Agent の `environmentVariables` フィールドに設定してください。
+
+:::
+
+## デプロイを確認する
+
+`agentcore status` を実行し、Runtime ARN、エンドポイント、最近の呼び出しを表示します。次に CLI からデプロイ済み Agent を呼び出します。
+
+```bash
+npx @aws/agentcore invoke "What is the weather in Tokyo?"
+```
+
+生成中のトークンをストリーミングするには、`--stream` を使用します。
+
+```bash
+npx @aws/agentcore invoke --stream "Plan a 3-day trip to Tokyo"
+```
+
+## 関連項目
+
+- [Amazon Bedrock AgentCore ドキュメント](https://docs.aws.amazon.com/bedrock-agentcore/)
+- [GitHub の AgentCore CLI](https://github.com/aws/agentcore-cli)

@@ -1,0 +1,166 @@
+---
+title: "日誌 | 可觀測性"
+description: 了解如何在 Mastra 中使用日誌來監察執行、擷取應用程式行為，並提升 AI 應用程式的準確度。
+packages:
+  - "@mastra/loggers"
+  - "@mastra/observability"
+---
+
+# 日誌
+
+Mastra 的日誌系統會以結構化格式擷取函數執行、輸入資料和輸出回應。
+
+部署至 Mastra 平台時，日誌會顯示在控制台中。在自行託管或自訂環境中，視乎已設定的傳輸方式，日誌可導向文件或外部服務。
+
+<Inject>
+  **給 AI Agent：** 執行 `npx mastra api log list '{"level":"error","page":0,"perPage":50}'`，直接檢查最近的錯誤日誌，而毋須開啟 Studio 或編寫臨時腳本。此命令需要正在運行且已設定可觀測性日誌的 Mastra 伺服器；可使用 `npx mastra dev` 啟動本機伺服器，或透過 `--url` 傳入可連線伺服器的基礎 URL。建立其他篩選條件前，請執行 `npx mastra api log list --schema`。使用 `npx skills add mastra-ai/skills --skill mastra` 安裝 Mastra 的 Skill，以取得完整的 API CLI 探索、目標指定、schema、驗證及錯誤處理指引。
+</Inject>
+
+## 使用 `PinoLogger` 設定日誌
+
+使用 CLI [初始化新的 Mastra 項目](/guides/getting-started/quickstart)時，預設會包含 `PinoLogger`。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { PinoLogger } from '@mastra/loggers'
+
+export const mastra = new Mastra({
+  logger: new PinoLogger({
+    name: 'Mastra',
+    level: 'info',
+  }),
+})
+```
+
+請參閱 [PinoLogger](/reference/logging/pino-logger)，了解所有可用的設定選項。
+
+## 將日誌寫入可觀測性儲存空間
+
+設定[可觀測性](/docs/observability/overview)後，所有 logger 呼叫都會自動轉送至你的可觀測性儲存空間。這代表來自應用程式及 Mastra 內部元件的每個 `debug`、`info`、`warn`、`error` 和 `trackException` 呼叫，都會與 Trace 一併儲存。
+
+毋須修改任何程式碼。Mastra 會包裝已設定的 logger，讓它同時寫入原有 logger（控制台、文件或自訂傳輸方式）及可觀測性系統。
+
+### 設定可觀測性日誌級別
+
+你可以獨立於控制台 logger，控制哪些日誌級別會送達可觀測性儲存空間。在可觀測性實例設定中加入 `logging` 選項：
+
+```typescript {12-15} title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { PinoLogger } from '@mastra/loggers'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+
+export const mastra = new Mastra({
+  logger: new PinoLogger({ name: 'Mastra', level: 'debug' }),
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-app',
+        exporters: [new MastraStorageExporter()],
+        logging: {
+          enabled: true, // set to false to disable log forwarding
+          level: 'info', // minimum level: 'debug' | 'info' | 'warn' | 'error' | 'fatal'
+        },
+      },
+    },
+  }),
+})
+```
+
+在此例中，控制台 logger 會輸出由 `debug` 開始的所有級別，但只有 `info` 或以上級別會寫入可觀測性儲存空間。這可保持儲存空間整潔，同時在開發期間保留詳盡的控制台輸出。
+
+| 選項 | 類型 | 預設值 | 說明 |
+| - | - | - | - |
+| `enabled` | `boolean` | `true` | 設為 `false` 可停用所有轉送至可觀測性儲存空間的日誌。 |
+| `level` | `LogLevel` | `'debug'` | 最低嚴重程度級別。低於此級別的日誌會被捨棄。 |
+
+### 查詢日誌
+
+寫入可觀測性儲存空間的日誌，可透過 Mastra client SDK 查詢：
+
+```typescript
+import { MastraClient } from '@mastra/client-js'
+
+const client = new MastraClient()
+
+const logs = await client.listLogsVNext({
+  filters: { level: 'error' },
+  pagination: { page: 1, perPage: 50 },
+  orderBy: { field: 'timestamp', direction: 'desc' },
+})
+```
+
+使用 DuckDB 或 ClickHouse 等持久儲存後端時，日誌會在重新啟動後保留，並可供歷史分析。
+
+## 自訂日誌
+
+Mastra 可透過 `mastra.getLogger()` 方法存取 logger 實例，Workflow 步驟和 Tool 均可使用。logger 支援標準嚴重程度級別：`debug`、`info`、`warn` 和 `error`。
+
+### 從 Workflow 步驟記錄日誌
+
+在 Workflow 步驟中，可透過 `execute` 函數內的 `mastra` 參數存取 logger。你可以記錄與該步驟執行相關的訊息。
+
+```typescript {6-7} title="src/mastra/workflows/test-workflow.ts" prettier:false
+import { createWorkflow, createStep } from "@mastra/core/workflows";
+import { z } from "zod";
+
+const step1 = createStep({
+  execute: async ({ mastra }) => {
+    const logger = mastra.getLogger();
+    logger.info("workflow info log");
+
+    return {
+      output: ""
+    };
+  }
+});
+
+export const testWorkflow = createWorkflow({...})
+  .then(step1)
+  .commit();
+```
+
+### 從 Tool 記錄日誌
+
+同樣地，Tool 可透過 `mastra` 參數存取 logger 實例。使用此實例記錄執行期間 Tool 特有的活動。
+
+```typescript {6-7} title="src/mastra/tools/test-tool.ts"
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const testTool = createTool({
+  execute: async (inputData, context) => {
+    const logger = context?.mastra.getLogger()
+    logger?.info('tool info log')
+
+    return {
+      output: '',
+    }
+  },
+})
+```
+
+### 使用額外資料記錄日誌
+
+Logger 方法接受可選的第二個引數，用於加入額外資料。傳入結構化物件，讓日誌可在可觀測性儲存空間中篩選。
+
+```typescript {9} title="src/mastra/workflows/test-workflow.ts" prettier:false
+import { createWorkflow, createStep } from "@mastra/core/workflows";
+import { z } from "zod";
+
+const step1 = createStep({
+  execute: async ({ mastra }) => {
+    const testAgent = mastra.getAgent("testAgent");
+    const logger = mastra.getLogger();
+    
+    logger.info("workflow info log", { agent: testAgent });
+
+    return {
+      output: ""
+    };
+  }
+});
+
+export const testWorkflow = createWorkflow({...})
+  .then(step1)
+  .commit();
+```

@@ -7,8 +7,8 @@
 /** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */
 const sidebars = {
   referenceSidebar: [
-    { type: 'doc', id: 'index', label: 'Overview' },
-    { type: 'doc', id: 'configuration', label: 'Configuration' },
+    { type: 'doc', id: 'index', label: 'Overview', key: 'reference-overview' },
+    { type: 'doc', id: 'configuration', label: 'Configuration', key: 'reference-configuration' },
     { type: 'doc', id: 'build-with-ai', label: 'Build with AI' },
     { type: 'doc', id: 'project-structure', label: 'Project Structure' },
     {
@@ -42,6 +42,7 @@ const sidebars = {
     {
       type: 'category',
       label: 'Agents',
+      key: 'agents-reference',
       collapsed: true,
       items: [
         { type: 'doc', id: 'agents/agent', label: 'Agent Class' },
@@ -65,18 +66,18 @@ const sidebars = {
         { type: 'doc', id: 'agents/getDescription', label: '.getDescription()' },
         { type: 'doc', id: 'agents/getInstructions', label: '.getInstructions()' },
         { type: 'doc', id: 'agents/getLLM', label: '.getLLM()' },
-        { type: 'doc', id: 'agents/getMemory', label: '.getMemory()' },
+        { type: 'doc', id: 'agents/getMemory', label: '.getMemory()', key: 'agent-get-memory' },
         { type: 'doc', id: 'agents/getMetadata', label: '.getMetadata()' },
         { type: 'doc', id: 'agents/getModel', label: '.getModel()' },
         { type: 'doc', id: 'agents/getSkill', label: '.getSkill()' },
         { type: 'doc', id: 'agents/getTools', label: '.getTools()' },
         { type: 'doc', id: 'agents/getVoice', label: '.getVoice()' },
-        { type: 'doc', id: 'agents/listAgents', label: '.listAgents()' },
-        { type: 'doc', id: 'agents/listScorers', label: '.listScorers()' },
+        { type: 'doc', id: 'agents/listAgents', label: '.listAgents()', key: 'agent-list-agents' },
+        { type: 'doc', id: 'agents/listScorers', label: '.listScorers()', key: 'agent-list-scorers' },
         { type: 'doc', id: 'agents/listSkills', label: '.listSkills()' },
         { type: 'doc', id: 'agents/listSuspendedRuns', label: '.listSuspendedRuns()' },
-        { type: 'doc', id: 'agents/listTools', label: '.listTools()' },
-        { type: 'doc', id: 'agents/listWorkflows', label: '.listWorkflows()' },
+        { type: 'doc', id: 'agents/listTools', label: '.listTools()', key: 'agent-list-tools' },
+        { type: 'doc', id: 'agents/listWorkflows', label: '.listWorkflows()', key: 'agent-list-workflows' },
         { type: 'doc', id: 'agents/network', label: '.network()' },
       ],
     },
@@ -113,7 +114,7 @@ const sidebars = {
         { type: 'doc', id: 'auth/clerk', label: 'Clerk' },
         { type: 'doc', id: 'auth/fga', label: 'Fine-Grained Authorization' },
         { type: 'doc', id: 'auth/firebase', label: 'Firebase' },
-        { type: 'doc', id: 'auth/google', label: 'Google' },
+        { type: 'doc', id: 'auth/google', label: 'Google', key: 'google-auth' },
         { type: 'doc', id: 'auth/jwt', label: 'JSON Web Token' },
         { type: 'doc', id: 'auth/okta', label: 'Okta' },
         { type: 'doc', id: 'auth/supabase', label: 'Supabase' },
@@ -123,6 +124,7 @@ const sidebars = {
     {
       type: 'category',
       label: 'Browser',
+      key: 'browser-reference',
       collapsed: true,
       items: [
         { type: 'doc', id: 'browser/agent-browser', label: 'AgentBrowser' },
@@ -220,7 +222,7 @@ const sidebars = {
         { type: 'doc', id: 'core/getLogger', label: '.getLogger()' },
         { type: 'doc', id: 'core/getMCPServer', label: '.getMCPServer()' },
         { type: 'doc', id: 'core/getMCPServerById', label: '.getMCPServerById()' },
-        { type: 'doc', id: 'core/getMemory', label: '.getMemory()' },
+        { type: 'doc', id: 'core/getMemory', label: '.getMemory()', key: 'core-get-memory' },
         { type: 'doc', id: 'core/getScorer', label: '.getScorer()' },
         { type: 'doc', id: 'core/getScorerById', label: '.getScorerById()' },
         { type: 'doc', id: 'core/getServer', label: '.getServer()' },
@@ -230,16 +232,16 @@ const sidebars = {
         { type: 'doc', id: 'core/getToolById', label: '.getToolById()' },
         { type: 'doc', id: 'core/getVector', label: '.getVector()' },
         { type: 'doc', id: 'core/getWorkflow', label: '.getWorkflow()' },
-        { type: 'doc', id: 'core/listAgents', label: '.listAgents()' },
+        { type: 'doc', id: 'core/listAgents', label: '.listAgents()', key: 'core-list-agents' },
         { type: 'doc', id: 'core/listGateways', label: '.listGateways()' },
         { type: 'doc', id: 'core/listLogs', label: '.listLogs()' },
         { type: 'doc', id: 'core/listLogsByRunId', label: '.listLogsByRunId()' },
         { type: 'doc', id: 'core/listMCPServers', label: '.listMCPServers()' },
         { type: 'doc', id: 'core/listMemory', label: '.listMemory()' },
-        { type: 'doc', id: 'core/listScorers', label: '.listScorers()' },
-        { type: 'doc', id: 'core/listTools', label: '.listTools()' },
+        { type: 'doc', id: 'core/listScorers', label: '.listScorers()', key: 'core-list-scorers' },
+        { type: 'doc', id: 'core/listTools', label: '.listTools()', key: 'core-list-tools' },
         { type: 'doc', id: 'core/listVectors', label: '.listVectors()' },
-        { type: 'doc', id: 'core/listWorkflows', label: '.listWorkflows()' },
+        { type: 'doc', id: 'core/listWorkflows', label: '.listWorkflows()', key: 'core-list-workflows' },
         { type: 'doc', id: 'core/removeWorkspace', label: '.removeWorkspace()' },
         { type: 'doc', id: 'core/setLogger', label: '.setLogger()' },
         { type: 'doc', id: 'core/setStorage', label: '.setStorage()' },
@@ -250,7 +252,7 @@ const sidebars = {
       label: 'Deployer',
       collapsed: true,
       items: [
-        { type: 'doc', id: 'deployer/cloudflare', label: 'Cloudflare' },
+        { type: 'doc', id: 'deployer/cloudflare', label: 'Cloudflare', key: 'cloudflare-deployer' },
         { type: 'doc', id: 'deployer/index', label: 'Deployer' },
         { type: 'doc', id: 'deployer/netlify', label: 'Netlify' },
         { type: 'doc', id: 'deployer/vercel', label: 'Vercel' },
@@ -271,6 +273,7 @@ const sidebars = {
         {
           type: 'category',
           label: 'Browser',
+          key: 'editor-browser',
           collapsed: true,
           items: [
             { type: 'doc', id: 'editor/browser-provider', label: 'BrowserProvider' },
@@ -439,7 +442,12 @@ const sidebars = {
           type: 'category',
           label: 'Tracing',
           items: [
-            { type: 'doc', id: 'observability/tracing/configuration', label: 'Configuration' },
+            {
+              type: 'doc',
+              id: 'observability/tracing/configuration',
+              label: 'Configuration',
+              key: 'tracing-configuration',
+            },
             { type: 'doc', id: 'observability/tracing/instances', label: 'Instances' },
             { type: 'doc', id: 'observability/tracing/interfaces', label: 'Interfaces' },
             { type: 'doc', id: 'observability/tracing/span-filtering', label: 'Span filtering' },
@@ -513,6 +521,7 @@ const sidebars = {
             {
               type: 'category',
               label: 'Processors',
+              key: 'observability-processors',
               items: [
                 {
                   type: 'doc',
@@ -528,6 +537,7 @@ const sidebars = {
     {
       type: 'category',
       label: 'Processors',
+      key: 'processors-reference',
       collapsed: true,
       items: [
         { type: 'doc', id: 'processors/batch-parts-processor', label: 'BatchPartsProcessor' },
@@ -595,7 +605,7 @@ const sidebars = {
       type: 'category',
       label: 'Schedules',
       collapsed: true,
-      items: [{ type: 'doc', id: 'schedules/overview', label: 'Overview' }],
+      items: [{ type: 'doc', id: 'schedules/overview', label: 'Overview', key: 'schedules-overview' }],
     },
     {
       type: 'category',
@@ -649,7 +659,7 @@ const sidebars = {
       label: 'Storage',
       collapsed: true,
       items: [
-        { type: 'doc', id: 'storage/overview', label: 'Overview' },
+        { type: 'doc', id: 'storage/overview', label: 'Overview', key: 'storage-overview' },
         { type: 'doc', id: 'storage/dsql', label: 'Aurora DSQL Storage' },
         { type: 'doc', id: 'storage/clickhouse', label: 'ClickHouse Storage' },
         { type: 'doc', id: 'storage/cloudflare-d1', label: 'Cloudflare D1 Storage' },
@@ -680,9 +690,10 @@ const sidebars = {
         {
           type: 'category',
           label: 'Agents',
+          key: 'streaming-agents',
           items: [
             { type: 'doc', id: 'streaming/agents/MastraModelOutput', label: 'MastraModelOutput' },
-            { type: 'doc', id: 'streaming/agents/stream', label: '.stream()' },
+            { type: 'doc', id: 'streaming/agents/stream', label: '.stream()', key: 'agent-stream' },
             { type: 'doc', id: 'streaming/agents/streamLegacy', label: '.streamLegacy()' },
             { type: 'doc', id: 'streaming/agents/streamUntilIdle', label: '.streamUntilIdle()' },
           ],
@@ -690,10 +701,11 @@ const sidebars = {
         {
           type: 'category',
           label: 'Workflows',
+          key: 'streaming-workflows',
           items: [
             { type: 'doc', id: 'streaming/workflows/observeStream', label: '.observeStream()' },
             { type: 'doc', id: 'streaming/workflows/resumeStream', label: '.resumeStream()' },
-            { type: 'doc', id: 'streaming/workflows/stream', label: '.stream()' },
+            { type: 'doc', id: 'streaming/workflows/stream', label: '.stream()', key: 'workflow-stream' },
             {
               type: 'doc',
               id: 'streaming/workflows/timeTravelStream',
@@ -707,7 +719,7 @@ const sidebars = {
       type: 'category',
       label: 'Templates',
       collapsed: true,
-      items: [{ type: 'doc', id: 'templates/overview', label: 'Overview' }],
+      items: [{ type: 'doc', id: 'templates/overview', label: 'Overview', key: 'templates-overview' }],
     },
     {
       type: 'category',
@@ -773,12 +785,12 @@ const sidebars = {
       items: [
         { type: 'doc', id: 'voice/aws-nova-sonic', label: 'AWS Nova Sonic' },
         { type: 'doc', id: 'voice/azure', label: 'Azure' },
-        { type: 'doc', id: 'voice/cloudflare', label: 'Cloudflare' },
+        { type: 'doc', id: 'voice/cloudflare', label: 'Cloudflare', key: 'cloudflare-voice' },
         { type: 'doc', id: 'voice/composite-voice', label: 'Composite Voice' },
         { type: 'doc', id: 'voice/deepgram', label: 'Deepgram' },
         { type: 'doc', id: 'voice/elevenlabs', label: 'ElevenLabs' },
         { type: 'doc', id: 'voice/voice.events', label: 'Events' },
-        { type: 'doc', id: 'voice/google', label: 'Google' },
+        { type: 'doc', id: 'voice/google', label: 'Google', key: 'google-voice' },
         { type: 'doc', id: 'voice/google-gemini-live', label: 'Google Gemini Live' },
         { type: 'doc', id: 'voice/inworld', label: 'Inworld' },
         { type: 'doc', id: 'voice/inworld-realtime', label: 'Inworld Realtime' },
@@ -810,11 +822,12 @@ const sidebars = {
       type: 'category',
       label: 'Workers',
       collapsed: true,
-      items: [{ type: 'doc', id: 'workers/overview', label: 'Overview' }],
+      items: [{ type: 'doc', id: 'workers/overview', label: 'Overview', key: 'workers-overview' }],
     },
     {
       type: 'category',
       label: 'Workflows',
+      key: 'workflows-reference',
       collapsed: true,
       items: [
         {

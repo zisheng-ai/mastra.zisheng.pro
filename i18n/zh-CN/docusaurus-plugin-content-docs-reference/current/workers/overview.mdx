@@ -1,0 +1,94 @@
+---
+title: "参考：Workers | Workers"
+description: "Mastra Workers 的 API 参考；Workers 是处理 Workflow 编排、cron 调度和后台任务执行的后台处理单元。"
+packages:
+  - "@mastra/core"
+  - "@mastra/redis-streams"
+  - "@mastra/google-cloud-pubsub"
+---
+
+# Workers
+
+有关使用模式和部署拓扑，请参阅 [Workers](/docs/deployment/workers)。
+
+## 环境变量
+
+### `MASTRA_WORKERS`
+
+控制在当前进程中启动哪些 Worker。
+
+| 值 | 行为 |
+| - | - |
+| _(未设置)_ | 根据配置自动创建默认 Worker |
+| `"false"` | 禁用 Worker 事件处理。该进程提供 HTTP 请求服务，仍可向 PubSub 发布事件（例如 Workflow 启动），但不会消费它们。 |
+| `"orchestration"` | 仅启动编排 Worker |
+| `"scheduler"` | 仅启动调度 Worker |
+| `"backgroundTasks"` | 仅启动后台任务 Worker |
+| `"orchestration,scheduler"` | 多个 Worker（以逗号分隔） |
+
+使用此变量可从同一构建产物在不同容器中运行不同类型的 Worker。
+
+### `MASTRA_STEP_EXECUTION_URL`
+
+API 服务器的基础 URL，编排 Worker 用它远程执行 Workflow 步骤。当编排 Worker 与 API 在不同进程中运行时必需。
+
+```
+MASTRA_STEP_EXECUTION_URL=http://api:4111/api
+```
+
+在生产环境中使用 HTTPS URL。请参阅[安全建议](/docs/server/auth/workers#security-recommendations)。
+
+编排 Worker 会向以下地址发送步骤执行请求：
+
+```
+${MASTRA_STEP_EXECUTION_URL}/workflows/:workflowId/runs/:runId/steps/execute
+```
+
+### `MASTRA_WORKER_AUTH_TOKEN`
+
+编排 Worker 调用 API 的步骤执行端点时发送的 bearer token。API 配置的认证 Provider 必须能够识别此 token。请参阅 [Worker 身份验证](/docs/server/auth/workers)。
+
+```
+MASTRA_WORKER_AUTH_TOKEN=sk-worker-secret-token
+```
+
+## Worker 类型
+
+### OrchestrationWorker
+
+处理 PubSub `workflows` topic 中的 Workflow 事件。需要配置了拉取订阅、支持拉取的 PubSub，例如 `@mastra/redis-streams` 或 `@mastra/google-cloud-pubsub`。
+
+- **名称**：`orchestration`
+- **PubSub topic**：`workflows`
+- **消费者组**：`mastra-orchestration`
+
+### SchedulerWorker
+
+轮询 storage 以查找到期的 cron 计划，并发布 `workflow.start` 事件。
+
+- **名称**：`scheduler`
+- **仅限单个实例**：恰好运行一个实例，以避免重复触发
+
+### BackgroundTaskWorker
+
+执行由 Agent 分派的后台 Tool 调用。
+
+- **名称**：`backgroundTasks`
+- **PubSub topic**：`background-tasks`
+- **消费者组**：`background-task-workers`
+- **支持多个副本**：实例共享消费者组
+
+## 支持的 storage 后端
+
+运行所有 Worker 类型的部署需要一个实现 `workflows`、`backgroundTasks` 和 `schedules` domain 的 storage 后端。SchedulerWorker 特别需要 `schedules` domain。如果不使用定时 Workflow，不具备该 domain 的后端仍可支持编排和后台任务。以下后端支持全部三个：
+
+| 后端 | 包 |
+| - | - |
+| PostgreSQL | [`@mastra/pg`](/reference/storage/postgresql) |
+| LibSQL | [`@mastra/libsql`](/reference/storage/libsql) |
+| MySQL | `@mastra/mysql` |
+| MongoDB | [`@mastra/mongodb`](/reference/storage/mongodb) |
+| Spanner | [`@mastra/spanner`](/reference/storage/spanner) |
+| Convex | [`@mastra/convex`](/reference/storage/convex) |
+
+其他 storage 后端（Upstash、DynamoDB、Cloudflare D1、ClickHouse、Redis）支持 Workflow 和部分 Worker 功能，但缺少 `schedules` domain。如果不部署 scheduler，仍可将其用于编排和后台任务 Worker。

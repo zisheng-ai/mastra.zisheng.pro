@@ -1,0 +1,84 @@
+---
+title: "Instructions | 檔案式 Agent"
+description: 使用 instructions.md 或 instructions.ts 撰寫檔案式 Agent 持續生效的 system prompt，並了解何時應改用 Tool 或 Skill。
+packages:
+  - "@mastra/core"
+---
+
+# Instructions
+
+Agent 的 instructions 包含持續生效的 system prompt：模型每一輪都會讀取。使用它們定義 Agent 的身分、語氣、角色與常設規則。
+
+請在 Agent 根目錄的兩種檔案之一撰寫 instructions。prompt 是固定文字時使用 `instructions.md`；prompt 需要程式碼時使用 `instructions.ts`，例如由共用常數組成，或依每個 request 解析。
+
+Instructions 一律會放在 context 中，因此應用於每個 request 都適用的穩定行為。任何有條件、篇幅較大或以動作為導向的內容，請移至 [`tools/`](/reference/file-based-agents/tools) 或 [`skills/`](/reference/file-based-agents/skills)，讓模型只在相關時使用。
+
+## 快速開始
+
+在 Agent 根目錄加入 `instructions.md`。其中的內容都會成為 prompt，因此最短版本只需一句話。
+
+```markdown title="src/mastra/agents/weather/instructions.md"
+You are a helpful weather assistant. Answer questions about current conditions and forecasts.
+```
+
+## Instructions 應包含的內容
+
+有效的 instructions 應涵蓋 Agent 行為中不會隨 request 改變的部分：
+
+- 角色與身分
+- 語氣與風格
+- 常設規則
+- 輸出格式
+
+將有條件、篇幅較大或以動作為導向的指引移至 [`tools/`](/reference/file-based-agents/tools) 或 [`skills/`](/reference/file-based-agents/skills)，讓模型只在相關時使用。
+
+## TypeScript 中的 Instructions
+
+當 markdown 無法表達 prompt 時，請使用 `instructions.ts`。此檔案會 default export 字串、system message 或傳回其中之一的函式，而 `agentInstructions()` 會在不改變 export 的情況下提供型別。
+
+如果 prompt 是在程式碼中組成（例如使用與應用程式其他部分共用的常數），請 export 字串：
+
+```typescript title="src/mastra/agents/weather/instructions.ts"
+import { agentInstructions } from '@mastra/core/agent'
+import { SUPPORTED_UNITS } from '../../constants'
+
+export default agentInstructions(`
+You are a helpful weather assistant.
+Report conditions using one of these units: ${SUPPORTED_UNITS.join(', ')}.
+`)
+```
+
+如果 prompt 取決於 request，請 export 函式。Mastra 每一輪都會呼叫它，並傳入 request context：
+
+```typescript title="src/mastra/agents/support/instructions.ts"
+import { agentInstructions } from '@mastra/core/agent'
+
+export default agentInstructions(({ requestContext }) => {
+  const tier = requestContext.get('tier') ?? 'standard'
+  return `You are a support agent. Treat this as a ${tier}-tier customer.`
+})
+```
+
+函式可以是 `async`，而且除了 `requestContext` 之外也會收到 `mastra`，因此可以先讀取 Storage 或其他已註冊的 primitive，再傳回 prompt。
+
+這兩種檔案也能放在 [subagent](/reference/file-based-agents/subagents) 目錄中，適用相同規則。
+
+## 建置時行為
+
+`instructions.md` 與 `instructions.ts` 會以不同方式送達已部署的 Agent：
+
+- `instructions.md`：Mastra 會讀取檔案，並在建置時將內容 inline 至產生的程式碼中。
+- `instructions.ts`：產生的程式碼會匯入此模組，因此它會像其他 TypeScript 檔案一樣納入 bundle，也能從專案的其他部分匯入內容。
+
+在 `mastra dev` 下，編輯任一檔案都會觸發重新建置。在已部署的應用程式中，執行階段不會從磁碟讀取這兩種檔案，因此變更會在下次建置後生效。
+
+## 與 config 的優先順序
+
+Instructions 可以來自 `instructions.ts`、`instructions.md` 或 [`config.ts`](/reference/file-based-agents/config) 中的 `instructions` 欄位：
+
+- `config.ts` 中於執行階段定義的函式型 `instructions` 優先於兩種檔案。
+- 否則，`instructions.ts` 優先於 `instructions.md`。
+- `instructions.md` 優先於 `config.ts` 中的靜態 `instructions` 字串。
+- 如果都不存在，建置會失敗，並指出 Agent 目錄名稱。
+
+在多個位置定義 instructions 時，系統會記錄警告，指出兩個來源及優先採用的來源。每個 Agent 請只保留一個來源。

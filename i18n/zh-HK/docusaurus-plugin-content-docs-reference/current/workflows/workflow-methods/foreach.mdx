@@ -1,0 +1,192 @@
+---
+title: "參考：Workflow.foreach() | Workflows"
+description: Workflow 中 `Workflow.foreach()` 方法的文件；此方法會建立迴圈，為陣列中的每個項目執行一個 step。
+packages:
+  - "@mastra/core"
+---
+
+# Workflow\.foreach()
+
+`.foreach()` 方法會建立迴圈，為陣列中的每個項目執行一個 step。它必定傳回包含每次反覆運算輸出的陣列，並保留原有次序。
+
+## 使用範例
+
+```typescript
+workflow.foreach(step1, { concurrency: 2 })
+```
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'step',
+    type: 'Step',
+    description: '在迴圈中執行的 step instance。上一個 step 必須傳回陣列類型。',
+    isOptional: false,
+  },
+  {
+    name: 'opts',
+    type: 'object',
+    description:
+      '迴圈的可選設定。concurrency 選項控制可平行執行的反覆運算數目（預設值：1）',
+    isOptional: true,
+    properties: [
+      {
+        name: 'concurrency',
+        type: 'number',
+        description: '允許同時執行的反覆運算數目（預設值：1）',
+        isOptional: true,
+      },
+    ],
+  },
+]}
+/>
+
+## 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'workflow',
+    type: 'Workflow',
+    description: '用於串連方法的 Workflow instance。輸出類型是由 step 輸出類型組成的陣列。',
+  },
+]}
+/>
+
+## 行為
+
+### 執行及等待
+
+`.foreach()` 方法會先處理所有項目，然後才執行下一個 step。無論 concurrency 設定為何，只有在每次反覆運算均完成後，`.foreach()` 之後的 step 才會執行。使用 `concurrency: 1`（預設值）時，項目會依次處理。使用較高的 concurrency 時，項目會分批平行處理，但下一個 step 仍會等待所有批次完成。
+
+如需為每個項目執行多個操作，請使用巢狀 Workflow 作為 step。這樣可將每個項目的所有操作組合在一起，亦比串連多個 `.foreach()` 呼叫更簡潔。範例請參閱 [foreach 內的巢狀 Workflow](/docs/workflows/control-flow#nested-workflows-inside-foreach)。
+
+### 輸出結構
+
+`.foreach()` 必定輸出陣列。輸出陣列中的每個元素，都對應輸入陣列中相同索引位置的元素經處理後所得的結果。
+
+```typescript
+// Input: [{ value: 1 }, { value: 2 }, { value: 3 }]
+// Step adds 10 to each value
+// Output: [{ value: 11 }, { value: 12 }, { value: 13 }]
+```
+
+### 在 `.foreach()` 後使用 `.then()`
+
+在 `.foreach()` 後串連 `.then()` 時，下一個 step 會接收整個輸出陣列作為輸入。你可以彙總或一併處理所有結果。
+
+```typescript
+workflow
+  .foreach(processItemStep) // Output: array of processed items
+  .then(aggregateStep) // Input: the entire array
+  .commit()
+```
+
+### 在 `.foreach()` 後使用 `.map()`
+
+在將陣列輸出傳遞至下一個 step 前，使用 `.map()` 轉換該陣列：
+
+```typescript
+workflow
+  .foreach(processItemStep)
+  .map(async ({ inputData }) => ({
+    total: inputData.reduce((sum, item) => sum + item.value, 0),
+    count: inputData.length,
+  }))
+  .then(nextStep)
+  .commit()
+```
+
+### 串連多個 `.foreach()` 呼叫
+
+串連 `.foreach()` 呼叫時，每個呼叫都會處理上一個 step 所傳回的陣列：
+
+```typescript
+workflow
+  .foreach(stepA) // If input is [a, b, c], output is [A, B, C]
+  .foreach(stepB) // Operates on [A, B, C], output is [A', B', C']
+  .commit()
+```
+
+如果 `.foreach()` 內的 step 傳回陣列，輸出便會成為陣列的陣列。使用 `.map()` 配合 `.flat()` 將其攤平：
+
+```typescript
+workflow
+  .foreach(chunkStep) // Output: [[chunk1, chunk2], [chunk3, chunk4]]
+  .map(async ({ inputData }) => inputData.flat()) // Output: [chunk1, chunk2, chunk3, chunk4]
+  .foreach(embedStep)
+  .commit()
+```
+
+### 串流期間的進度事件
+
+使用 `run.stream()` 時，foreach step 會在每次反覆運算完成後發出 `workflow-step-progress` 事件。這讓你無需等待整個 foreach 完成，便可實時追蹤進度。
+
+```typescript
+const run = await workflow.createRun()
+const stream = run.stream({ inputData })
+
+for await (const chunk of stream) {
+  if (chunk.type === 'workflow-step-progress') {
+    console.log(`${chunk.payload.completedCount}/${chunk.payload.totalCount}`)
+    // e.g. "1/3", "2/3", "3/3"
+  }
+}
+```
+
+每個進度事件的 payload 都包含：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'foreach step 的 step ID',
+  },
+  {
+    name: 'completedCount',
+    type: 'number',
+    description: '到目前為止已完成的反覆運算數目',
+  },
+  {
+    name: 'totalCount',
+    type: 'number',
+    description: '反覆運算總數',
+  },
+  {
+    name: 'currentIndex',
+    type: 'number',
+    description: '剛完成的反覆運算索引',
+  },
+  {
+    name: 'iterationStatus',
+    type: "'success' | 'failed' | 'suspended'",
+    description: '剛完成的反覆運算狀態',
+  },
+  {
+    name: 'iterationOutput',
+    type: 'Record<string, any>',
+    description: "反覆運算的輸出（iterationStatus 為 'success' 時存在）",
+    isOptional: true,
+  },
+]}
+/>
+
+### 恢復單次反覆運算
+
+當 `.foreach()` 內的 step 暫停時，每次反覆運算會各自暫停。將 `forEachIndex` 傳遞至 [`run.resume()`](../run-methods/resume)，即可使用各自的 `resumeData`，每次恢復一個反覆運算。如省略 `forEachIndex`，所有已暫停的反覆運算都會使用相同資料恢復。
+
+```typescript
+await run.resume({
+  step: 'approve',
+  resumeData: { ok: true },
+  forEachIndex: 1,
+})
+```
+
+## 相關內容
+
+- [使用 foreach 執行迴圈](/docs/workflows/control-flow#looping-with-foreach)
+- [run.resume()](../run-methods/resume)

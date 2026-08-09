@@ -1,0 +1,572 @@
+---
+title: "參考：Tool 呼叫準確度評分器 | Evals"
+description: Mastra Tool 呼叫準確度評分器的文件，用於評估 LLM 輸出是否從可用選項中呼叫正確的 Tool。
+packages:
+  - "@mastra/evals"
+---
+
+# Tool 呼叫準確度評分器
+
+Mastra 提供兩款 Tool 呼叫準確度評分器，用於評估 LLM 是否從可用選項中選擇正確的 Tool：
+
+1. **以程式碼為基礎的評分器**——透過精確比對 Tool，進行確定性的評估
+1. **以 LLM 為基礎的評分器**——使用 AI 評估適切性的語意評估
+
+## 選擇評分器
+
+### 適合使用以程式碼為基礎之評分器的情況
+
+- 需要**確定且可重現**的結果
+- 想測試**精確的 Tool 比對**
+- 需要驗證**特定的 Tool 序列**
+- 重視速度與成本（不呼叫 LLM）
+- 正在執行自動化測試
+
+### 適合使用以 LLM 為基礎之評分器的情況
+
+- 需要從**語意上理解**適切性
+- Tool 選擇取決於 **context 與意圖**
+- 想處理要求釐清等**邊界情況**
+- 需要評分決策的**說明**
+- 正在評估**正式環境中的 Agent 行為**
+
+## 以程式碼為基礎的 Tool 呼叫準確度評分器
+
+`@mastra/evals/scorers/prebuilt` 的 `createToolCallAccuracyScorerCode()` 函式會依據精確的 Tool 比對，提供確定性的二元評分；它同時支援嚴格與寬鬆評估模式，以及 Tool 呼叫順序驗證。
+
+### 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'expectedTool',
+    type: 'string',
+    description: '指定任務應呼叫的 Tool 名稱。提供 expectedToolOrder 時會忽略此值。',
+    required: false,
+  },
+  {
+    name: 'strictMode',
+    type: 'boolean',
+    description:
+      '控制評估的嚴格程度。單一 Tool 模式：只接受完全相符的單一 Tool 呼叫。順序檢查模式：Tool 必須完全相符，且不得有額外 Tool。',
+    required: false,
+    default: 'false',
+  },
+  {
+    name: 'expectedToolOrder',
+    type: 'string[]',
+    description: '依預期呼叫順序排列的 Tool 名稱陣列。提供此值時會啟用順序檢查模式，並忽略 expectedTool 參數。',
+    required: false,
+  },
+]}
+/>
+
+此函式會傳回 MastraScorer 類別的執行個體。如需 `.run()` 方法及其輸入／輸出的詳細資訊，請參閱 [MastraScorer 參考文件](./mastra-scorer)。
+
+### 評估模式
+
+以程式碼為基礎的評分器有兩種不同模式：
+
+#### 單一 Tool 模式
+
+未提供 `expectedToolOrder` 時，評分器會評估單一 Tool 選擇：
+
+- **標準模式（strictMode: false）**：只要呼叫預期的 Tool，無論是否呼叫其他 Tool，都會傳回 `1`
+- **嚴格模式（strictMode: true）**：只有恰好呼叫一個 Tool，且與預期 Tool 相符時，才會傳回 `1`
+
+#### 順序檢查模式
+
+提供 `expectedToolOrder` 時，評分器會驗證 Tool 呼叫順序：
+
+- **嚴格順序（strictMode: true）**：Tool 必須完全依指定順序呼叫，且不得有額外 Tool
+- **彈性順序（strictMode: false）**：預期 Tool 必須以正確的相對順序出現（允許額外 Tool）
+
+## 以程式碼為基礎的評分詳情
+
+- **二元分數**：一律傳回 0 或 1
+- **確定性**：相同輸入一律產生相同輸出
+- **快速**：不呼叫外部 API
+
+### 以程式碼為基礎的評分器選項
+
+```typescript
+// Standard mode - passes if expected tool is called
+const lenientScorer = createCodeScorer({
+  expectedTool: 'search-tool',
+  strictMode: false,
+})
+
+// Strict mode - only passes if exactly one tool is called
+const strictScorer = createCodeScorer({
+  expectedTool: 'search-tool',
+  strictMode: true,
+})
+
+// Order checking with strict mode
+const strictOrderScorer = createCodeScorer({
+  expectedTool: 'step1-tool',
+  expectedToolOrder: ['step1-tool', 'step2-tool', 'step3-tool'],
+  strictMode: true, // no extra tools allowed
+})
+```
+
+### 以程式碼為基礎的評分器結果
+
+```typescript prettier:false
+{
+  runId: string,
+  preprocessStepResult: {
+    expectedTool: string,
+    actualTools: string[],
+    strictMode: boolean,
+    expectedToolOrder?: string[],
+    hasToolCalls: boolean,
+    correctToolCalled: boolean,
+    correctOrderCalled: boolean | null,
+    toolCallInfos: ToolCallInfo[]
+  },
+  score: number // Always 0 or 1
+}
+```
+
+## 以程式碼為基礎的評分器範例
+
+以程式碼為基礎的評分器會依據精確的 Tool 比對，提供確定性的二元評分（0 或 1）。
+
+### 選擇正確的 Tool
+
+```typescript title="src/example-correct-tool.ts"
+const scorer = createToolCallAccuracyScorerCode({
+  expectedTool: 'weather-tool',
+})
+
+// Simulate LLM input and output with tool call
+const inputMessages = [
+  createTestMessage({
+    content: 'What is the weather like in New York today?',
+    role: 'user',
+    id: 'input-1',
+  }),
+]
+
+const output = [
+  createTestMessage({
+    content: 'Let me check the weather for you.',
+    role: 'assistant',
+    id: 'output-1',
+    toolInvocations: [
+      createToolInvocation({
+        toolCallId: 'call-123',
+        toolName: 'weather-tool',
+        args: { location: 'New York' },
+        result: { temperature: '72°F', condition: 'sunny' },
+        state: 'result',
+      }),
+    ],
+  }),
+]
+
+const run = createAgentTestRun({ inputMessages, output })
+const result = await scorer.run(run)
+
+console.log(result.score) // 1
+console.log(result.preprocessStepResult?.correctToolCalled) // true
+```
+
+### 嚴格模式評估
+
+只有恰好呼叫一個 Tool 時才會通過：
+
+```typescript title="src/example-strict-mode.ts"
+const strictScorer = createToolCallAccuracyScorerCode({
+  expectedTool: 'weather-tool',
+  strictMode: true,
+})
+
+// Multiple tools called - fails in strict mode
+const output = [
+  createTestMessage({
+    content: 'Let me help you with that.',
+    role: 'assistant',
+    id: 'output-1',
+    toolInvocations: [
+      createToolInvocation({
+        toolCallId: 'call-1',
+        toolName: 'search-tool',
+        args: {},
+        result: {},
+        state: 'result',
+      }),
+      createToolInvocation({
+        toolCallId: 'call-2',
+        toolName: 'weather-tool',
+        args: { location: 'New York' },
+        result: { temperature: '20°C' },
+        state: 'result',
+      }),
+    ],
+  }),
+]
+
+const result = await strictScorer.run(run)
+console.log(result.score) // 0 - fails because multiple tools were called
+```
+
+### Tool 順序驗證
+
+驗證 Tool 是否依特定順序呼叫：
+
+```typescript title="src/example-order-validation.ts"
+const orderScorer = createToolCallAccuracyScorerCode({
+  expectedTool: 'auth-tool', // ignored when order is specified
+  expectedToolOrder: ['auth-tool', 'fetch-tool'],
+  strictMode: true, // no extra tools allowed
+})
+
+const output = [
+  createTestMessage({
+    content: 'I will authenticate and fetch the data.',
+    role: 'assistant',
+    id: 'output-1',
+    toolInvocations: [
+      createToolInvocation({
+        toolCallId: 'call-1',
+        toolName: 'auth-tool',
+        args: { token: 'abc123' },
+        result: { authenticated: true },
+        state: 'result',
+      }),
+      createToolInvocation({
+        toolCallId: 'call-2',
+        toolName: 'fetch-tool',
+        args: { endpoint: '/data' },
+        result: { data: ['item1'] },
+        state: 'result',
+      }),
+    ],
+  }),
+]
+
+const result = await orderScorer.run(run)
+console.log(result.score) // 1 - correct order
+```
+
+### 彈性順序模式
+
+只要預期 Tool 維持相對順序，即可允許額外 Tool：
+
+```typescript title="src/example-flexible-order.ts"
+const flexibleOrderScorer = createToolCallAccuracyScorerCode({
+  expectedTool: 'auth-tool',
+  expectedToolOrder: ['auth-tool', 'fetch-tool'],
+  strictMode: false, // allows extra tools
+})
+
+const output = [
+  createTestMessage({
+    content: 'Performing comprehensive operation.',
+    role: 'assistant',
+    id: 'output-1',
+    toolInvocations: [
+      createToolInvocation({
+        toolCallId: 'call-1',
+        toolName: 'auth-tool',
+        args: { token: 'abc123' },
+        result: { authenticated: true },
+        state: 'result',
+      }),
+      createToolInvocation({
+        toolCallId: 'call-2',
+        toolName: 'log-tool', // Extra tool - OK in flexible mode
+        args: { message: 'Starting fetch' },
+        result: { logged: true },
+        state: 'result',
+      }),
+      createToolInvocation({
+        toolCallId: 'call-3',
+        toolName: 'fetch-tool',
+        args: { endpoint: '/data' },
+        result: { data: ['item1'] },
+        state: 'result',
+      }),
+    ],
+  }),
+]
+
+const result = await flexibleOrderScorer.run(run)
+console.log(result.score) // 1 - auth-tool comes before fetch-tool
+```
+
+## 以 LLM 為基礎的 Tool 呼叫準確度評分器
+
+`@mastra/evals/scorers/prebuilt` 的 `createToolCallAccuracyScorerLLM()` 函式會使用 LLM 評估 Agent 呼叫的 Tool 是否適合使用者要求，提供語意評估，而非精確比對。
+
+### 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description: '用於評估 Tool 適切性的 LLM 模型',
+    required: true,
+  },
+  {
+    name: 'availableTools',
+    type: 'Array<{name: string, description: string}>',
+    description: '可用 Tool 及其說明的清單，用來提供 context',
+    required: true,
+  },
+]}
+/>
+
+### 功能
+
+以 LLM 為基礎的評分器提供：
+
+- **語意評估**：理解 context 與使用者意圖
+- **適切性評估**：區分「有幫助」與「適合」的 Tool
+- **釐清處理**：辨識 Agent 適當要求釐清的情況
+- **遺漏 Tool 偵測**：找出原本應該呼叫的 Tool
+- **產生理由**：提供評分決策的說明
+
+### 評估流程
+
+1. **擷取 Tool 呼叫**：識別 Agent 輸出中提及的 Tool
+1. **分析適切性**：依據使用者要求評估各 Tool
+1. **產生分數**：根據適當 Tool 與 Tool 總數計算分數
+1. **產生理由**：提供方便人員閱讀的說明
+
+## 以 LLM 為基礎的評分詳情
+
+- **小數分數**：傳回介於 0.0 到 1.0 的值
+- **理解 context**：考量使用者意圖與適切性
+- **提供說明**：提供分數的理由
+
+### 以 LLM 為基礎的評分器選項
+
+```typescript prettier:false
+// Basic configuration
+const basicLLMScorer = createLLMScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  availableTools: [
+    { name: 'tool1', description: 'Description 1' },
+    { name: 'tool2', description: 'Description 2' }
+  ]
+});
+
+// With different model
+const customModelScorer = createLLMScorer({
+  model: '__GATEWAY_OPENAI_MODEL_BASE__', // More powerful model for complex evaluations
+  availableTools: [...]
+});
+```
+
+### 以 LLM 為基礎的評分器結果
+
+```typescript prettier:false
+{
+  runId: string,
+  score: number,  // 0.0 to 1.0
+  reason: string, // Human-readable explanation
+  analyzeStepResult: {
+    evaluations: Array<{
+      toolCalled: string,
+      wasAppropriate: boolean,
+      reasoning: string
+    }>,
+    missingTools?: string[]
+  }
+}
+```
+
+## 以 LLM 為基礎的評分器範例
+
+以 LLM 為基礎的評分器使用 AI 評估所選 Tool 是否適合使用者要求。
+
+### 基本 LLM 評估
+
+```typescript title="src/example-llm-basic.ts"
+const llmScorer = createToolCallAccuracyScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  availableTools: [
+    {
+      name: 'weather-tool',
+      description: 'Get current weather information for any location',
+    },
+    {
+      name: 'calendar-tool',
+      description: 'Check calendar events and scheduling',
+    },
+    {
+      name: 'search-tool',
+      description: 'Search the web for general information',
+    },
+  ],
+})
+
+const inputMessages = [
+  createTestMessage({
+    content: 'What is the weather like in San Francisco today?',
+    role: 'user',
+    id: 'input-1',
+  }),
+]
+
+const output = [
+  createTestMessage({
+    content: 'Let me check the current weather for you.',
+    role: 'assistant',
+    id: 'output-1',
+    toolInvocations: [
+      createToolInvocation({
+        toolCallId: 'call-123',
+        toolName: 'weather-tool',
+        args: { location: 'San Francisco', date: 'today' },
+        result: { temperature: '68°F', condition: 'foggy' },
+        state: 'result',
+      }),
+    ],
+  }),
+]
+
+const run = createAgentTestRun({ inputMessages, output })
+const result = await llmScorer.run(run)
+
+console.log(result.score) // 1.0 - appropriate tool usage
+console.log(result.reason) // "The agent correctly used the weather-tool to address the user's request for weather information."
+```
+
+### 處理不適當的 Tool 使用情形
+
+```typescript title="src/example-llm-inappropriate.ts"
+const inputMessages = [
+  createTestMessage({
+    content: 'What is the weather in Tokyo?',
+    role: 'user',
+    id: 'input-1',
+  }),
+]
+
+const inappropriateOutput = [
+  createTestMessage({
+    content: 'Let me search for that information.',
+    role: 'assistant',
+    id: 'output-1',
+    toolInvocations: [
+      createToolInvocation({
+        toolCallId: 'call-456',
+        toolName: 'search-tool', // Less appropriate than weather-tool
+        args: { query: 'Tokyo weather' },
+        result: { results: ['Tokyo weather data...'] },
+        state: 'result',
+      }),
+    ],
+  }),
+]
+
+const run = createAgentTestRun({ inputMessages, output: inappropriateOutput })
+const result = await llmScorer.run(run)
+
+console.log(result.score) // 0.5 - partially appropriate
+console.log(result.reason) // "The agent used search-tool when weather-tool would have been more appropriate for a direct weather query."
+```
+
+### 評估釐清要求
+
+LLM 評分器能辨識 Agent 適當要求釐清的情況：
+
+```typescript prettier:false title="src/example-llm-clarification.ts"
+const vagueInput = [
+  createTestMessage({
+    content: 'I need help with something',
+    role: 'user',
+    id: 'input-1'
+  })
+];
+
+const clarificationOutput = [
+  createTestMessage({
+    content: 'I'd be happy to help! Could you please provide more details about what you need assistance with?',
+    role: 'assistant',
+    id: 'output-1',
+    // No tools called - asking for clarification instead
+  })
+];
+
+const run = createAgentTestRun({
+  inputMessages: vagueInput,
+  output: clarificationOutput
+});
+const result = await llmScorer.run(run);
+
+console.log(result.score); // 1.0 - appropriate to ask for clarification
+console.log(result.reason); // "The agent appropriately asked for clarification rather than calling tools with insufficient information."
+```
+
+## 比較兩款評分器
+
+以下範例會使用兩款評分器評估相同資料：
+
+```typescript title="src/example-comparison.ts"
+import {
+  createToolCallAccuracyScorerCode as createCodeScorer,
+  createToolCallAccuracyScorerLLM as createLLMScorer,
+} from '@mastra/evals/scorers/prebuilt'
+
+// Setup both scorers
+const codeScorer = createCodeScorer({
+  expectedTool: 'weather-tool',
+  strictMode: false,
+})
+
+const llmScorer = createLLMScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  availableTools: [
+    { name: 'weather-tool', description: 'Get weather information' },
+    { name: 'search-tool', description: 'Search the web' },
+  ],
+})
+
+// Test data
+const run = createAgentTestRun({
+  inputMessages: [
+    createTestMessage({
+      content: 'What is the weather?',
+      role: 'user',
+      id: 'input-1',
+    }),
+  ],
+  output: [
+    createTestMessage({
+      content: 'Let me find that information.',
+      role: 'assistant',
+      id: 'output-1',
+      toolInvocations: [
+        createToolInvocation({
+          toolCallId: 'call-1',
+          toolName: 'search-tool',
+          args: { query: 'weather' },
+          result: { results: ['weather data'] },
+          state: 'result',
+        }),
+      ],
+    }),
+  ],
+})
+
+// Run both scorers
+const codeResult = await codeScorer.run(run)
+const llmResult = await llmScorer.run(run)
+
+console.log('Code Scorer:', codeResult.score) // 0 - wrong tool
+console.log('LLM Scorer:', llmResult.score) // 0.3 - partially appropriate
+console.log('LLM Reason:', llmResult.reason) // Explains why search-tool is less appropriate
+```
+
+## 相關資源
+
+- [答案相關性評分器](./answer-relevancy)
+- [完整度評分器](./completeness)
+- [Faithfulness 評分器](./faithfulness)
+- [自訂評分器](/docs/evals/custom-scorers)

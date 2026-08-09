@@ -1,0 +1,136 @@
+---
+title: "Mastra を Vercel にデプロイする | Deployment"
+description: "Mastra アプリケーションを Vercel にデプロイする方法を説明します"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# Mastra を Vercel にデプロイする
+
+`@mastra/deployer-vercel` を使用して、Mastra サーバーを Vercel の Serverless Function としてデプロイします。Deployer はコードをバンドルし、Vercel の [Build Output API](https://vercel.com/docs/build-output-api/v3) に準拠した `.vercel/output` ディレクトリを生成するため、追加設定なしでデプロイできます。
+
+:::info
+このガイドでは、[Mastra サーバー](/docs/server/mastra-server)のデプロイについて説明します。[Server Adapter](/docs/server/server-adapters) または [Web フレームワーク](/docs/deployment/web-framework)を使用している場合は、そのフレームワークの通常の方法でデプロイしてください。
+:::
+
+## 始める前に
+
+[Mastra アプリケーション](/guides/getting-started/quickstart)と [Vercel](https://vercel.com/) アカウントが必要です。
+
+:::warning
+Vercel Functions のファイルシステムは一時的なため、設定するすべてのストレージ（Observability ストレージを含む）は外部でホストする必要があります。[LibSQLStore](/reference/storage/libsql) でファイル URL を使用している場合は、リモートでホストされるデータベースに切り替えてください。
+:::
+
+## インストール
+
+`@mastra/deployer-vercel` パッケージをプロジェクトに追加します。
+
+```bash npm2yarn
+npm install @mastra/deployer-vercel@latest
+```
+
+[`VercelDeployer`](/reference/deployer/vercel) をインポートし、Mastra 設定の Deployer として指定します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+// highlight-next-line
+import { VercelDeployer } from '@mastra/deployer-vercel'
+
+export const mastra = new Mastra({
+  // highlight-next-line
+  deployer: new VercelDeployer(),
+})
+```
+
+## デプロイする
+
+<Steps>
+  <StepItem>
+    プロジェクトをリモート Git Provider（GitHub など）にプッシュし、リポジトリを Vercel に接続します。
+
+    Vercel はデフォルトで `npm run build` を実行し、これによって `mastra build` が開始されます。ビルドスクリプトがない場合は、`package.json` に `"build": "mastra build"` を追加してください。
+
+    :::note
+
+    アプリケーションの実行に必要な環境変数（[モデル Provider](/models/providers) の API キーなど）を設定してください。
+
+    :::
+  </StepItem>
+
+  <StepItem>
+    準備ができたら **Deploy** をクリックし、最初のデプロイが完了するまで待ちます。
+  </StepItem>
+
+  <StepItem>
+    `https://<your-project>.vercel.app/api/agents` でデプロイを確認します。Agent の一覧が JSON で返されます。
+
+    Mastra サーバーはすべてのエンドポイントに `/api` を付けるため、リクエスト時の URL に追加する必要があります。
+  </StepItem>
+
+  <StepItem>
+    これで、Mastra エンドポイントを HTTP 経由で呼び出せます。
+
+    :::warning
+    エンドポイントを公開する前に、[認証](/docs/server/auth)を設定してください。
+    :::
+  </StepItem>
+</Steps>
+
+## Studio
+
+`studio` オプションを有効にすると、API とともに [Studio](/docs/studio/overview) をデプロイできます。Studio は Vercel の Edge CDN から配信される静的アセットとしてデプロイされるため、Function の呼び出し回数を消費しません。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { VercelDeployer } from '@mastra/deployer-vercel'
+
+export const mastra = new Mastra({
+  deployer: new VercelDeployer({
+    // highlight-next-line
+    studio: true,
+  }),
+})
+```
+
+デプロイ後、Studio はルート URL（`https://<your-project>.vercel.app/`）で利用でき、API は引き続き `/api/*` に配置されます。Studio は同じオリジンの API に自動接続するため、追加の環境変数は必要ありません。
+
+Studio 自体のページは CDN から配信され、それ以外のパスはすべてサーバーに渡されるため、[`registerApiRoute()`](/docs/server/custom-api-routes) で追加したルートにはそれぞれのパスでアクセスできます。Studio が先に使用するため、Studio と同じパス（`/agents` や `/workflows` など）をカスタムルートに指定しないでください。
+
+:::warning
+Studio を Mastra サーバーに接続すると、Agent、Workflow、Tool への完全なアクセス権を持ちます。不正アクセスを防ぐため、本番環境では認証や VPN などで適切に保護してください。
+:::
+
+## 任意のオーバーライド
+
+Vercel Deployer は、Vercel Output API の Function 設定に書き込まれる設定オプションをサポートします。`maxDuration`、`memory`、`regions` などの利用可能なオプションについては、[`VercelDeployer` リファレンス](/reference/deployer/vercel#constructor-options)を参照してください。
+
+## Observability
+
+Serverless Function はレスポンスを返した直後に終了することがあります。テレメトリの送信など、保留中の非同期処理は完了前に強制終了される可能性があります。`flush()` を待機すると、Function が終了する前にすべての Trace が送信されます。
+
+```typescript title="api/chat.ts"
+import type { VercelRequest, VercelResponse } from '@vercel/node'
+import { mastra } from '../src/mastra'
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const { message } = req.body
+  const agent = mastra.getAgent('myAgent')
+  const result = await agent.generate([{ role: 'user', content: message }])
+
+  await mastra.observability.flush()
+
+  return res.json(result)
+}
+```
+
+:::warning
+Vercel Deployer には `flush` 呼び出しが含まれません。必要な場合は、ハンドラーを自分でラップし、レスポンスを返す前にこのロジックを追加してください。または、この問題が発生しない[仮想マシン](/guides/deployment/digital-ocean)などの長時間稼働サーバーにデプロイしてください。
+:::
+
+## 関連項目
+
+- [VercelDeployer リファレンス](/reference/deployer/vercel)
+- [Deployment の概要](/docs/deployment/overview)
+- [Server Adapter](/docs/server/server-adapters)
+- [Web フレームワークとの統合](/docs/deployment/web-framework)

@@ -1,0 +1,237 @@
+---
+title: "OpenUI を使用する | Frameworks"
+description: "OpenUI と Mastra を統合する方法を説明します"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# OpenUI を使用する
+
+[OpenUI](https://openui.com) は Generative UI のオープン標準です。ストリーミングを重視したコンパクトな言語（OpenUI Lang）と、React Runtime および組み込みコンポーネントライブラリを組み合わせ、ストリーミング中のモデル出力を構造化 UI としてレンダリングできます。
+
+OpenUI は [AG-UI プロトコル](https://docs.ag-ui.com)を通じて Mastra に接続します。`@ag-ui/mastra` Adapter が Mastra `Agent` をラップして AG-UI イベントを送出し、クライアント上の OpenUI `agUIAdapter()` がそれを解析します。
+
+:::tip
+
+完全に動作する例については、OpenUI リポジトリの [`mastra-chat`](https://github.com/thesysdev/openui/tree/main/examples/mastra-chat) を参照してください。
+
+:::
+
+## 統合ガイド
+
+Mastra を Next.js API Route に組み込み、AG-UI プロトコルを介して OpenUI の `<AgentInterface />` チャット画面に接続します。
+
+<Steps>
+  <StepItem>
+    新しい OpenUI アプリを作成します。
+
+    ```bash npm2yarn
+    npx @openuidev/cli@latest create --name openui-mastra-chat
+    ```
+
+    新しく作成したプロジェクトのディレクトリに移動します。
+
+    ```bash
+    cd openui-mastra-chat
+    ```
+
+    作成されたアプリは、次の構造を持つ Next.js プロジェクトです。
+
+    ```bash
+    openui-mastra-chat
+    └── src
+        ├── app
+        │   ├── api
+        │   │   └── chat
+        │   │       └── route.ts
+        │   ├── globals.css
+        │   ├── layout.tsx
+        │   └── page.tsx
+        ├── generated
+        │   └── system-prompt.txt
+        └── library.ts
+    ```
+
+    チャットルートは `src/app/api/chat/route.ts`、チャット画面は `src/app/page.tsx`、コンポーネントライブラリは `src/library.ts` にあります。OpenUI CLI はライブラリから `src/generated/system-prompt.txt` を生成します。ライブラリを変更した場合は、必ず再生成してください。
+
+    OpenAI キーを `.env.local` に追加します。
+
+    ```bash title=".env.local"
+    OPENAI_API_KEY=sk-...
+    ```
+
+    :::note
+
+    OpenUI にはモデル Provider のキーが必要です。Mastra がサポートする任意の Provider を使用し、次の Step で Agent 設定を変更してください。
+
+    :::
+  </StepItem>
+
+  <StepItem>
+    Mastra パッケージと Mastra 用 AG-UI Adapter をインストールします。
+
+    ```bash npm2yarn
+    npm install @mastra/core @ag-ui/mastra @ag-ui/core zod
+    ```
+
+    `@ag-ui/mastra` は Mastra `Agent` を、[AG-UI プロトコル](https://docs.ag-ui.com)イベントを送出する `MastraAgent` でラップします。クライアント上の OpenUI `agUIAdapter()` がこれらのイベントを使用します。
+  </StepItem>
+
+  <StepItem>
+    `src/app/api/chat/route.ts` を開きます。`@mastra/core/tools` の `createTool` を使用して、Agent に必要な Tool を定義します。
+
+    ```typescript title="src/app/api/chat/route.ts"
+    import { createTool } from '@mastra/core/tools'
+    import { z } from 'zod'
+
+    const getWeather = createTool({
+      id: 'get_weather',
+      description: 'Get current weather for a city.',
+      inputSchema: z.object({ location: z.string().describe('City name') }),
+      execute: async ({ location }) => {
+        return { location, temperature_celsius: 22, condition: 'Clear' }
+      },
+    })
+    ```
+
+    Mastra `Agent` を `MastraAgent` でラップします。Agent が OpenUI コンポーネントライブラリの使用方法を理解できるように、生成されたシステムプロンプトを注入します。
+
+    ```typescript title="src/app/api/chat/route.ts"
+    import { MastraAgent } from '@ag-ui/mastra'
+    import { Agent } from '@mastra/core/agent'
+    import { readFileSync } from 'fs'
+    import { join } from 'path'
+
+    const systemPrompt = readFileSync(join(process.cwd(), 'src/generated/system-prompt.txt'), 'utf-8')
+
+    const agent = new MastraAgent({
+      agent: new Agent({
+        id: 'openui-agent',
+        name: 'OpenUI Agent',
+        instructions: `You are a helpful assistant. Use tools when relevant.\n\n${systemPrompt}`,
+        model: {
+          id: '__GATEWAY_OPENAI_MODEL__',
+          apiKey: process.env.OPENAI_API_KEY,
+        },
+        tools: { getWeather },
+      }),
+      resourceId: 'chat-user',
+    })
+    ```
+
+    Agent の AG-UI イベントを Server-Sent Events（SSE）としてストリーミングする `POST` Handler をエクスポートします。
+
+    ```typescript title="src/app/api/chat/route.ts"
+    import type { Message } from '@ag-ui/core'
+    import { NextRequest } from 'next/server'
+
+    export async function POST(req: NextRequest) {
+      const { messages, threadId }: { messages: Message[]; threadId: string } = await req.json()
+      const encoder = new TextEncoder()
+
+      const stream = new ReadableStream({
+        start(controller) {
+          const subscription = agent
+            .run({ messages, threadId, runId: crypto.randomUUID(), tools: [], context: [] })
+            .subscribe({
+              next: event => {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+              },
+              complete: () => {
+                controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+                controller.close()
+              },
+              error: error => {
+                controller.enqueue(
+                  encoder.encode(`data: ${JSON.stringify({ error: error.message })}\n\n`),
+                )
+                controller.close()
+              },
+            })
+
+          req.signal.addEventListener('abort', () => subscription.unsubscribe())
+        },
+      })
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+        },
+      })
+    }
+    ```
+  </StepItem>
+
+  <StepItem>
+    OpenUI の `<AgentInterface />` チャット画面をルートに接続します。`fetchLLM()` で `llm` Adapter を作成し、`streamAdapter` を `agUIAdapter()` に設定して、OpenUI が AG-UI イベントを解析できるようにします。
+
+    ```tsx title="src/app/page.tsx" {5,8-11,17}
+    'use client'
+
+    import '@openuidev/react-ui/components.css'
+
+    import { AgentInterface, agUIAdapter, fetchLLM } from '@openuidev/react-ui'
+    import { openuiChatLibrary } from '@openuidev/react-ui/genui-lib'
+
+    const llm = fetchLLM({
+      url: '/api/chat',
+      streamAdapter: agUIAdapter(),
+    })
+
+    export default function Page() {
+      return (
+        <div className="relative h-screen w-screen overflow-hidden">
+          <AgentInterface llm={llm} componentLibrary={openuiChatLibrary} />
+        </div>
+      )
+    }
+    ```
+
+    `componentLibrary` Prop は、モデルが生成できるコンポーネントを制御します。出力を制限または拡張するには、`openuiChatLibrary` を独自のライブラリに置き換えます。
+  </StepItem>
+
+  <StepItem>
+    開発サーバーを起動します。
+
+    ```bash npm2yarn
+    npm run dev
+    ```
+
+    [http://localhost:3000](http://localhost:3000) を開きます。OpenUI チャット画面から Mastra Agent とチャットできるようになり、モデルのストリーミングに合わせて構造化 UI が段階的にレンダリングされます。
+  </StepItem>
+</Steps>
+
+## AG-UI でストリーミングする
+
+OpenUI は、AI Agent 用の型付きイベントを転送する、Transport に依存しない [AG-UI プロトコル](https://docs.ag-ui.com)を使用します。`@ag-ui/mastra` は Mastra `Agent` をこのプロトコルに変換します。
+
+- サーバーは `agent.run({ messages, threadId, runId, ... })` を呼び出し、送出された各イベントを SSE メッセージとしてシリアライズします。
+- クライアントは `<AgentInterface />` に `fetchLLM({ streamAdapter: agUIAdapter() })` を渡します。これにより、SSE ストリームが OpenUI Lang のレンダリングを駆動する内部イベントに解析されます。
+
+`threadId` はリクエスト間で会話を関連付け、`runId` は 1 回の実行を識別します。リクエストごとに新しい `runId` を生成し、クライアント側で `threadId` を永続化してください。
+
+## コンポーネントライブラリ
+
+OpenUI はコンポーネントライブラリから UI を生成します。ライブラリは、利用可能なコンポーネント、その Props、モデルに使用方法を指示する方法を定義します。
+
+### 組み込みライブラリ
+
+`@openuidev/react-ui` には、そのまま使用できる 2 つのライブラリがあります。
+
+- `openuiChatLibrary`：チャットインターフェース用のコンポーネント（カード、フォーム、テーブル、チャート）。
+- `openuiDashboardLibrary`：ダッシュボードやデータ量の多い画面向けのコンポーネント。
+
+ライブラリを `<AgentInterface componentLibrary={...} />` に渡すと、そのコンポーネントをモデルで使用できるようになります。
+
+### ライブラリをカスタマイズする
+
+出力を制限または拡張するには、`src/library.ts` に独自のライブラリを定義し、コンポーネントの一部をエクスポートします。そのライブラリを `<AgentInterface />` に渡し、ライブラリを変更するたびにシステムプロンプトを再生成します。
+
+```bash npm2yarn
+npx @openuidev/cli generate src/library.ts --out src/generated/system-prompt.txt
+```
+
+生成されたプロンプトは API Route で読み込まれ、Agent の `instructions` にマージされるため、Agent は送出できるコンポーネントを正確に認識できます。

@@ -1,0 +1,428 @@
+---
+title: "リファレンス: Mastra クラス | Core"
+description: "Agent、Workflow、MCP サーバー、サーバーエンドポイントを管理するための中核的なエントリーポイントである、Mastra の `Mastra` クラスのドキュメントです。"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/loggers"
+---
+
+# Mastra クラス
+
+`Mastra` クラスは、あらゆる Mastra アプリケーションの中心的なオーケストレーターであり、Agent、Workflow、ストレージ、ロギング、可観測性などを管理します。通常は、アプリケーション全体を連携させるために `Mastra` のインスタンスを 1 つ作成します。
+
+`Mastra` は、アプリケーション全体からアクセスする必要がある Agent、Workflow、Tool、その他のコンポーネントを登録する最上位のレジストリと考えることができます。
+
+## 使用例
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { PinoLogger } from '@mastra/loggers'
+import { LibSQLStore } from '@mastra/libsql'
+import { weatherWorkflow } from './workflows/weather-workflow'
+import { weatherAgent } from './agents/weather-agent'
+
+export const mastra = new Mastra({
+  workflows: { weatherWorkflow },
+  agents: { weatherAgent },
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: ':memory:',
+  }),
+  logger: new PinoLogger({
+    name: 'Mastra',
+    level: 'info',
+  }),
+})
+```
+
+遅延通知レコードと通知サマリーを Workflow スケジューラー経由で自動配信する場合は、通知のスケジュール配信を有効にします。
+
+```typescript title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  agents: { supportAgent },
+  storage,
+  notifications: {
+    dispatch: {
+      enabled: true,
+      cron: '*/1 * * * *',
+      batchSize: 100,
+    },
+  },
+})
+```
+
+`notifications.dispatch.enabled` を指定すると、内部ディスパッチャー Workflow がデフォルトの cron `*/1 * * * *` で実行できるようになります。ディスパッチャーは、配信期限を迎えた通知レコードをストレージから読み取り、`agentId`、`resourceId`、`threadId` ごとにサマリーをグループ化し、Agent のスレッドランタイムを通じてシグナルを送出します。これはユーザー向けのエントリーポイントではありません。配信スケジュールと、それを支える Workflow スケジューラーは、最初の遅延通知またはサマリー通知が発生した時点で遅延起動されます。そのため、通知を遅延させないアプリではスケジューラー自体が実行されません。
+
+## コンストラクターパラメーター
+
+利用可能なすべての設定オプションの詳細については、[設定リファレンス](/reference/configuration)を参照してください。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agents',
+    type: 'Record<string, Agent>',
+    description: '名前をキーとして登録する Agent インスタンス',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'tools',
+    type: 'Record<string, ToolApi>',
+    description:
+      '登録する Tool インスタンス。キーは [`getTool()`](/reference/core/getTool) で使用する登録キーで、値は Tool インスタンスです。固有 ID で検索するには [`getToolById()`](/reference/core/getToolById)、レジストリを読み取るには [`listTools()`](/reference/core/listTools) を使用します。',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'storage',
+    type: 'MastraCompositeStore',
+    description: 'データを永続化するためのストレージエンジンインスタンス',
+    isOptional: true,
+  },
+  {
+    name: 'vectors',
+    type: 'Record<string, MastraVector>',
+    description:
+      'セマンティック検索やベクトルベースの Tool に使用するベクトルストアインスタンス（例: Pinecone、PgVector、Qdrant）',
+    isOptional: true,
+  },
+  {
+    name: 'logger',
+    type: 'Logger',
+    description: 'new PinoLogger() で作成した Logger インスタンス',
+    isOptional: true,
+    defaultValue: 'Console logger with INFO level',
+  },
+  {
+    name: 'idGenerator',
+    type: '(context?: IdGeneratorContext) => string',
+    description:
+      'カスタム ID 生成関数。Agent、Workflow、Memory、その他のコンポーネントが一意の識別子を生成する際に使用します。コンテキストに応じた ID 形式をサポートするため、idType、source、entityId、threadId などの任意のコンテキストを受け取ります。',
+    isOptional: true,
+  },
+  {
+    name: 'workflows',
+    type: 'Record<string, Workflow>',
+    description:
+      '登録する Workflow。キーと値のペアで構成され、キーは Workflow 名、値は Workflow インスタンスです。',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'tts',
+    type: 'Record<string, MastraVoice>',
+    isOptional: true,
+    description: '音声合成に使用するテキスト読み上げ Provider',
+  },
+  {
+    name: 'observability',
+    type: 'ObservabilityEntrypoint',
+    isOptional: true,
+    description: 'トレースと監視のための可観測性設定',
+  },
+  {
+    name: 'environment',
+    type: 'string',
+    isOptional: true,
+    description:
+      'デプロイ環境名（例: `production`、`staging`、`development`）。設定すると、各呼び出しで `tracingOptions.metadata.environment` を渡さなくても環境で絞り込めるよう、すべての可観測性シグナルに自動的に付加されます。未設定の場合は `process.env.NODE_ENV` にフォールバックし、どちらも設定されていなければ undefined のままです。呼び出しごとの `tracingOptions.metadata.environment` が常に優先されます。',
+  },
+  {
+    name: 'deployer',
+    type: 'MastraDeployer',
+    isOptional: true,
+    description: 'デプロイを管理する MastraDeployer のインスタンス。',
+  },
+  {
+    name: 'server',
+    type: 'ServerConfig',
+    description:
+      'ポート、ホスト、タイムアウト、API ルート、ミドルウェア、CORS 設定、および Swagger UI、API リクエストロギング、OpenAPI ドキュメントのビルドオプションを含むサーバー設定。',
+    isOptional: true,
+  },
+  {
+    name: 'mcpServers',
+    type: 'Record<string, MCPServerBase>',
+    isOptional: true,
+    description:
+      'キーがレジストリキー（getMCPServer() で使用）、値が MCPServer のインスタンスまたは MCPServerBase を拡張したクラスであるオブジェクト。各 MCPServer には id プロパティが必要です。サーバーは getMCPServer() を使ってレジストリキーで取得するか、getMCPServerById() を使って固有 id で取得できます。',
+  },
+  {
+    name: 'bundler',
+    type: 'BundlerConfig',
+    description:
+      'externals、sourcemap、transpilePackages、dynamicPackages のオプションを含むアセットバンドラーの設定。',
+    isOptional: true,
+    defaultValue: '{ externals: [], sourcemap: false, transpilePackages: [], dynamicPackages: [] }',
+  },
+  {
+    name: 'scorers',
+    type: 'Record<string, Scorer>',
+    description: 'Agent の応答と Workflow の出力を評価する Scorer',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'processors',
+    type: 'Record<string, Processor>',
+    description: 'Agent の入力と出力を変換する入出力 Processor',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'gateways',
+    type: 'Record<string, MastraModelGateway>',
+    description:
+      '代替 Provider やプライベートデプロイを通じて AI モデルへアクセスするために登録するカスタムモデル Gateway。キーと値のペアで構成され、キーはレジストリキー（getGateway() で使用）、値は Gateway インスタンスです。',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'memory',
+    type: 'Record<string, MastraMemory>',
+    description:
+      '登録する Memory インスタンス。保存済みの Agent から参照し、実行時に解決できます。キーと値のペアで構成され、キーはレジストリキー、値は Memory インスタンスです。',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'notifications',
+    type: 'object',
+    description: '通知シグナル配信のランタイム設定。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'dispatch',
+            type: 'NotificationDispatchConfig',
+            isOptional: true,
+            description:
+              '遅延通知と通知サマリーのスケジュール配信設定。配信はデフォルトで有効です。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'enabled',
+                    type: 'boolean',
+                    isOptional: true,
+                    defaultValue: 'true',
+                    description: '自動スケジュール通知配信を無効にするには `false` に設定します。',
+                  },
+                  {
+                    name: 'cron',
+                    type: 'string',
+                    isOptional: true,
+                    defaultValue: '`*/1 * * * *`',
+                    description: '内部通知ディスパッチャー Workflow が使用する cron スケジュール。',
+                  },
+                  {
+                    name: 'batchSize',
+                    type: 'number',
+                    isOptional: true,
+                    defaultValue: '100',
+                    description: '1 回の配信実行で処理する、配信期限を迎えた通知レコードの最大数。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'versions',
+    type: 'VersionOverrides',
+    description:
+      'サブ Agent への委譲に使用するグローバルなバージョンオーバーライド。Supervisor Agent がサブ Agent に委譲するとき、コードで定義されたデフォルトの代わりに使用する、そのサブ Agent の保存済みバージョンをこのオーバーライドで決定します。Editor パッケージの設定が必要です。詳細は [Editor のバージョン管理](/docs/editor/overview#versioning)を参照してください。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'VersionOverrides',
+        parameters: [
+          {
+            name: 'agents',
+            type: 'Record<string, VersionSelector>',
+            isOptional: true,
+            description:
+              'Agent ID からバージョンセレクターへのマップ。各セレクターは、ID または公開ステータスによって特定のバージョンを指定できます。',
+            properties: [
+              {
+                type: 'VersionSelector',
+                parameters: [
+                  {
+                    name: 'versionId',
+                    type: 'string',
+                    isOptional: true,
+                    description: '使用する特定バージョンの ID。',
+                  },
+                ],
+              },
+              {
+                parameters: [
+                  {
+                    name: 'status',
+                    type: "'draft' | 'published'",
+                    isOptional: true,
+                    description: 'この公開ステータスを持つ最新バージョンを選択します。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'workers',
+    type: 'MastraWorker[] | false',
+    description:
+      'この Mastra インスタンスで実行する [Worker](/docs/deployment/workers) を設定します。省略すると、Mastra が PubSub と設定に基づいてデフォルトの Worker を自動作成します。すべてのイベント処理を無効にするには `false` を渡します（スタンドアロン Worker を別に実行する場合に便利です）。カスタム Worker を追加するには `MastraWorker[]` を渡します。これらは自動作成されたデフォルトとマージされ、デフォルトと同じ `name` を持つカスタム Worker はデフォルトを置き換えます。',
+    isOptional: true,
+  },
+  {
+    name: 'backgroundTasks',
+    type: 'BackgroundTaskManagerConfig',
+    description:
+      'Agent の [バックグラウンドタスク](/docs/long-running-agents/background-tasks)実行を設定します。すべてのオプションについては、[バックグラウンドタスク設定リファレンス](/reference/configuration#backgroundtasks)を参照してください。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'BackgroundTaskManagerConfig',
+        parameters: [
+          {
+            name: 'enabled',
+            type: 'boolean',
+            isOptional: true,
+            defaultValue: 'false',
+            description: 'バックグラウンドタスクの配信を有効にします。',
+          },
+          {
+            name: 'globalConcurrency',
+            type: 'number',
+            isOptional: true,
+            defaultValue: '10',
+            description: 'すべての Agent を通じた同時実行タスクの最大数。',
+          },
+          {
+            name: 'perAgentConcurrency',
+            type: 'number',
+            isOptional: true,
+            defaultValue: '5',
+            description: 'Agent ごとの同時実行タスクの最大数。',
+          },
+          {
+            name: 'backpressure',
+            type: "'queue' | 'reject' | 'fallback-sync'",
+            isOptional: true,
+            defaultValue: "'queue'",
+            description: '同時実行数の上限に達したときの動作。',
+          },
+          {
+            name: 'defaultTimeoutMs',
+            type: 'number',
+            isOptional: true,
+            defaultValue: '300000',
+            description: 'デフォルトのタスクタイムアウト（ミリ秒）。',
+          },
+          {
+            name: 'defaultRetries',
+            type: 'RetryConfig',
+            isOptional: true,
+            description: 'デフォルトのリトライ設定。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'scheduler',
+    type: 'object',
+    description:
+      'cron による Workflow トリガーのための [Scheduler Worker](/docs/deployment/workers#scheduler-worker) を設定します。いずれかの Workflow が `schedule` を宣言すると自動的に有効になります。[スケジュールされた Workflow](/docs/workflows/scheduled-workflows) を参照してください。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'enabled',
+            type: 'boolean',
+            isOptional: true,
+            description: 'Scheduler を明示的に有効または無効にします。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'recovery',
+    type: 'MastraRecoveryConfig',
+    description:
+      '孤立した Agent と Workflow の実行に対する起動時の復旧動作。[クラッシュ復旧](/docs/long-running-agents/durable-agents#crash-recovery)を参照してください。',
+    isOptional: true,
+    defaultValue: "{ durableAgents: 'off' }",
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'durableAgents',
+            type: "'auto' | 'off'",
+            isOptional: true,
+            defaultValue: "'off'",
+            description:
+              "サーバー起動時に孤立した RUNNING 状態の Durable Agent の実行を自動的に再駆動するには、`'auto'` に設定します。復旧では LLM 呼び出しが再発行され、Tool 呼び出しも再実行されるため、Tool は冪等である必要があります。[クラッシュ復旧](/docs/long-running-agents/durable-agents#crash-recovery)を参照してください。",
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## メソッド
+
+### `recoverAllDurableAgents()`
+
+登録済みのすべての Durable Agent を対象に、孤立した `running` 状態の実行をすべて再駆動します。`recovery.durableAgents` が `'auto'` の場合は起動時に自動的に呼び出されます。手動復旧やスケジュールタスクから直接呼び出すこともできます。
+
+永続ストレージが必要です。インメモリストアでは、プロセスの再起動後に復旧できるものはありません。
+
+```typescript
+const result = await mastra.recoverAllDurableAgents()
+// { agents: 2, recovered: 3, succeeded: 3, failed: 0 }
+```
+
+戻り値:
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agents',
+    type: 'number',
+    description: 'スキャンした Durable Agent の数。',
+  },
+  {
+    name: 'recovered',
+    type: 'number',
+    description: '再駆動した実行の合計数。',
+  },
+  {
+    name: 'succeeded',
+    type: 'number',
+    description: '正常に再起動した実行の数。',
+  },
+  {
+    name: 'failed',
+    type: 'number',
+    description: '再起動時にエラーがスローされた実行の数。',
+  },
+]}
+/>

@@ -1,0 +1,210 @@
+---
+title: "參考：NestJS 轉接器 | Server"
+description: "@mastra/nestjs Server 轉接器的 API 參考。"
+packages:
+  - "@mastra/nestjs"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# NestJS 轉接器
+
+`@mastra/nestjs` 套件提供一個 NestJS 模組，用於透過基於 Express 的 NestJS 平台執行 Mastra。
+
+在 v1 中它有意僅支援 Express。如果使用不同的 HTTP 轉接器引導 Nest，`MastraModule` 會在啟動期間擲回錯誤，而非嘗試部分整合。有關通用轉接器概念，請參閱 [Server Adapters](/docs/server/server-adapters)。
+
+## 安裝
+
+安裝 NestJS 轉接器，並確保 app 使用 Express 平台：
+
+```bash npm2yarn
+npm install @mastra/nestjs@latest
+```
+
+## 使用範例
+
+```typescript title="src/app.module.ts"
+import { Module } from '@nestjs/common'
+import { MastraModule } from '@mastra/nestjs'
+import { mastra } from './mastra'
+
+@Module({
+  imports: [
+    MastraModule.register({
+      mastra,
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+:::note
+
+`MastraModule` 會註冊一個攔截所有路由的 controller（`@All('*')`）。如果在 app 模組之前匯入它，它可能會攔截無關路由並傳回 404。為避免衝突，請最後匯入 `MastraModule`，或將其掛載到專用前綴下（例如，`/api/v1/mastra`）。
+
+:::
+
+```typescript title="src/main.ts"
+import { NestFactory } from '@nestjs/core'
+import { AppModule } from './app.module'
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule)
+  await app.listen(3000)
+}
+
+bootstrap()
+```
+
+預設情況下，Mastra 路由掛載在 `/api` 下。使用 `prefix` 進行變更。
+
+## 模組選項
+
+<PropertiesTable
+  content={[
+  { name: 'mastra', type: 'Mastra', description: 'Mastra 實例', isOptional: false },
+  {
+    name: 'prefix',
+    type: 'string',
+    description: '路由路徑前綴（例如，`/api/v2`）',
+    isOptional: true,
+    defaultValue: '`/api`',
+  },
+  {
+    name: 'rateLimitOptions',
+    type: '{ enabled?: boolean; defaultLimit?: number; windowMs?: number; generateLimit?: number }',
+    description: '速率限制設定（預設啟用）',
+    isOptional: true,
+  },
+  {
+    name: 'shutdownOptions',
+    type: '{ timeoutMs?: number; notifyClients?: boolean }',
+    description: '優雅關閉設定',
+    isOptional: true,
+  },
+  {
+    name: 'bodyLimitOptions',
+    type: '{ maxSize?: number; maxFileSize?: number; tempDir?: string; allowedMimeTypes?: string[] }',
+    description: '請求請求主體大小限制',
+    isOptional: true,
+  },
+  {
+    name: 'streamOptions',
+    type: '{ redact?: boolean; heartbeatMs?: number }',
+    description: '流設定',
+    isOptional: true,
+  },
+  {
+    name: 'tracingOptions',
+    type: '{ enabled?: boolean; serviceName?: string }',
+    description: 'OpenTelemetry Trace 設定',
+    isOptional: true,
+  },
+  {
+    name: 'contextOptions',
+    type: '{ strict?: boolean; logWarnings?: boolean }',
+    description: '請求情境解析設定',
+    isOptional: true,
+  },
+  {
+    name: 'customRouteAuthConfig',
+    type: 'Map<string, boolean>',
+    description: '依路由覆寫身分驗證。鍵為 `METHOD:PATH`。',
+    isOptional: true,
+  },
+  { name: 'tools', type: 'Record<string, Tool>', description: '為 Server 註冊的 Tool', isOptional: true },
+  {
+    name: 'taskStore',
+    type: 'InMemoryTaskStore',
+    description: '用於 A2A（Agent-to-Agent）操作的任務儲存',
+    isOptional: true,
+  },
+  {
+    name: 'mcpOptions',
+    type: '{ serverless?: boolean; sessionIdGenerator?: () => string }',
+    description: 'MCP 傳輸選項',
+    isOptional: true,
+  },
+  {
+    name: 'auth',
+    type: '{ enabled?: boolean; allowQueryApiKey?: boolean }',
+    description:
+      '啟用 Mastra token 身分驗證。預設停用——大多數 NestJS app 使用自己的身分驗證守衛。為保持回溯相容性，選擇啟用查詢字串 `apiKey` 身分驗證。',
+    isOptional: true,
+    defaultValue: '`{ enabled: false }`',
+  },
+]}
+/>
+
+## 非同步註冊
+
+```typescript title="src/app.module.ts"
+import { Module } from '@nestjs/common'
+import { ConfigModule, ConfigService } from '@nestjs/config'
+import { MastraModule } from '@mastra/nestjs'
+import { Mastra } from '@mastra/core/mastra'
+
+@Module({
+  imports: [
+    ConfigModule.forRoot(),
+    MastraModule.registerAsync({
+      imports: [ConfigModule],
+      useFactory: (config: ConfigService) => ({
+        mastra: new Mastra({
+          agents: {
+            greeter: {
+              name: 'greeter',
+              description: 'Greets the user',
+              model: config.get('MASTRA_MODEL', '__GATEWAY_OPENAI_MODEL_MINI__'),
+            },
+          },
+        }),
+        prefix: config.get('MASTRA_PREFIX', '/api'),
+      }),
+      inject: [ConfigService],
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+## 存取 Mastra
+
+在服務中使用 `MASTRA` token 或 `MastraService`：
+
+```typescript
+import { Injectable, Inject } from '@nestjs/common'
+import { MASTRA, MastraService } from '@mastra/nestjs'
+import type { Mastra } from '@mastra/core/mastra'
+
+@Injectable()
+export class AgentService {
+  constructor(@Inject(MASTRA) private readonly mastra: Mastra) {}
+}
+
+@Injectable()
+export class WorkflowService {
+  constructor(private readonly mastraService: MastraService) {}
+}
+```
+
+## MCP 路由
+
+MCP endpoint 會公開在 API 前綴下：
+
+- `POST /api/mcp/:serverId/mcp`
+- `GET /api/mcp/:serverId/sse`
+- `POST /api/mcp/:serverId/messages`
+
+## 健康檢查路由
+
+為相容基礎設施，維運 endpoint 有意不使用前綴：
+
+- `GET /health`
+- `GET /ready`
+- `GET /info`
+
+## 相關內容
+
+- [Server Adapters](/docs/server/server-adapters)
+- [MastraServer Reference](/reference/server/mastra-server)

@@ -1,0 +1,549 @@
+---
+title: "參考：評分器工具函式 | Evals"
+description: 用於從評分器執行的輸入及輸出擷取資料的工具函式，包括文字內容、推理、系統訊息及 Tool 呼叫。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+# 評分器工具函式
+
+Mastra 提供多個工具函式，協助從評分器執行的輸入及輸出擷取和處理資料。這些工具函式對自訂評分器的 `preprocess` 步驟尤其有用。
+
+## 匯入
+
+```typescript
+import {
+  getAssistantMessageFromRunOutput,
+  getReasoningFromRunOutput,
+  getUserMessageFromRunInput,
+  getSystemMessagesFromRunInput,
+  getCombinedSystemPrompt,
+  extractToolCalls,
+  extractInputMessages,
+  extractAgentResponseMessages,
+  compareTrajectories,
+  createTrajectoryTestRun,
+} from '@mastra/evals/scorers/utils'
+```
+
+軌跡擷取函式可從 `@mastra/core/evals` 使用：
+
+```typescript
+import {
+  extractTrajectory,
+  extractWorkflowTrajectory,
+  extractTrajectoryFromTrace,
+} from '@mastra/core/evals'
+```
+
+## 訊息擷取
+
+### `getAssistantMessageFromRunOutput`
+
+從執行輸出的第一個助理訊息擷取文字內容。
+
+```typescript
+const scorer = createScorer({
+  id: 'my-scorer',
+  description: 'My scorer',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    const response = getAssistantMessageFromRunOutput(run.output)
+    return { response }
+  })
+  .generateScore(({ results }) => {
+    return results.preprocessStepResult?.response ? 1 : 0
+  })
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'output',
+    type: 'ScorerRunOutputForAgent',
+    isOptional: true,
+    description: '評分器執行輸出（MastraDBMessage 陣列）',
+  },
+]}
+/>
+
+**傳回：** `string | undefined` — 助理訊息文字；如找不到助理訊息，則為 undefined。
+
+### `getUserMessageFromRunInput`
+
+從執行輸入的第一個使用者訊息擷取文字內容。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const userMessage = getUserMessageFromRunInput(run.input);
+  return { userMessage };
+})
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'input',
+    type: 'ScorerRunInputForAgent',
+    isOptional: true,
+    description: '包含輸入訊息的評分器執行輸入',
+  },
+]}
+/>
+
+**傳回：** `string | undefined` — 使用者訊息文字；如找不到使用者訊息，則為 undefined。
+
+### `extractInputMessages`
+
+以陣列形式擷取所有輸入訊息的文字內容。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const allUserMessages = extractInputMessages(run.input);
+  return { conversationHistory: allUserMessages.join("\n") };
+})
+```
+
+**傳回：** `string[]` — 由每個輸入訊息的文字字串組成的陣列。
+
+### `extractAgentResponseMessages`
+
+以陣列形式擷取所有助理回應訊息的文字內容。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const allResponses = extractAgentResponseMessages(run.output);
+  return { allResponses };
+})
+```
+
+**傳回：** `string[]` — 由每個助理訊息的文字字串組成的陣列。
+
+## 推理內容擷取
+
+### `getReasoningFromRunOutput`
+
+從執行輸出擷取推理文字。評估會產生思維鏈推理的模型（例如 `deepseek-reasoner`）回應時，這項功能尤其有用。
+
+推理內容可儲存在兩個位置：
+
+1. `content.reasoning` — 訊息內容中的字串欄位
+1. `content.parts` — 以包含 `details` 且 `type: 'reasoning'` 的部分形式儲存
+
+```typescript
+import {
+  getReasoningFromRunOutput,
+  getAssistantMessageFromRunOutput,
+} from '@mastra/evals/scorers/utils'
+
+const reasoningQualityScorer = createScorer({
+  id: 'reasoning-quality',
+  name: 'Reasoning Quality',
+  description: 'Evaluates the quality of model reasoning',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    const reasoning = getReasoningFromRunOutput(run.output)
+    const response = getAssistantMessageFromRunOutput(run.output)
+    return { reasoning, response }
+  })
+  .analyze(({ results }) => {
+    const { reasoning } = results.preprocessStepResult || {}
+    return {
+      hasReasoning: !!reasoning,
+      reasoningLength: reasoning?.length || 0,
+      hasStepByStep: reasoning?.includes('step') || false,
+    }
+  })
+  .generateScore(({ results }) => {
+    const { hasReasoning, reasoningLength } = results.analyzeStepResult || {}
+    if (!hasReasoning) return 0
+    // Score based on reasoning length (normalized to 0-1)
+    return Math.min(reasoningLength / 500, 1)
+  })
+  .generateReason(({ results, score }) => {
+    const { hasReasoning, reasoningLength } = results.analyzeStepResult || {}
+    if (!hasReasoning) {
+      return 'No reasoning was provided by the model.'
+    }
+    return `Model provided ${reasoningLength} characters of reasoning. Score: ${score}`
+  })
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'output',
+    type: 'ScorerRunOutputForAgent',
+    isOptional: true,
+    description: '評分器執行輸出（MastraDBMessage 陣列）',
+  },
+]}
+/>
+
+**傳回：** `string | undefined` — 推理文字；如沒有推理內容，則為 undefined。
+
+## 系統訊息擷取
+
+### `getSystemMessagesFromRunInput`
+
+從執行輸入擷取所有系統訊息，包括標準系統訊息及已加標籤的系統訊息（例如記憶指示等專用提示）。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const systemMessages = getSystemMessagesFromRunInput(run.input);
+  return { 
+    systemPromptCount: systemMessages.length,
+    systemPrompts: systemMessages 
+  };
+})
+```
+
+**傳回：** `string[]` — 系統訊息字串陣列。
+
+### `getCombinedSystemPrompt`
+
+把所有系統訊息合併為單一提示字串，並以兩個換行符號連接。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const fullSystemPrompt = getCombinedSystemPrompt(run.input);
+  return { fullSystemPrompt };
+})
+```
+
+**傳回：** `string` — 合併後的系統提示字串。
+
+## Tool 呼叫擷取
+
+### `extractToolCalls`
+
+從執行輸出擷取所有 Tool 呼叫的資料，包括 Tool 名稱、呼叫 ID，以及它們在訊息陣列中的位置。
+
+```typescript
+const toolUsageScorer = createScorer({
+  id: 'tool-usage',
+  description: 'Evaluates tool usage patterns',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    const { tools, toolCallInfos } = extractToolCalls(run.output)
+    return {
+      toolsUsed: tools,
+      toolCount: tools.length,
+      toolDetails: toolCallInfos,
+    }
+  })
+  .generateScore(({ results }) => {
+    const { toolCount } = results.preprocessStepResult || {}
+    // Score based on appropriate tool usage
+    return toolCount > 0 ? 1 : 0
+  })
+```
+
+**傳回：**
+
+```typescript prettier:false
+{
+  tools: string[];           // Array of tool names
+  toolCallInfos: ToolCallInfo[];  // Detailed tool call information
+}
+```
+
+其中 `ToolCallInfo` 為：
+
+```typescript
+type ToolCallInfo = {
+  toolName: string // Name of the tool
+  toolCallId: string // Unique call identifier
+  messageIndex: number // Index in the output array
+  invocationIndex: number // Index within message's tool invocations
+}
+```
+
+## 測試工具函式
+
+這些工具函式可協助建立評分器開發所需的測試資料。
+
+### `createTestMessage`
+
+建立供測試使用的 `MastraDBMessage` 物件。
+
+```typescript
+import { createTestMessage } from '@mastra/evals/scorers/utils'
+
+const userMessage = createTestMessage({
+  content: 'What is the weather?',
+  role: 'user',
+})
+
+const assistantMessage = createTestMessage({
+  content: 'The weather is sunny.',
+  role: 'assistant',
+  toolInvocations: [
+    {
+      toolCallId: 'call-1',
+      toolName: 'weatherTool',
+      args: { location: 'London' },
+      result: { temp: 20 },
+      state: 'result',
+    },
+  ],
+})
+```
+
+### `createAgentTestRun`
+
+建立完整的測試執行物件，以測試評分器。
+
+```typescript
+import { createAgentTestRun, createTestMessage } from '@mastra/evals/scorers/utils'
+
+const testRun = createAgentTestRun({
+  inputMessages: [createTestMessage({ content: 'Hello', role: 'user' })],
+  output: [createTestMessage({ content: 'Hi there!', role: 'assistant' })],
+})
+
+// Run your scorer with the test data
+const result = await myScorer.run({
+  input: testRun.input,
+  output: testRun.output,
+})
+```
+
+## 軌跡工具函式
+
+### `extractTrajectory`
+
+從 Agent 輸出訊息（`MastraDBMessage[]`）擷取 `Trajectory`。它會把 Tool 呼叫轉換為 `ToolCallStep` 物件。`runEvals` 流程會為軌跡評分器自動呼叫此函式；你只需在直接測試時使用。
+
+可從 `@mastra/core/evals` 使用。
+
+```typescript
+import { extractTrajectory } from '@mastra/core/evals'
+
+const trajectory = extractTrajectory(agentOutputMessages)
+// trajectory.steps — ToolCallStep[] extracted from toolInvocations
+// trajectory.rawOutput — the original MastraDBMessage[] array
+```
+
+**傳回：** `Trajectory`：包含 `steps: TrajectoryStep[]`、`totalDurationMs` 及 `rawOutput`。
+
+### `extractWorkflowTrajectory`
+
+從 Workflow 步驟結果擷取 `Trajectory`。它會按照執行路徑次序，把 `StepResult` 記錄轉換為 `WorkflowStepStep` 物件。
+
+可從 `@mastra/core/evals` 使用。
+
+```typescript
+import { extractWorkflowTrajectory } from '@mastra/core/evals'
+
+const trajectory = extractWorkflowTrajectory(
+  workflowResult.steps, // Record<string, StepResult>
+  workflowResult.stepExecutionPath, // string[] (optional)
+)
+// trajectory.steps — WorkflowStepStep[] in execution order
+```
+
+**傳回：** `Trajectory`：包含 `steps: TrajectoryStep[]`、`totalDurationMs` 及 `rawWorkflowResult`。
+
+### `extractTrajectoryFromTrace`
+
+從可觀測性 Trace span（`SpanRecord[]`）建立階層式 `Trajectory`。它會重建父子 span 樹狀結構，並把每個 span 映射至適當、含巢狀 `children` 的 `TrajectoryStep` 判別聯合類型。
+
+如有可用的儲存後端，建議使用此擷取方法。當目標的 `Mastra` 執行個體已設定儲存後端時，`runEvals` 流程會自動呼叫此函式。它可擷取完整執行樹狀結構，包括巢狀 Agent 執行、Tool 呼叫及模型生成，因此產生的軌跡比 `extractTrajectory` 或 `extractWorkflowTrajectory` 更豐富。
+
+可從 `@mastra/core/evals` 使用。
+
+```typescript
+import { extractTrajectoryFromTrace } from '@mastra/core/evals'
+
+// After fetching a trace from the observability store
+const traceData = await observabilityStore.getTrace({ traceId })
+const trajectory = extractTrajectoryFromTrace(traceData.spans, rootSpanId)
+// trajectory.steps — hierarchical TrajectoryStep[] with children
+```
+
+**參數：**
+
+- `spans` (`SpanRecord[]`)：來自 Trace 查詢的 span 記錄陣列。
+- `rootSpanId`（`string`，選填）：用作起點的 span ID。省略時，使用沒有父項的 span。
+
+**傳回：** `Trajectory`：包含具有遞迴 `children` 的 `steps: TrajectoryStep[]` 及 `totalDurationMs`。
+
+#### Span 類型映射
+
+| Span 類型 | Trajectory 步驟類型 | 擷取的主要欄位 |
+| - | - | - |
+| `TOOL_CALL` | `tool_call` | `toolArgs`, `toolResult`, `success` |
+| `MCP_TOOL_CALL` | `mcp_tool_call` | `toolArgs`, `toolResult`, `mcpServer`, `success` |
+| `MODEL_GENERATION` | `model_generation` | `modelId`, `promptTokens`, `completionTokens`, `finishReason` |
+| `AGENT_RUN` | `agent_run` | `agentId`（來自實體 ID） |
+| `WORKFLOW_RUN` | `workflow_run` | `workflowId`（來自實體 ID） |
+| `WORKFLOW_STEP` | `workflow_step` | `output` |
+| `WORKFLOW_CONDITIONAL` | `workflow_conditional` | `conditionCount`, `selectedSteps` |
+| `WORKFLOW_PARALLEL` | `workflow_parallel` | `branchCount`, `parallelSteps` |
+| `WORKFLOW_LOOP` | `workflow_loop` | `loopType`, `totalIterations` |
+| `WORKFLOW_SLEEP` | `workflow_sleep` | `sleepDurationMs`, `sleepType` |
+| `WORKFLOW_WAIT_EVENT` | `workflow_wait_event` | `eventName`, `eventReceived` |
+| `PROCESSOR_RUN` | `processor_run` | `processorId` |
+
+類型為 `GENERIC`、`MODEL_STEP`、`MODEL_CHUNK` 及 `WORKFLOW_CONDITIONAL_EVAL` 的 span 會視為雜訊並略過。
+
+### `compareTrajectories`
+
+把實際軌跡與預期軌跡比較，並傳回詳細比較結果。此函式供 `createTrajectoryAccuracyScorerCode` 內部使用。
+
+`expected` 參數接受 `Trajectory`（實際軌跡）或 `{ steps: ExpectedStep[] }`。使用 `ExpectedStep[]` 時，你可以只按名稱配對，或按名稱加 stepType 配對，亦可加入資料作比較。詳情請參閱[預期步驟](/reference/evals/trajectory-accuracy#expected-steps)。
+
+```typescript
+import { compareTrajectories } from '@mastra/evals/scorers/utils'
+
+// Using ExpectedStep[] (recommended for expectations)
+// Data fields (e.g. toolArgs) are auto-compared when present on expected steps
+const result = compareTrajectories(
+  actualTrajectory,
+  { steps: [{ name: 'search' }, { name: 'summarize', stepType: 'tool_call' }] },
+  { allowRepeatedSteps: true },
+)
+// result.score — 0.0 to 1.0
+// result.missingSteps — step names not found
+// result.extraSteps — unexpected step names
+// result.outOfOrderSteps — steps found but in wrong order
+```
+
+**傳回：** `TrajectoryComparisonResult`
+
+### `createTrajectoryTestRun`
+
+建立供軌跡評分器使用的測試執行物件，並把 `Trajectory` 封裝為預期的 `ScorerRun` 格式。
+
+```typescript
+import { createTrajectoryTestRun } from '@mastra/evals/scorers/utils'
+
+const run = createTrajectoryTestRun({
+  steps: [
+    { stepType: 'tool_call', name: 'search', toolArgs: { q: 'test' } },
+    { stepType: 'tool_call', name: 'summarize' },
+  ],
+})
+
+const result = await trajectoryScorer.run(run)
+```
+
+### `checkTrajectoryEfficiency`
+
+根據步驟、token 及持續時間預算評估軌跡效率，亦會偵測重複呼叫（以相同引數呼叫同一 Tool）。
+
+```typescript
+import { checkTrajectoryEfficiency } from '@mastra/evals/scorers/utils'
+
+const result = checkTrajectoryEfficiency(trajectory, {
+  maxSteps: 5,
+  maxTotalTokens: 2000,
+  maxTotalDurationMs: 5000,
+  noRedundantCalls: true,
+})
+// result.score — 1.0 if within all budgets, lower with penalties
+// result.redundantCalls — duplicate tool+args combos
+// result.overStepBudget — true if maxSteps exceeded
+// result.overTokenBudget — true if maxTotalTokens exceeded
+// result.overDurationBudget — true if maxTotalDurationMs exceeded
+```
+
+**傳回：** `TrajectoryEfficiencyResult`
+
+### `checkTrajectoryBlacklist`
+
+檢查軌跡是否包含禁用 Tool 或 Tool 呼叫序列。
+
+```typescript
+import { checkTrajectoryBlacklist } from '@mastra/evals/scorers/utils'
+
+const result = checkTrajectoryBlacklist(trajectory, {
+  blacklistedTools: ['deleteAll', 'admin-override'],
+  blacklistedSequences: [['escalate', 'admin-override']],
+})
+// result.score — 1.0 if no violations, 0.0 if any found
+// result.violatedTools — blacklisted tools that were called
+// result.violatedSequences — blacklisted sequences that were detected
+```
+
+**傳回：** `TrajectoryBlacklistResult`
+
+### `analyzeToolFailures`
+
+偵測 Tool 失敗模式，包括重試、fallback 及引數修正。
+
+```typescript
+import { analyzeToolFailures } from '@mastra/evals/scorers/utils'
+
+const result = analyzeToolFailures(trajectory, {
+  maxRetriesPerTool: 2,
+})
+// result.score — 1.0 if no failure patterns, lower if patterns detected
+// result.patterns — detected patterns (retry, fallback, arg_correction)
+```
+
+**傳回：** `ToolFailureAnalysisResult`
+
+## 完整範例
+
+以下完整範例示範如何配合使用多個工具函式：
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+import {
+  getAssistantMessageFromRunOutput,
+  getReasoningFromRunOutput,
+  getUserMessageFromRunInput,
+  getCombinedSystemPrompt,
+  extractToolCalls,
+} from '@mastra/evals/scorers/utils'
+
+const comprehensiveScorer = createScorer({
+  id: 'comprehensive-analysis',
+  name: 'Comprehensive Analysis',
+  description: 'Analyzes all aspects of an agent response',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    // Extract all relevant data
+    const userMessage = getUserMessageFromRunInput(run.input)
+    const response = getAssistantMessageFromRunOutput(run.output)
+    const reasoning = getReasoningFromRunOutput(run.output)
+    const systemPrompt = getCombinedSystemPrompt(run.input)
+    const { tools, toolCallInfos } = extractToolCalls(run.output)
+
+    return {
+      userMessage,
+      response,
+      reasoning,
+      systemPrompt,
+      toolsUsed: tools,
+      toolCount: tools.length,
+    }
+  })
+  .generateScore(({ results }) => {
+    const { response, reasoning, toolCount } = results.preprocessStepResult || {}
+
+    let score = 0
+    if (response && response.length > 0) score += 0.4
+    if (reasoning) score += 0.3
+    if (toolCount > 0) score += 0.3
+
+    return score
+  })
+  .generateReason(({ results, score }) => {
+    const { response, reasoning, toolCount } = results.preprocessStepResult || {}
+
+    const parts = []
+    if (response) parts.push('provided a response')
+    if (reasoning) parts.push('included reasoning')
+    if (toolCount > 0) parts.push(`used ${toolCount} tool(s)`)
+
+    return `Score: ${score}. The agent ${parts.join(', ')}.`
+  })
+```

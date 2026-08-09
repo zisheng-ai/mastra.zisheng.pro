@@ -1,0 +1,235 @@
+---
+title: "參考：WorkingMemory | 處理器"
+description: "WorkingMemory 處理器的 Mastra 文件；此處理器會將持久保存的用戶／情境資料注入為系統指示。"
+packages:
+  - "@mastra/core"
+  - "@mastra/pg"
+---
+
+# WorkingMemory
+
+`WorkingMemory` 是一種**輸入處理器**，會將工作記憶體資料注入為系統訊息。它會從儲存空間擷取持久保存的資訊，再將其格式化為 LLM 的指示，讓 Agent 能跨對話維持用戶相關情境。
+
+## 使用範例
+
+```typescript
+import { WorkingMemory } from '@mastra/core/processors'
+
+const processor = new WorkingMemory({
+  storage: memoryStorage,
+  scope: 'resource',
+  template: {
+    format: 'markdown',
+    content: `# User Profile
+- **Name**:
+- **Preferences**:
+- **Goals**:
+`,
+  },
+})
+```
+
+## 建構函式參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'Options',
+    description: '工作記憶體處理器的設定選項',
+    isOptional: false,
+    properties: [
+      {
+        type: 'Options',
+        parameters: [
+          {
+            name: 'storage',
+            type: 'MemoryStorage',
+            description: '用來擷取工作記憶體資料的儲存執行個體',
+            isOptional: false,
+          },
+          {
+            name: 'template',
+            type: 'WorkingMemoryTemplate',
+            description: '定義工作記憶體格式與結構的範本',
+            isOptional: true,
+            properties: [
+              {
+                type: 'WorkingMemoryTemplate',
+                parameters: [
+                  {
+                    name: 'format',
+                    type: "'markdown' | 'json'",
+                    description: '工作記憶體內容的格式',
+                    isOptional: false,
+                  },
+                  {
+                    name: 'content',
+                    type: 'string',
+                    description: '定義工作記憶體資料結構的範本內容',
+                    isOptional: false,
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            name: 'scope',
+            type: "'thread' | 'resource'",
+            description:
+              "工作記憶體的範圍。'thread' 限定為目前對話串；'resource' 會在該資源的所有對話串間共用",
+            isOptional: true,
+            default: "'resource'",
+          },
+          {
+            name: 'useVNext',
+            type: 'boolean',
+            description: '使用改良指引的下一代指示格式',
+            isOptional: true,
+          },
+          {
+            name: 'readOnly',
+            type: 'boolean',
+            description:
+              '設為 true 時，工作記憶體會作為唯讀情境提供。資料會注入對話，但不會包含 updateWorkingMemory Tool 或更新指示。適合只應參照工作記憶體、不應加以修改的 Agent。',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'templateProvider',
+            type: '{ getWorkingMemoryTemplate(args: { memoryConfig?: MemoryConfig }): Promise<WorkingMemoryTemplate | null> }',
+            description: '用於在執行階段解析範本的動態範本 Provider',
+            isOptional: true,
+          },
+          {
+            name: 'logger',
+            type: 'IMastraLogger',
+            description: '選用的結構化記錄器執行個體',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 回傳值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "設為 'working-memory' 的處理器識別碼",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: "設為 'WorkingMemory' 的處理器顯示名稱",
+    isOptional: false,
+  },
+  {
+    name: 'defaultWorkingMemoryTemplate',
+    type: 'string',
+    description: '未提供自訂範本時使用的預設 markdown 範本',
+    isOptional: false,
+  },
+  {
+    name: 'processInput',
+    type: '(args: { messages: MastraDBMessage[]; messageList: MessageList; abort: (reason?: string) => never; requestContext?: RequestContext }) => Promise<MessageList | MastraDBMessage[]>',
+    description: '擷取工作記憶體，並將它作為系統訊息加入訊息清單',
+    isOptional: false,
+  },
+]}
+/>
+
+## 延伸使用範例
+
+```typescript title="src/mastra/agents/personalized-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { WorkingMemory, MessageHistory } from '@mastra/core/processors'
+import { PostgresStorage } from '@mastra/pg'
+
+const storage = new PostgresStorage({
+  connectionString: process.env.DATABASE_URL,
+})
+
+export const agent = new Agent({
+  id: 'personalized-agent',
+  name: 'personalized-agent',
+  instructions: 'You are a helpful assistant that remembers user preferences',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [
+    new WorkingMemory({
+      storage,
+      scope: 'resource',
+      template: {
+        format: 'markdown',
+        content: `# User Information
+- **Name**:
+- **Location**:
+- **Preferences**:
+- **Communication Style**:
+- **Current Projects**:
+`,
+      },
+    }),
+    new MessageHistory({ storage, lastMessages: 50 }),
+  ],
+  outputProcessors: [new MessageHistory({ storage })],
+})
+```
+
+## JSON 格式範例
+
+```typescript
+import { WorkingMemory } from '@mastra/core/processors'
+
+const processor = new WorkingMemory({
+  storage: memoryStorage,
+  scope: 'resource',
+  template: {
+    format: 'json',
+    content: JSON.stringify({
+      user: {
+        name: { type: 'string' },
+        preferences: { type: 'object' },
+        goals: { type: 'array' },
+      },
+    }),
+  },
+})
+```
+
+## 行為
+
+### 輸入處理
+
+1. 從請求情境擷取 `threadId` 和 `resourceId`
+1. 依範圍從下列其中一處擷取工作記憶體：
+   - 對話串中繼資料（`scope: 'thread'`）
+   - 資源記錄（`scope: 'resource'`）
+1. 解析範本（來源可以是 Provider、選項或預設值）
+1. 依模式產生系統指示：
+   - **一般模式**：包含儲存／更新資訊的指引、範本結構與目前資料
+   - **唯讀模式**（`readOnly: true`）：只包含目前資料作為情境，不包含更新指示
+1. 將指示作為帶有 `source: 'memory'` 標記的系統訊息加入
+
+### 更新工作記憶體
+
+工作記憶體是透過 Memory 類別提供的 `updateWorkingMemory` Tool 更新，而非透過此處理器。此處理器只負責將目前的工作記憶體狀態注入對話。
+
+### 預設範本
+
+若未提供範本，處理器會使用預設 markdown 範本，包含下列欄位：
+
+- 名字、姓氏
+- 地點、職業
+- 興趣、目標
+- 事件、事實、專案
+
+## 相關資源
+
+- [防護欄](/docs/agents/guardrails)

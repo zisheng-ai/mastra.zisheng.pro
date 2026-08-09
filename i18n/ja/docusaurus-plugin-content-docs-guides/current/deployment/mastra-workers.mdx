@@ -1,0 +1,616 @@
+---
+title: "Mastra Worker をデプロイする | Deployment"
+description: "独立したスケーリング、イベントの耐久性、プロセス分離のために、Mastra Worker を別プロセスとしてデプロイする方法を説明します。"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+import Tabs from '@theme/Tabs'
+import TabItem from '@theme/TabItem'
+
+# Mastra Worker をデプロイする
+
+[Mastra Worker](/docs/deployment/workers) を別プロセスとして実行し、Orchestration、Schedule、バックグラウンドタスクを API とは独立してスケーリングします。このガイドでは、Docker Compose または Kubernetes を使用した完全分離型のデプロイについて説明します。
+
+:::info
+このガイドでは、Worker を独自のコンテナに分離する方法を説明します。API と同じプロセス内で Worker を実行するだけでよい場合は、[Worker](/docs/deployment/workers) を参照してください。追加設定は必要ありません。
+:::
+
+## 始める前に
+
+次のものが必要です。
+
+- [Mastra アプリケーション](/guides/getting-started/quickstart)
+- [Docker](https://docs.docker.com/get-docker/) と [Docker Compose](https://docs.docker.com/compose/)、または [`kubectl`](https://kubernetes.io/docs/tasks/tools/) を使用できる [Kubernetes](https://kubernetes.io/docs/setup/) Cluster
+- 分散 PubSub Backend：[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) 用の [Redis](https://redis.io/)、または [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub) 用の [Google Cloud](https://cloud.google.com/) プロジェクト
+- すべてのコンテナからアクセスできる共有データベース。完全な一覧は、[サポートされるストレージ Backend](/reference/workers/overview#supported-storage-backends) を参照してください。
+
+:::warning
+デフォルトの In-memory PubSub はプロセス間でイベントを配信できません。Worker を別のコンテナに分離する前に、分散 PubSub Backend を設定する必要があります。
+:::
+
+## 共有インフラストラクチャを設定する
+
+`Mastra` インスタンスを分散 PubSub Backend と共有データベースに接続します。すべてのコンテナで同じイメージを実行できるように、環境変数を使用します。
+
+<Tabs>
+  <TabItem value="redis" label="Redis Streams + PostgreSQL">
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core/mastra'
+    import { RedisStreamsPubSub } from '@mastra/redis-streams'
+    import { PostgresStore } from '@mastra/pg'
+
+    export const mastra = new Mastra({
+      storage: new PostgresStore({
+        connectionString: process.env.DATABASE_URL!,
+      }),
+      pubsub: new RedisStreamsPubSub({
+        url: process.env.REDIS_URL!,
+      }),
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="gcp" label="Google Cloud Pub/Sub + LibSQL">
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core/mastra'
+    import { GoogleCloudPubSub } from '@mastra/google-cloud-pubsub'
+    import { LibSQLStore } from '@mastra/libsql'
+
+    export const mastra = new Mastra({
+      storage: new LibSQLStore({
+        url: process.env.DATABASE_URL!,
+      }),
+      pubsub: new GoogleCloudPubSub({
+        projectId: process.env.GCP_PROJECT_ID!,
+      }),
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+[サポートされるストレージ Backend](/reference/workers/overview#supported-storage-backends) はどれでも使用できます。使用するデータベースに合わせてストレージ Adapter を置き換えてください。
+
+## デプロイする
+
+<Steps>
+  <StepItem>
+    Mastra アプリケーションをビルドします。出力はすべてのコンテナで実行されます。
+
+    ```bash
+    mastra build
+    ```
+
+    自己完結型の `.mastra/output/` ディレクトリが生成されます。ビルド出力について詳しくは、[Mastra サーバーをデプロイする](/docs/deployment/mastra-server)を参照してください。
+  </StepItem>
+
+  <StepItem>
+    ビルド済み出力をコピーし、本番用の依存関係をインストールする Dockerfile を作成します。
+
+    ```dockerfile title="app/Dockerfile"
+    FROM node:22-alpine
+
+    WORKDIR /app
+
+    COPY .mastra/output/package.json .mastra/output/.npmrc* ./
+    RUN npm install --omit=dev
+
+    COPY .mastra/output/ .
+
+    EXPOSE 4111
+    CMD ["node", "index.mjs"]
+    ```
+  </StepItem>
+
+  <StepItem>
+    完全分離型の Topology を定義します。この構成は、データベース、PubSub Backend、API サーバー、3 つの Worker の計 6 つの Service を実行します。各 Worker は同じイメージを異なる `MASTRA_WORKERS` 値で実行し、起動する Worker を制御します。
+
+    API は `MASTRA_WORKERS: "false"` を設定し、すべてのイベント処理を無効にします。Orchestration Worker は `MASTRA_STEP_EXECUTION_URL` を設定し、Step 実行リクエストを API の内部 URL に送ります。詳しくは [Step 実行 URL](#step-execution-url)を参照してください。
+
+    すべての Service が `MASTRA_WORKER_AUTH_TOKEN` を共有します。Worker は API へのリクエストにこの Token を含めるため、API は呼び出し元が信頼できる内部 Service であることを検証できます。詳しくは [Worker 認証](/docs/server/auth/workers)を参照してください。
+
+    <Tabs>
+      <TabItem value="docker-compose" label="Docker Compose">
+        ```yaml title="docker-compose.yml"
+        services:
+          postgres:
+            image: postgres:16-alpine
+            environment:
+              POSTGRES_USER: mastra
+              POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+              POSTGRES_DB: mastra
+            ports:
+              - '5432:5432'
+            volumes:
+              - pgdata:/var/lib/postgresql/data
+            healthcheck:
+              test: ['CMD-SHELL', 'pg_isready -U mastra']
+              interval: 5s
+              timeout: 3s
+              retries: 5
+
+          redis:
+            image: redis:7-alpine
+            ports:
+              - '6379:6379'
+            healthcheck:
+              test: ['CMD', 'redis-cli', 'ping']
+              interval: 5s
+              timeout: 3s
+              retries: 5
+
+          api:
+            build: ./app
+            ports:
+              - '4111:4111'
+            environment:
+              DATABASE_URL: postgres://mastra:${POSTGRES_PASSWORD}@postgres:5432/mastra
+              REDIS_URL: redis://redis:6379
+              MASTRA_WORKERS: 'false'
+              MASTRA_WORKER_AUTH_TOKEN: ${MASTRA_WORKER_AUTH_TOKEN}
+            depends_on:
+              postgres:
+                condition: service_healthy
+              redis:
+                condition: service_healthy
+            healthcheck:
+              test: ['CMD', 'wget', '-qO-', 'http://localhost:4111/api/agents']
+              interval: 5s
+              timeout: 3s
+              retries: 5
+
+          orchestration-worker:
+            build: ./app
+            environment:
+              DATABASE_URL: postgres://mastra:${POSTGRES_PASSWORD}@postgres:5432/mastra
+              REDIS_URL: redis://redis:6379
+              MASTRA_WORKERS: orchestration
+              MASTRA_STEP_EXECUTION_URL: http://api:4111/api
+              MASTRA_WORKER_AUTH_TOKEN: ${MASTRA_WORKER_AUTH_TOKEN}
+            depends_on:
+              api:
+                condition: service_healthy
+
+          scheduler-worker:
+            build: ./app
+            environment:
+              DATABASE_URL: postgres://mastra:${POSTGRES_PASSWORD}@postgres:5432/mastra
+              REDIS_URL: redis://redis:6379
+              MASTRA_WORKERS: scheduler
+              MASTRA_WORKER_AUTH_TOKEN: ${MASTRA_WORKER_AUTH_TOKEN}
+            depends_on:
+              api:
+                condition: service_healthy
+
+          background-task-worker:
+            build: ./app
+            environment:
+              DATABASE_URL: postgres://mastra:${POSTGRES_PASSWORD}@postgres:5432/mastra
+              REDIS_URL: redis://redis:6379
+              MASTRA_WORKERS: backgroundTasks
+              MASTRA_WORKER_AUTH_TOKEN: ${MASTRA_WORKER_AUTH_TOKEN}
+            depends_on:
+              api:
+                condition: service_healthy
+
+        volumes:
+          pgdata:
+        ```
+
+        `docker-compose.yml` と同じ場所に `.env` ファイルを作成します。
+
+        ```bash title=".env"
+        POSTGRES_PASSWORD=your-secure-password
+        MASTRA_WORKER_AUTH_TOKEN=your-shared-secret-token
+        ```
+
+        :::note
+        アプリケーションに必要なその他の環境変数（[モデル Provider](/models/providers) の API キーなど）も設定してください。
+        :::
+      </TabItem>
+
+      <TabItem value="kubernetes" label="Kubernetes">
+        Namespace と接続文字列を含む Secret を作成します。
+
+        ```yaml title="k8s/namespace.yaml"
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: mastra-workers
+        ```
+
+        ```bash
+        kubectl apply -f k8s/namespace.yaml
+        kubectl create secret generic mastra-secrets -n mastra-workers \
+          --from-literal=POSTGRES_PASSWORD='your-password' \
+          --from-literal=DATABASE_URL='postgresql://mastra:your-password@postgres:5432/mastra' \
+          --from-literal=REDIS_URL='redis://redis:6379' \
+          --from-literal=MASTRA_WORKER_AUTH_TOKEN='your-shared-token'
+        ```
+
+        :::note
+        アプリケーションに必要なその他の環境変数（[モデル Provider](/models/providers) の API キーなど）を Secret または追加の `--from-literal` Entry として追加してください。
+        :::
+
+        Cluster から Pull できる Registry に Docker イメージをビルドしてプッシュします。
+
+        ```bash
+        docker build -t your-registry/mastra-workers:latest ./app
+        docker push your-registry/mastra-workers:latest
+        ```
+
+        データベース、PubSub Backend、API、3 つの Worker 用の Deployment と Service を適用します。次の例では、Cluster 内の Postgres と Redis を使用します。本番環境では、マネージド Service（Amazon RDS、Cloud SQL、ElastiCache、Memorystore など）を使用してください。
+
+        ```yaml title="k8s/postgres.yaml"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: postgres
+          namespace: mastra-workers
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: postgres
+          template:
+            metadata:
+              labels:
+                app: postgres
+            spec:
+              containers:
+                - name: postgres
+                  image: postgres:16-alpine
+                  ports:
+                    - containerPort: 5432
+                  env:
+                    - name: POSTGRES_USER
+                      value: mastra
+                    - name: POSTGRES_PASSWORD
+                      valueFrom:
+                        secretKeyRef:
+                          name: mastra-secrets
+                          key: POSTGRES_PASSWORD
+                    - name: POSTGRES_DB
+                      value: mastra
+                  volumeMounts:
+                    - name: pgdata
+                      mountPath: /var/lib/postgresql/data
+              volumes:
+                - name: pgdata
+                  emptyDir: {}
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: postgres
+          namespace: mastra-workers
+        spec:
+          selector:
+            app: postgres
+          ports:
+            - port: 5432
+              targetPort: 5432
+        ```
+
+        :::caution
+        上記の Postgres の例ではストレージに `emptyDir` を使用しているため、Pod を再起動するとデータが失われます。本番環境では `PersistentVolumeClaim` に置き換えるか、マネージドデータベース Service を使用してください。
+        :::
+
+        ```yaml title="k8s/redis.yaml"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: redis
+          namespace: mastra-workers
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: redis
+          template:
+            metadata:
+              labels:
+                app: redis
+            spec:
+              containers:
+                - name: redis
+                  image: redis:7-alpine
+                  args: ['--appendonly', 'yes']
+                  ports:
+                    - containerPort: 6379
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: redis
+          namespace: mastra-workers
+        spec:
+          selector:
+            app: redis
+          ports:
+            - port: 6379
+              targetPort: 6379
+        ```
+
+        ```yaml title="k8s/api.yaml"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: api
+          namespace: mastra-workers
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: api
+          template:
+            metadata:
+              labels:
+                app: api
+            spec:
+              containers:
+                - name: api
+                  image: your-registry/mastra-workers:latest
+                  ports:
+                    - containerPort: 4111
+                  env:
+                    - name: MASTRA_WORKERS
+                      value: 'false'
+                  envFrom:
+                    - secretRef:
+                        name: mastra-secrets
+                  readinessProbe:
+                    httpGet:
+                      path: /api/agents
+                      port: 4111
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                  livenessProbe:
+                    httpGet:
+                      path: /api/agents
+                      port: 4111
+                    initialDelaySeconds: 15
+                    periodSeconds: 10
+                  resources:
+                    requests:
+                      cpu: 500m
+                      memory: 512Mi
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: api
+          namespace: mastra-workers
+        spec:
+          selector:
+            app: api
+          ports:
+            - port: 4111
+              targetPort: 4111
+        ```
+
+        ```yaml title="k8s/orchestration-worker.yaml"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: orchestration-worker
+          namespace: mastra-workers
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: orchestration-worker
+          template:
+            metadata:
+              labels:
+                app: orchestration-worker
+            spec:
+              containers:
+                - name: worker
+                  image: your-registry/mastra-workers:latest
+                  env:
+                    - name: MASTRA_WORKERS
+                      value: orchestration
+                    - name: MASTRA_STEP_EXECUTION_URL
+                      value: http://api:4111/api
+                  envFrom:
+                    - secretRef:
+                        name: mastra-secrets
+                  resources:
+                    requests:
+                      cpu: 250m
+                      memory: 256Mi
+        ```
+
+        ```yaml title="k8s/scheduler-worker.yaml"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: scheduler-worker
+          namespace: mastra-workers
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: scheduler-worker
+          template:
+            metadata:
+              labels:
+                app: scheduler-worker
+            spec:
+              containers:
+                - name: worker
+                  image: your-registry/mastra-workers:latest
+                  env:
+                    - name: MASTRA_WORKERS
+                      value: scheduler
+                  envFrom:
+                    - secretRef:
+                        name: mastra-secrets
+                  resources:
+                    requests:
+                      cpu: 250m
+                      memory: 256Mi
+        ```
+
+        ```yaml title="k8s/background-task-worker.yaml"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: background-task-worker
+          namespace: mastra-workers
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: background-task-worker
+          template:
+            metadata:
+              labels:
+                app: background-task-worker
+            spec:
+              containers:
+                - name: worker
+                  image: your-registry/mastra-workers:latest
+                  env:
+                    - name: MASTRA_WORKERS
+                      value: backgroundTasks
+                  envFrom:
+                    - secretRef:
+                        name: mastra-secrets
+                  resources:
+                    requests:
+                      cpu: 250m
+                      memory: 256Mi
+        ```
+
+        すべての Manifest を適用し、API の準備ができるまで待ちます。
+
+        ```bash
+        kubectl apply -f k8s/
+        kubectl wait -n mastra-workers --for=condition=ready pod -l app=api --timeout=90s
+        kubectl wait -n mastra-workers --for=condition=ready pod -l app=orchestration-worker --timeout=60s
+        kubectl wait -n mastra-workers --for=condition=ready pod -l app=scheduler-worker --timeout=60s
+        kubectl wait -n mastra-workers --for=condition=ready pod -l app=background-task-worker --timeout=60s
+        ```
+      </TabItem>
+    </Tabs>
+  </StepItem>
+
+  <StepItem>
+    Stack が実行され、API が応答することを確認します。
+
+    <Tabs>
+      <TabItem value="docker-compose-verify" label="Docker Compose">
+        ```bash
+        docker compose up -d
+        docker compose ps
+        curl http://localhost:4111/api/agents
+        ```
+      </TabItem>
+
+      <TabItem value="kubernetes-verify" label="Kubernetes">
+        ```bash
+        kubectl get pods -n mastra-workers
+        kubectl port-forward -n mastra-workers svc/api 4111:4111
+        ```
+
+        別のターミナルで次を実行します。
+
+        ```bash
+        curl http://localhost:4111/api/agents
+        ```
+
+        Agent の一覧が JSON で返れば、API と Worker は実行されています。
+      </TabItem>
+    </Tabs>
+  </StepItem>
+</Steps>
+
+## Step 実行 URL
+
+完全分離型のデプロイでは、Orchestration Worker が API とは別のコンテナで実行されます。Workflow イベントを処理するとき、HTTP 経由で Step の実行を API に委任します。
+
+`MASTRA_STEP_EXECUTION_URL` に `/api` Prefix を含む API の内部 URL を設定します。
+
+```bash
+MASTRA_STEP_EXECUTION_URL=http://api:4111/api
+```
+
+Orchestration Worker は、Step ごとに `${MASTRA_STEP_EXECUTION_URL}/workflows/:workflowId/runs/:runId/steps/execute` へ `POST` リクエストを送ります。API が Workflow を解決し、Step をローカル実行します。
+
+この変数を設定しない場合、Orchestration Worker はプロセス内で Step の実行を試みます。Worker が API と同じプロセスで実行される場合は動作しますが、Worker が完全な Mastra Runtime にアクセスできない分離型デプロイでは失敗します。
+
+## スケーリング
+
+Orchestration Worker とバックグラウンドタスク Worker は安全に水平スケーリングできます。PubSub Consumer Group がインスタンス間でイベントを分散するため、各イベントは一度だけ処理されます。
+
+<Tabs>
+  <TabItem value="docker-compose-scale" label="Docker Compose">
+    ```bash
+    docker compose up -d --scale orchestration-worker=3
+    docker compose up -d --scale background-task-worker=2
+    ```
+  </TabItem>
+
+  <TabItem value="kubernetes-scale" label="Kubernetes">
+    ```bash
+    kubectl scale deployment/orchestration-worker -n mastra-workers --replicas=3
+    kubectl scale deployment/background-task-worker -n mastra-workers --replicas=2
+    ```
+
+    自動スケーリングするには、HorizontalPodAutoscaler を追加します。
+
+    ```yaml title="k8s/hpa.yaml"
+    apiVersion: autoscaling/v2
+    kind: HorizontalPodAutoscaler
+    metadata:
+      name: orchestration-worker
+      namespace: mastra-workers
+    spec:
+      scaleTargetRef:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: orchestration-worker
+      minReplicas: 1
+      maxReplicas: 10
+      metrics:
+        - type: Resource
+          resource:
+            name: cpu
+            target:
+              type: Utilization
+              averageUtilization: 70
+    ```
+
+    :::note
+    CPU ベースの自動スケーリングには、Cluster で [metrics-server](https://github.com/kubernetes-sigs/metrics-server) を実行する必要があります。GKE、EKS、AKS などのマネージド Cluster にはデフォルトで含まれています。
+    :::
+  </TabItem>
+</Tabs>
+
+API も Load Balancer の背後で水平スケーリングできます。
+
+**Scheduler Worker はスケーリングしないでください。** インスタンスを 1 つだけ実行します。複数の Scheduler が同じストレージを Poll すると、同じ Schedule に対して重複したイベントが発生します。
+
+## Crash Recovery
+
+分散 PubSub Backend が未確認のイベントを永続化するため、Worker は Crash から復旧できます。
+
+- **Orchestration Worker**：保留中のイベントは PubSub Backend に残ります。Worker を再起動すると、中断した場所から処理を再開します。
+- **Scheduler Worker**：イベントが完全に失われることはありません。再起動時に Scheduler は、中断した場所ではなく現在時刻から次の実行時刻を計算します。
+- **Step 実行中の API**：Orchestration Worker の HTTP リクエストが失敗します。イベントは Nack され、次の試行で再配信されます。
+
+:::warning
+Step の実行中に API が Crash した場合（Sleep の途中など）、その Step の作業は失われます。Workflow の Run は `running` 状態のまま停止することがあります。現時点では、この状況に対する Timeout ベースの自動復旧はありません。
+:::
+
+## 関連項目
+
+- [Worker](/docs/deployment/workers)：Worker の概要と使用するタイミング
+- [Worker 認証](/docs/server/auth/workers)：Worker から API への通信を保護する
+- [Worker リファレンス](/reference/workers/overview)：すべての Worker タイプの設定詳細
+- [CLI リファレンス](/reference/cli/mastra#mastra-worker-build)：`mastra worker build` と `mastra worker start`
+- [PubSub](/docs/server/pubsub)：イベント配信 Backend
+- [Mastra サーバーをデプロイする](/docs/deployment/mastra-server)：ビルド出力とサーバー設定
+- [Mastra を Kubernetes にデプロイする](/guides/deployment/kubernetes)：Durable Agent を使用した複数 Pod デプロイ

@@ -1,0 +1,261 @@
+---
+title: "リファレンス: Google Cloud Spanner ストレージ | Storage"
+description: Mastra の Google Cloud Spanner ストレージ実装に関するドキュメントです。
+packages:
+  - "@mastra/core"
+  - "@mastra/spanner"
+---
+
+# Google Cloud Spanner ストレージ
+
+Google Cloud Spanner ストレージ実装は、Mastra 向けに水平方向へ拡張可能な大容量かつ強整合性のストレージバックエンドを提供します。Cloud Spanner の GoogleSQL ダイアレクトを対象としています。
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/spanner@latest
+```
+
+## 使用方法
+
+```typescript
+import { SpannerStore } from '@mastra/spanner'
+
+const storage = new SpannerStore({
+  id: 'spanner-storage',
+  projectId: process.env.SPANNER_PROJECT_ID!,
+  instanceId: process.env.SPANNER_INSTANCE_ID!,
+  databaseId: process.env.SPANNER_DATABASE_ID!,
+})
+```
+
+インスタンスとデータベースは事前に作成しておく必要があります。アダプターは初回使用時に必要なテーブルを作成するため、Spanner クライアントに渡す認証情報にはスキーマ変更を実行する権限が必要です（または、デプロイ手順で昇格された認証情報を使用して `storage.init()` を一度実行してください）。
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'このストレージインスタンスの一意な識別子。',
+    isOptional: false,
+  },
+  {
+    name: 'projectId',
+    type: 'string',
+    description: '`database` を指定しない場合に必須となる Google Cloud プロジェクト ID。',
+    isOptional: true,
+  },
+  {
+    name: 'instanceId',
+    type: 'string',
+    description: '`database` を指定しない場合に必須となる Cloud Spanner インスタンス ID。',
+    isOptional: true,
+  },
+  {
+    name: 'databaseId',
+    type: 'string',
+    description: '`database` を指定しない場合に必須となる Cloud Spanner データベース ID。',
+    isOptional: true,
+  },
+  {
+    name: 'database',
+    type: '@google-cloud/spanner Database',
+    description:
+      '事前設定済みの Spanner Database ハンドル。Spanner クライアントを別の場所で管理する場合（たとえば、複数のサービスで認証や接続オプションを共有する場合）に使用します。',
+    isOptional: true,
+  },
+  {
+    name: 'spannerOptions',
+    type: 'object',
+    description:
+      '`@google-cloud/spanner` クライアントのコンストラクターに渡されるオプション。認証情報やカスタムエンドポイントの設定、ローカルエミュレーターへの接続に使用します。',
+    isOptional: true,
+  },
+  {
+    name: 'disableInit',
+    type: 'boolean',
+    description:
+      'true の場合、初回使用時の自動テーブル作成をスキップします。別のデプロイ手順で `storage.init()` を明示的に呼び出す必要があります。',
+    isOptional: true,
+    defaultValue: 'false',
+  },
+  {
+    name: 'skipDefaultIndexes',
+    type: 'boolean',
+    description: 'true の場合、初期化時にデフォルトインデックスを作成しません。',
+    isOptional: true,
+    defaultValue: 'false',
+  },
+  {
+    name: 'indexes',
+    type: 'CreateIndexOptions[]',
+    description:
+      '作成するカスタムセカンダリインデックス。各インデックスでは、所属するテーブルを指定する必要があります。インデックスはテーブル名に基づいて適切なドメインに振り分けられます。',
+    isOptional: true,
+  },
+  {
+    name: 'initMode',
+    type: "'sync' | 'validate'",
+    description:
+      "スキーマ初期化の動作を制御します。`'sync'` は `init()` の実行時に不足しているテーブル、カラム、インデックスを作成します（従来の動作）。`'validate'` は DDL を発行せず、想定されるすべてのテーブル、カラム、デフォルトおよびカスタムインデックスがすでに存在することを検証し、不足がある場合は型付きユーザーエラーをスローします。外部プロセス（Terraform、Liquibase、リリースパイプラインなど）がスキーマを管理し、Mastra は検証のみを行う場合に便利です。",
+    isOptional: true,
+    defaultValue: "'sync'",
+  },
+]}
+/>
+
+## コンストラクターの例
+
+`SpannerStore` は複数の方法でインスタンス化できます。
+
+```typescript
+import { Spanner } from '@google-cloud/spanner'
+import { SpannerStore } from '@mastra/spanner'
+
+// Using projectId / instanceId / databaseId
+const store1 = new SpannerStore({
+  id: 'spanner-storage-1',
+  projectId: 'my-gcp-project',
+  instanceId: 'my-instance',
+  databaseId: 'mastra',
+})
+
+// Reusing an existing Spanner Database handle
+const spanner = new Spanner({ projectId: 'my-gcp-project' })
+const database = spanner.instance('my-instance').database('mastra')
+
+const store2 = new SpannerStore({
+  id: 'spanner-storage-2',
+  database,
+})
+
+// Using the local Spanner emulator (set the SPANNER_EMULATOR_HOST env var)
+process.env.SPANNER_EMULATOR_HOST = 'localhost:9010'
+const store3 = new SpannerStore({
+  id: 'spanner-storage-emulator',
+  projectId: 'test-project',
+  instanceId: 'test-instance',
+  databaseId: 'test-db',
+  spannerOptions: { servicePath: 'localhost', port: 9010, sslCreds: undefined },
+})
+```
+
+## 補足事項
+
+### スキーマ管理
+
+ストレージアダプターは、すべて GoogleSQL ダイアレクトを使用して次のテーブルを作成します。
+
+- `mastra_workflow_snapshot`: Workflow の状態と実行データ
+- `mastra_threads`: 会話スレッド
+- `mastra_messages`: 個々のメッセージ
+- `mastra_resources`: リソースのワーキングメモリ
+- `mastra_scorers`: 評価スコア
+- `mastra_background_tasks`: バックグラウンドでの Tool 実行状態
+- `mastra_agents`: 最小限の Agent レコード（ID、ステータス、アクティブなバージョン）
+- `mastra_agent_versions`: バージョン管理された Agent 設定のスナップショット
+- `mastra_mcp_clients` / `mastra_mcp_client_versions`: MCP クライアント設定とそのバージョン履歴
+- `mastra_mcp_servers` / `mastra_mcp_server_versions`: MCP サーバー設定とそのバージョン履歴
+- `mastra_skills` / `mastra_skill_versions`: Skill レコードとバージョン管理された Skill のスナップショット（指示、リファレンス、スクリプト、アセット、コンテンツツリー）
+- `mastra_skill_blobs`: Skill バージョンのコンテンツに使用される、SHA-256 ハッシュをキーとしたコンテンツアドレス指定可能な Blob ストア
+- `mastra_prompt_blocks` / `mastra_prompt_block_versions`: プロンプトブロックのレコードとバージョン管理されたコンテンツのスナップショット（テンプレートコンテンツ、ルール、リクエストコンテキストスキーマ）
+- `mastra_scorer_definitions` / `mastra_scorer_definition_versions`: Scorer 定義レコードとバージョン管理された設定のスナップショット（Judge の指示、モデル、スコア範囲、プリセット設定、デフォルトのサンプリング）
+- `mastra_schedules` / `mastra_schedule_triggers`: Mastra 組み込みの `WorkflowScheduler` が使用する、cron 駆動の Workflow スケジュールとトリガー履歴
+- `mastra_workspaces` / `mastra_workspace_versions`: Workspace レコードとバージョン管理された設定のスナップショット（ファイルシステム、Sandbox、マウント、検索、Skill、Tool）
+- `mastra_datasets` / `mastra_dataset_items` / `mastra_dataset_versions`: 評価データセット、SCD-2 方式でバージョン管理された項目、バージョンのスナップショット
+- `mastra_experiments` / `mastra_experiment_results`: 実験の実行と項目ごとの結果
+- `mastra_favorites`: Agent と Skill に対するユーザーごとのお気に入り。親レコードでは非正規化された `favoriteCount` が維持されます
+- `mastra_channel_installations` / `mastra_channel_config`: マルチプラットフォームのチャンネルインストールとプラットフォームごとの設定
+- `mastra_ai_spans`: observability のための AI トレーススパン（トレースごとおよびスパンごとのレコードで、Studio のトレース UI に使用）
+
+テキストと JSON ペイロードには `STRING(MAX)`、そのほかに `INT64`、`FLOAT64`、`BOOL`、`TIMESTAMP` を使用してテーブルが作成されます。
+
+次のテーブルには Spanner 固有の `STORED` 生成カラムがあります。アダプターが JSON ペイロードから値を設定するため、一般的なフィルターでは `JSON_VALUE` スキャンの代わりに通常のセカンダリインデックスを使用できます。
+
+- `mastra_workflow_snapshot.snapshotStatus`: `snapshot` から `$.status` を抽出します。`listWorkflowRuns({ status })` を支えます。
+- `mastra_schedules.target_workflow_id`: `target` から `$.workflowId` を抽出します。`listSchedules({ workflowId })` を支えます。
+
+どちらも `init()` の実行時に `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` によって追加され、`initMode: 'validate'` の場合（スキーマが外部で管理される場合）はスキップされます。カラムがない場合、アダプターは実行時に `JSON_VALUE` フィルターへフォールバックします。
+
+アダプターはスキーマを作成も使用もしません。分離するには専用のデータベースを使用してください。
+
+### 初期化
+
+ストレージを `Mastra` クラスに渡すと、ストレージ操作が行われる前に `init()` が自動的に呼び出されます。
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { SpannerStore } from '@mastra/spanner'
+
+const storage = new SpannerStore({
+  id: 'spanner-storage',
+  projectId: process.env.SPANNER_PROJECT_ID!,
+  instanceId: process.env.SPANNER_INSTANCE_ID!,
+  databaseId: process.env.SPANNER_DATABASE_ID!,
+})
+
+const mastra = new Mastra({
+  storage, // init() is called automatically
+})
+```
+
+ストレージを直接使用する場合は、最初の操作の前に `init()` を一度呼び出してください。Spanner ではスキーマを同時に変更できないため、`SpannerStore.init()` は各ドメインのセットアップを順番に実行します。
+
+```typescript
+const storage = new SpannerStore({
+  id: 'spanner-storage',
+  projectId: process.env.SPANNER_PROJECT_ID!,
+  instanceId: process.env.SPANNER_INSTANCE_ID!,
+  databaseId: process.env.SPANNER_DATABASE_ID!,
+})
+
+await storage.init()
+const memory = await storage.getStore('memory')
+const thread = await memory?.getThreadById({ threadId: '...' })
+```
+
+:::warning
+`init()` が呼び出されず、`disableInit` が true の場合、必要なテーブルが存在しないためストレージ操作は失敗します。
+:::
+
+### GoogleSQL 固有の仕様
+
+ほかのリレーショナルアダプターとは、いくつかの動作が異なります。
+
+- Upsert には `INSERT OR UPDATE` を使用します。Spanner は Upsert 用の `RETURNING` 句を提供していないため、書き込み後の状態が必要な呼び出し元はデータを再度読み取る必要があります。
+- `TRUNCATE` はありません。`dangerouslyClearAll()` は `DELETE WHERE TRUE` を発行します。
+- 識別子はバッククォートで囲まれます。
+- DDL は非同期（長時間実行オペレーション）の `database.updateSchema(...)` を通じて適用されます。
+- `NULLS FIRST/LAST` はサポートされていません。NULL を扱う並べ替えは、`IS NULL` をソートキーとしてエミュレートされます。
+- JSON の包含はネイティブではサポートされていません。`listTraces` の `metadata` および `scope` フィルターはキーごとの `JSON_VALUE(...) = @v` 等価性チェックにコンパイルされ、`tags` フィルターは `JSON_QUERY_ARRAY(...)` に対する `EXISTS` にコンパイルされます。これは Postgres の `@>` 包含演算子（1回のインデックススキャンでネストされた構造に一致可能）とは異なります。単発の検索のほとんどは引き続き機能しますが、深くネストされた構造の一致は表現できません。
+
+### データベースへの直接アクセス
+
+`SpannerStore` は基盤となる Spanner クライアントオブジェクトを公開します。
+
+```typescript
+store.database // @google-cloud/spanner Database
+store.instance // @google-cloud/spanner Instance (when created internally)
+store.spanner // @google-cloud/spanner Spanner client (when created internally)
+```
+
+これらは、独自のトランザクションやスキーマのイントロスペクションなど、高度な用途を想定しています。データベースを直接使用すると、アダプターの検証と JSON 変換ロジックは迂回されます。
+
+### エミュレーターを使用したローカル開発
+
+Docker で Cloud Spanner エミュレーターをローカル実行します。
+
+```bash
+docker run -p 9010:9010 -p 9020:9020 gcr.io/cloud-spanner-emulator/emulator
+```
+
+アプリを実行する前に `SPANNER_EMULATOR_HOST=localhost:9010` を設定し、インスタンスとデータベースを作成します。
+
+```bash
+gcloud spanner instances create test-instance --config=emulator-config --nodes=1
+gcloud spanner databases create test-db --instance=test-instance
+```
+
+次に、Node.js プロセスでも同じ環境変数を設定して接続します。`@google-cloud/spanner` クライアントはエミュレーターを自動的に検出します。

@@ -1,0 +1,203 @@
+---
+title: "Agent 网络 | Agent"
+description: 使用 Agent network 协调多个 Agent、Workflow 和 Tool，以执行复杂的非确定性任务。
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+---
+
+# Agent network
+
+:::warning[已弃用]
+
+Agent network 已弃用，将在未来的主版本中移除。现在推荐使用通过 `agent.stream()` 或 `agent.generate()` 运行的 [Supervisor Agent](../capabilities/subagents)。它能实现相同的多 Agent 协作，同时提供更好的控制、更简单的 API，并且更易于调试。
+
+请参阅[迁移指南](/guides/migrations/network-to-supervisor)进行升级。
+
+:::
+
+**路由 Agent** 使用 LLM 解析请求，并决定调用哪些原语（子 Agent、Workflow 或 Tool）、调用顺序以及传入的数据。
+
+## 创建 Agent network
+
+使用 `agents`、`workflows` 和 `tools` 配置路由 Agent。Memory 是必需的，因为 `.network()` 使用它存储任务历史记录并判断任务何时完成。
+
+每个原语都需要清晰的 `description`，以便路由 Agent 决定使用哪一个。对于 Workflow 和 Tool，`inputSchema` 与 `outputSchema` 也有助于路由器确定正确的输入。
+
+```typescript title="src/mastra/agents/routing-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+
+import { researchAgent } from './research-agent'
+import { writingAgent } from './writing-agent'
+import { cityWorkflow } from '../workflows/city-workflow'
+import { weatherTool } from '../tools/weather-tool'
+
+export const routingAgent = new Agent({
+  id: 'routing-agent',
+  name: 'Routing Agent',
+  instructions: `
+    You are a network of writers and researchers. The user will ask you to research a topic. Always respond with a complete report—no bullet points. Write in full paragraphs, like a blog post. Do not answer with incomplete or uncertain information.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  agents: {
+    // highlight-start
+    researchAgent,
+    writingAgent,
+    // highlight-end
+  },
+  workflows: {
+    // highlight-next-line
+    cityWorkflow,
+  },
+  tools: {
+    // highlight-next-line
+    weatherTool,
+  },
+  memory: new Memory({
+    storage: new LibSQLStore({
+      id: 'mastra-storage',
+      url: 'file:../mastra.db',
+    }),
+  }),
+})
+```
+
+:::note
+
+子 Agent 需要在实例上设置 `description`，该实例由 `Agent` 创建。Workflow 和 Tool 需要设置 `description`、`inputSchema` 和 `outputSchema`，并在 `createWorkflow()` 或 `createTool()` 上完成配置。
+
+:::
+
+## 调用 network
+
+使用用户消息调用 `.network()`。该方法会返回一个可以迭代的事件流。
+
+```typescript
+const result = await routingAgent.network('Tell me three cool ways to use Mastra')
+
+for await (const chunk of result) {
+  console.log(chunk.type)
+  if (chunk.type === 'network-execution-event-step-finish') {
+    console.log(chunk.payload.result)
+  }
+}
+```
+
+## 结构化输出
+
+传入 `structuredOutput` 可获得带类型且经过验证的结果。使用 `objectStream` 可在生成过程中获取部分对象。
+
+```typescript
+import { z } from 'zod'
+
+const resultSchema = z.object({
+  summary: z.string().describe('A brief summary of the findings'),
+  recommendations: z.array(z.string()).describe('List of recommendations'),
+  confidence: z.number().min(0).max(1).describe('Confidence score'),
+})
+
+const stream = await routingAgent.network('Research AI trends', {
+  structuredOutput: { schema: resultSchema },
+})
+
+for await (const partial of stream.objectStream) {
+  console.log('Building result:', partial)
+}
+
+const final = await stream.object
+console.log(final?.summary)
+```
+
+## 批准和拒绝 Tool 调用
+
+当某个原语需要审批时，流会发出 `agent-execution-approval` 或 `tool-execution-approval` 分块。使用 `approveNetworkToolCall()` 或 `declineNetworkToolCall()` 进行响应。
+
+Network 审批使用快照捕获执行状态。请确保已在 Mastra 实例中启用 [Storage Provider](/docs/storage/overview)。
+
+```typescript title="src/approve-network.ts"
+const stream = await routingAgent.network('Perform some sensitive action', {
+  memory: {
+    thread: 'user-123',
+    resource: 'my-app',
+  },
+})
+
+for await (const chunk of stream) {
+  if (chunk.type === 'agent-execution-approval' || chunk.type === 'tool-execution-approval') {
+    // Approve
+    const approvedStream = await routingAgent.approveNetworkToolCall(chunk.payload.toolCallId, {
+      runId: stream.runId,
+      memory: { thread: 'user-123', resource: 'my-app' },
+    })
+
+    for await (const c of approvedStream) {
+      if (c.type === 'network-execution-event-step-finish') {
+        console.log(c.payload.result)
+      }
+    }
+  }
+}
+```
+
+要拒绝，请使用相同参数调用 `declineNetworkToolCall()`。
+
+## 挂起和恢复
+
+当某个原语调用 `suspend()` 时，流会发出一个挂起分块（例如 `tool-execution-suspended`）。使用 `resumeNetwork()` 提供所需数据并继续执行。
+
+```typescript title="src/resume-network.ts"
+const stream = await routingAgent.network('Delete the old records', {
+  memory: { thread: 'user-123', resource: 'my-app' },
+})
+
+for await (const chunk of stream) {
+  if (chunk.type === 'workflow-execution-suspended') {
+    console.log(chunk.payload.suspendPayload)
+  }
+}
+
+// Resume with user confirmation
+const resumedStream = await routingAgent.resumeNetwork(
+  { confirmed: true },
+  {
+    runId: stream.runId,
+    memory: { thread: 'user-123', resource: 'my-app' },
+  },
+)
+
+for await (const chunk of resumedStream) {
+  if (chunk.type === 'network-execution-event-step-finish') {
+    console.log(chunk.payload.result)
+  }
+}
+```
+
+### 自动恢复
+
+将 `autoResumeSuspendedTools` 设置为 `true`，network 就会根据用户的下一条消息恢复挂起的原语。这样可以创建一种对话式流程，让用户以自然语言提供所需信息。
+
+```typescript
+const stream = await routingAgent.network('Delete the old records', {
+  autoResumeSuspendedTools: true,
+  memory: { thread: 'user-123', resource: 'my-app' },
+})
+```
+
+自动恢复的要求：
+
+- **已配置 Memory**：Agent 需要使用 Memory 跨消息跟踪挂起的 Tool。
+- **相同 thread**：后续消息必须使用相同的 `thread` 和 `resource` 标识符。
+- **已定义 `resumeSchema`**：Tool 必须定义 `resumeSchema`，以便 network 从用户消息中提取数据。
+
+| | 手动（`resumeNetwork`） | 自动（`autoResumeSuspendedTools`） |
+| - | - | - |
+| 最适合 | 带审批按钮的自定义 UI | 聊天式界面 |
+| 控制 | 完全控制恢复时间和数据 | Network 从用户消息中提取数据 |
+| 设置 | 处理挂起分块并调用 `resumeNetwork` | 设置标志，并在 Tool 上定义 `resumeSchema` |
+
+## 相关内容
+
+- [Supervisor Agent](../capabilities/subagents)
+- [从 `.network()` 迁移到 Supervisor Agent](/guides/migrations/network-to-supervisor)

@@ -1,0 +1,198 @@
+---
+title: "參考：StreamErrorRetryProcessor | Processors"
+description: "Mastra 中 StreamErrorRetryProcessor processor 的 API 參考；此 processor 會重試暫時性的串流錯誤。"
+packages:
+  - "@mastra/core"
+---
+
+# StreamErrorRetryProcessor
+
+`StreamErrorRetryProcessor` 是一個**錯誤 processor**，會重試暫時性的 LLM API 及串流故障。它內置 OpenAI Responses 串流錯誤的配對功能，亦支援其他 Provider 特有錯誤格式的額外 matcher。
+
+此 processor 在 core 中預設不會啟用。對於需要有限次數重試處理的 Agent，請將它加入 `errorProcessors`。
+
+## 使用範例
+
+將 `StreamErrorRetryProcessor` 加入 `errorProcessors`：
+
+```typescript title="src/mastra/agents/openai-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { StreamErrorRetryProcessor } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'openai-agent',
+  name: 'openai-agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  errorProcessors: [new StreamErrorRetryProcessor()],
+})
+```
+
+## 運作方式
+
+此 processor 會檢查錯誤及其原因鏈中的以下項目：
+
+- Provider 重試 metadata：`isRetryable === true`
+- 內置 OpenAI Responses 串流錯誤配對
+- Matcher 結果：任何已設定且傳回 `true` 的 matcher
+
+當錯誤可重試時，processor 會傳回 `{ retry: true }`。它不會修改訊息。
+
+設定 `delayMs` 後，processor 會先等候，然後才發出重試訊號。這對 `ECONNRESET` 等暫時性網絡錯誤很有用，因為立即重試很可能會再次失敗。延遲時間可以是固定的毫秒數，亦可以是使用錯誤 args 評估的函式（例如用來實作指數退避）。
+
+### 重試限制
+
+`maxRetries` 預設為 `1`，並限制此 processor 要求重試的次數。Agent 亦會透過 `maxProcessorRetries` 限制 processor 重試。當設定了錯誤 processor 而沒有設定 Agent 限制時，runtime 上限為 `10`。
+
+如需單一重試配額，請將兩個值明確設為相同的有限值。該次呼叫的模型 `maxRetries` 應保持為 `0`，以免增加 Provider 嘗試次數。
+
+### `Retry-After` 處理方式
+
+對於包含 `Retry-After` response header 的可重試錯誤，processor 會透過錯誤原因鏈，以不區分大小寫的方式讀取 delta-seconds 及 HTTP-date 值。它會按照 `delayMs` 與設有上限的伺服器延遲之中較長的時間等候。
+
+`maxRetryAfterMs` 預設為 `30_000`。它只會限制由 Provider 提供的等候時間。較長而且明確設定的 `delayMs` 會維持不變。無效或已過期的 header 會被忽略。
+
+## 重試未知錯誤
+
+設定 `retryUnknownErrors`，可重試不符合 Provider metadata、內置 OpenAI matcher 或自訂 matcher 的錯誤。未知錯誤重試會使用 processor 層級的 `maxRetries` 及 `delayMs` 值。已知的授權失敗（包括 HTTP `401` 及 `403` response）不會重試：
+
+```typescript title="src/mastra/agents/resilient-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { StreamErrorRetryProcessor } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'resilient-agent',
+  name: 'Resilient agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  errorProcessors: [
+    new StreamErrorRetryProcessor({
+      retryUnknownErrors: true,
+      maxRetries: 2,
+      delayMs: 3000,
+    }),
+  ],
+})
+```
+
+特定 matcher policy 仍會優先於未知錯誤值。此選項預設為 `false`，因此除非你啟用此選項，否則不會重試未知錯誤。
+
+## 延遲重試
+
+將 `delayMs` 與自訂 matcher 配合使用，可先等候再重試暫時性的網絡重設：
+
+```typescript title="src/mastra/agents/resilient-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { StreamErrorRetryProcessor } from '@mastra/core/processors'
+
+const isECONNRESET = (error: unknown) => {
+  if (!error || typeof error !== 'object') return false
+  const code = (error as { code?: unknown }).code
+  if (typeof code === 'string' && code.toUpperCase() === 'ECONNRESET') return true
+  const message = error instanceof Error ? error.message : undefined
+  return typeof message === 'string' && /econnreset|socket hang up/i.test(message)
+}
+
+export const agent = new Agent({
+  id: 'resilient-agent',
+  name: 'resilient-agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  errorProcessors: [
+    new StreamErrorRetryProcessor({
+      maxRetries: 2,
+      delayMs: ({ retryCount }) => Math.min(1000 * 2 ** retryCount, 30000),
+      matchers: [isECONNRESET],
+    }),
+  ],
+})
+```
+
+## 預設 OpenAI Responses matcher
+
+`isRetryableOpenAIResponsesStreamError` 會配對 `type: 'error'` 或 `type: 'response.failed'` 的 OpenAI Responses 串流錯誤 chunk。它會重試已知的暫時性 OpenAI 錯誤碼；作為後備機制，亦會重試帶有明確重試指引（例如 `You can retry your request`）的錯誤。
+
+`StreamErrorRetryProcessor` 預設包含此 matcher。你亦可匯入它，並在自訂重試邏輯中重用。
+
+## Constructor 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'StreamErrorRetryProcessorOptions',
+    description: '重試處理的設定。',
+    isOptional: true,
+    properties: [
+      {
+        name: 'maxRetries',
+        type: 'number',
+        description: '此 processor 要求重試的次數上限。',
+        isOptional: true,
+        defaultValue: '1',
+      },
+      {
+        name: 'matchers',
+        type: 'StreamErrorRetryMatcher[]',
+        description: '用來識別 Provider 特有可重試串流錯誤的額外函式。',
+        isOptional: true,
+        defaultValue: '[]',
+      },
+      {
+        name: 'retryUnknownErrors',
+        type: 'boolean',
+        description:
+          '是否重試無法與 Provider metadata、內置 matcher 及自訂 matcher 配對的未知錯誤。已知的授權失敗除外。使用 processor 層級的 maxRetries 及 delayMs 值。',
+        isOptional: true,
+        defaultValue: 'false',
+      },
+      {
+        name: 'delayMs',
+        type: 'number | ((args: ProcessAPIErrorArgs) => number | Promise<number>)',
+        description:
+          '發出重試訊號前等候的毫秒數。接受固定數字，或使用目前錯誤 args 評估的函式（例如用於指數退避）。負數或非有限值會被限制為 0。',
+        isOptional: true,
+        defaultValue: '0',
+      },
+      {
+        name: 'maxRetryAfterMs',
+        type: 'number',
+        description:
+          '從 Retry-After header 讀取、由 Provider 控制的延遲時間上限。這不會限制明確設定的 delayMs 值。負數或非有限值會被限制為 0。',
+        isOptional: true,
+        defaultValue: '30000',
+      },
+    ],
+  },
+]}
+/>
+
+## 屬性
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: "'stream-error-retry-processor'",
+    description: 'Processor 標識符。',
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: "'Stream Error Retry Processor'",
+    description: 'Processor 顯示名稱。',
+    isOptional: false,
+  },
+  {
+    name: 'processAPIError',
+    type: '(args: ProcessAPIErrorArgs) => ProcessAPIErrorResult | void',
+    description: '重試串流錯誤，次數不超過設定的重試上限。',
+    isOptional: false,
+  },
+]}
+/>
+
+## 相關內容
+
+- [Processor interface](/reference/processors/processor-interface)
+- [Processors](/docs/agents/processors)

@@ -1,0 +1,144 @@
+---
+title: "Worker | Auth"
+description: "独立した Worker と Mastra API サーバー間の通信を保護します。"
+packages:
+  - "@mastra/core"
+---
+
+# Worker
+
+Worker が API とは別のプロセスで実行される場合、両者は HTTP で通信します。オーケストレーション Worker は API のステップ実行エンドポイントを呼び出し、API サーバー上で Workflow のステップを実行します。プッシュモードの PubSub ブローカー（プッシュモードの Google Cloud Pub/Sub など）は、API のイベントエンドポイントへイベントを直接配信することもできます。これは、ブローカーからイベントを自ら取得するプルモード Worker とは異なる統合経路です。認証 Provider が設定されている場合、どちらの HTTP エンドポイントにも認証が必要です。
+
+## 仕組み
+
+Worker の認証には、Mastra サーバーの他の部分と同じ認証パイプラインを使用します。オーケストレーション Worker は各 HTTP リクエストに認証情報を含めて送信し、サーバーに設定された `authenticateToken` Provider がその情報を検証します。
+
+| エンドポイント | 使用元 | 目的 |
+| - | - | - |
+| `POST /api/workflows/:workflowId/runs/:runId/steps/execute` | `HttpRemoteStrategy` 経由のオーケストレーション Worker | API 上で Workflow のステップを実行 |
+| `POST /api/workflows/events` | プッシュモードのブローカー（GCP Pub/Sub、SNS） | Workflow イベントを API へ配信 |
+
+どちらのルートにも `requiresAuth: true` が設定されています。認証 Provider が設定されていない場合は公開されます。
+
+:::warning
+
+Worker を別プロセスとしてデプロイする場合は、サーバーに必ず認証 Provider を設定してください。設定しないと、ステップ実行エンドポイントとイベントエンドポイントを誰でも呼び出せます。
+
+:::
+
+## Worker 認証の設定
+
+### サーバーに認証 Provider を設定する
+
+任意の Mastra 認証 Provider を使用できます。Worker トークンには `SimpleAuth` が適しています。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { SimpleAuth } from '@mastra/core/server'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new SimpleAuth({
+      tokens: {
+        [process.env.WORKER_TOKEN!]: {
+          id: 'worker',
+          name: 'Orchestration Worker',
+          role: 'worker',
+        },
+      },
+    }),
+  },
+  // ... storage, pubsub, etc.
+})
+```
+
+### Worker トークンを設定する
+
+各 Worker コンテナで、サーバーの認証 Provider が認識するトークンを `MASTRA_WORKER_AUTH_TOKEN` に設定します。
+
+```yaml title="docker-compose.yml"
+services:
+  api:
+    environment:
+      WORKER_TOKEN: ${WORKER_TOKEN}
+      # ... other env vars
+
+  orchestration-worker:
+    environment:
+      MASTRA_WORKER_AUTH_TOKEN: ${WORKER_TOKEN}
+      MASTRA_STEP_EXECUTION_URL: http://api:4111/api # Use HTTPS in production
+      # ... other env vars
+```
+
+```bash title=".env"
+WORKER_TOKEN=sk-worker-secret-token
+```
+
+これらの例ではローカル開発用に `http://` を使用しています。本番環境では HTTPS URL を使用し、サービスメッシュまたは Ingress コントローラーで TLS を終端してください。[セキュリティに関する推奨事項](#security-recommendations)を参照してください。
+
+オーケストレーション Worker は `MASTRA_WORKER_AUTH_TOKEN` を読み取り、ステップ実行リクエストごとに `Authorization` ヘッダーの `Bearer` トークンとして送信します。
+
+## 認証情報の種類
+
+`HttpRemoteStrategy` は3種類の認証形式をサポートします。ほとんどの構成ではデフォルトの `bearer` を使用できます。
+
+### Bearer トークン
+
+`MASTRA_WORKER_AUTH_TOKEN` を設定すると、Strategy は `Authorization: Bearer <token>` を送信します。
+
+```bash
+MASTRA_WORKER_AUTH_TOKEN=sk-worker-secret-token
+```
+
+### API キーヘッダー
+
+認証情報を `Authorization` ではなく `x-worker-api-key` として送信します。
+
+```typescript
+import { HttpRemoteStrategy } from '@mastra/core/worker'
+
+const strategy = new HttpRemoteStrategy({
+  serverUrl: 'http://api:4111/api', // Use HTTPS in production
+  auth: { type: 'api-key', key: process.env.WORKER_API_KEY! },
+})
+```
+
+この認証情報を検証するには、サーバーの認証 Provider が `x-worker-api-key` ヘッダーを読み取る必要があります。
+
+### カスタムヘッダー
+
+任意のヘッダー名と値を使用できます。
+
+```typescript
+import { HttpRemoteStrategy } from '@mastra/core/worker'
+
+const strategy = new HttpRemoteStrategy({
+  serverUrl: 'http://api:4111/api', // Use HTTPS in production
+  auth: {
+    type: 'header',
+    name: 'X-Internal-Service-Key',
+    value: process.env.INTERNAL_KEY!,
+  },
+})
+```
+
+## プッシュモードブローカーの認証
+
+プッシュモードの PubSub（Google Cloud Pub/Sub など）を使用すると、ブローカーは `/api/workflows/events` エンドポイントへイベントを直接 POST します。ブローカーは独自の認証情報を付加します。たとえば、Google Cloud Pub/Sub は Google が署名した OIDC トークンを送信します。
+
+認証 Provider の `authenticateToken` コールバックは、ブローカーが送信する認証情報を認識する必要があります。使用される認証方式については、ブローカーのドキュメントを参照してください。
+
+## セキュリティに関する推奨事項
+
+- **Worker の種類ごとに異なるトークンを使用します。** 他の Worker に影響を与えずに、特定の Worker のアクセスだけを取り消せます。
+- **定期的にトークンをローテーションします。** `WORKER_TOKEN` 環境変数を更新し、影響するコンテナを再起動します。
+- **本番環境では TLS を使用します。** 転送中のトークンを保護するため、Worker と API 間の通信には HTTPS を使用してください。これは Kubernetes クラスターや Docker ネットワークを含む、すべての環境に該当します。サービスメッシュ（Istio、Linkerd など）または TLS を終端する Ingress を使用して内部トラフィックを暗号化します。
+- **ネットワークアクセスを制限します。** ステップ実行エンドポイントとイベントエンドポイントは内部向けです。可能であれば、ネットワークポリシーやファイアウォールルールを使用して公開インターネットから隔離してください。
+
+## 関連項目
+
+- [認証の概要](/docs/server/auth): 利用可能な認証 Provider とその仕組み
+- [トークンベース認証](/docs/server/auth/simple-auth): トークンとユーザーをマッピングする認証
+- [Worker のデプロイ](/guides/deployment/mastra-workers): 分割した Worker プロセスの設定
+- [Worker リファレンス](/reference/workers/overview): すべての Worker 種別の設定詳細
+- [CLI リファレンス](/reference/cli/mastra#mastra-worker-build): `mastra worker build` と `mastra worker start`

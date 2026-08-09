@@ -1,0 +1,170 @@
+---
+title: "リファレンス：createBedrockKBTool() | Tools and MCP"
+description: Agent による検索をサポートし、Amazon Bedrock Knowledge Bases からドキュメントを取得する Mastra の Bedrock Knowledge Base Tool のドキュメント。
+packages:
+  - "@mastra/core"
+  - "@mastra/rag"
+---
+
+# createBedrockKBTool()
+
+`createBedrockKBTool()` 関数は、Amazon Bedrock Knowledge Base から関連ドキュメントを取得する Tool を作成します。マネージド検索設定と Agentic Retrieval（クエリ分解およびマネージド再ランキング）の両方をサポートし、標準検索へ自動的にフォールバックします。
+
+## 使用例
+
+```typescript
+import { createBedrockKBTool } from '@mastra/rag'
+
+const kbTool = createBedrockKBTool({
+  knowledgeBaseId: 'YOUR_KB_ID',
+  region: 'us-west-2',
+  numberOfResults: 5,
+  useAgenticRetrieval: true,
+})
+```
+
+### Agent と使用する
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { createBedrockKBTool } from '@mastra/rag'
+
+const kbTool = createBedrockKBTool({
+  knowledgeBaseId: 'YOUR_KB_ID',
+})
+
+const agent = new Agent({
+  name: 'KnowledgeAssistant',
+  instructions: 'Use the knowledge base tool to answer questions.',
+  model: myModel,
+  tools: { kb: kbTool },
+})
+```
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'knowledgeBaseId',
+    type: 'string',
+    description: 'クエリ対象となる Amazon Bedrock Knowledge Base の ID。',
+    isOptional: false,
+  },
+  {
+    name: 'region',
+    type: 'string',
+    description:
+      'Knowledge Base がデプロイされている AWS リージョン。デフォルトは AWS_REGION 環境変数、または us-east-1 です。',
+    isOptional: true,
+  },
+  {
+    name: 'numberOfResults',
+    type: 'number',
+    description: '返す結果の最大数。デフォルトは 5 です。',
+    isOptional: true,
+  },
+  {
+    name: 'useAgenticRetrieval',
+    type: 'boolean',
+    description:
+      'クエリ分解とマネージド再ランキングを使用する AgenticRetrieveStream を複雑なクエリに使用します。失敗した場合は標準の Retrieve にフォールバックします。デフォルトは true です（USE_AGENTIC_RETRIEVAL=false 環境変数で無効化できます）。',
+    isOptional: true,
+  },
+  {
+    name: 'userId',
+    type: 'string',
+    description:
+      'ドキュメントレベルのアクセス制御に使用するデフォルトの AWS ユーザー ID。Mastra のリクエストコンテキストにある userId が優先されます。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 入力スキーマ
+
+Agent から呼び出されるとき、この Tool は次の入力を受け取ります。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'queryText',
+    type: 'string',
+    description: 'Knowledge Base 内の関連ドキュメントを検索するための検索クエリ。',
+    isOptional: false,
+  },
+]}
+/>
+
+## 出力スキーマ
+
+この Tool は、次のプロパティを持つオブジェクトを返します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'results',
+    type: 'BedrockKBResult[]',
+    description:
+      '検索結果の配列。標準検索では、Bedrock から提供された場合に source と score が含まれます。Agentic Retrieval では、これらのフィールドが省略されることがあります。',
+    isOptional: false,
+  },
+]}
+/>
+
+### BedrockKBResult
+
+| フィールド | 型 | 説明 |
+| - | - | - |
+| `content` | `string` | 取得した一節のテキストコンテンツ。 |
+| `source` | `string \| undefined` | Bedrock から提供された場合のソース URI。Agentic Retrieval では、結果のメタデータに `_source_uri` が含まれる場合にのみこのフィールドが含まれます。 |
+| `score` | `number \| undefined` | 標準検索から返される関連度スコア。Agentic API は結果項目のスコアを返しません。 |
+| `metadata` | `Record<string, unknown>` | 検索結果に含まれる追加のメタデータ。 |
+
+## 検索モード
+
+### Agentic Retrieval（デフォルト）
+
+`useAgenticRetrieval` が `true`（デフォルト）の場合、この Tool は `AgenticRetrieveStreamCommand` を使用して次の処理を行います。
+
+- 複雑なクエリをサブクエリに分解する
+- 複数のパスにわたって検索する
+- マネージド再ランキングを適用して結果を改善する
+
+Agentic Retrieval が失敗した場合（古い SDK や権限不足など）、標準のマネージド検索へ自動的にフォールバックします。
+
+### 標準のマネージド検索
+
+`useAgenticRetrieval` が `false` の場合、この Tool は `managedSearchConfiguration` を指定した `RetrieveCommand` を使用し、1 回のパスで直接検索します。
+
+## ユーザー単位のアクセス制御
+
+Mastra のリクエストコンテキストに `userId` を設定すると、Bedrock の `userContext.userId` として転送されます。これにより、ドキュメントレベルのアクセス制御を適用する Knowledge Base を利用できます。リクエストコンテキストの値は、Tool に設定されたデフォルトの `userId` より優先されます。
+
+```typescript
+import { RequestContext } from '@mastra/core/request-context'
+
+const requestContext = new RequestContext()
+requestContext.set('userId', 'user-123')
+
+await agent.generate('Find my private documents', { requestContext })
+```
+
+## 必要な IAM 権限
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["bedrock:Retrieve", "bedrock:AgenticRetrieveStream"],
+      "Resource": "arn:aws:bedrock:*:*:knowledge-base/*"
+    }
+  ]
+}
+```
+
+## SDK の要件
+
+- `@aws-sdk/client-bedrock-agent-runtime` >= 3.1000（AgenticRetrieveStreamCommand には \~3.1000 以降が必要です）

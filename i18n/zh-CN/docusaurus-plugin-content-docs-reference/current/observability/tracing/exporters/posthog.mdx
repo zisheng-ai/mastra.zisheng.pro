@@ -1,0 +1,193 @@
+---
+title: "参考：PosthogExporter | Observability"
+description: 用于 Tracing 的 PostHog Exporter
+packages:
+  - "@mastra/posthog"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# PosthogExporter
+
+将 Tracing 数据发送到 PostHog，用于 AI 可观测性和分析。
+
+## 构造函数
+
+```typescript prettier:false
+new PosthogExporter(config: PosthogExporterConfig)
+```
+
+## `PosthogExporterConfig`
+
+```typescript
+interface PosthogExporterConfig extends BaseExporterConfig {
+  apiKey?: string
+  host?: string
+  flushAt?: number
+  flushInterval?: number
+  serverless?: boolean
+  defaultDistinctId?: string
+  enablePrivacyMode?: boolean
+}
+```
+
+扩展自 `BaseExporterConfig`，其中包括：
+
+- `logger?: IMastraLogger` - Logger 实例
+- `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'` - 日志级别（默认：INFO）
+
+<PropertiesTable
+  props={[
+  {
+    name: 'apiKey',
+    type: 'string',
+    description: 'PostHog 项目 API 密钥。未设置时使用 POSTHOG_API_KEY 环境变量。',
+    required: false,
+  },
+  {
+    name: 'host',
+    type: 'string',
+    description: "PostHog 主机 URL。未设置时使用 POSTHOG_HOST 环境变量。（默认：'https://us.i.posthog.com'）",
+    required: false,
+  },
+  {
+    name: 'flushAt',
+    type: 'number',
+    description: '自动刷新前的批次大小（默认：20；serverless：10）',
+    required: false,
+  },
+  {
+    name: 'flushInterval',
+    type: 'number',
+    description: '刷新间隔，单位为毫秒（默认：10000；serverless：2000）',
+    required: false,
+  },
+  {
+    name: 'serverless',
+    type: 'boolean',
+    description: '针对 serverless 环境自动配置（默认：false）',
+    required: false,
+  },
+  {
+    name: 'defaultDistinctId',
+    type: 'string',
+    description: "metadata 中没有 userId 时使用的备用用户标识符（默认：'anonymous'）",
+    required: false,
+  },
+  {
+    name: 'enablePrivacyMode',
+    type: 'boolean',
+    description: '从生成事件中排除输入/输出（默认：false）',
+    required: false,
+  },
+  {
+    name: 'logLevel',
+    type: "LogLevel | 'debug' | 'info' | 'warn' | 'error'",
+    description: "Logger 级别（默认：'info'）",
+    required: false,
+  },
+]}
+/>
+
+## 方法
+
+### `exportTracingEvent`
+
+```typescript prettier:false
+async exportTracingEvent(event: TracingEvent): Promise<void>
+```
+
+将 tracing 事件导出到 PostHog。
+
+### `onFeedbackEvent`
+
+```typescript prettier:false
+async onFeedbackEvent(event: FeedbackEvent): Promise<void>
+```
+
+将反馈事件导出到 PostHog。请参阅[反馈导出](#feedback-export)。
+
+### flush
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+在不关闭 Exporter 的情况下，强制将所有已缓冲事件刷新到 PostHog。适用于需要在运行时终止前确保 Span 已导出的 serverless 环境。
+
+### shutdown
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+刷新待处理的批量事件，并关闭 PostHog 客户端。
+
+## 用法
+
+### 零配置（使用环境变量）
+
+```typescript
+import { PosthogExporter } from '@mastra/posthog'
+
+// Reads from POSTHOG_API_KEY, POSTHOG_HOST
+const exporter = new PosthogExporter()
+```
+
+### 显式配置
+
+```typescript
+import { PosthogExporter } from '@mastra/posthog'
+
+const exporter = new PosthogExporter({
+  apiKey: process.env.POSTHOG_API_KEY!,
+  host: 'https://us.i.posthog.com',
+  serverless: true,
+})
+```
+
+## Span 类型映射
+
+| Mastra Span 类型 | PostHog 事件类型 |
+| - | - |
+| `MODEL_GENERATION` | `$ai_generation` |
+| `MODEL_STEP` | `$ai_generation` |
+| `MODEL_CHUNK` | `$ai_span` |
+| `TOOL_CALL` | `$ai_span` |
+| `MCP_TOOL_CALL` | `$ai_span` |
+| `PROVIDER_TOOL_CALL` | `$ai_span` |
+| `PROCESSOR_RUN` | `$ai_span` |
+| `AGENT_RUN` | `$ai_span` |
+| `WORKFLOW_RUN` | `$ai_span` |
+| 所有其他工作流 | `$ai_span` |
+| `GENERIC` | `$ai_span` |
+
+## 反馈导出
+
+通过 [`addFeedback()`](/docs/observability/feedback) 记录的反馈会作为原生 `$ai_feedback` 事件导出到 PostHog。PostHog 会在关联的 Trace 上将其显示为 **User feedback**。无需额外配置。
+
+```typescript
+const trace = await mastra.observability.getRecordedTrace({ traceId })
+await trace.addFeedback({
+  feedbackType: 'thumbs',
+  value: 'down',
+  comment: 'Wrong answer',
+})
+```
+
+反馈事件会映射到以下 PostHog 属性：
+
+| Mastra 反馈字段 | PostHog 属性 |
+| - | - |
+| `traceId` | `$ai_trace_id` |
+| `comment`（没有 comment 时使用 `value`） | `$ai_feedback_text` |
+| `feedbackId` | `feedback_id` |
+| `feedbackType` | `feedback_type` |
+| `value` | `feedback_value` |
+| `feedbackSource` | `feedback_source` |
+| `spanId` | `span_id` |
+| `sourceId` | `source_id` |
+| `metadata.sessionId` | `$ai_session_id` |
+| `metadata`（其他键） | 自定义属性 |
+
+没有 `traceId` 的反馈会被丢弃，因为 PostHog 通过 `$ai_trace_id` 将反馈关联到 Trace。事件的 distinct ID 依次取自 `feedbackUserId`、`metadata.userId`、`defaultDistinctId`，最后使用 `anonymous`。

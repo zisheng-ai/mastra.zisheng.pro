@@ -1,0 +1,276 @@
+---
+title: "參考：OpenAI Responses API | Client SDK"
+description: client-js 輔助函式的 API 參考；這些函式會呼叫與 OpenAI 相容的 Mastra `/v1/responses` 路由。
+packages:
+  - "@mastra/client-js"
+---
+
+# OpenAI Responses API
+
+這個由 Agent 支援且與 OpenAI 相容的介面，讓你將 Mastra Agent 用作 Responses API。它提供透過 Mastra Agent 建立、取得、串流傳送及刪除回應的方法。
+
+這些路由是建基於 Mastra Agent、記憶及儲存空間的 Agent 轉接器。使用 `agent_id` 選擇處理請求的 Mastra Agent。你可以傳入 `model`，在單次請求中覆寫 Agent 已設定的模型；亦可省略此值，使用 Agent 原有的模型。
+
+已儲存的回應亦會傳回 `conversation_id`；在 Mastra 中，此值是原始記憶 `threadId`。
+
+此 API 目前屬實驗性功能。
+
+## 使用範例
+
+```typescript
+import { MastraClient } from '@mastra/client-js'
+
+const client = new MastraClient({
+  baseUrl: 'http://localhost:4111',
+})
+
+const response = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Summarize this ticket',
+  store: true,
+})
+
+console.log(response.output_text)
+```
+
+## 方法
+
+### 生命週期
+
+#### `create(params)`
+
+建立回應。
+
+```typescript
+const response = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Summarize this ticket',
+})
+```
+
+**傳回：** 省略 `stream` 或設為 `false` 時，傳回 `Promise<ResponsesResponse>`。
+
+當 `stream: true` 時，`create()` 會傳回 SSE 形式事件承載資料的非同步可迭代物件：
+
+```typescript
+const stream = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Summarize this ticket',
+  stream: true,
+})
+
+for await (const event of stream) {
+  if (event.type === 'response.output_text.delta') {
+    process.stdout.write(event.delta)
+  }
+}
+```
+
+串流回應亦可包括 Tool 事件。Tool 呼叫串流會使用 `response.output_item.added`、`response.function_call_arguments.delta`、`response.function_call_arguments.done` 及 `response.output_item.done` 事件。Tool 結果會顯示為 `function_call_output` 項目，ID 為 `<toolCallId>:output`。
+
+**傳回：** `Promise<ResponsesStream>`.
+
+#### `retrieve(responseId, requestContext?)`
+
+取得已儲存的回應。
+
+```typescript
+const response = await client.responses.retrieve('msg_123')
+```
+
+**傳回：** `Promise<ResponsesResponse>`.
+
+#### `delete(responseId, requestContext?)`
+
+刪除已儲存的回應。
+
+```typescript
+const deleted = await client.responses.delete('msg_123')
+```
+
+**傳回：** `Promise<{ id: string; object: "response"; deleted: true }>`
+
+#### `stream(params)`
+
+建立串流回應。
+
+```typescript
+const stream = await client.responses.stream({
+  agent_id: 'support-agent',
+  input: 'Say hello',
+})
+
+for await (const event of stream) {
+  console.log(event.type)
+}
+```
+
+**傳回：** `Promise<ResponsesStream>`.
+
+## 已儲存的回應與對話
+
+已儲存的回應同時包含 `response.id` 及 `conversation_id`。
+
+- `response.id` 是回應 ID。對於已儲存並由 Agent 支援的回應，此值是持久保存的助理訊息 ID。
+- `conversation_id` 是原始 Mastra 執行緒 ID。
+
+如要延續先前已儲存的回應，請使用 `previous_response_id`；如要直接指定已知執行緒，請使用 `conversation_id`。
+
+```typescript
+const first = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Start a support thread',
+  store: true,
+})
+
+const second = await client.responses.create({
+  agent_id: 'support-agent',
+  conversation_id: first.conversation_id!,
+  input: 'Add a follow-up to the same thread',
+  store: true,
+})
+```
+
+如要直接建立、取得、刪除或檢查底層 OpenAI Responses API 對話，請使用 [`client.conversations`](/reference/client-js/conversations)。
+
+## 函數呼叫（Tool）
+
+`response.tools` 包含此請求可用的已設定函數定義。
+
+如果模型呼叫函式，該活動會連同最終助理 `message`，以 `function_call` 及 `function_call_output` 項目形式包含在 `response.output` 中。
+
+當 `stream: true` 時，函式呼叫亦會以 Responses 串流事件形式發出。從 `response.function_call_arguments.delta` 事件讀取部分參數區塊；如要取得最終參數承載資料及 Tool 名稱，應優先使用 `response.function_call_arguments.done`。從 `response.output_item.done` 事件讀取已完成的 `function_call` 及 `function_call_output` 項目。Tool 輸出項目使用 `<toolCallId>:output` ID。
+
+## 結構化輸出
+
+如需 JSON 輸出，請使用 `text.format`。
+
+- `json_object` 會啟用 JSON 模式。
+- `json_schema` 會啟用受結構描述約束的結構化輸出。
+
+兩種格式都會在助理訊息內容中傳回 JSON。如需嚴格執行結構描述，請使用 `json_schema`；如只需有效的 JSON 輸出，請使用 `json_object`。
+
+```typescript
+const response = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Return a structured support ticket summary.',
+  text: {
+    format: {
+      type: 'json_schema',
+      name: 'ticket_summary',
+      schema: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          priority: { type: 'string' },
+        },
+        required: ['summary', 'priority'],
+        additionalProperties: false,
+      },
+    },
+  },
+})
+```
+
+## Provider 支援的請求
+
+如需使用 Mastra 未有在 Responses 層標準化的 Provider 特定選項，請使用 `providerOptions`。
+
+```typescript
+const response = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Continue this exchange',
+  providerOptions: {
+    openai: {
+      previousResponseId: 'resp_123',
+    },
+  },
+})
+```
+
+## 回應結構
+
+傳回的回應物件包括：
+
+- `id`: 該回應 ID
+- `output`：輸出項目，例如助理 `message`、`function_call` 及 `function_call_output`
+- `output_text`：合併助理文字輸出的便捷 getter
+- `tools`：為請求設定的 Tool 定義
+- `conversation_id`：已儲存回應的原始執行緒 ID
+- `text`：請求的文字輸出格式（如有提供）
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent_id',
+    type: 'string',
+    description:
+      '首次請求時必填。選擇執行請求的 Mastra Agent。以 `previous_response_id` 延續已儲存的後續輪次時可省略。',
+    isOptional: true,
+  },
+  {
+    name: 'model',
+    type: 'string',
+    description:
+      '可選的模型覆寫值，例如 `openai/gpt-5`。如省略，Mastra 會使用所選 Agent 已設定的模型。',
+    isOptional: true,
+  },
+  {
+    name: 'input',
+    type: "string | Array<{ role: 'system' | 'developer' | 'user' | 'assistant'; content: string | Array<{ type: 'input_text' | 'text' | 'output_text'; text: string }> }>",
+    description: '必填。回應的輸入文字或訊息陣列。',
+    isOptional: false,
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description: '可選。覆寫此請求的指示。',
+    isOptional: true,
+  },
+  {
+    name: 'text',
+    type: "{ format: { type: 'json_object' } | { type: 'json_schema'; name: string; schema: Record<string, unknown>; description?: string; strict?: boolean } }",
+    description:
+      '可選的文字輸出格式。使用 `json_object` 啟用 JSON 模式，或使用 `json_schema` 取得受結構描述約束的結構化輸出。',
+    isOptional: true,
+  },
+  {
+    name: 'providerOptions',
+    type: 'Record<string, Record<string, unknown> | undefined>',
+    description: '可選。傳遞至底層模型呼叫的 Provider 專用選項。',
+    isOptional: true,
+  },
+  {
+    name: 'stream',
+    type: 'boolean',
+    description: '設為 true 時，傳回 Responses API 事件的非同步可迭代物件。',
+    isOptional: true,
+  },
+  {
+    name: 'store',
+    type: 'boolean',
+    description: '設為 true 時，透過所選 Agent 的記憶永久保存回應。',
+    isOptional: true,
+  },
+  {
+    name: 'conversation_id',
+    type: 'string',
+    description: '可選的對話識別碼。在 Mastra 中，此值是原始記憶執行緒 ID。',
+    isOptional: true,
+  },
+  {
+    name: 'previous_response_id',
+    type: 'string',
+    description: '從先前已儲存的回應延續回應鏈。',
+    isOptional: true,
+  },
+  {
+    name: 'requestContext',
+    type: 'RequestContext | Record<string, any>',
+    description: '可選。轉送至 Mastra 伺服器的請求上下文。',
+    isOptional: true,
+  },
+]}
+/>

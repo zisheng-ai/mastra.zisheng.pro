@@ -1,0 +1,164 @@
+---
+title: "リファレンス：CachingPubSub | PubSub"
+description: 再開可能なストリームのためにイベントのキャッシュとリプレイを追加する pub/sub ラッパー、CachingPubSub の API リファレンスです。
+packages:
+  - "@mastra/core"
+---
+
+# CachingPubSub
+
+`CachingPubSub` は任意の [`PubSub`](/reference/pubsub/base) 実装をラップし、イベントのキャッシュとリプレイを追加します。公開されたすべてのイベントをトピックごとにキャッシュへ記録するため、遅れて接続した subscriber や、切断後に再接続した subscriber は、受信できなかったイベントをリプレイしてから live イベントの受信を続けられます。
+
+履歴を保持しない [`EventEmitterPubSub`](/reference/pubsub/event-emitter) などの transport 上に、再開可能なストリームを構築する場合に使用します。[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) など、イベントをすでに永続化する transport にはこのラッパーは必要ありません。
+
+`CachingPubSub` はバッチ処理に対して透過的です。`subscribe()` は `options.batch` を内部の pub/sub に転送し、`supportsNativeBatching` は内部の値を反映します。バッチ処理に対応していない内部実装をラップした場合、`options.batch` を渡してもバッチ配信にはなりません。
+
+## 使用例
+
+内部の pub/sub をラップし、イベントを保存する server cache を指定します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { CachingPubSub, EventEmitterPubSub } from '@mastra/core/events'
+import { InMemoryServerCache } from '@mastra/core/cache'
+
+const cache = new InMemoryServerCache()
+const pubsub = new CachingPubSub(new EventEmitterPubSub(), cache)
+
+export const mastra = new Mastra({
+  pubsub,
+})
+```
+
+`withCaching` helper は同じインスタンスを返し、インラインでラップする場合に読みやすくなります。
+
+```typescript
+import { withCaching, EventEmitterPubSub } from '@mastra/core/events'
+import { InMemoryServerCache } from '@mastra/core/cache'
+
+const pubsub = withCaching(new EventEmitterPubSub(), new InMemoryServerCache())
+```
+
+## コンストラクターのパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'inner',
+    type: 'PubSub',
+    description:
+      'ラップする pub/sub 実装。すべての publish と live subscription はこのインスタンスを経由します。',
+    isOptional: false,
+  },
+  {
+    name: 'cache',
+    type: 'MastraServerCache',
+    description: 'リプレイ用にイベントをトピックごとに保存する cache。',
+    isOptional: false,
+  },
+  {
+    name: 'options',
+    type: 'CachingPubSubOptions',
+    description: '任意の設定。',
+    isOptional: true,
+    properties: [
+      {
+        name: 'keyPrefix',
+        type: 'string',
+        description: 'イベントの namespace を分けるために使用する cache key の prefix。',
+        isOptional: true,
+        defaultValue: 'pubsub:',
+      },
+      {
+        name: 'logger',
+        type: 'IMastraLogger',
+        description: 'エラー出力用の logger。省略すると `console.error` にフォールバックします。',
+        isOptional: true,
+      },
+    ],
+  },
+]}
+/>
+
+## プロパティ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'supportsNativeBatching',
+    type: 'boolean',
+    description: '内部の pub/sub の値を反映します。ラップした実装がバッチ処理に対応する場合にのみ `true` を返します。',
+  },
+]}
+/>
+
+## メソッド
+
+`CachingPubSub` は [`PubSub`](/reference/pubsub/base) の規約を実装します。リプレイメソッドをオーバーライドし、キャッシュされたイベントを読み取ります。以下のメソッドでは、キャッシュに関する動作を説明します。
+
+### `publish(topic, event)`
+
+イベントに連番 index を付けてキャッシュしてから、内部の pub/sub に公開します。
+
+```typescript
+await pubsub.publish('my-topic', {
+  type: 'example',
+  data: { value: 1 },
+  runId: 'run-123',
+})
+```
+
+### `subscribeWithReplay(topic, cb)`
+
+トピックにキャッシュされたすべてのイベントをリプレイしてから、live イベントを購読します。
+
+```typescript
+await pubsub.subscribeWithReplay('my-topic', event => {
+  console.log(event)
+})
+```
+
+### `subscribeFromOffset(topic, offset, cb)`
+
+`offset` からキャッシュ済みイベントをリプレイし、その後 live イベントを購読します。クライアントが最後の位置を把握していて、履歴全体のリプレイを避けたい場合に使用します。
+
+```typescript
+await pubsub.subscribeFromOffset('my-topic', 42, event => {
+  console.log(event)
+})
+```
+
+### `getHistory(topic, offset?)`
+
+`offset` から始まる、トピックのキャッシュ済みイベントを返します。
+
+```typescript
+const events = await pubsub.getHistory('my-topic', 0)
+```
+
+戻り値：`Promise<Event[]>`
+
+### `clearTopic(topic)`
+
+トピックのキャッシュ済みイベントと offset counter を削除し、その呼び出しを内部の pub/sub に転送します。これにより、[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) などの永続 transport も、保持している状態を削除できます。Mastra の run lifecycle は、run の終了時にこのメソッドを自動的に呼び出します。
+
+```typescript
+await pubsub.clearTopic('my-topic')
+```
+
+## 関数
+
+### `withCaching(pubsub, cache, options?)`
+
+`CachingPubSub` を構築するための便利なラッパーです。コンストラクターと同じ引数を受け取り、新しいインスタンスを返します。
+
+```typescript
+import { withCaching, EventEmitterPubSub } from '@mastra/core/events'
+import { InMemoryServerCache } from '@mastra/core/cache'
+
+const pubsub = withCaching(new EventEmitterPubSub(), new InMemoryServerCache(), {
+  keyPrefix: 'events:',
+})
+```
+
+戻り値：`CachingPubSub`

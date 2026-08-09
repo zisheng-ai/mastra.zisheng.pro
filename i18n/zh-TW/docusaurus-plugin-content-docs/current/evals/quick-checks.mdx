@@ -1,0 +1,142 @@
+---
+title: "Quick Checks | Evals"
+description: "不使用 LLM 的微型評分器，可快速對 Agent 輸出文字與 Tool 使用情形執行確定性斷言。"
+packages:
+  - "@mastra/evals"
+---
+
+# Quick Checks
+
+Quick Checks 是可組合的微型評分器，適用於「輸出包含 X」或「Agent 呼叫了 Tool Y」等常見斷言。它們不需要 LLM、能立即執行，並可像其他評分器一樣加入同一個 `scorers: [...]` 陣列。
+
+## Quick Checks 的適用時機
+
+需要快速、確定性的斷言時，請使用 Quick Checks：
+
+- 驗證輸出文字包含或排除特定字串
+- 確認 Agent 呼叫或避開了特定 Tool
+- 驗證 Tool 呼叫順序與次數限制
+- 以零成本二元檢查作為 CI 管線的閘門
+- 與 LLM 評分器結合，進行分層評估
+
+若要進行主觀或語意評估，請改用 [LLM 評分器](/docs/evals/built-in-scorers)。
+
+## 快速入門
+
+```typescript title="src/evals/weather-checks.ts"
+import { checks } from '@mastra/evals/checks'
+import { runEvals } from '@mastra/core/evals'
+import { weatherAgent } from '../agents'
+
+const result = await runEvals({
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  target: weatherAgent,
+  scorers: [checks.includes('Brooklyn'), checks.calledTool('get_weather'), checks.noToolErrors()],
+})
+
+console.log(result.scores)
+// { 'check-includes': 1, 'check-called-tool': 1, 'check-no-tool-errors': 1 }
+```
+
+## 可用的檢查
+
+Quick Checks 分為以下類別：
+
+### 文字檢查
+
+這些評分器會評估 Agent 的文字輸出：
+
+| 檢查 | 功能 | 分數 |
+| - | - | - |
+| `checks.includes(str)` | 輸出包含子字串 | 1 或 0 |
+| `checks.excludes(str)` | 輸出不包含子字串 | 1 或 0 |
+| `checks.equals(str)` | 輸出與字串完全相符 | 1 或 0 |
+| `checks.matches(regex)` | 輸出符合正規表示式 | 1 或 0 |
+| `checks.similarity(str)` | 與字串的 Dice 係數相似度 | 0-1（設定 `threshold` 時則為二元結果） |
+
+### Tool 呼叫檢查
+
+這些評分器會評估 Agent 執行過程中的 Tool 使用情形：
+
+| 檢查 | 功能 | 分數 |
+| - | - | - |
+| `checks.calledTool(name)` | Tool 至少被呼叫 N 次 | 1 或 0 |
+| `checks.didNotCall(name)` | 未呼叫 Tool | 1 或 0 |
+| `checks.toolOrder([...])` | Tool 依預期順序呼叫 | 1 或 0 |
+| `checks.maxToolCalls(n)` | Tool 呼叫總次數不超過 N 次 | 1 或 0 |
+| `checks.usedNoTools()` | 完全未呼叫任何 Tool | 1 或 0 |
+| `checks.noToolErrors()` | 所有 Tool 呼叫都未發生錯誤 | 1 或 0 |
+
+## 結合檢查與 LLM 評分器
+
+檢查可以在單次 `runEvals` 呼叫中與 LLM 評分器搭配使用。以檢查建立確定性閘門，並以 LLM 評分器進行質化評估：
+
+```typescript title="src/evals/layered-eval.ts"
+import { checks } from '@mastra/evals/checks'
+import { createFaithfulnessScorer } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+import { myAgent } from '../agents'
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'What is the weather in Brooklyn?',
+      context: ['Brooklyn weather data: sunny, 72°F'],
+    },
+  ],
+  target: myAgent,
+  scorers: [
+    // Deterministic checks (instant, free)
+    checks.includes('Brooklyn'),
+    checks.calledTool('get_weather'),
+    checks.excludes('error'),
+    checks.noToolErrors(),
+
+    // LLM-based scorer (semantic, costs tokens)
+    createFaithfulnessScorer({ model: '__GATEWAY_OPENAI_MODEL_MINI__' }),
+  ],
+})
+```
+
+## 在即時評分中使用檢查
+
+將檢查附加至 Agent，以持續監控：
+
+```typescript title="src/agents/weather-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { checks } from '@mastra/evals/checks'
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: 'Answer weather questions using the get_weather tool.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { get_weather: weatherTool },
+  scorers: {
+    noErrors: {
+      scorer: checks.noToolErrors(),
+      sampling: { type: 'ratio', rate: 1 },
+    },
+    mentionCity: {
+      scorer: checks.includes('Brooklyn'),
+      sampling: { type: 'ratio', rate: 0.5 },
+    },
+  },
+})
+```
+
+## 檢查的運作方式
+
+每個檢查都是標準的 `createScorer()` 執行個體，包含 `preprocess` 步驟與 `generateScore` 步驟。它們和其他評分器一樣，遵循相同的[四步驟管線](/docs/evals/custom-scorers#the-four-step-pipeline)：
+
+1. **preprocess**：從 Agent 執行結果中擷取並正規化相關資料（文字內容、Tool 呼叫）
+1. **generateScore**：將預先處理的結果轉換為分數（通常是二元的 1 或 0）
+
+由於檢查會略過 `analyze` 與 `generateReason` 步驟，也不會呼叫 LLM，因此可在數微秒內完成。請參閱 [Quick Checks 參考](/reference/evals/checks)，了解完整 API，包括每項檢查的所有參數與選項。
+
+## 相關資源
+
+- [Quick Checks 參考](/reference/evals/checks)
+- [內建評分器](/docs/evals/built-in-scorers)
+- [自訂評分器](/docs/evals/custom-scorers)
+- [`runEvals()` 參考](/reference/evals/run-evals)

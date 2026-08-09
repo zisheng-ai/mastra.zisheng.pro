@@ -1,0 +1,515 @@
+---
+title: "リファレンス: OracleDB ベクターストア | ベクター"
+description: Mastra の Oracle Database ベクトルプロバイダーのドキュメントです。
+packages:
+  - "@mastra/core"
+  - "@mastra/fastembed"
+  - "@mastra/memory"
+  - "@mastra/oracledb"
+  - "@mastra/rag"
+---
+
+# OracleDB ベクターストア
+
+`OracleVector` は埋め込みを Oracle Database の `VECTOR` 列に保存し、Mastra のベクトルインターフェースを通じて公開します。Mastra の各論理ベクトルインデックスはレジストリテーブルを介して Oracle ベクトルテーブルにマッピングされ、メタデータは構造化フィルタリング用の Oracle JSON として保存されます。
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/oracledb@latest
+```
+
+## 使用方法
+
+```ts
+import { OracleVector } from '@mastra/oracledb'
+
+const vector = new OracleVector({
+  id: 'oracle-vector',
+  user: process.env.ORACLE_DATABASE_USER,
+  password: process.env.ORACLE_DATABASE_PASSWORD,
+  connectString: process.env.ORACLE_DATABASE_CONNECT_STRING,
+})
+
+await vector.createIndex({
+  indexName: 'memory_messages',
+  dimension: 1536,
+  metric: 'cosine',
+})
+
+await vector.upsert({
+  indexName: 'memory_messages',
+  vectors: [embedding],
+  metadata: [{ resource_id: 'user-1', thread_id: 'thread-1' }],
+})
+
+const results = await vector.query({
+  indexName: 'memory_messages',
+  queryVector,
+  topK: 5,
+  filter: { resource_id: 'user-1' },
+})
+```
+
+デフォルトでは、`OracleVector` は近似ベクトルインデックスを使用せずに完全検索を実行します。データセットやレイテンシ要件で近似検索が必要な場合は、IVF または HNSW を設定してください。
+
+## コンストラクターオプション
+
+Oracle 接続オプション（`user`、`password`、`connectString`、`pool`、ウォレットオプション、`externalAuth`）を直接渡すか、`poolManager` を渡して `OracleStore` が使用するプールを共有します。ベクトル固有のオプションは次のとおりです。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'このベクターストアインスタンスの一意な識別子。',
+  },
+  {
+    name: 'poolManager',
+    type: 'OraclePoolManager',
+    description: '`OracleStore` と 1 つの Oracle プールを共有するための共有 Oracle プールマネージャー。',
+    isOptional: true,
+  },
+  {
+    name: 'schemaName',
+    type: 'string',
+    description: 'ベクトルレジストリとベクトルテーブルを修飾する Oracle スキーマ名。',
+    isOptional: true,
+  },
+  {
+    name: 'tablePrefix',
+    type: 'string',
+    description: '物理 Oracle ベクトルテーブルに使用するプレフィックス。',
+    isOptional: true,
+    defaultValue: "'MASTRA_VEC'",
+  },
+  {
+    name: 'registryTableName',
+    type: 'string',
+    description: 'Mastra の論理インデックス名を物理ベクトルテーブルにマッピングする Oracle テーブル。',
+    isOptional: true,
+    defaultValue: "'MASTRA_VECTOR_INDEXES'",
+  },
+  {
+    name: 'defaultIndexConfig',
+    type: 'OracleVectorIndexConfig',
+    description: 'デフォルトの Oracle ベクトルインデックス設定。',
+    isOptional: true,
+    defaultValue: "{ type: 'none', accuracy: 95 }",
+  },
+  {
+    name: 'defaultMetadataIndexes',
+    type: 'string[]',
+    description: 'ベクトルテーブル作成時に自動でインデックスを作成するメタデータフィールド。',
+    isOptional: true,
+    defaultValue: "['thread_id', 'resource_id', 'message_id', 'source_id']",
+  },
+  {
+    name: 'defaultVectorFormat',
+    type: "'vector' | 'bit' | 'int8'",
+    description: '密、バイナリ、int8 埋め込みのデフォルト Oracle ベクトル形式。',
+    isOptional: true,
+    defaultValue: "'vector'",
+  },
+  {
+    name: 'upsertBatchSize',
+    type: 'number',
+    description:
+      'Oracle の `executeMany` 呼び出しごとに送信するベクトル数。すべてのバッチが成功した後、upsert 全体を一度だけコミットします。',
+    isOptional: true,
+    defaultValue: '200',
+  },
+]}
+/>
+
+## コンストラクターの例
+
+### OracleStore とプールを共有する
+
+```ts
+import { OracleStore, OracleVector } from '@mastra/oracledb'
+
+const storage = new OracleStore({ id: 'oracle-storage', user, password, connectString })
+
+const vector = new OracleVector({
+  id: 'oracle-vector',
+  poolManager: storage.getPoolManager(),
+})
+```
+
+Autonomous Database と mTLS 接続では、同じコンストラクターに `walletLocation`、`walletPassword`、`configDir` を渡します。
+
+## メソッド
+
+### `createIndex()`
+
+レジストリ行、物理 Oracle ベクトルテーブル、メタデータインデックス、および任意の Oracle ベクトルインデックスを作成します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'Mastra の論理インデックス名。プロバイダーが内部で有効な Oracle テーブル名にマッピングします。',
+  },
+  {
+    name: 'dimension',
+    type: 'number',
+    description: 'ベクトルの次元数。埋め込みモデルの出力サイズと一致させる必要があります。',
+  },
+  {
+    name: 'metric',
+    type: "'cosine' | 'euclidean' | 'dotproduct' | 'hamming' | 'jaccard'",
+    isOptional: true,
+    defaultValue: 'cosine',
+    description: '類似検索の距離メトリクス。バイナリベクトルでは `hamming` と `jaccard` を使用できます。',
+  },
+  {
+    name: 'vectorFormat',
+    type: "'vector' | 'bit' | 'int8'",
+    isOptional: true,
+    defaultValue: 'vector',
+    description: 'Oracle ベクトルの保存形式。',
+  },
+  {
+    name: 'indexConfig',
+    type: 'OracleVectorIndexConfig',
+    isOptional: true,
+    defaultValue: "{ type: 'none', accuracy: 95 }",
+    description: 'Oracle ベクトルインデックス設定。`none` は近似ベクトルインデックスを使用しない完全検索を意味します。',
+  },
+  {
+    name: 'buildIndex',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'true',
+    description: '`indexConfig.type` が `ivf` または `hnsw` の場合に Oracle ベクトルインデックスを構築するかどうか。',
+  },
+  {
+    name: 'metadataIndexes',
+    type: 'string[]',
+    isOptional: true,
+    description: 'JSON メタデータのフィルタリングを高速化するためにインデックスを作成するメタデータフィールド名。',
+  },
+]}
+/>
+
+#### `OracleVectorIndexConfig`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'type',
+    type: "'none' | 'ivf' | 'hnsw'",
+    description: 'Oracle ベクトルインデックスの種類。',
+    isOptional: true,
+    defaultValue: "'none'",
+  },
+  {
+    name: 'accuracy',
+    type: 'number',
+    description: '近似ベクトル検索の目標精度。',
+    isOptional: true,
+    defaultValue: '95',
+  },
+  {
+    name: 'ivf.neighborPartitions',
+    type: 'number',
+    description: 'Oracle IVF の近傍パーティション設定。',
+    isOptional: true,
+  },
+  {
+    name: 'hnsw.neighbors',
+    type: 'number',
+    description: 'Oracle HNSW の近傍設定。',
+    isOptional: true,
+  },
+  {
+    name: 'hnsw.efConstruction',
+    type: 'number',
+    description: 'Oracle HNSW の構築時設定。',
+    isOptional: true,
+  },
+]}
+/>
+
+#### インデックス設定
+
+```ts
+await vector.createIndex({
+  indexName: 'support_articles',
+  dimension: 1536,
+  metric: 'cosine',
+  indexConfig: {
+    type: 'ivf',
+    accuracy: 95,
+    ivf: {
+      neighborPartitions: 32,
+    },
+  },
+})
+```
+
+デフォルトは `indexConfig: { type: 'none' }` で、完全検索を使用するため近似インデックスの調整は不要です。データ量とレイテンシ要件から近似検索が妥当な場合にのみ、IVF または HNSW を使用してください。HNSW は `indexConfig: { type: 'hnsw', hnsw: { neighbors, efConstruction } }` で設定します。Oracle Vector Pool メモリが必要で、ローカルまたは自己管理データベースでは `configureVectorMemory()` で割り当てられます。
+
+### `upsert()`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'ベクトルを upsert するインデックスの名前。',
+  },
+  {
+    name: 'vectors',
+    type: 'number[][]',
+    description: '埋め込みベクトルの配列。',
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, any>[]',
+    isOptional: true,
+    description: 'Oracle JSON として保存するメタデータ。`vectors` と位置を対応させる必要があります。',
+  },
+  {
+    name: 'ids',
+    type: 'string[]',
+    isOptional: true,
+    description: '任意のベクトル ID。省略すると生成されます。',
+  },
+]}
+/>
+
+### `query()`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: '検索するインデックスの名前。',
+  },
+  {
+    name: 'queryVector',
+    type: 'number[]',
+    description: 'クエリベクトル。',
+  },
+  {
+    name: 'topK',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '10',
+    description: '返す結果の数。',
+  },
+  {
+    name: 'filter',
+    type: 'Record<string, any>',
+    isOptional: true,
+    description: 'Oracle JSON 述語に変換される Mastra メタデータフィルター。',
+  },
+  {
+    name: 'includeVector',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'false',
+    description: '各結果にベクトルを含めるかどうか。',
+  },
+  {
+    name: 'minScore',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '-1',
+    description: '類似度スコアの最小しきい値。',
+  },
+  {
+    name: 'queryMode',
+    type: "'exact' | 'approx'",
+    isOptional: true,
+    description: 'Oracle のクエリモード。近似ベクトルインデックスが設定されていない場合、デフォルトで完全検索を使用します。',
+  },
+  {
+    name: 'targetAccuracy',
+    type: 'number',
+    isOptional: true,
+    description: 'Oracle の近似ベクトルクエリの目標精度。',
+  },
+]}
+/>
+
+### `listIndexes()`
+
+Oracle ベクトルレジストリテーブルに記録された Mastra の論理インデックス名を返します。
+
+### `describeIndex()`
+
+物理テーブル名、次元数、ベクトル数、メトリクス、インデックスの種類、ベクトル形式、設定済みの精度を含む Oracle インデックスのメタデータを返します。
+
+### `deleteIndex()`
+
+Oracle ベクトルテーブルを削除し、論理インデックスのレジストリエントリを削除します。
+
+### `updateVector()`
+
+ID またはメタデータフィルターでベクトルを更新します。`id` と `filter` のどちらか一方だけを指定する必要があります。`update` オブジェクトには `vector`、`metadata`、またはその両方を含められます。
+
+```ts
+await vector.updateVector({
+  indexName: 'support_articles',
+  id: 'doc-1',
+  update: { metadata: { status: 'reviewed' } },
+})
+```
+
+### `deleteVector()`
+
+ID で単一のベクトルを削除します。
+
+### `deleteVectors()`
+
+ID またはメタデータフィルターで複数のベクトルを削除します。`ids` と `filter` のどちらか一方だけを指定する必要があります。
+
+### `buildIndex()`
+
+既存の論理インデックスに Oracle ベクトルインデックスを構築します。解決されたインデックスの種類が `none` の場合、このメソッドは何も行いません。
+
+### `rebuildIndex()`
+
+既存の論理インデックスの Oracle ベクトルインデックスを削除して再作成します。通常は、近似インデックスの調整を変更した後に実行します。
+
+### インデックス診断
+
+`getIndexStatus({ indexName })` で Oracle カタログのステータスを確認し、`indexAccuracyQuery({ indexName, queryVector, topK, targetAccuracy })` で近似インデックスに対して `DBMS_VECTOR.INDEX_ACCURACY_QUERY` を実行します。
+
+### `configureVectorMemory()`
+
+HNSW インデックスに必要な Oracle Vector Pool メモリを割り当てます。`ALTER SYSTEM SET VECTOR_MEMORY_SIZE` を呼び出すため、`SYSDBA` や `SYSTEM` などの特権接続が必要です。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'size',
+    type: 'string',
+    description: 'ベクトルプールのサイズ。整数の後に任意で `K`、`M`、`G` を付けます（例: `"512M"`）。',
+  },
+  {
+    name: 'scope',
+    type: "'MEMORY' | 'SPFILE' | 'BOTH'",
+    isOptional: true,
+    defaultValue: "'MEMORY'",
+    description: "Oracle ALTER SYSTEM のスコープ。データベース再起動後も設定を保持するには 'SPFILE' または 'BOTH' を使用します。",
+  },
+]}
+/>
+
+### `disconnect()`
+
+`OracleVector` がプールマネージャーを作成した場合、Oracle プールを閉じます。`pool` または `poolManager` を指定した場合、そのライフサイクルは利用者が管理します。
+
+## メタデータフィルター
+
+`OracleVector` は Mastra の標準メタデータフィルター構文を受け取ります。フィルターはバインド値を持つ Oracle JSON 述語に変換されます。
+
+- スカラー比較には `JSON_VALUE` を使用します
+- 配列、存在、要素一致のチェックには `JSON_EXISTS` を使用します
+- 正規表現フィルターには `REGEXP_LIKE` を使用します
+- 文字列包含フィルターには大文字と小文字を区別しない `LIKE` を使用します
+
+```ts
+const results = await vector.query({
+  indexName: 'memory_messages',
+  queryVector,
+  topK: 5,
+  filter: {
+    resource_id: 'user-1',
+    tags: { $contains: 'support' },
+    score: { $gte: 0.8 },
+    $or: [{ source: 'docs' }, { source: 'tickets' }],
+  },
+})
+```
+
+メタデータはネイティブ Oracle JSON として保存されるため、DBeaver や SQL Developer などの標準 Oracle JDBC ツールでも行を直接読み取れます。
+
+Agent が `createVectorQueryTool()` 用に Oracle 互換のメタデータフィルターを生成する場合は、`ORACLEDB_PROMPT` を使用します。
+
+```ts
+import { Agent } from '@mastra/core/agent'
+import { createVectorQueryTool } from '@mastra/rag'
+import { fastembed } from '@mastra/fastembed'
+import { ORACLEDB_PROMPT } from '@mastra/oracledb'
+
+const vectorQueryTool = createVectorQueryTool({
+  vectorStoreName: 'oracle',
+  indexName: 'support_articles',
+  model: fastembed,
+  enableFilter: true,
+})
+
+export const ragAgent = new Agent({
+  id: 'oracle-rag-agent',
+  name: 'Oracle RAG Agent',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  instructions: `
+Use the retrieval tool when you need source context.
+Available metadata fields: resource_id, thread_id, source, category, tags.
+${ORACLEDB_PROMPT}
+`,
+  tools: { vectorQueryTool },
+})
+```
+
+## レスポンス型
+
+クエリ結果は次の形式で返されます。
+
+```ts
+interface QueryResult {
+  id: string
+  score: number
+  metadata: Record<string, any>
+  vector?: number[]
+}
+```
+
+## 使用例
+
+```ts title="src/mastra/agents/oracle-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { fastembed } from '@mastra/fastembed'
+import { OracleStore, OracleVector } from '@mastra/oracledb'
+
+const storage = new OracleStore({
+  id: 'oracle-storage',
+  user: process.env.ORACLE_DATABASE_USER,
+  password: process.env.ORACLE_DATABASE_PASSWORD,
+  connectString: process.env.ORACLE_DATABASE_CONNECT_STRING,
+})
+
+const vector = new OracleVector({
+  id: 'oracle-vector',
+  poolManager: storage.getPoolManager(),
+})
+
+export const oracleAgent = new Agent({
+  id: 'oracle-agent',
+  name: 'Oracle Agent',
+  instructions: 'You are an assistant with OracleDB-backed memory and semantic recall.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage,
+    vector,
+    embedder: fastembed,
+    options: {
+      semanticRecall: { topK: 3, messageRange: 2 },
+    },
+  }),
+})
+```
+
+## 関連情報
+
+- [OracleDB ストレージ](/reference/storage/oracledb)
+- [メタデータフィルター](/reference/rag/metadata-filters)
+- [ベクトルデータベース](/guides/rag/vector-databases)

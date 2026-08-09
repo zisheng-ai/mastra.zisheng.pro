@@ -1,0 +1,183 @@
+---
+title: "多轮 Evals | Evals"
+description: "在共享 thread 上依次发送输入，评估 Agent 在多轮对话中的行为。"
+packages:
+  - "@mastra/core"
+---
+
+# 多轮 Evals
+
+多轮 Evals 用于测试 Agent 在对话过程中的行为。你不再使用单个 `input`，而是提供 `inputs` 数组。数组中的每一项都会在同一个 thread 上依次发送给 Agent，Scorer 则会看到所有轮次累积的输出。
+
+## 何时使用多轮 Evals
+
+- Agent 使用 Memory，必须回忆之前轮次的上下文
+- Agent 处理依赖先前响应的后续问题
+- 需要验证对话中的 Tool 调用序列
+- Agent 运行多步 Workflow（搜索、确认、执行）
+
+## Quickstart
+
+```typescript title="src/evals/conversation-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { weatherAgent } from '../agents'
+
+const result = await runEvals({
+  data: [
+    {
+      inputs: [
+        'What is the weather in Brooklyn?',
+        'What about tomorrow?',
+        'Compare the two forecasts.',
+      ],
+    },
+  ],
+  target: weatherAgent,
+  scorers: [checks.calledTool('get_weather', { times: 2 }), checks.includes('Brooklyn')],
+})
+```
+
+每一轮都会使用相同的 thread ID 运行 `agent.generate()`，因此 Agent 可以看到完整的对话历史记录。Scorer 会接收所有轮次累积的输出消息。
+
+## 跨轮次召回需要 Memory
+
+多轮召回要求 Agent **已配置 Memory Store**。共享 thread ID 让每一轮都能看到之前的轮次，但只有在 Agent 配置了 Memory 时，thread 才会持久化历史记录。如果 Agent 未配置 Memory，各轮仍会依次运行，其输出也仍会累积以供评分，但 Agent 无法回忆之前的轮次（每项输入都会隔离运行）。当你通过 `runEvals` 在没有 Memory 的 Agent 上使用 `inputs` 时，它会记录警告。
+
+`runEvals` 会为你管理对话身份：它生成共享 `threadId` 并注入 `resourceId`（Mastra Memory 按 resource + thread 确定消息作用域，因此两者都是实现召回所必需的）。默认情况下，resource 由生成的 thread 派生，因此每次对话都会隔离。要固定特定 resource，例如复用现有用户的 Memory，请传入 `targetOptions.memory.resource`；`runEvals` 仍会管理 thread，因此无需提供：
+
+```typescript
+await runEvals({
+  target: weatherAgent,
+  data: [{ inputs: ['What is the weather in Brooklyn?', 'What about tomorrow?'] }],
+  scorers: [checks.similarity('weather forecast')],
+  targetOptions: { memory: { resource: 'user-42' } },
+})
+```
+
+如何配置 Memory Storage 请参阅 [Memory](/docs/memory/overview)。
+
+## 工作原理
+
+当数据项目包含 `inputs` 数组时，`runEvals` 会：
+
+1. 为对话创建新的 thread（具有唯一 `threadId`）和 resource（保留调用方提供的 `targetOptions.memory.resource`）
+1. 通过 `agent.generate()` 在该 thread 上依次发送每项输入
+1. 累积所有轮次的输出消息
+1. 将完整的累积输出传给 Scorer 进行评估
+
+Scorer 会看到完整的对话输出，其中包含每一轮。
+
+## 评分语义
+
+为多轮项目编写 Scorer 时，需要注意以下细节：
+
+- **`run.output` 是每一轮的累积输出。** 基于输出的 Scorer（`checks.includes`、`checks.calledTool`、`checks.similarity` 等）会评估整段对话。例如，`checks.calledTool('get_weather', { times: 2 })` 会统计所有轮次中的调用。
+- **`run.input` 只是第一轮的输入。** 将输入与输出进行比较的 Scorer（faithfulness、answer relevancy 以及其他与输入相关的 LLM Scorer）只会看到第一条用户消息，而不是完整对话。对于多轮对话，请优先使用基于输出的检查，或构建直接读取累积 `run.output` 的 Scorer。
+
+## 使用 `turns` 进行逐轮断言
+
+`inputs` 形式会将**累积**输出作为整体进行评分，即针对每一轮的全部输出计算单一分数。这可能掩盖某一轮的失败：像 `checks.includes('Brooklyn')` 这样的输出检查，只要\_任意\_轮次提到 Brooklyn 就会通过，即使后续轮次出现了问题。
+
+当需要断言**特定轮次**的行为是否正确时，请改用 `turns`。每一轮都是一个对象，拥有自己的 `input` 以及可选的 `gates`/`scorers`，且只评估**该轮次**的输入和输出：
+
+```typescript title="src/evals/per-turn-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { weatherAgent } from '../agents'
+
+const result = await runEvals({
+  data: [
+    {
+      turns: [
+        {
+          input: 'What is the weather in Brooklyn?',
+          gates: [checks.calledTool('get_weather')],
+        },
+        {
+          // The follow-up must call the tool again — it can't be satisfied
+          // by the first turn's tool call.
+          input: 'What about tomorrow?',
+          gates: [checks.calledTool('get_weather')],
+          scorers: [{ scorer: checks.similarity('tomorrow forecast'), threshold: 0.5 }],
+        },
+      ],
+    },
+  ],
+  target: weatherAgent,
+})
+
+result.verdict // 'passed' | 'scored' | 'failed'
+result.turnResults // per-turn gate/threshold/scorer outcomes
+```
+
+具体语义如下：
+
+- 逐轮 Gate 或 Scorer **只会看到该轮次的** `run.input` 和 `run.output`，绝不会看到累积对话。这解决了 `inputs` 的两个盲点：错误的轮次无法满足检查，而且每一轮的 `run.input` 都是正确的。
+- 逐轮结果会纳入 [Verdict](/docs/evals/gates-and-verdicts)：某一轮的 Gate 失败会使 Verdict 变为 `failed`。如果 Gate 通过但某一轮未达到阈值，Verdict 会变为 `scored`。
+- `result.turnResults[i]` 会报告每一轮的 `gateResults`、`thresholdResults` 和 `scores`，因此失败时可以定位到具体轮次。在多次对话中，轮次结果会按轮次索引取平均值。
+- 没有 `gates` 或 `scorers` 的轮次仍会推进对话。
+- 顶层 `scorers`/`gates` 仍会将累积输出作为整体运行，因此可以将“该轮必须调用 Tool”与“答案提到 Brooklyn”结合起来。
+- 当 Agent 配置了 Storage 时，每个逐轮 Scorer/Gate 结果都会像顶层分数一样持久化，因此逐轮结果会出现在分数存储中。每个已存储的逐轮分数都使用轮次索引标记（`metadata.turnIndex`）、共享对话的 `threadId`，并链接到该轮自己的 Trace Span。
+
+当只需针对整段对话计算单一总分时，请使用 `inputs`。当正确性取决于各个轮次时，请使用 `turns`。在同一个数据项目中，`turns` 不能与 `input` 或 `inputs` 结合使用。
+
+## 与 Gate 和阈值结合
+
+多轮数据项目可与 [Gate 和 Verdict](/docs/evals/gates-and-verdicts) 一起使用。使用基于输出的 Scorer，使 Gate 反映完整对话：
+
+```typescript title="src/evals/memory-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+
+const result = await runEvals({
+  data: [
+    {
+      inputs: ['My favorite city is Brooklyn.', 'What is the weather in my favorite city?'],
+    },
+  ],
+  target: weatherAgent,
+  gates: [checks.calledTool('get_weather')],
+  scorers: [{ scorer: checks.similarity('Brooklyn weather forecast'), threshold: 0.5 }],
+})
+
+result.verdict // 'passed' | 'scored' | 'failed'
+```
+
+## 混合单轮和多轮
+
+一次 `runEvals` 调用可以同时包含单轮和多轮数据项目：
+
+```typescript title="src/evals/mixed-eval.ts"
+const result = await runEvals({
+  data: [
+    { input: 'What is the weather in Brooklyn?' },
+    {
+      inputs: ['My favorite city is Brooklyn.', 'What is the weather in my favorite city?'],
+    },
+  ],
+  target: weatherAgent,
+  scorers: [checks.includes('Brooklyn')],
+})
+```
+
+单轮项目照常使用 `input`。多轮项目使用 `inputs`，可以完全省略 `input`。
+
+## 验证
+
+`runEvals` 会抛出 `MastraError`，条件是存在 `inputs` 但数组为空：
+
+```typescript
+// Throws: 'inputs' must be a non-empty array
+await runEvals({
+  data: [{ inputs: [] }],
+  target: myAgent,
+  scorers: [myScorer],
+})
+```
+
+## 相关内容
+
+- [`runEvals()` Reference](/reference/evals/run-evals)：`runEvals` 参数和返回值的完整 API
+- [Gate 与 Verdict](/docs/evals/gates-and-verdicts)：强制执行硬性要求和质量阈值
+- [Quick Checks](/docs/evals/quick-checks)：无需 LLM 的可组合微型 Scorer

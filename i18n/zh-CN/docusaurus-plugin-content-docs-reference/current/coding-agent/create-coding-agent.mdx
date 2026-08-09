@@ -1,0 +1,152 @@
+---
+title: "参考：createCodingAgent() | Coding Agent"
+description: "createCodingAgent() 的 API 参考；该工厂函数使用可移植的 Workspace、任务 Signal、错误重试和目标判断默认值构建 Coding Agent。"
+packages:
+  - "@mastra/core"
+---
+
+# createCodingAgent()
+
+`createCodingAgent()` 会构建一个 Coding [`Agent`](/reference/agents/agent)，并为 Coding Agent 始终需要的组件提供可移植的默认值：本地 Workspace、任务列表 Signal Provider、网络重试 Error Processor 和目标判断 Prompt。只需提供 `model`、`instructions` 和 `tools` 即可获得可用的 Agent，也可以覆盖任何默认值。
+
+返回值是标准 `Agent`，因此可用于 `Agent` 适用的任何位置，包括作为传给 [`AgentController`](/reference/agent-controller/agent-controller-class) 的 Agent。
+
+## 用法示例
+
+传入模型、指令和 Tool。工厂函数会填充 Workspace、任务 Signal、Error Processor 和目标 Prompt：
+
+```typescript title="src/mastra/coding-agent.ts"
+import { createCodingAgent } from '@mastra/core/coding-agent'
+
+const agent = createCodingAgent({
+  id: 'my-coding-agent',
+  name: 'My Coding Agent',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  instructions: 'You are a helpful coding assistant.',
+  tools: {},
+})
+```
+
+## 参数
+
+`createCodingAgent()` 接受 [`AgentConfig`](/reference/agents/agent#constructor-parameters) 的所有字段以及下列字段。你提供的字段始终优先于工厂默认值。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraLanguageModel | DynamicArgument<MastraLanguageModel>',
+    description: 'Agent 使用的语言模型。直接传给 Agent。',
+  },
+  {
+    name: 'instructions',
+    type: 'string | DynamicArgument<string>',
+    description: 'Agent 的系统指令。直接传给 Agent。',
+  },
+  {
+    name: 'tools',
+    type: 'ToolsInput | DynamicArgument<ToolsInput>',
+    description: 'Agent 可用的 Tool。直接传给 Agent。',
+    isOptional: true,
+  },
+  {
+    name: 'workspace',
+    type: 'AnyWorkspace | undefined',
+    description:
+      '为 Agent 提供支持的 Workspace。省略该键时，会构建默认的本地 Workspace。显式设为 undefined 时，工厂不会构建默认值——当 Workspace 在其他位置连接（例如 AgentController 层级）时，可用这种方式选择退出。',
+    isOptional: true,
+  },
+  {
+    name: 'basePath',
+    type: 'string',
+    description: '省略 workspace 时所构建默认 Workspace 的基础路径。',
+    isOptional: true,
+    defaultValue: 'process.cwd()',
+  },
+  {
+    name: 'signals',
+    type: 'SignalProvider[]',
+    description: 'Agent 的 Signal Provider。省略时，默认为单个 TaskSignalProvider。',
+    isOptional: true,
+  },
+  {
+    name: 'errorProcessors',
+    type: 'Processor[]',
+    description:
+      'Agent 的 Error Processor。省略时，默认为针对未知 Stream Error 的重试机制（包含专门的 ECONNRESET 和错误请求策略），以及 PrefillErrorHandler 和 ProviderHistoryCompat。',
+    isOptional: true,
+  },
+  {
+    name: 'goal',
+    type: 'AgentGoalConfig',
+    description:
+      '目标配置。提供配置但未提供 Prompt 时，Prompt 默认为 DEFAULT_GOAL_JUDGE_PROMPT。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 返回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'Agent',
+    description: '已应用解析后 Workspace、Signal、Error Processor 和目标的 Coding Agent。',
+  },
+]}
+/>
+
+## 默认值
+
+只有当你未提供对应字段时，工厂函数才会填充默认值。调用方提供的值始终优先。
+
+| 字段 | 省略时的默认值 |
+| - | - |
+| `workspace` | 一个以基础路径为根目录、由 `LocalFilesystem` 和 `LocalSandbox` 支持的 [`Workspace`](/reference/workspace/workspace-class)。 |
+| `signals` | 单个 [`TaskSignalProvider`](/reference/signals/task-signal-provider)。 |
+| `errorProcessors` | 针对未知 Stream Error 的重试机制（包含专门的 ECONNRESET 和错误请求策略），以及 `PrefillErrorHandler` 和 `ProviderHistoryCompat`。 |
+| `goal.prompt` | `DEFAULT_GOAL_JUDGE_PROMPT`（仅在配置了 `goal` 时）。 |
+
+### Workspace
+
+省略 `workspace` 键时，工厂函数会构建一个以 `basePath`（默认为 `process.cwd()`）为根目录的本地 Workspace：
+
+```typescript
+import { Workspace, LocalFilesystem, LocalSandbox } from '@mastra/core/workspace'
+
+new Workspace({
+  filesystem: new LocalFilesystem({ basePath }),
+  sandbox: new LocalSandbox({ workingDirectory: basePath }),
+})
+```
+
+如需选择退出（例如在 [`AgentController`](/reference/agent-controller/agent-controller-class) 层级注入 Workspace 时），请显式传入 `workspace: undefined`：
+
+```typescript
+const agent = createCodingAgent({
+  id: 'my-coding-agent',
+  name: 'My Coding Agent',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  instructions: 'You are a helpful coding assistant.',
+  tools: {},
+  workspace: undefined, // opt out of the default workspace
+})
+```
+
+### Error Processor
+
+默认的 [`StreamErrorRetryProcessor`](/reference/processors/stream-error-retry-processor) 会应用以下重试策略：
+
+- 未被 Provider 元数据或特定 Matcher 匹配的未知错误最多重试两次，延迟为 `3000ms`。已知的授权失败会立即向上抛出。
+- 网络重置（`ECONNRESET` / `socket hang up`）最多重试两次，并采用指数退避（`1000ms * 2^retryCount`，上限为 `30000ms`）。
+- 错误请求会在 `2000ms` 后重试一次。
+
+特定的网络重置和错误请求策略优先于未知错误策略。传入 `errorProcessors` 会替换默认的 Processor Stack。为兼容 Provider，其中还包含 `PrefillErrorHandler` 和 `ProviderHistoryCompat`。
+
+## 相关内容
+
+- [`buildBasePrompt()`](/reference/coding-agent/build-base-prompt)
+- [`Agent`](/reference/agents/agent)
+- [`AgentController`](/reference/agent-controller/agent-controller-class)

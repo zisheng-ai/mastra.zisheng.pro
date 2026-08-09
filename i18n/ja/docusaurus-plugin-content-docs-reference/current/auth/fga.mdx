@@ -1,0 +1,215 @@
+---
+title: "リファレンス：IFGAProvider | Auth"
+description: "Mastra のきめ細かな認可（FGA）のために、リソースに対するユーザーとシステム Actor の操作を認可する IFGAProvider インターフェースの API リファレンス。"
+packages:
+  - "@mastra/core"
+---
+
+# IFGAProvider
+
+`IFGAProvider` インターフェースは、きめ細かな認可（FGA）Provider を定義します。Mastra はこのインターフェースを呼び出し、ユーザーまたはシステム Actor が特定のリソースに対して権限を行使できるかどうかを判断します。Mastra を WorkOS Authorization などの FGA backend に接続するには、このインターフェースを実装します。
+
+Mastra が FGA を適用する概念、設定、ライフサイクル上のポイントについては、[きめ細かな認可](/docs/server/auth/fga)を参照してください。
+
+## 使用例
+
+次の例では、最小限の Provider を実装します。`require` は拒否時にエラーをスローし、`check` は boolean を返します。
+
+```typescript title="src/mastra/fga.ts"
+import { FGADeniedError } from '@mastra/core/auth/ee'
+import type { FGACheckParams, IFGAProvider, MastraFGAPermissionInput } from '@mastra/core/auth/ee'
+
+class MyFGAProvider implements IFGAProvider {
+  async check(user: any, params: FGACheckParams): Promise<boolean> {
+    // Your authorization logic.
+    return true
+  }
+
+  async require(user: any, params: FGACheckParams): Promise<void> {
+    if (!(await this.check(user, params))) {
+      throw new FGADeniedError(user, params.resource, params.permission)
+    }
+  }
+
+  async filterAccessible<T extends { id: string }>(
+    user: any,
+    resources: T[],
+    resourceType: string,
+    permission: MastraFGAPermissionInput,
+  ): Promise<T[]> {
+    return resources
+  }
+}
+```
+
+## メソッド
+
+### `check(user, params)`
+
+`user` がリソースに対する権限を持つかどうかを返します。フィルタリングや条件付き UI など、エラーをスローしない確認に使用します。
+
+戻り値：`Promise<boolean>`
+
+### `require(user, params)`
+
+`FGADeniedError` は、`user` に権限がない場合にスローされます。Mastra は、このメソッドを[適用ポイント](/docs/server/auth/fga#enforcement-points)で呼び出します。
+
+戻り値：`Promise<void>`
+
+### `filterAccessible(user, resources, resourceType, permission)`
+
+`resources` のうち、`user` が `permission` を使用してアクセスできるものを返します。
+
+戻り値：`Promise<T[]>`
+
+### `requireActor(actor, params)`
+
+自律型またはスケジュールされた Agent など、ユーザーではないシステム Actor を認可します。任意です。
+
+システム Actor はユーザー中心の `require()` パスを通らないため、Actor ごとに最小権限を適用するには `requireActor` を実装します。拒否するには `FGADeniedError` をスローします。Provider が `requireActor` を実装していない場合、Mastra は信頼された Actor のバイパス（tenant scope の確認後に許可）を維持するため、このメソッドを追加しても後方互換性が保たれます。
+
+`actor.permissions` は信頼できない claim として扱ってください。inline の値を信頼するのではなく、`actor.agentId` をキーとして信頼できるソースから Agent の正式な grant を解決します。[システム Actor](/docs/server/auth/fga#system-actors)を参照してください。
+
+```typescript
+import { FGADeniedError } from '@mastra/core/auth/ee'
+import type { ActorSignal, FGACheckParams, IFGAProvider } from '@mastra/core/auth/ee'
+
+class MyFGAProvider implements IFGAProvider {
+  // ...check, require, filterAccessible...
+
+  async requireActor(actor: ActorSignal, params: FGACheckParams): Promise<void> {
+    const agentId = actor === true ? undefined : actor.agentId
+    // Resolve the agent's authoritative grants from a trusted source keyed by agentId.
+    const granted = await this.grantsForAgent(agentId)
+    const required = Array.isArray(params.permission) ? params.permission : [params.permission]
+    if (!required.some(permission => granted.includes(permission))) {
+      throw new FGADeniedError(null, params.resource, params.permission)
+    }
+  }
+}
+```
+
+戻り値：`Promise<void>`
+
+## 設定プロパティ
+
+任意のプロパティで、ルートの適用範囲と起動時の検証を制御します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'requireForProtectedRoutes',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'false',
+    description:
+      'true の場合、ルートレベルの FGA metadata または resolver の出力がない保護ルートは、通過を許可されず拒否されます。',
+  },
+  {
+    name: 'auditProtectedRoutes',
+    type: "boolean | 'warn' | 'error'",
+    isOptional: true,
+    defaultValue: 'false',
+    description:
+      "組み込みの FGA metadata がない保護ルートを監査します。起動時の警告をログに記録するには true または 'warn'、起動を失敗させるには 'error'、無効にするには false を使用します。",
+  },
+  {
+    name: 'resolveRouteFGA',
+    type: 'FGARouteResolver',
+    isOptional: true,
+    description:
+      'ルート、解析済みのパラメーター、リクエストコンテキストから、リソース型、リソース ID、権限を導出します。',
+  },
+  {
+    name: 'validatePermissions',
+    type: '(permissions: MastraFGAPermissionInput[]) => void | Promise<void>',
+    isOptional: true,
+    description:
+      'Provider 固有の権限マッピングを起動時に検証します。Mastra が生成する可能性のある権限がマッピングされていない場合はエラーをスローします。',
+  },
+]}
+/>
+
+## パラメーター
+
+`params` は、`check`、`require`、`requireActor` に渡される引数です。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'resource',
+    type: '{ type: string; id: string }',
+    description: 'アクセス対象のリソース。',
+  },
+  {
+    name: 'permission',
+    type: 'MastraFGAPermissionInput | MastraFGAPermissionInput[]',
+    description:
+      '確認対象の権限。配列を指定した場合、Actor は列挙された権限のいずれか 1 つを持つ必要があります。',
+  },
+  {
+    name: 'context',
+    type: 'FGACheckContext',
+    isOptional: true,
+    description:
+      '所有元の resourceId、リクエストコンテキスト、action metadata など、リソース解決用の Provider 固有コンテキスト。',
+  },
+]}
+/>
+
+## `ActorSignal`
+
+認証済みのエンドユーザーではなく、信頼されたユーザー以外の Actor による呼び出しを識別します。値は `true`（匿名システムを表す省略形）、または実行する Agent の名前と Provider が適用できる grant を持つオブジェクトのいずれかです。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'actorKind',
+    type: "'system'",
+    description: 'オブジェクト形式の signal であることを示します。',
+  },
+  {
+    name: 'agentId',
+    type: 'string',
+    isOptional: true,
+    description:
+      '実行するシステム Agent の ID。確認対象のリソース（target）とは異なり、Actor 自体を示すため、Provider は Agent ごとに最小権限を適用できます。',
+  },
+  {
+    name: 'permissions',
+    type: 'MastraFGAPermissionInput[]',
+    isOptional: true,
+    description:
+      "この Actor に付与されていると表明された権限。これは信頼できない自己申告の hint です。実際の最小権限を適用する Provider は、これらの値を信頼せず、agentId をキーとして信頼できるソースから Agent の正式な grant を解決します。",
+  },
+  {
+    name: 'scope',
+    type: 'Record<string, string>',
+    isOptional: true,
+    description: 'Actor 用の追加の Provider 固有 scope（tenant や環境など）。',
+  },
+  {
+    name: 'sourceWorkflow',
+    type: 'string',
+    isOptional: true,
+    description: '該当する場合、Actor の実行を開始した Workflow の名前。',
+  },
+]}
+/>
+
+## `FGADeniedError`
+
+認可の確認が拒否された場合にスローされます。`require` と `requireActor` は拒否時にこのエラーをスローし、Mastra は HTTP `403` として返します。
+
+```typescript
+import { FGADeniedError } from '@mastra/core/auth/ee'
+
+throw new FGADeniedError(user, { type: 'agent', id: 'reporter' }, 'agents:execute')
+// Optional fourth argument: a reason string included in the error message.
+```
+
+## 関連情報
+
+- [きめ細かな認可](/docs/server/auth/fga)
+- [システム Actor](/docs/server/auth/fga#system-actors)
+- [WorkOS 認証](/reference/auth/workos)

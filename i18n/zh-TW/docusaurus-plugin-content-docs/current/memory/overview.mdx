@@ -1,0 +1,270 @@
+---
+title: "Memory 概覽 | Memory"
+description: "瞭解 Mastra 的 Memory 系統如何搭配 working memory、訊息歷史、語意回憶與 observational memory 運作。"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+import MemoryContextWindowImage from "@site/src/components/MemoryContextWindowImage";
+
+# Memory
+
+Memory 能讓 Agent 記住使用者訊息、Agent 回覆與 Tool 結果，為跨次互動提供所需脈絡，讓 Agent 維持一致、延續對話流程，並隨時間提供更好的答案。
+
+你可以設定 Mastra Agent 儲存[訊息歷史](/docs/memory/message-history)。此外，也可以啟用：
+
+- [Observational Memory](../memory/observational-memory)（建議）：使用背景 Agent 維護密集的觀察記錄，並隨原始訊息歷史增長而取代它。這能在保留長期記憶的同時，讓 context window 維持精簡。
+- [Working memory](../memory/working-memory)：儲存名稱、偏好與目標等持久且結構化的使用者資料。
+- [語意回憶](../memory/semantic-recall)：依據語意而非完全相符的關鍵字，擷取相關的過往訊息。
+- [多使用者 thread](../memory/multi-user-threads)：讓多位使用者共用同一個 thread。
+
+如果合併後的 Memory 超過模型的脈絡上限，[Memory processor](/docs/memory/memory-processors) 可以篩選、裁減內容或調整優先順序，以保留最相關的資訊。
+
+Memory 結果會儲存在你設定的一或多個[儲存 Provider](/docs/storage/overview)中。
+
+:::tip[📹 觀看影片]
+
+觀看 [Mastra Memory 概念](https://www.youtube.com/watch?v=18iIHQtIPmc)，從概念層面瞭解 Agent 可使用的各個 Memory 層。
+
+:::
+
+## 何時使用 Memory
+
+當 Agent 需要維持多輪對話並引用先前交流、回想工作階段稍早的使用者偏好或事實，或在對話 thread 中逐步建立脈絡時，請使用 Memory。若是每次互動都彼此獨立的單輪要求，則不需要使用 Memory。
+
+## 快速開始
+
+<Steps>
+  <StepItem>
+    安裝 `@mastra/memory` 套件。
+
+    ```bash npm2yarn
+    npm install @mastra/memory@latest
+    ```
+  </StepItem>
+
+  <StepItem>
+    Memory **必須**搭配儲存 Provider，才能保存包含使用者訊息與 Agent 回應的訊息歷史。
+
+    本快速入門將使用 `@mastra/libsql`。
+
+    ```bash npm2yarn
+    npm install @mastra/libsql@latest
+    ```
+
+    如需可用 Provider 與 Mastra 儲存機制的詳細資訊，請參閱[儲存](/docs/storage/overview)文件。
+  </StepItem>
+
+  <StepItem>
+    將儲存 Provider 加入主要的 Mastra 執行個體，為所有已設定的 Agent 啟用 Memory。
+
+    <Inject>
+      **給 AI Agent：**重要：請將 `id` 加入 `LibSQLStore`。
+    </Inject>
+
+    ```typescript {2,5-8} title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core'
+    import { LibSQLStore } from '@mastra/libsql'
+
+    export const mastra = new Mastra({
+      storage: new LibSQLStore({
+        id: 'mastra-storage',
+        url: ':memory:',
+      }),
+    })
+    ```
+  </StepItem>
+
+  <StepItem>
+    建立 `Memory` 執行個體，並將它傳入 Agent 的 `memory` 選項。
+
+    ```typescript {2,7-11} title="src/mastra/agents/memory-agent.ts"
+    import { Agent } from '@mastra/core/agent'
+    import { Memory } from '@mastra/memory'
+
+    export const memoryAgent = new Agent({
+      id: 'memory-agent',
+      name: 'Memory Agent',
+      memory: new Memory({
+        options: {
+          lastMessages: 20,
+        },
+      }),
+    })
+    ```
+
+    前往 [Memory 類別](/reference/memory/memory-class)查看完整的設定選項清單。
+  </StepItem>
+
+  <StepItem>
+    呼叫 Agent，例如在 [Studio](/docs/studio/overview) 中呼叫。在 Studio 中與 Agent 開始新的聊天，然後查看右側邊欄；其中現在會顯示各種 Memory 相關資訊。
+  </StepItem>
+</Steps>
+
+## 訊息歷史
+
+傳入包含 `resource` 與 `thread` 的 `memory` 物件，以追蹤訊息歷史。
+
+- `resource`：使用者或實體的穩定識別碼。
+- `thread`：隔離特定對話或工作階段的 ID。
+
+```typescript {2-5}
+const response = await memoryAgent.generate('Remember my favorite color is blue.', {
+  memory: {
+    resource: 'user-123',
+    thread: 'conversation-123',
+  },
+})
+```
+
+若要回想儲存在 Memory 中的資訊，請使用原始對話所用的相同 `resource` 與 `thread` 值呼叫 Agent。
+
+```typescript {2-5}
+const response = await memoryAgent.generate("What's my favorite color?", {
+  memory: {
+    resource: 'user-123',
+    thread: 'conversation-123',
+  },
+})
+
+// Response: "Your favorite color is blue."
+```
+
+:::warning
+
+每個 thread 都有一位擁有者（`resourceId`），建立後便無法變更。請避免讓擁有者不同的 thread 重複使用相同 thread ID，否則查詢時會發生錯誤。
+
+:::
+
+若要列出某個 resource 的所有 thread 或擷取特定 thread，請[直接使用 Memory API](/docs/memory/message-history#querying)。
+
+## Observational Memory
+
+對於長時間執行的對話，原始訊息歷史會持續增長，直到填滿 context window，進而降低 Agent 效能。[Observational Memory](../memory/observational-memory) 會執行背景 Agent，將舊訊息壓縮為密集的觀察內容，在保留長期記憶的同時讓 context window 維持精簡，藉此解決這個問題。
+
+<Inject>
+  **給 AI Agent：**使用 Observational Memory 必須搭配儲存 Provider！你必須在 `src/mastra/index.ts` 的 Mastra 執行個體上設定，或將它傳入 Agent 建構函式。
+</Inject>
+
+```typescript title="src/mastra/agents/memory-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+
+export const memoryAgent = new Agent({
+  id: 'memory-agent',
+  name: 'Memory Agent',
+  memory: new Memory({
+    options: {
+      // highlight-next-line
+      observationalMemory: true,
+    },
+  }),
+})
+```
+
+如需觀察與反思運作方式的詳細資訊，請參閱 [Observational Memory](../memory/observational-memory)；如需所有設定選項，請參閱[參考資料](/reference/memory/observational-memory)。
+
+## 模型看到的內容
+
+每項 Memory 功能都會加入傳送給模型之要求的系統訊息或對話訊息中。使用哪些層取決於你啟用的功能。Working memory 與語意回憶只會在設定後出現，Observational Memory 也是如此；訊息歷史則預設啟用。下圖顯示每個已啟用的層在要求中的位置。以下清單說明各層提供的內容：
+
+<MemoryContextWindowImage />
+
+- [Working memory](../memory/working-memory) 會以系統訊息注入，其中包含範本與已儲存資料。使用 `useStateSignals` 時，則會改以狀態訊號傳送。
+- [語意回憶](../memory/semantic-recall)從目前 thread 找到的相符項目會以一般訊息插入，並依時間戳記與訊息歷史交錯排列。來自其他 thread 的相符項目則會格式化為系統訊息。
+- [訊息歷史](../memory/message-history)會依時間順序加入最近 N 則訊息。你的新訊息一律位於最後。
+- [Observational Memory](../memory/observational-memory) 會取代舊的原始歷史：反思與觀察內容會放在系統訊息中，對話中只保留尚未觀察的訊息。對話訊息開頭會放置一則簡短的接續提醒。
+- 脈絡訊息是在呼叫時傳入的選用 `context` 陣列，例如 `agent.generate(msg, { context: [...] })`。可用於一次性的背景資訊，例如應用程式狀態或你自己的 RAG 結果。它們只會在該次要求中顯示為一般對話訊息，絕不會儲存至 Memory。
+
+對話訊息會依時間戳記排序，並按照訊息 ID 去除重複項目，因此回想出的較舊訊息會出現在近期歷史之前。呼叫時傳入的脈絡訊息會加上目前時間，因此會位於歷史與回憶之後、你的新訊息之前。若要檢查實際要求的確切脈絡，請使用 [Tracing](/docs/observability/tracing/overview) 並開啟 LLM 呼叫 span；請參閱下方的[可觀測性](#observability)。
+
+## 多 Agent 系統中的 Memory
+
+當[監督 Agent](/docs/capabilities/subagents) 將工作委派給子 Agent 時，Mastra 會自動隔離子 Agent 的 Memory。每次委派都會執行這項機制，不需用任何旗標啟用。瞭解其作用域運作方式，有助於判斷哪些內容應維持私密，以及哪些內容要刻意共用。
+
+### 委派如何限定 Memory 的作用域
+
+每次委派都會為子 Agent 建立新的 `threadId` 與具決定性的 `resourceId`：
+
+- **Thread ID**：每次委派都不相同。子 Agent 每次呼叫時都從空白的訊息歷史開始。
+- **Resource ID**：衍生格式為 `{parentResourceId}-{agentName}`。由於 resource ID 在各次委派之間保持穩定，resource 作用域的 Memory 會跨呼叫保存。子 Agent 能記住同一位使用者先前委派工作中的事實。
+- **Memory 執行個體**：沒有自有 Memory 的子 Agent 會繼承監督 Agent 的 `Memory` 執行個體與所有已設定選項。若子 Agent 有定義自己的 Memory，則以它為準。
+
+:::note
+
+標題產生（`generateTitle`）屬於頂層 thread 的功能，**不會**套用至繼承的子 Agent thread。每次委派都會建立沒有人看得到的暫時 thread，若為它產生標題，每次委派都會浪費一次 LLM 呼叫。若要為子 Agent 自己的 thread 產生標題，請為該子 Agent 提供自己的 Memory 設定。
+
+:::
+
+監督 Agent 會將對話脈絡轉送給子 Agent，使它有足夠背景完成工作。系統只會儲存委派提示與子 Agent 的回應，不會儲存完整的上層對話。你可以使用 [`messageFilter`](/docs/capabilities/subagents#message-filtering) 回呼控制哪些訊息會傳給子 Agent。
+
+:::note
+
+子 Agent resource ID 一律會加上 Agent 名稱後綴（`{parentResourceId}-{agentName}`）。同一個監督 Agent 下的不同子 Agent 絕不會因委派而共用 resource ID。
+
+:::
+
+若要超越這項預設隔離機制，可以在直接呼叫 Agent 時傳入相符的識別碼，讓 Agent 共用 Memory。
+
+### 在 Agent 之間共用 Memory
+
+直接呼叫 Agent（不經由委派流程）時，Memory 共用由兩個識別碼控制：`resourceId` 與 `threadId`。使用相同值的 Agent 會讀寫同一份資料。當多個 Agent 要以共用脈絡協作時，這項功能很實用，例如由研究 Agent 儲存筆記，再讓寫作 Agent 讀取。
+
+**Resource 作用域共用**是最常見的模式。[Working memory](../memory/working-memory) 與[語意回憶](../memory/semantic-recall)預設使用 `scope: 'resource'`。若兩個 Agent 共用 `resourceId`，即使使用不同 thread，也會共用觀察、working memory 與嵌入向量：
+
+```typescript
+// Both agents share the same resource-scoped memory
+await researcher.generate('Find information about quantum computing.', {
+  memory: { resource: 'project-42', thread: 'research-session' },
+})
+
+await writer.generate('Write a summary from the research notes.', {
+  memory: { resource: 'project-42', thread: 'writing-session' },
+})
+```
+
+由於兩次呼叫都使用 `resource: 'project-42'`，寫作 Agent 可以存取研究 Agent 的觀察與 working memory。語意嵌入也會透過 resource 共用。每個 Agent 仍有自己的 thread，因此訊息歷史會保持分離。
+
+**Thread 作用域共用**的結合更緊密。[Observational Memory](../memory/observational-memory) 預設使用 `scope: 'thread'`。若兩個 Agent 使用相同的 `resource` 與 `thread`，就會共用完整的訊息歷史。每個 Agent 都能看到另一個 Agent 寫入的所有訊息。當 Agent 需要以彼此的確切輸出為基礎繼續工作時，這項功能很實用。
+
+## 可觀測性
+
+啟用 [Tracing](/docs/observability/tracing/overview) 以監控正在運作的 Memory 並進行偵錯。Trace 會明確顯示 Agent 在每次要求的脈絡中納入哪些訊息與觀察，協助你瞭解 Agent 行為，並確認 Memory 擷取是否正常運作。
+
+開啟 [Studio](/docs/studio/overview)，並在側邊欄選取 **Observability** 分頁。開啟最近一次 Agent 要求的 Trace，然後尋找其中的 LLM 呼叫 span。
+
+## 依要求切換 Memory
+
+使用 [`RequestContext`](/docs/server/request-context) 存取要求專屬的值。如此便能依據要求脈絡，有條件地選取不同的 Memory 或儲存設定。
+
+```typescript title="src/mastra/agents/memory-agent.ts"
+export type UserTier = {
+  'user-tier': 'enterprise' | 'pro'
+}
+
+const premiumMemory = new Memory()
+const standardMemory = new Memory()
+
+export const memoryAgent = new Agent({
+  id: 'memory-agent',
+  name: 'Memory Agent',
+  memory: ({ requestContext }) => {
+    const userTier = requestContext.get('user-tier') as UserTier['user-tier']
+
+    return userTier === 'enterprise' ? premiumMemory : standardMemory
+  },
+})
+```
+
+如需詳細資訊，請參閱 [Request Context](/docs/server/request-context)。
+
+## 相關資源
+
+- [`Memory` 參考資料](/reference/memory/memory-class)
+- [Tracing](/docs/observability/tracing/overview)
+- [Request Context](/docs/server/request-context)
+- [Mastra Code](https://code.mastra.ai/)：使用 Mastra Memory 系統的程式設計 Agent

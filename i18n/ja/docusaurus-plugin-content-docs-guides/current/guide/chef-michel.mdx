@@ -1,0 +1,239 @@
+---
+title: "ガイド：AI シェフアシスタントの構築"
+description: 手元にある食材で料理を作れるようユーザーを支援する Chef Assistant Agent を Mastra で作成するためのガイドです。
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# AI シェフアシスタントを構築する
+
+このガイドでは、手元にある食材で料理を作れるようユーザーを支援する「Chef Assistant」Agent を作成します。
+
+Agent を作成し、Mastra に登録する方法を学びます。次に、ターミナルから Agent と対話して、さまざまなレスポンス形式を確認します。その後、Mastra のローカル API エンドポイントを介して Agent にアクセスします。
+
+## 前提条件
+
+- Node.js `v22.13.0` 以降がインストールされていること
+- サポートされている[モデル Provider](/models) の API キー
+- 既存の Mastra プロジェクト（新しいプロジェクトをセットアップするには、[インストールガイド](/guides/getting-started/quickstart)に従ってください）
+
+## Agent を作成する
+
+Mastra で Agent を作成するには、`Agent` クラスで定義してから Mastra に登録します。
+
+<Steps>
+  <StepItem>
+    新しいファイル `src/mastra/agents/chefAgent.ts` を作成し、Agent を定義します。
+
+    ```ts title="src/mastra/agents/chefAgent.ts"
+    import { Agent } from '@mastra/core/agent'
+
+    export const chefAgent = new Agent({
+      id: 'chef-agent',
+      name: 'chef-agent',
+      instructions:
+        'You are Michel, a practical and experienced home chef' +
+        'You help people cook with whatever ingredients they have available.',
+      model: '__GATEWAY_OPENAI_MODEL__',
+    })
+    ```
+  </StepItem>
+
+  <StepItem>
+    `src/mastra/index.ts` ファイルで Agent を登録します。
+
+    ```ts title="src/mastra/index.ts" {2, 5}
+    import { Mastra } from '@mastra/core'
+    import { chefAgent } from './agents/chefAgent'
+
+    export const mastra = new Mastra({
+      agents: { chefAgent },
+    })
+    ```
+  </StepItem>
+</Steps>
+
+## Agent と対話する
+
+要件に応じて、Agent と対話し、さまざまな形式でレスポンスを取得できます。以下の手順では、生成、ストリーミング、構造化出力の取得方法を学びます。
+
+<Steps>
+  <StepItem>
+    新しいファイル `src/index.ts` を作成し、`main()` 関数を追加します。その中で Agent に送る質問を作成し、レスポンスをログに出力します。
+
+    ```ts title="src/index.ts"
+    import { chefAgent } from './mastra/agents/chefAgent'
+
+    async function main() {
+      const query =
+        'In my kitchen I have: pasta, canned tomatoes, garlic, olive oil, and some dried herbs (basil and oregano). What can I make?'
+      console.log(`Query: ${query}`)
+
+      const response = await chefAgent.generate([{ role: 'user', content: query }])
+      console.log('\n👨‍🍳 Chef Michel:', response.text)
+    }
+
+    main()
+    ```
+
+    続いて、スクリプトを実行します。
+
+    ```bash
+    npx bun src/index.ts
+    ```
+
+    次のような出力が得られます。
+
+    ```
+    Query: In my kitchen I have: pasta, canned tomatoes, garlic, olive oil, and some dried herbs (basil and oregano). What can I make?
+
+    👨‍🍳 Chef Michel: You can make a delicious pasta al pomodoro! Here's how...
+    ```
+  </StepItem>
+
+  <StepItem>
+    前の例では、処理が進んでいる表示がないまま、レスポンスをしばらく待ったかもしれません。Agent がレスポンスを生成する過程を表示するには、代わりにレスポンスをターミナルへストリーミングします。
+
+    ```ts title="src/index.ts"
+    import { chefAgent } from './mastra/agents/chefAgent'
+
+    async function main() {
+      const query =
+        "Now I'm over at my friend's house, and they have: chicken thighs, coconut milk, sweet potatoes, and some curry powder."
+      console.log(`Query: ${query}`)
+
+      const stream = await chefAgent.stream([{ role: 'user', content: query }])
+
+      console.log('\n Chef Michel: ')
+
+      for await (const chunk of stream.textStream) {
+        process.stdout.write(chunk)
+      }
+
+      console.log('\n\n✅ Recipe complete!')
+    }
+
+    main()
+    ```
+
+    続いて、スクリプトをもう一度実行します。
+
+    ```bash
+    npx bun src/index.ts
+    ```
+
+    次のような出力が得られます。今回は、大きな 1 つのブロックではなく、行ごとに読み進められます。
+
+    ```
+    Query: Now I'm over at my friend's house, and they have: chicken thighs, coconut milk, sweet potatoes, and some curry powder.
+
+    👨‍🍳 Chef Michel:
+    Great! You can make a comforting chicken curry...
+
+    ✅ Recipe complete!
+    ```
+  </StepItem>
+
+  <StepItem>
+    Agent のレスポンスを人に見せるのではなく、コードの別の部分に渡したい場合があります。そのような場合、Agent は[構造化出力](/docs/agents/structured-output)を返す必要があります。
+
+    `src/index.ts` を次のように変更します。
+
+    ```ts title="src/index.ts"
+    import { chefAgent } from './mastra/agents/chefAgent'
+    import { z } from 'zod'
+
+    async function main() {
+      const query = 'I want to make lasagna, can you generate a lasagna recipe for me?'
+      console.log(`Query: ${query}`)
+
+      // Define the Zod schema
+      const schema = z.object({
+        ingredients: z.array(
+          z.object({
+            name: z.string(),
+            amount: z.string(),
+          }),
+        ),
+        steps: z.array(z.string()),
+      })
+
+      const response = await chefAgent.generate([{ role: 'user', content: query }], {
+        structuredOutput: {
+          schema,
+        },
+      })
+      console.log('\n👨‍🍳 Chef Michel:', response.object)
+    }
+
+    main()
+    ```
+
+    スクリプトをもう一度実行すると、次のような出力が得られます。
+
+    ```
+    Query: I want to make lasagna, can you generate a lasagna recipe for me?
+
+    👨‍🍳 Chef Michel: {
+      ingredients: [
+        { name: "Lasagna noodles", amount: "12 sheets" },
+        { name: "Ground beef", amount: "1 pound" },
+      ],
+      steps: [
+        "Preheat oven to 375°F (190°C).",
+        "Cook the lasagna noodles according to package instructions.",
+      ]
+    }
+    ```
+  </StepItem>
+</Steps>
+
+## Agent サーバーを実行する
+
+Mastra の API を介して Agent と対話する方法を学びます。
+
+<Steps>
+  <StepItem>
+    `mastra dev` コマンドを使用して、Agent をサービスとして実行できます。
+
+    ```bash
+    mastra dev
+    ```
+
+    登録済みの Agent と対話するためのエンドポイントを公開するサーバーが起動します。[Studio](/docs/studio/overview) では、UI から Agent をテストできます。
+  </StepItem>
+
+  <StepItem>
+    デフォルトでは、`mastra dev` は `http://localhost:4111` で実行されます。Chef Assistant Agent は次の場所で利用できます。
+
+    ```
+    POST http://localhost:4111/api/agents/chefAgent/generate
+    ```
+  </StepItem>
+
+  <StepItem>
+    コマンドラインから `curl` を使用して Agent と対話できます。
+
+    ```bash
+    curl -X POST http://localhost:4111/api/agents/chefAgent/generate \
+      -H "Content-Type: application/json" \
+      -d '{
+        "messages": [
+          {
+            "role": "user",
+            "content": "I have eggs, flour, and milk. What can I make?"
+          }
+        ]
+      }'
+    ```
+
+    **レスポンス例：**
+
+    ```json
+    {
+      "text": "You can make delicious pancakes! Here's a simple recipe..."
+    }
+    ```
+  </StepItem>
+</Steps>

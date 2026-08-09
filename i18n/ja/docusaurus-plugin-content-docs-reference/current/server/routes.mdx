@@ -1,0 +1,481 @@
+---
+title: "リファレンス：サーバールート | Server"
+description: "Mastra サーバーアダプターによって登録される HTTP ルートの API リファレンス。"
+packages:
+  - "@mastra/server"
+---
+
+# サーバールート
+
+サーバーアダプターは、`server.init()` を呼び出すと以下のルートを登録します。`prefix` オプションが設定されている場合、すべてのルートにそのプレフィックスが付きます。
+
+## Agent
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `GET` | `/api/agents` | すべての Agent を一覧表示 |
+| `GET` | `/api/agents/:agentId` | ID で Agent を取得（バージョンのクエリパラメーターをサポート） |
+| `POST` | `/api/agents/:agentId/generate` | Agent のレスポンスを生成 |
+| `POST` | `/api/agents/:agentId/stream` | Agent のレスポンスをストリーミング |
+| `POST` | `/api/agents/:agentId/send-message` | アクティブまたはアイドル状態のスレッドにユーザーメッセージを送信 |
+| `POST` | `/api/agents/:agentId/queue-message` | 次のスレッドターン用にユーザーメッセージをキューに追加 |
+| `POST` | `/api/agents/:agentId/signals` | アクティブまたはアイドル状態のスレッドに低レベルのシグナルを送信 |
+| `POST` | `/api/agents/:agentId/threads/subscribe` | スレッドストリームを購読 |
+| `POST` | `/api/agents/:agentId/send-tool-approval` | Tool 呼び出しを承認または拒否し、スレッド購読を通じて再開 |
+| `POST` | `/api/agents/:agentId/resume-stream` | カスタムデータを使用して中断中の Agent ストリームを再開 |
+| `GET` | `/api/agents/:agentId/tools` | Agent の Tool を一覧表示 |
+| `POST` | `/api/agents/:agentId/tools/:toolId/execute` | Agent の Tool を実行 |
+
+### Agent 取得のクエリパラメーター
+
+`GET /api/agents/:agentId` は、コードで定義された Agent にオーバーライドとして適用する保存済み設定のバージョンを制御するため、オプションのクエリパラメーターを受け付けます。
+
+| パラメーター | 型 | デフォルト | 説明 |
+| - | - | - | - |
+| `status` | `'draft' \| 'published'` | `'published'` | 解決する保存済みバージョン。`draft` は最新バージョンを返し、`published` はアクティブなバージョンを返します。 |
+| `versionId` | `string` | なし | 解決する特定のバージョン ID。`status` より優先されます。 |
+
+```bash
+# Get agent with active published overrides (default)
+GET /api/agents/my-agent
+
+# Get agent with latest draft overrides
+GET /api/agents/my-agent?status=draft
+
+# Get agent with a specific version's overrides
+GET /api/agents/my-agent?versionId=abc123
+```
+
+### 生成リクエストのボディ
+
+```typescript prettier:false
+{
+  messages: CoreMessage[] | string;       // Required
+  instructions?: string;                   // System instructions
+  system?: string;                         // System prompt
+  context?: CoreMessage[];                 // Additional context
+  memory?: { key: string } | boolean;      // Memory config
+  resourceId?: string;                     // Resource identifier
+  threadId?: string;                       // Thread identifier
+  runId?: string;                          // Run identifier
+  maxSteps?: number;                       // Max tool steps
+  activeTools?: string[];                  // Tools to enable
+  toolChoice?: ToolChoice;                 // Tool selection mode
+  requestContext?: Record<string, unknown>; // Request context
+  output?: ZodSchema;                      // Structured output schema
+}
+```
+
+### 生成レスポンス
+
+```typescript prettier:false
+{
+  text: string;
+  toolCalls?: ToolCall[];
+  finishReason: string;
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+  };
+}
+```
+
+### Agent メッセージルート
+
+アクティブな Agent ループにユーザーメッセージを送信するか、アイドル状態のスレッドを起動するには、`POST /api/agents/:agentId/send-message` を使用します。Mastra がフォローアップ実行を開始する前にアクティブな実行を完了させる場合は、`POST /api/agents/:agentId/queue-message` を使用します。
+
+どちらのルートも同じリクエストボディを受け付けます。
+
+```typescript prettier:false
+{
+  message: string | Array<TextPart | FilePart> | {
+    contents: string | Array<TextPart | FilePart>;
+    attributes?: Record<string, JSONValue>;
+    metadata?: Record<string, unknown>;
+    providerOptions?: ProviderMetadata;
+  };
+  runId?: string;
+  resourceId?: string;
+  threadId?: string;
+  ifActive?: {
+    behavior?: 'deliver' | 'persist' | 'discard';
+    attributes?: Record<string, string | number | boolean>;
+  };
+  ifIdle?: {
+    behavior?: 'wake' | 'persist' | 'discard';
+    streamOptions?: Omit<AgentExecutionOptions, 'messages'>;
+    attributes?: Record<string, string | number | boolean>;
+  };
+}
+```
+
+`runId` を省略した場合は、`resourceId` と `threadId` が必須です。`ifIdle` はスレッドを対象とするリクエストにのみ適用され、実行を対象とするリクエストには適用されません。
+
+#### メッセージの送信
+
+```bash
+curl -X POST http://localhost:4111/api/agents/supportAgent/send-message \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "message": {
+      "contents": "Show the shorter version.",
+      "attributes": { "sentFrom": "web" }
+    },
+    "resourceId": "user_123",
+    "threadId": "thread_456"
+  }'
+```
+
+#### メッセージのキューへの追加
+
+```bash
+curl -X POST http://localhost:4111/api/agents/supportAgent/queue-message \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "message": "Also check whether the tests need updates.",
+    "resourceId": "user_123",
+    "threadId": "thread_456"
+  }'
+```
+
+どちらのルートも次のレスポンスを返します。
+
+```typescript prettier:false
+{
+  accepted: true;
+  runId: string;
+  signal?: CreatedAgentSignal;
+}
+```
+
+### 購読での Tool 承認ルート
+
+クライアントにアクティブなスレッド購読がすでにある場合は、`POST /api/agents/:agentId/send-tool-approval` を使用します。このルートは実行を再開し、JSON の確認応答を返します。再開されたストリームのチャンクは、`POST /api/agents/:agentId/threads/subscribe` を通じて配信されます。
+
+このルートは次のリクエストボディを受け付けます。
+
+```typescript prettier:false
+{
+  resourceId: string;
+  threadId: string;
+  toolCallId: string;
+  approved: boolean;
+  requestContext?: Record<string, unknown>;
+}
+```
+
+このルートは次のレスポンスを返します。
+
+```typescript prettier:false
+{
+  accepted: true;
+  runId: string;
+  toolCallId?: string;
+}
+```
+
+## Workflow
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `GET` | `/api/workflows` | すべての Workflow を一覧表示 |
+| `GET` | `/api/workflows/run-counts` | Workflow ごとに実行中および中断中の実行数を取得 |
+| `GET` | `/api/workflows/:workflowId` | ID で Workflow を取得 |
+| `POST` | `/api/workflows/:workflowId/create-run` | 新しい Workflow 実行を作成 |
+| `POST` | `/api/workflows/:workflowId/start-async` | Workflow を開始して結果を待機 |
+| `POST` | `/api/workflows/:workflowId/stream` | Workflow の実行をストリーミング |
+| `POST` | `/api/workflows/:workflowId/resume` | 中断中の Workflow を再開 |
+| `POST` | `/api/workflows/:workflowId/resume-async` | 非同期で再開 |
+| `GET` | `/api/workflows/:workflowId/runs` | Workflow の実行を一覧表示 |
+| `GET` | `/api/workflows/:workflowId/runs/:runId` | 特定の実行を取得 |
+
+### 実行数のレスポンス
+
+`/api/workflows/run-counts` エンドポイントは、登録されたすべての Workflow について、`running` と [`suspended`](/docs/workflows/suspend-and-resume) の実行数を返します。レコードのキーには Mastra 設定にある Workflow のレジストリキーが使用され、サーバーはレスポンスを数秒間キャッシュする場合があります。
+
+```typescript prettier:false
+{
+  [workflowRegistryKey: string]: {
+    running: number;
+    suspended: number;
+  };
+}
+```
+
+### 動的 Workflow
+
+動的 Workflow 定義（ベータ版）は JSON で表現された Workflow で、`workflowDefinitions` ストレージドメインを通じて永続化され、実行中のインスタンスに動的に登録されます。[動的 Workflow](/docs/workflows/dynamic-workflows) を参照してください。
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `GET` | `/api/stored/workflows` | 動的 Workflow 定義を一覧表示。`status` と `authorId` で絞り込み可能 |
+| `GET` | `/api/stored/workflows/:dynamicWorkflowId` | ID で動的 Workflow 定義を取得 |
+| `POST` | `/api/stored/workflows` | 定義（およびオプションのヘルパー `dependencies`）を upsert し、動的に登録 |
+| `DELETE` | `/api/stored/workflows/:dynamicWorkflowId` | 動的 Workflow 定義を削除し、実行中の Workflow の登録を解除 |
+
+認証済みサーバーでは、読み取りルートに `stored-workflows:read` 権限、書き込みルートに `stored-workflows:write` 権限が必要です。登録された動的 Workflow は、上記の通常の `/api/workflows/:workflowId` ルートを通じて実行されます。
+
+### 実行作成リクエストのボディ
+
+```typescript prettier:false
+{
+  resourceId?: string;     // Associate run with a resource (e.g., user ID)
+  disableScorers?: boolean; // Disable scorers for this run
+}
+```
+
+### `/start-async` のリクエストボディ
+
+```typescript prettier:false
+{
+  resourceId?: string;     // Associate run with a resource (e.g., user ID)
+  inputData?: unknown;
+  initialState?: unknown;
+  requestContext?: Record<string, unknown>;
+  tracingOptions?: {
+    spanName?: string;
+    attributes?: Record<string, unknown>;
+  };
+}
+```
+
+### Workflow ストリーミングのリクエストボディ
+
+```typescript prettier:false
+{
+  resourceId?: string;     // Associate run with a resource (e.g., user ID)
+  inputData?: unknown;
+  initialState?: unknown;
+  requestContext?: Record<string, unknown>;
+  closeOnSuspend?: boolean;
+}
+```
+
+### 再開リクエストのボディ
+
+```typescript prettier:false
+{
+  step?: string | string[];
+  resumeData?: unknown;
+  requestContext?: Record<string, unknown>;
+}
+```
+
+## Tool
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `GET` | `/api/tools` | すべての Tool を一覧表示 |
+| `GET` | `/api/tools/:toolId` | ID で Tool を取得 |
+| `POST` | `/api/tools/:toolId/execute` | Tool を実行 |
+
+### Tool 実行リクエストのボディ
+
+```typescript prettier:false
+{
+  data: unknown;  // Tool input data
+  requestContext?: Record<string, unknown>;
+}
+```
+
+## Memory
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `GET` | `/api/memory/threads` | スレッドを一覧表示 |
+| `GET` | `/api/memory/threads/:threadId` | スレッドを取得 |
+| `POST` | `/api/memory/threads` | スレッドを作成 |
+| `DELETE` | `/api/memory/threads/:threadId` | スレッドを削除 |
+| `POST` | `/api/memory/threads/:threadId/clone` | スレッドを複製 |
+| `GET` | `/api/memory/threads/:threadId/messages` | スレッドのメッセージを取得 |
+| `POST` | `/api/memory/threads/:threadId/messages` | メッセージを追加 |
+
+### スレッド作成リクエストのボディ
+
+```typescript prettier:false
+{
+  resourceId: string;
+  title?: string;
+  metadata?: Record<string, unknown>;
+}
+```
+
+### スレッド複製リクエストのボディ
+
+```typescript prettier:false
+{
+  newThreadId?: string;           // Custom ID for cloned thread
+  resourceId?: string;            // Override resource ID
+  title?: string;                 // Custom title for clone
+  metadata?: Record<string, unknown>;  // Additional metadata
+  options?: {
+    messageLimit?: number;        // Max messages to clone
+    messageFilter?: {
+      startDate?: Date;           // Clone messages after this date
+      endDate?: Date;             // Clone messages before this date
+      messageIds?: string[];      // Clone specific messages
+    };
+  };
+}
+```
+
+### スレッド複製のレスポンス
+
+```typescript prettier:false
+{
+  thread: {
+    id: string;
+    resourceId: string;
+    title: string;
+    createdAt: Date;
+    updatedAt: Date;
+    metadata: {
+      clone: {
+        sourceThreadId: string;
+        clonedAt: Date;
+        lastMessageId?: string;
+      };
+      // ... other metadata
+    };
+  };
+  clonedMessages: MastraDBMessage[];
+}
+```
+
+## Vector
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `POST` | `/api/vectors/:vectorName/upsert` | Vector を upsert |
+| `POST` | `/api/vectors/:vectorName/query` | Vector をクエリ |
+| `POST` | `/api/vectors/:vectorName/delete` | Vector を削除 |
+
+### Upsert リクエストのボディ
+
+```typescript
+{
+  vectors: Array<{
+    id: string
+    values: number[]
+    metadata?: Record<string, unknown>
+  }>
+}
+```
+
+### クエリリクエストのボディ
+
+```typescript prettier:false
+{
+  vector: number[];
+  topK?: number;
+  filter?: Record<string, unknown>;
+  includeMetadata?: boolean;
+}
+```
+
+## MCP
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `GET` | `/api/mcp/servers` | MCP サーバーを一覧表示 |
+| `GET` | `/api/mcp/servers/:serverId/tools` | サーバーの Tool を一覧表示 |
+| `POST` | `/api/mcp/:serverId` | MCP HTTP トランスポート |
+| `GET` | `/api/mcp/:serverId/sse` | MCP SSE トランスポート |
+
+## Responses API
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `POST` | `/api/v1/responses` | OpenAI 互換の Responses API ルートを通じてレスポンスを作成 |
+| `GET` | `/api/v1/responses/:responseId` | 保存済みのレスポンスを取得 |
+| `DELETE` | `/api/v1/responses/:responseId` | 保存済みのレスポンスを削除 |
+
+リクエストとレスポンスの完全な仕様については、[Responses API リファレンス](/reference/client-js/responses) を参照してください。
+
+## Conversations API
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `POST` | `/api/v1/conversations` | 会話を作成 |
+| `GET` | `/api/v1/conversations/:conversationId` | 会話を取得 |
+| `DELETE` | `/api/v1/conversations/:conversationId` | 会話を削除 |
+| `GET` | `/api/v1/conversations/:conversationId/items` | 会話に保存された項目を一覧表示 |
+
+リクエストとレスポンスの完全な仕様については、[Conversations API リファレンス](/reference/client-js/conversations) を参照してください。
+
+## ログ
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `GET` | `/api/logs` | ログを一覧表示 |
+| `GET` | `/api/logs/:runId` | 実行 ID でログを取得 |
+
+### クエリパラメーター
+
+```typescript prettier:false
+{
+  page?: number;
+  perPage?: number;
+  transportId?: string;
+}
+```
+
+## テレメトリ
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `GET` | `/api/telemetry/traces` | Trace を一覧表示 |
+| `GET` | `/api/telemetry/traces/:traceId` | Trace を取得 |
+| `GET` | `/api/telemetry/traces/:traceId/spans` | Trace の span を取得 |
+
+## 共通のクエリパラメーター
+
+### ページネーション
+
+ほとんどの一覧エンドポイントは、以下をサポートします。
+
+```typescript prettier:false
+{
+  page?: number;   // Page number (0-indexed)
+  perPage?: number; // Items per page (default: 10)
+}
+```
+
+### フィルタリング
+
+Workflow の実行は、以下をサポートします。
+
+```typescript prettier:false
+{
+  fromDate?: string;  // ISO date string
+  toDate?: string;    // ISO date string
+  status?: string;    // Run status filter
+  resourceId?: string; // Filter by resource
+}
+```
+
+## エラーレスポンス
+
+すべてのルートは、次の形式でエラーを返します。
+
+```typescript prettier:false
+{
+  error: string;      // Error message
+  details?: unknown;  // Additional details
+}
+```
+
+一般的なステータスコードは次のとおりです。
+
+| コード | 意味 |
+| - | - |
+| 400 | Bad Request - 無効なパラメーター |
+| 401 | Unauthorized - 認証情報がないか無効 |
+| 403 | Forbidden - 権限が不足 |
+| 404 | Not Found - リソースが存在しない |
+| 500 | Internal Server Error |
+
+## 関連項目
+
+- [createRoute()](/reference/server/create-route)：カスタムルートの作成
+- [Server Adapters](/docs/server/server-adapters)：アダプターの使用

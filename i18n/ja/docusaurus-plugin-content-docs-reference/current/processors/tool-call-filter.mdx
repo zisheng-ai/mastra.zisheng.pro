@@ -1,0 +1,197 @@
+---
+title: "リファレンス: ToolCallFilter | Processors"
+description: "メッセージから Tool 呼び出しとその結果を除外する Mastra の ToolCallFilter processor のドキュメント。"
+packages:
+  - "@mastra/core"
+---
+
+# ToolCallFilter
+
+`ToolCallFilter` は、モデルへ送信する前にメッセージ履歴から Tool 呼び出しとその結果を除外する **input processor** です。特定の Tool 操作をコンテキストから除外したい場合や、すべての Tool 呼び出しを完全に削除したい場合に役立ちます。
+
+## 使用例
+
+```typescript
+import { ToolCallFilter } from '@mastra/core/processors'
+
+// Exclude all tool calls
+const filterAll = new ToolCallFilter()
+
+// Exclude specific tools by name
+const filterSpecific = new ToolCallFilter({
+  exclude: ['searchDatabase', 'sendEmail'],
+})
+
+// Enable filtering during agent loops and keep the two most recent tool-producing steps
+const filterAfterRecentTools = new ToolCallFilter({
+  filterAfterToolSteps: 2,
+})
+
+// Preserve compact model-facing output for filtered completed tool results
+const filterWithCompactToolHistory = new ToolCallFilter({
+  preserveModelOutput: true,
+})
+```
+
+## コンストラクターパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'Options',
+    description: 'Tool 呼び出しフィルターの設定オプション',
+    isOptional: true,
+    properties: [
+      {
+        type: 'Options',
+        parameters: [
+          {
+            name: 'exclude',
+            type: 'string[]',
+            description:
+              '除外する特定の Tool 名のリスト。指定しない場合や undefined の場合は、すべての Tool 呼び出しが除外されます',
+            isOptional: true,
+          },
+          {
+            name: 'filterAfterToolSteps',
+            type: 'number',
+            description:
+              'Agent ループ中のフィルタリングを有効にし、Tool を生成した直近の指定ステップ数に含まれる Tool 呼び出しと結果を保持します。undefined の場合、ステップのフィルタリングは無効です',
+            isOptional: true,
+          },
+          {
+            name: 'preserveModelOutput',
+            type: 'boolean',
+            description:
+              'providerMetadata.mastra.modelOutput を持つ、フィルタリング対象の完了済み Tool 結果について、モデル向けの簡潔な出力を保持します。生の Tool 引数と結果は削除されます',
+            isOptional: true,
+            defaultValue: 'false',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "'tool-call-filter' に設定された processor の識別子",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: "'ToolCallFilter' に設定された processor の表示名",
+    isOptional: false,
+  },
+  {
+    name: 'processInput',
+    type: '(args: { messages: MastraDBMessage[]; messageList: MessageList; abort: (reason?: string) => never; requestContext?: RequestContext }) => Promise<MessageList | MastraDBMessage[]>',
+    description: '設定に基づいて入力メッセージを処理し、Tool 呼び出しとその結果を除外します',
+    isOptional: false,
+  },
+  {
+    name: 'processInputStep',
+    type: '(args: ProcessInputStepArgs) => Promise<ProcessInputStepResult>',
+    description:
+      'filterAfterToolSteps が設定されている場合に Agent ループのステップ入力を処理します。ステップのフィルタリングが無効な場合は変更を返しません',
+    isOptional: false,
+  },
+]}
+/>
+
+## ステップのフィルタリング
+
+デフォルトでは、`ToolCallFilter` は Agent ループ開始前の初期入力だけをフィルタリングします。各ループステップでもフィルタリングするには、`filterAfterToolSteps` を設定します。
+
+`filterAfterToolSteps` は、Tool を生成したステップを数えます。たとえば `filterAfterToolSteps: 2` は、Tool を生成した直近2ステップの Tool 呼び出しと結果を保持し、それ以前の Tool 呼び出しと結果を除外します。Tool 以外のテキストはコンテキストに残ります。
+
+各ステップですべての過去の Tool 呼び出しと結果を除外するには、`filterAfterToolSteps: 0` を設定します。
+
+```typescript
+const filter = new ToolCallFilter({
+  filterAfterToolSteps: 2,
+})
+```
+
+## モデル向けの簡潔な出力を保持する
+
+フィルターが削除する完了済み Tool 結果について、簡潔な `toModelOutput` 履歴を保持するには、`preserveModelOutput: true` を設定します。これにより、生の `toolInvocation.args` と `toolInvocation.result` ペイロードを削除しつつ、モデル向けの出力をプロンプト内のテキストとして残せます。
+
+保持されるのは、`providerMetadata.mastra.modelOutput` を持つ完了済みの Tool 結果だけです。Tool 呼び出し、未完了の結果、保存済みのモデル出力がない結果は、引き続き除外されます。
+
+```typescript
+const filter = new ToolCallFilter({
+  preserveModelOutput: true,
+})
+```
+
+フィルタリング対象の Tool についてのみ簡潔な出力を保持するには、`preserveModelOutput` と `exclude` を組み合わせます。
+
+```typescript
+const filter = new ToolCallFilter({
+  exclude: ['searchDatabase'],
+  preserveModelOutput: true,
+})
+```
+
+## 詳細な使用例
+
+```typescript title="src/mastra/agents/filtered-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { ToolCallFilter } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'filtered-agent',
+  name: 'filtered-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: {
+    searchDatabase,
+    sendEmail,
+    getWeather,
+  },
+  inputProcessors: [
+    // Filter out database search tool calls from context
+    // to reduce token usage while keeping other tool interactions
+    new ToolCallFilter({
+      exclude: ['searchDatabase'],
+    }),
+  ],
+})
+```
+
+## すべての Tool 呼び出しをフィルタリングする
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { ToolCallFilter } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'no-tools-context-agent',
+  name: 'no-tools-context-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: {
+    searchDatabase,
+    sendEmail,
+  },
+  inputProcessors: [
+    // Remove all tool calls from the message history
+    // The agent can still use tools, but previous tool interactions
+    // won't be included in the context
+    new ToolCallFilter(),
+  ],
+})
+```
+
+## 関連情報
+
+- [Guardrails](/docs/agents/guardrails)

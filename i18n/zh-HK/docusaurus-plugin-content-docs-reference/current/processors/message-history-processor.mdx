@@ -1,0 +1,137 @@
+---
+title: "參考：MessageHistory | Processors"
+description: "Mastra 中 MessageHistory Processor 的文件；此 Processor 負責擷取及持久保存對話記錄。"
+packages:
+  - "@mastra/core"
+  - "@mastra/pg"
+---
+
+# MessageHistory
+
+`MessageHistory` 是一個 **hybrid processor**，同時負責擷取及持久保存訊息記錄。在輸入時，它會從儲存空間擷取歷史訊息，並加到對話開首。在輸出時，它會將新訊息持久保存至儲存空間。
+
+## 使用範例
+
+```typescript
+import { MessageHistory } from '@mastra/core/processors'
+
+const processor = new MessageHistory({
+  storage: memoryStorage,
+  lastMessages: 50,
+})
+```
+
+## 建構函數參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'MessageHistoryOptions',
+    description: '訊息記錄 Processor 的設定選項',
+    isOptional: false,
+    properties: [
+      {
+        type: 'MessageHistoryOptions',
+        parameters: [
+          {
+            name: 'storage',
+            type: 'MemoryStorage',
+            description: '用於擷取及持久保存訊息的儲存空間執行個體',
+            isOptional: false,
+          },
+          {
+            name: 'lastMessages',
+            type: 'number',
+            description: '要擷取的歷史訊息數目上限。如未指定，則擷取所有訊息',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "Processor 識別符，設定為 'message-history'",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: "Processor 顯示名稱，設定為 'MessageHistory'",
+    isOptional: false,
+  },
+  {
+    name: 'processInput',
+    type: '(args: { messages: MastraDBMessage[]; messageList: MessageList; abort: (reason?: string) => never; tracingContext?: TracingContext; requestContext?: RequestContext }) => Promise<MessageList | MastraDBMessage[]>',
+    description: '從儲存空間擷取歷史訊息，並將其加入訊息清單',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputResult',
+    type: '(args: { messages: MastraDBMessage[]; messageList: MessageList; abort: (reason?: string) => never; tracingContext?: TracingContext; requestContext?: RequestContext }) => Promise<MessageList>',
+    description: '將新訊息（用戶輸入及助理回應）持久保存至儲存空間，系統訊息除外',
+    isOptional: false,
+  },
+]}
+/>
+
+## 進階使用範例
+
+```typescript title="src/mastra/agents/memory-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { MessageHistory } from '@mastra/core/processors'
+import { PostgresStorage } from '@mastra/pg'
+
+const storage = new PostgresStorage({
+  connectionString: process.env.DATABASE_URL,
+})
+
+export const agent = new Agent({
+  id: 'memory-agent',
+  name: 'memory-agent',
+  instructions: 'You are a helpful assistant with conversation memory',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [
+    new MessageHistory({
+      storage,
+      lastMessages: 100,
+    }),
+  ],
+  outputProcessors: [
+    new MessageHistory({
+      storage,
+    }),
+  ],
+})
+```
+
+## 行為
+
+### 輸入處理
+
+1. 從請求內容中擷取 `threadId`
+1. 從儲存空間擷取歷史訊息（按建立日期降序排列）
+1. 篩除系統訊息（它們不應儲存在資料庫中）
+1. 將歷史訊息與傳入訊息合併，並按 ID 避免重複
+1. 為歷史訊息加入 `source: 'memory'` 標籤
+
+### 輸出處理
+
+1. 從請求內容中擷取 `threadId`
+1. 如記憶設定中已設定 `readOnly`，則略過持久保存
+1. 從訊息中篩除未完成的 Tool 呼叫
+1. 將新的用戶輸入及助理回應訊息持久保存至儲存空間
+1. 更新 Thread 的 `updatedAt` 時間戳記
+
+## 相關內容
+
+- [Guardrails](/docs/agents/guardrails)

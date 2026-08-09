@@ -1,0 +1,691 @@
+---
+title: 'リファレンス：DurableAgent | Agents'
+description: 'Agent を耐久実行と再開可能な Stream でラップする DurableAgent の API リファレンスです。'
+packages:
+  - '@mastra/core'
+---
+
+# DurableAgent
+
+`DurableAgent` は既存の [`Agent`](/reference/agents/agent) を耐久実行と再開可能な Stream でラップします。クライアントがイベントを失わずに切断・再接続できるよう Agentic Loop を実行し、イベントを [PubSub](/docs/server/pubsub) 経由でストリーミングします。Run を単一リクエストより長く継続させる場合や、接続切断後も維持する必要がある場合に使用します。
+
+[`createDurableAgent`](#createdurableagentoptions) ファクトリで作成します。組み込み Workflow Engine で Fire-and-forget 実行するには [`createEventedAgent`](#createeventedagentoptions) を使用します。Inngest を利用する実行には、`@mastra/inngest` の [`createInngestAgent`](/reference/agents/inngest-agent) を使用します。
+
+## 使用例
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Agent } from '@mastra/core/agent'
+import { createDurableAgent } from '@mastra/core/agent/durable'
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'My Agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const durableAgent = createDurableAgent({ agent })
+
+export const mastra = new Mastra({
+  agents: { myAgent: durableAgent },
+})
+```
+
+レスポンスをストリーミングして結果を読み取ります。Run の使用を終えたら、`cleanup` 関数で PubSub の購読を解除します。
+
+```typescript
+const { output, runId, cleanup } = await durableAgent.stream('Hello!')
+
+const text = await output.text
+
+cleanup()
+```
+
+### `durable` 設定フラグの使用
+
+`AgentConfig` に `durable: true` を設定すると、Agent を `Mastra` インスタンスへ登録したときに `createDurableAgent` で自動的にラップされます。`cache`、`pubsub`、`maxSteps`、`cleanupTimeoutMs` などの高度なオプションを渡すにはオブジェクトを使います。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Agent } from '@mastra/core/agent'
+
+const myAgent = new Agent({
+  id: 'my-agent',
+  name: 'My Agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  durable: true, // or: { maxSteps: 10, cleanupTimeoutMs: 60_000 }
+})
+
+export const mastra = new Mastra({
+  agents: { myAgent },
+})
+```
+
+`mastra.getAgent('myAgent')` はラップされた `DurableAgent` を返します。スタンドアロン Agent（作成後に `Mastra` インスタンスへ登録されていない Agent）は Durable になりません。ラップは登録時に適用されます。
+
+## `createDurableAgent(options)`
+
+`Agent` を耐久実行と再開可能な Stream でラップします。`DurableAgent` の推奨作成方法です。
+
+```typescript
+import { createDurableAgent } from '@mastra/core/agent/durable'
+
+const durableAgent = createDurableAgent({ agent })
+```
+
+戻り値： `DurableAgent`
+
+### パラメータ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'Agent',
+    isOptional: false,
+    description: '耐久実行機能でラップする Agent。Agent のメソッドはこの Agent へ委譲されます。',
+  },
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: true,
+    description: 'ID の上書き値。',
+    defaultValue: 'agent.id',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    isOptional: true,
+    description: '名前の上書き値。',
+    defaultValue: 'agent.name',
+  },
+  {
+    name: 'cache',
+    type: 'MastraServerCache | false',
+    isOptional: true,
+    description:
+      '保存済み Stream イベントの Cache。Stream の再開を可能にします。省略すると、Agent は Mastra インスタンスの Cache を継承するか、InMemoryServerCache を使用します。Cache を無効にして Stream を再開不可にするには `false` を設定します。',
+  },
+  {
+    name: 'pubsub',
+    type: 'PubSub',
+    isOptional: true,
+    description: 'イベントをストリーミングする PubSub インスタンス。',
+    defaultValue: 'EventEmitterPubSub',
+  },
+  {
+    name: 'maxSteps',
+    type: 'number',
+    isOptional: true,
+    description: 'Agentic Loop の最大 Step 数。',
+  },
+]}
+/>
+
+## `createEventedAgent(options)`
+
+組み込み Workflow Engine 上で `Agent` を Fire-and-forget の耐久実行でラップします。`createDurableAgent` と同様にストリーミング可能な結果を返しますが、基盤の Workflow は Stream の接続前に完了まで実行されず、`startAsync` によりノンブロッキングで動作します。呼び出し元とは独立して Run を進める場合に使用します。`id` と `name` の上書きは受け付けません。
+
+```typescript
+import { createEventedAgent } from '@mastra/core/agent/durable'
+
+const eventedAgent = createEventedAgent({ agent })
+```
+
+戻り値： `EventedAgent` (a subclass of `DurableAgent`)
+
+### パラメータ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'Agent',
+    isOptional: false,
+    description: 'イベント駆動の耐久実行機能でラップする Agent。',
+  },
+  {
+    name: 'cache',
+    type: 'MastraServerCache | false',
+    isOptional: true,
+    description:
+      '保存済み Stream イベントの Cache。Stream の再開を可能にします。省略すると、Agent は Mastra インスタンスの Cache を継承するか、InMemoryServerCache を使用します。Cache を無効にするには `false` を設定します。',
+  },
+  {
+    name: 'pubsub',
+    type: 'PubSub',
+    isOptional: true,
+    description: 'イベントをストリーミングする PubSub インスタンス。',
+    defaultValue: 'EventEmitterPubSub',
+  },
+  {
+    name: 'maxSteps',
+    type: 'number',
+    isOptional: true,
+    description: 'Agentic Loop の最大 Step 数。',
+  },
+]}
+/>
+
+## コンストラクターのパラメータ
+
+`DurableAgent` クラスは、`createDurableAgent` と同じオプションに加えて `cleanupTimeoutMs` を受け取ります。サブクラス化が必要な場合を除き、ファクトリを推奨します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'Agent',
+    isOptional: false,
+    description: '耐久実行機能でラップする Agent。',
+  },
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: true,
+    description: 'ID の上書き値。',
+    defaultValue: 'agent.id',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    isOptional: true,
+    description: '名前の上書き値。',
+    defaultValue: 'agent.name',
+  },
+  {
+    name: 'cache',
+    type: 'MastraServerCache | false',
+    isOptional: true,
+    description:
+      '保存済み Stream イベントの Cache。省略すると Mastra インスタンスから継承するか、InMemoryServerCache を使用します。Cache を無効にするには `false` を設定します。',
+  },
+  {
+    name: 'pubsub',
+    type: 'PubSub',
+    isOptional: true,
+    description: 'イベントをストリーミングする PubSub インスタンス。',
+    defaultValue: 'EventEmitterPubSub',
+  },
+  {
+    name: 'maxSteps',
+    type: 'number',
+    isOptional: true,
+    description: 'Agentic Loop の最大 Step 数。',
+  },
+  {
+    name: 'cleanupTimeoutMs',
+    type: 'number',
+    isOptional: true,
+    description:
+      'Stream の完了またはエラー後、Registry エントリが自動削除されるまでの猶予時間（ミリ秒）。自動 Cleanup を無効にし、`cleanup()` の手動呼び出しを必須にするには 0 を設定します。Suspend イベントでは自動 Cleanup は実行されません。',
+    defaultValue: '30000',
+  },
+]}
+/>
+
+## メソッド
+
+### 実行
+
+#### `stream(messages, options?)`
+
+耐久実行でレスポンスをストリーミングします。Run の進行に応じて `output` がイベントを生成する結果をすぐに返します。
+
+```typescript
+const { output, runId, cleanup } = await durableAgent.stream('Hello!', {
+  onChunk: chunk => console.log(chunk),
+  onFinish: result => console.log('done', result),
+})
+
+const text = await output.text
+cleanup()
+```
+
+戻り値： [`Promise<DurableAgentStreamResult>`](#durableagentstreamresult)
+
+#### `resume(runId, resumeData, options?)`
+
+Tool の承認後などに Suspend された Run を再開します。元の Stream の `runId` と、Run が待機していたデータを渡します。Run の Registry エントリが存在しない場合はエラーをスローします。
+
+```typescript
+const { output, cleanup } = await durableAgent.resume(runId, {
+  approved: true,
+})
+
+await output.text
+cleanup()
+```
+
+戻り値： [`Promise<DurableAgentStreamResult>`](#durableagentstreamresult)
+
+#### `observe(runId, options?)`
+
+既存の Run へ再接続し、ライブイベントを配信する前に Cache 済みイベントを再生します。ネットワーク切断後に使用します。既知の位置から再生を始めるには `offset` を渡します。
+
+```typescript
+const { output, cleanup } = await durableAgent.observe(runId, {
+  offset: 0,
+  onChunk: chunk => console.log(chunk),
+})
+
+await output.text
+```
+
+デフォルトでは、`observe()` はイベントを無期限に待機します。Run を実行するプロセスが予期せず停止すると、Run はイベント生成を止めても完了イベントを送出しないため、監視中の Stream は永遠に待機します。待機時間を制限するには `idleTimeoutMs` を渡します。指定したミリ秒の間イベントがなければ Stream が終了します。最初に任意の `isAlive` 検査が実行されます。長時間の Tool 呼び出し中や、人の入力を待って一時停止している場合など、Run の処理が続いている間は `true` を返すと待機を継続します。`false` を返すか `isAlive` を省略すると、Stream はエラーで終了します。`isAlive` が一時的に例外をスローしても「稼働中」と見なされるため、一時的な検査失敗でライブ Stream が終了することはありません。
+
+```typescript
+const { output } = await durableAgent.observe(runId, {
+  idleTimeoutMs: 30_000,
+  isAlive: () => runHeartbeat.isFresh(runId),
+})
+```
+
+アイドルタイムアウトで Run を終了すると、エラー終了時と同じ Cleanup（以下の警告を参照）が実行され、Cache 状態は保持されず解放されます。どちらのオプションも明示的に有効化します。従来どおり無期限に待機するには省略してください。
+
+戻り値： `Promise<DurableAgentStreamResult>`
+
+:::warning
+
+`observe()` が返す `cleanup()` は、Run の Registry エントリと Cache 済みイベントを破棄します。Run の使用を終えたときだけ呼び出してください。Run が Suspend 中で後から再開する場合は、`cleanup()` を呼び出さないでください。Run の完了またはエラー後に自動 Cleanup Timer へ処理を任せます。Suspend イベントでは自動 Cleanup は実行されません。
+
+:::
+
+#### `prepare(messages, options?)`
+
+Run を開始せずに耐久実行の準備をします。Run を内部 Registry へ登録し、シリアライズ済み Workflow 入力を返します。Workflow を起動するタイミングと方法を制御する場合に使用します。
+
+```typescript
+const { runId, messageId, workflowInput, threadId, resourceId } = await durableAgent.prepare(
+  'Summarize the document',
+  {
+    memory: { threadId: 'thread-1', resourceId: 'user-1' },
+  },
+)
+```
+
+戻り値：
+
+```typescript
+interface PrepareResult {
+  runId: string
+  messageId: string
+  workflowInput: any
+  registryEntry: object
+  threadId?: string
+  resourceId?: string
+}
+```
+
+### 復旧
+
+#### `recoverActiveRuns(options?)`
+
+この Agent で `running` ステータスのまま停止している Run を検出し、最後に永続化された Snapshot から再実行します。最大 `options.limit` 件（デフォルト：100）の Run を復旧し、復旧結果の概要を返します。
+
+```typescript
+const result = await durableAgent.recoverActiveRuns()
+// { recovered: [{ runId, status }], succeeded: 2, failed: 0 }
+```
+
+既知の Run を1件復旧するには `runId` を渡します。
+
+```typescript
+await durableAgent.recoverActiveRuns({ runId: 'run-abc-123' })
+```
+
+戻り値：
+
+```typescript
+interface DurableAgentRecoverActiveRunsResult {
+  recovered: Array<{ runId: string; status: 'success' | 'failed'; error?: Error }>
+  succeeded: number
+  failed: number
+}
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options.runId',
+    type: 'string',
+    isOptional: true,
+    description: 'ID を指定して特定の Run を復旧します。設定すると、検出 Filter は無視されます。',
+  },
+  {
+    name: 'options.limit',
+    type: 'number',
+    isOptional: true,
+    description: '検出するアクティブ Run の最大数。デフォルトは 100 です。',
+  },
+  {
+    name: 'options.createdBefore',
+    type: 'Date',
+    isOptional: true,
+    description: 'この日時より前に作成された Run だけを復旧します。',
+  },
+]}
+/>
+
+#### `recover(runId, options?)`
+
+ID を指定して1件の Run を復旧します。`stream()` と同じ形式のストリーミング可能な結果を返します。復旧 Stream をリアルタイムで監視する場合に使用します。
+
+```typescript
+const { output, cleanup } = await durableAgent.recover('run-abc-123', {
+  onChunk: chunk => console.log(chunk),
+  onError: ({ error }) => console.error(error),
+})
+
+await output.text
+cleanup()
+```
+
+戻り値： [`Promise<DurableAgentStreamResult>`](#durableagentstreamresult)
+
+## Stream オプション
+
+`stream()` は `DurableAgentStreamOptions` オブジェクトを受け取ります。以下の Agent 実行オプションとライフサイクル Callback に対応します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'runId',
+    type: 'string',
+    isOptional: true,
+    description: 'この Run の一意な識別子。後から `resume()` または `observe()` で使用します。',
+  },
+  {
+    name: 'instructions',
+    type: "AgentExecutionOptions['instructions']",
+    isOptional: true,
+    description:
+      "この Run で Agent のデフォルト instructions を上書きします。静的文字列、または Agent が対応する動的 instructions 値を受け取ります。",
+  },
+  {
+    name: 'context',
+    type: 'ModelMessage[]',
+    isOptional: true,
+    description: 'Agent へ渡す追加のコンテキストメッセージ。',
+  },
+  {
+    name: 'memory',
+    type: 'object',
+    isOptional: true,
+    description: '会話の永続化と取得に使う Memory 設定。',
+  },
+  {
+    name: 'requestContext',
+    type: 'RequestContext',
+    isOptional: true,
+    description: 'この Run の動的設定と状態を保持するリクエストコンテキスト。',
+  },
+  {
+    name: 'maxSteps',
+    type: 'number',
+    isOptional: true,
+    description: 'この Stream で実行する最大 Step 数。',
+  },
+  {
+    name: 'toolsets',
+    type: 'object',
+    isOptional: true,
+    description: 'この Run で利用できる追加 Tool Set。',
+  },
+  {
+    name: 'clientTools',
+    type: 'object',
+    isOptional: true,
+    description: '実行中に利用できるクライアント側 Tool。',
+  },
+  {
+    name: 'toolChoice',
+    type: "'auto' | 'none' | 'required' | { type: 'tool'; toolName: string }",
+    isOptional: true,
+    description: 'Tool の選択方式。',
+  },
+  {
+    name: 'activeTools',
+    type: 'string[]',
+    isOptional: true,
+    description: "Agent の Tool のうち、指定したサブセットだけに実行を制限します。",
+  },
+  {
+    name: 'modelSettings',
+    type: 'object',
+    isOptional: true,
+    description:
+      'Temperature など、モデル固有の設定。Credential を含む Header（`Authorization`、`X-Api-Key` など）は、シリアライズ済み Snapshot がプロセス境界を越える前に削除されます。',
+  },
+  {
+    name: 'stopWhen',
+    type: "AgentExecutionOptions['stopWhen']",
+    isOptional: true,
+    description:
+      'Agentic Loop を早期終了する述語または Composition。Closure はプロセス内の Run Registry に保持されます。プロセス間の再開時は `maxSteps` のみへ縮退します。',
+  },
+  {
+    name: 'system',
+    type: 'string | string[]',
+    isOptional: true,
+    description: 'Agent instructions の後、ユーザーメッセージの前に追加されるシステムメッセージ。',
+  },
+  {
+    name: 'requireToolApproval',
+    type: 'boolean | ((args: { toolName: string; args: unknown; requestContext: RequestContext; workspace?: string }) => boolean | Promise<boolean>)',
+    isOptional: true,
+    description:
+      'Tool 呼び出しに承認を必須とします。すべてを制御するには `true` または `false`、呼び出しごとの Policy には関数を渡します。関数形式の Policy はプロセス内 Run Registry に保持されます。プロセス間の再開時は `true` の Shadow へフォールバックします。',
+  },
+  {
+    name: 'autoResumeSuspendedTools',
+    type: 'boolean',
+    isOptional: true,
+    description: '外部からの `resume()` 呼び出しを待たず、Suspend した Tool を自動的に再開します。',
+  },
+  {
+    name: 'toolCallConcurrency',
+    type: 'number',
+    isOptional: true,
+    description: '同時に実行する Tool 呼び出しの最大数。',
+  },
+  {
+    name: 'includeRawChunks',
+    type: 'boolean',
+    isOptional: true,
+    description: 'Stream 出力に Provider の生チャンクを含めます。',
+  },
+  {
+    name: 'maxProcessorRetries',
+    type: 'number',
+    isOptional: true,
+    description: '1回の生成で Processor を再試行する最大回数。',
+  },
+  {
+    name: 'structuredOutput',
+    type: 'object',
+    isOptional: true,
+    description: '構造化出力の設定。',
+  },
+  {
+    name: 'untilIdle',
+    type: 'boolean | { maxIdleMs?: number }',
+    isOptional: true,
+    description:
+      '設定すると、Agent がアイドル状態になるまで、バックグラウンド Task の継続をまたいで Stream を開いたままにします。デフォルトの5分間のアイドルタイムアウトには `true`、カスタマイズするには `{ maxIdleMs }` を渡します。非推奨の `streamUntilIdle()` メソッドと同等です。`resume()` でも使用できます。',
+  },
+  {
+    name: 'disableBackgroundTasks',
+    type: 'boolean',
+    isOptional: true,
+    description: 'この Run でバックグラウンド Task の Dispatch を無効にします。バックグラウンド実行可能な Tool は代わりにインライン実行されます。',
+  },
+  {
+    name: 'tracingOptions',
+    type: "AgentExecutionOptions['tracingOptions']",
+    isOptional: true,
+    description:
+      'Agent とモデルの Span へ転送する Tracing メタデータ、Tag、Trace ID、親 Span ID、`requestContextKeys`。完全に JSON シリアライズ可能です。',
+  },
+  {
+    name: 'actor',
+    type: "AgentExecutionOptions['actor']",
+    isOptional: true,
+    description: 'FGA 検査と Tool 実行へ転送する呼び出し単位の Actor Signal。',
+  },
+  {
+    name: 'transform',
+    type: "AgentExecutionOptions['transform']",
+    isOptional: true,
+    description:
+      '呼び出し単位の Tool Payload 変換 Policy。`transformToolPayload` Closure はプロセス内 Run Registry に保持され、JSON-safe な `targets` Shadow だけがシリアライズされます。',
+  },
+  {
+    name: 'prepareStep',
+    type: "AgentExecutionOptions['prepareStep']",
+    isOptional: true,
+    description:
+      '各反復の開始時に `PrepareStepProcessor` として呼び出される Step 単位の準備 Hook。Closure のみで、プロセス内 Run Registry に保存されます。プロセス間の再開では Hook が失われます。',
+  },
+  {
+    name: 'isTaskComplete',
+    type: "AgentExecutionOptions['isTaskComplete']",
+    isOptional: true,
+    description:
+      '呼び出し単位の完了 Policy。Scorer インスタンスと `onComplete` はプロセス内 Run Registry に保持されます。JSON-safe な Primitive（`strategy`、`timeout`、`parallel`、`suppressFeedback`、`scorerNames`）はプロセス間の可観測性のためにシリアライズされます。',
+  },
+  {
+    name: 'delegation',
+    type: "AgentExecutionOptions['delegation']",
+    isOptional: true,
+    description:
+      'Sub-agent の委譲 Hook（`onDelegationStart`、`onDelegationComplete`、`messageFilter`）。Callback は準備時に Sub-agent Tool Wrapper へ組み込まれます。プロセス間の再開では Callback が失われます。',
+  },
+  {
+    name: 'versions',
+    type: 'object',
+    isOptional: true,
+    description: 'Sub-agent の委譲に使うバージョン上書き。',
+  },
+  {
+    name: 'abortSignal',
+    type: 'AbortSignal',
+    isOptional: true,
+    description:
+      "外部 Abort Signal。Durable Run 内部の `AbortController` へ転送されるため、どちらからでも Run をキャンセルできます。プロセス間の再開では Signal を復元できません。再開後にも中止可能にするには、新しい Signal を `resume()` へ渡します。",
+  },
+  {
+    name: 'onChunk',
+    type: '(chunk: ChunkType) => void | Promise<void>',
+    isOptional: true,
+    description: 'ストリーミングされる各チャンクで呼び出されます。',
+  },
+  {
+    name: 'onStepFinish',
+    type: '(result: AgentStepFinishEventData) => void | Promise<void>',
+    isOptional: true,
+    description: 'Agentic Loop の Step が完了したときに呼び出されます。',
+  },
+  {
+    name: 'onFinish',
+    type: '(result: AgentFinishEventData) => void | Promise<void>',
+    isOptional: true,
+    description: 'Run が完了したときに呼び出されます。',
+  },
+  {
+    name: 'onError',
+    type: '(error: Error) => void | Promise<void>',
+    isOptional: true,
+    description: 'Run でエラーが発生したときに呼び出されます。',
+  },
+  {
+    name: 'onSuspended',
+    type: '(data: AgentSuspendedEventData) => void | Promise<void>',
+    isOptional: true,
+    description: 'Tool の承認などで Run が Suspend したときに呼び出されます。',
+  },
+  {
+    name: 'onAbort',
+    type: "AgentExecutionOptions['onAbort']",
+    isOptional: true,
+    description: '`abortSignal` または `result.abort()` で Run が中止されたときに呼び出されます。',
+  },
+  {
+    name: 'onIterationComplete',
+    type: "AgentExecutionOptions['onIterationComplete']",
+    isOptional: true,
+    description:
+      '各 Agentic Loop 反復後、最新の `messageList`、`finishReason`、`isFinal` フラグとともに呼び出されます。Durable Agent では監視専用で、`continue: false` や Feedback を返しても Loop に影響しません。',
+  },
+]}
+/>
+
+`resume()` と `observe()` は同じライフサイクル Callback（`onChunk`、`onStepFinish`、`onFinish`、`onError`、`onSuspended`）を受け取ります。`observe()` は再生開始位置を制御する `offset` も受け取ります。
+
+## DurableAgentStreamResult
+
+`stream()`、`resume()`、`observe()`、`recover()` が返すオブジェクトです。
+
+```typescript
+interface DurableAgentStreamResult<OUTPUT = undefined> {
+  output: MastraModelOutput<OUTPUT>
+  readonly fullStream: ReadableStream<any>
+  runId: string
+  threadId?: string
+  resourceId?: string
+  cleanup: () => void
+  abort: () => void
+}
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'output',
+    type: 'MastraModelOutput',
+    description: 'ストリーミング出力。全文を得るには `output.text` を await し、または `output.fullStream` を消費します。',
+  },
+  {
+    name: 'fullStream',
+    type: 'ReadableStream',
+    description: '`output.fullStream` へ委譲する完全なイベント Stream。',
+  },
+  {
+    name: 'runId',
+    type: 'string',
+    description: '一意の Run ID。再接続するには `resume()` または `observe()` へ渡します。',
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    isOptional: true,
+    description: 'Memory 使用時の Thread ID。',
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    isOptional: true,
+    description: 'Memory 使用時の Resource ID。',
+  },
+  {
+    name: 'cleanup',
+    type: '() => void',
+    description: 'PubSub の購読を解除し、Run の Registry エントリを削除します。Run の使用を終えたら呼び出します。',
+  },
+  {
+    name: 'abort',
+    type: '() => void',
+    description:
+      '内部の `AbortController` を切り替えて Run を中止します。Durable LLM 実行 Step 内では `AbortError` として表面化し、`onAbort` Callback が発火します。Run 完了後に呼び出しても安全で、その場合は何も行いません。',
+  },
+]}
+/>
+
+## 関連項目
+
+- [`createInngestAgent()`](/reference/agents/inngest-agent)
+- [Agent クラス](/reference/agents/agent)
+- [PubSub](/docs/server/pubsub)
+- [`.getMemory()`](/reference/agents/getMemory)

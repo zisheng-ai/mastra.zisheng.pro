@@ -1,0 +1,142 @@
+---
+title: "Quick Checks | Evals"
+description: "无需 LLM 的微型 Scorer，用于对 Agent 输出文本和 Tool 使用情况进行快速、确定性的断言。"
+packages:
+  - "@mastra/evals"
+---
+
+# Quick Checks
+
+Quick Checks 是可组合的微型 Scorer，用于处理“输出包含 X”或“Agent 调用了 Tool Y”等常见断言。它们无需 LLM，可以即时运行，并且与其他 Scorer 一样接入同一个 `scorers: [...]` 数组。
+
+## 何时使用 Quick Checks
+
+当需要快速、确定性的断言时，请使用 Quick Checks：
+
+- 验证输出文本包含或排除特定字符串
+- 确认 Agent 调用或避开了特定 Tool
+- 验证 Tool 调用顺序和次数限制
+- 使用零成本二元检查为 CI Pipeline 设置 Gate
+- 与基于 LLM 的 Scorer 结合，进行分层评估
+
+对于主观或语义评估，请改用[基于 LLM 的 Scorer](/docs/evals/built-in-scorers)。
+
+## Quickstart
+
+```typescript title="src/evals/weather-checks.ts"
+import { checks } from '@mastra/evals/checks'
+import { runEvals } from '@mastra/core/evals'
+import { weatherAgent } from '../agents'
+
+const result = await runEvals({
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  target: weatherAgent,
+  scorers: [checks.includes('Brooklyn'), checks.calledTool('get_weather'), checks.noToolErrors()],
+})
+
+console.log(result.scores)
+// { 'check-includes': 1, 'check-called-tool': 1, 'check-no-tool-errors': 1 }
+```
+
+## 可用检查
+
+Quick Checks 分为以下几类：
+
+### 文本检查
+
+这些 Scorer 用于评估 Agent 的文本输出：
+
+| 检查 | 作用 | 分数 |
+| - | - | - |
+| `checks.includes(str)` | 输出包含子字符串 | 1 或 0 |
+| `checks.excludes(str)` | 输出不包含子字符串 | 1 或 0 |
+| `checks.equals(str)` | 输出与字符串完全相等 | 1 或 0 |
+| `checks.matches(regex)` | 输出与正则表达式匹配 | 1 或 0 |
+| `checks.similarity(str)` | 与字符串的 Dice 系数相似度 | 0-1（或设置 `threshold` 后返回二元结果） |
+
+### Tool 调用检查
+
+这些 Scorer 根据 Agent 运行情况评估 Tool 使用方式：
+
+| 检查 | 作用 | 分数 |
+| - | - | - |
+| `checks.calledTool(name)` | Tool 至少被调用 N 次 | 1 或 0 |
+| `checks.didNotCall(name)` | Tool 未被调用 | 1 或 0 |
+| `checks.toolOrder([...])` | Tool 按预期顺序调用 | 1 或 0 |
+| `checks.maxToolCalls(n)` | Tool 调用总次数不超过 N | 1 或 0 |
+| `checks.usedNoTools()` | 完全没有调用 Tool | 1 或 0 |
+| `checks.noToolErrors()` | Tool 调用均未发生错误 | 1 或 0 |
+
+## 将检查与 LLM Scorer 结合
+
+在一次 `runEvals` 调用中，检查可以与基于 LLM 的 Scorer 组合使用。使用检查实现确定性的 Gate，使用 LLM Scorer 进行定性评估：
+
+```typescript title="src/evals/layered-eval.ts"
+import { checks } from '@mastra/evals/checks'
+import { createFaithfulnessScorer } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+import { myAgent } from '../agents'
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'What is the weather in Brooklyn?',
+      context: ['Brooklyn weather data: sunny, 72°F'],
+    },
+  ],
+  target: myAgent,
+  scorers: [
+    // Deterministic checks (instant, free)
+    checks.includes('Brooklyn'),
+    checks.calledTool('get_weather'),
+    checks.excludes('error'),
+    checks.noToolErrors(),
+
+    // LLM-based scorer (semantic, costs tokens)
+    createFaithfulnessScorer({ model: '__GATEWAY_OPENAI_MODEL_MINI__' }),
+  ],
+})
+```
+
+## 在实时评分中使用检查
+
+将检查附加到 Agent，以进行持续监控：
+
+```typescript title="src/agents/weather-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { checks } from '@mastra/evals/checks'
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: 'Answer weather questions using the get_weather tool.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { get_weather: weatherTool },
+  scorers: {
+    noErrors: {
+      scorer: checks.noToolErrors(),
+      sampling: { type: 'ratio', rate: 1 },
+    },
+    mentionCity: {
+      scorer: checks.includes('Brooklyn'),
+      sampling: { type: 'ratio', rate: 0.5 },
+    },
+  },
+})
+```
+
+## 检查的工作原理
+
+每项检查都是标准的 `createScorer()` 实例，包含一个 `preprocess` Step 和一个 `generateScore` Step。它们遵循与其他 Scorer 相同的[四步 Pipeline](/docs/evals/custom-scorers#the-four-step-pipeline)：
+
+1. **preprocess**：从 Agent 运行中提取并标准化相关数据（文本内容、Tool 调用）
+1. **generateScore**：将预处理后的结果转换为分数（通常为二元值 1 或 0）
+
+由于检查会跳过 `analyze` 和 `generateReason` Step，且不会调用 LLM，因此可以在微秒内运行。有关完整 API，包括每项检查的所有参数和选项，请访问 [Quick Checks Reference](/reference/evals/checks)。
+
+## 相关内容
+
+- [Quick Checks Reference](/reference/evals/checks)
+- [内置 Scorer](/docs/evals/built-in-scorers)
+- [自定义 Scorer](/docs/evals/custom-scorers)
+- [`runEvals()` Reference](/reference/evals/run-evals)

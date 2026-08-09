@@ -1,0 +1,249 @@
+---
+title: "中间件 | 服务器"
+description: "应用自定义中间件函数来拦截请求。"
+packages:
+  - "@mastra/core"
+  - "@mastra/server"
+---
+
+# 中间件
+
+Mastra 服务器可以在调用 API 路由 handler 之前或之后执行自定义中间件函数。这适用于身份验证、日志记录、注入请求特定的上下文或添加 CORS 标头等场景。
+
+中间件接收 [Hono](https://hono.dev) `Context`（`c`）和 `next` 函数。如果返回 `Response`，请求将短路。调用 `next()` 会继续处理下一个中间件或路由 handler。
+
+```typescript
+import { Mastra } from '@mastra/core'
+
+export const mastra = new Mastra({
+  server: {
+    middleware: [
+      {
+        handler: async (c, next) => {
+          // Example: Add authentication check
+          const authHeader = c.req.header('Authorization')
+          if (!authHeader) {
+            return new Response('Unauthorized', { status: 401 })
+          }
+
+          await next()
+        },
+        path: '/api/*',
+      },
+      // Add a global request logger
+      async (c, next) => {
+        console.log(`${c.req.method} ${c.req.url}`)
+        await next()
+      },
+    ],
+  },
+})
+```
+
+要将中间件附加到单个路由，请向 `registerApiRoute` 传递 `middleware` 选项：
+
+```typescript
+registerApiRoute('/my-custom-route', {
+  method: 'GET',
+  middleware: [
+    async (c, next) => {
+      console.log(`${c.req.method} ${c.req.url}`)
+      await next()
+    },
+  ],
+  handler: async c => {
+    const mastra = c.get('mastra')
+    return c.json({ message: 'Hello, world!' })
+  },
+})
+```
+
+## 常见示例
+
+### 使用 `RequestContext`
+
+可以通过从请求中提取信息，在运行时服务器中间件中填充 `RequestContext`。本示例根据 Cloudflare `CF-IPCountry` 标头设置 `temperature-unit`，以确保响应与用户的区域设置匹配。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RequestContext } from '@mastra/core/request-context'
+import { testWeatherAgent } from './agents/test-weather-agent'
+
+export const mastra = new Mastra({
+  agents: { testWeatherAgent },
+  server: {
+    middleware: [
+      async (context, next) => {
+        const country = context.req.header('CF-IPCountry')
+        const requestContext = context.get('requestContext')
+
+        requestContext.set('temperature-unit', country === 'US' ? 'fahrenheit' : 'celsius')
+
+        await next()
+      },
+    ],
+  },
+})
+```
+
+### 身份验证
+
+```typescript prettier:false
+{
+  handler: async (c, next) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+
+    // Validate token here
+    await next();
+  },
+  path: '/api/*',
+}
+```
+
+### 授权（用户隔离）
+
+身份验证用于验证用户身份，授权则控制用户可以访问的内容。如果没有资源 ID 作用域，已认证用户可能通过猜测 ID 或操纵 `resourceId` 参数来访问其他用户的 Thread。
+
+将内存和 Thread 限定到已认证用户的最简单方法，是使用身份验证配置中的 `mapUserToResourceId` 回调：
+
+```typescript
+import { Mastra } from '@mastra/core'
+
+export const mastra = new Mastra({
+  server: {
+    auth: {
+      authenticateToken: async token => {
+        return verifyToken(token) // { id: 'user-123', orgId: 'org-456', ... }
+      },
+      mapUserToResourceId: user => user.id,
+    },
+  },
+})
+```
+
+身份验证成功后，会使用已认证用户对象调用 `mapUserToResourceId`。返回值会在请求上下文中设置为 `MASTRA_RESOURCE_ID_KEY`，且适用于所有服务器 Adapter（Hono、Express、Next.js 等）。
+
+资源 ID 不必是 `user.id`。常见模式包括：
+
+```typescript
+// Org-scoped
+mapUserToResourceId: user => `${user.orgId}:${user.id}`
+
+// From a JWT claim
+mapUserToResourceId: user => user.tenantId
+
+// Composite key
+mapUserToResourceId: user => `${user.workspaceId}:${user.projectId}:${user.id}`
+```
+
+设置资源 ID 后，服务器会自动：
+
+- **筛选 Thread 列表**，仅返回用户拥有的 Thread
+- **验证 Thread 访问**，访问其他用户的 Thread 时返回 403
+- **强制创建 Thread** 时使用已认证用户的 ID
+- **验证消息操作**（包括删除），确保消息属于用户拥有的 Thread
+
+即使客户端传递 `?resourceId=other-user-id`，由身份验证设置的值也优先。尝试访问其他用户拥有的 Thread 或消息会返回 403 错误。
+
+#### 高级：在中间件中设置资源 ID
+
+对于更复杂的场景（例如从数据库查询资源 ID），可以直接在中间件中设置 `MASTRA_RESOURCE_ID_KEY`：
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { MASTRA_RESOURCE_ID_KEY } from '@mastra/core/request-context'
+import { getAuthenticatedUser } from '@mastra/server/auth'
+
+export const mastra = new Mastra({
+  server: {
+    auth: {
+      authenticateToken: async token => verifyToken(token),
+    },
+    middleware: [
+      {
+        path: '/api/*',
+        handler: async (c, next) => {
+          const token = c.req.header('Authorization')
+          if (!token) {
+            return c.json({ error: 'Unauthorized' }, 401)
+          }
+
+          const user = await getAuthenticatedUser<{ id: string }>({
+            mastra: c.get('mastra'),
+            token,
+            request: c.req.raw,
+          })
+          const requestContext = c.get('requestContext')
+
+          if (!user) {
+            return c.json({ error: 'Unauthorized' }, 401)
+          }
+
+          requestContext.set(MASTRA_RESOURCE_ID_KEY, user.id)
+          return next()
+        },
+      },
+    ],
+  },
+})
+```
+
+`server.middleware` 在 Mastra 的单路由身份验证检查之前运行。当中间件需要已认证用户时，请调用 `getAuthenticatedUser()` 从配置的身份验证 Provider 中解析用户，而不更改默认路由身份验证流程。
+
+#### 使用 `MASTRA_THREAD_ID_KEY`
+
+也可以设置 `MASTRA_THREAD_ID_KEY`，以覆盖客户端提供的 Thread ID：
+
+```typescript
+import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from '@mastra/core/request-context'
+
+// Force operations to use a specific thread
+requestContext.set(MASTRA_THREAD_ID_KEY, validatedThreadId)
+```
+
+当需要将操作限制为已通过其他方式验证的特定 Thread 时，此功能很有用。
+
+### CORS 支持
+
+```typescript prettier:false
+{
+  handler: async (c, next) => {
+    c.header('Access-Control-Allow-Origin', '*');
+    c.header(
+      'Access-Control-Allow-Methods',
+      'GET, POST, PUT, DELETE, OPTIONS',
+    );
+    c.header(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization',
+    );
+
+    if (c.req.method === 'OPTIONS') {
+      return new Response(null, { status: 204 });
+    }
+
+    await next();
+  },
+}
+```
+
+### 请求日志记录
+
+```typescript prettier:false
+{
+  handler: async (c, next) => {
+    const start = Date.now();
+    await next();
+    const duration = Date.now() - start;
+    console.log(`${c.req.method} ${c.req.url} - ${duration}ms`);
+  },
+}
+```
+
+# 相关内容
+
+- [请求上下文](/docs/server/request-context)
+- [保留键](/docs/server/request-context#reserved-keys)

@@ -1,0 +1,242 @@
+---
+title: "リファレンス: Cloudflare D1 ストレージ | Storage"
+description: Mastra の Cloudflare D1 SQL ストレージ実装に関するドキュメントです。
+packages:
+  - "@mastra/cloudflare-d1"
+  - "@mastra/core"
+  - "@mastra/deployer-cloudflare"
+---
+
+# Cloudflare D1 ストレージ
+
+Cloudflare D1 ストレージ実装は、Cloudflare D1 を使用したサーバーレス SQL データベースソリューションを提供し、リレーショナル操作とトランザクションの整合性をサポートします。
+
+:::warning[Observability は未サポート]
+
+Cloudflare D1 ストレージは **observability ドメインをサポートしていません**。`MastraStorageExporter` のトレースを D1 に永続化できず、D1 を唯一のストレージ Provider とした場合、[Studio](/docs/studio/overview) の observability 機能は動作しません。observability を有効にするには、[複合ストレージ](/reference/storage/composite#specialized-storage-for-observability)を使用し、observability データを ClickHouse などの対応 Provider にルーティングしてください。
+
+:::
+
+:::warning[行サイズの上限]
+Cloudflare D1 では、行の最大サイズが **1 MiB** に制限されます。画像など、base64 エンコードされた添付ファイルを含むメッセージを保存すると、この上限を超える場合があります。添付ファイルを外部ストレージへアップロードする方法などの回避策については、[大きな添付ファイルの処理](/docs/memory/memory-processors#handling-large-attachments)を参照してください。
+:::
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/cloudflare-d1@latest
+```
+
+## 使用方法
+
+### Mastra CloudflareDeployer で使用する
+
+Cloudflare 上の Mastra で D1Store を使用する標準的な方法は、`CloudflareDeployer` と組み合わせることです。`cloudflare:workers` から `env` をインポートし、`new Mastra({...})` 内で `D1Store` をインライン初期化します。
+
+```typescript title="src/mastra/index.ts"
+import { env } from 'cloudflare:workers'
+import { D1Store } from '@mastra/cloudflare-d1'
+import { Mastra } from '@mastra/core'
+import { CloudflareDeployer } from '@mastra/deployer-cloudflare'
+
+export const mastra = new Mastra({
+  storage: new D1Store({ binding: env.DB }),
+  deployer: new CloudflareDeployer({
+    name: 'my-worker',
+    d1_databases: [
+      {
+        binding: 'DB',
+        database_name: 'your-database-name',
+        database_id: 'your-database-id',
+      },
+    ],
+  }),
+})
+```
+
+:::note
+`import { env } from 'cloudflare:workers'` を使用する場合、`D1Store` は `new Mastra({...})` 内でインライン初期化する必要があり、モジュールレベルの変数として切り出すことはできません。または、`env` が利用可能になった後、`fetch` ハンドラー内で `D1Store` を初期化してください。詳しくは、[CloudflareDeployer リファレンス](/reference/deployer/cloudflare#cloudflare-bindings)を参照してください。
+:::
+
+### HTTP ルートなしで Cloudflare Worker 内で使用する
+
+HTTP ルートを提供せずに Worker 内で Mastra を直接呼び出す場合（Agent の実行や Workflow のトリガーなど）、`CloudflareDeployer` は不要です。Worker の `env` パラメーターから D1 バインディングにアクセスし、プログラムから Mastra を呼び出します。
+
+```typescript
+import { D1Store } from '@mastra/cloudflare-d1'
+import { Mastra } from '@mastra/core'
+
+type Env = {
+  DB: D1Database
+}
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const mastra = new Mastra({
+      storage: new D1Store({ binding: env.DB }),
+    })
+
+    const agent = mastra.getAgent('my-agent')
+    const result = await agent.generate('Hello')
+
+    return Response.json({ text: result.text })
+  },
+}
+```
+
+### REST API で使用する
+
+Workers 以外の環境（Node.js、サーバーレス関数など）では、REST API を使用します。
+
+```typescript
+import { D1Store } from '@mastra/cloudflare-d1'
+
+const storage = new D1Store({
+  accountId: process.env.CLOUDFLARE_ACCOUNT_ID!, // Cloudflare Account ID
+  databaseId: process.env.CLOUDFLARE_D1_DATABASE_ID!, // D1 Database ID
+  apiToken: process.env.CLOUDFLARE_API_TOKEN!, // Cloudflare API Token
+  tablePrefix: 'dev_', // Optional: isolate tables per environment
+})
+```
+
+### Wrangler の設定
+
+`wrangler.toml` に D1 データベースバインディングを追加します。
+
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "your-database-name"
+database_id = "your-database-id"
+```
+
+または、`wrangler.jsonc` に追加します。
+
+```jsonc
+{
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "your-database-name",
+      "database_id": "your-database-id",
+    },
+  ],
+}
+```
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'binding',
+    type: 'D1Database',
+    description: 'Cloudflare D1 Workers バインディング（Workers ランタイム用）',
+    isOptional: true,
+  },
+  {
+    name: 'accountId',
+    type: 'string',
+    description: 'Cloudflare Account ID（REST API 用）',
+    isOptional: true,
+  },
+  {
+    name: 'databaseId',
+    type: 'string',
+    description: 'Cloudflare D1 Database ID（REST API 用）',
+    isOptional: true,
+  },
+  {
+    name: 'apiToken',
+    type: 'string',
+    description: 'Cloudflare API Token（REST API 用）',
+    isOptional: true,
+  },
+  {
+    name: 'tablePrefix',
+    type: 'string',
+    description: 'すべてのテーブル名に付ける任意のプレフィックス（環境の分離に便利）',
+    isOptional: true,
+  },
+]}
+/>
+
+## 補足事項
+
+### スキーマ管理
+
+ストレージ実装がスキーマの作成と更新を自動的に処理します。次のテーブルが作成されます。
+
+- `threads`: 会話スレッドを保存します
+- `messages`: 個々のメッセージを保存します
+- `metadata`: スレッドとメッセージの追加メタデータを保存します
+
+### 初期化
+
+ストレージを Mastra クラスに渡すと、ストレージ操作の前に `init()` が自動的に呼び出されます。
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { D1Store } from '@mastra/cloudflare-d1'
+
+type Env = {
+  DB: D1Database
+}
+
+// In a Cloudflare Worker
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const storage = new D1Store({
+      binding: env.DB,
+    })
+
+    const mastra = new Mastra({
+      storage, // init() is called automatically
+    })
+
+    // Your handler logic here
+    return new Response('Success')
+  },
+}
+```
+
+Mastra を介さずストレージを直接使用する場合は、テーブルを作成するために `init()` を明示的に呼び出す必要があります。
+
+```typescript
+import { D1Store } from '@mastra/cloudflare-d1'
+
+type Env = {
+  DB: D1Database
+}
+
+// In a Cloudflare Worker
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const storage = new D1Store({
+      id: 'd1-storage',
+      binding: env.DB,
+    })
+
+    // Required when using storage directly
+    await storage.init()
+
+    // Access domain-specific stores via getStore()
+    const memoryStore = await storage.getStore('memory')
+    const thread = await memoryStore?.getThreadById({ threadId: '...' })
+
+    return new Response('Success')
+  },
+}
+```
+
+:::warning
+`init()` を呼び出さないとテーブルが作成されず、ストレージ操作は何も通知せず失敗するか、エラーをスローします。
+:::
+
+### トランザクションと整合性
+
+Cloudflare D1 は、単一行の操作に対してトランザクションを保証します。複数の操作を、すべて成功するかすべて失敗する単一の作業単位として実行できます。
+
+### テーブル作成とマイグレーション
+
+ストレージの初期化時にテーブルが自動作成されます（`tablePrefix` オプションを使用して環境ごとに分離できます）。ただし、列の追加やデータ型・インデックスの変更など高度なスキーマ変更では、データ損失を避けるため、手動でのマイグレーションと慎重な計画が必要です。

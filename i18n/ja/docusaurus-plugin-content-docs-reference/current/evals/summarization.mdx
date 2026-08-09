@@ -1,0 +1,289 @@
+---
+title: "リファレンス: Summarization スコアラー | Evals"
+description: Mastra の Summarization Scorer に関するドキュメント。要約が元のテキストに忠実であり、元のテキストに記載された情報を維持しているかを評価します。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Summarization スコアラー
+
+`createSummarizationScorer()` 関数は、要約を 2 つの軸で評価するスコアラーを作成します。1 つ目は要約内のすべての主張が元のテキストによって裏付けられているか、2 つ目は元のテキストに記載された情報を維持しているかです。最終スコアには 2 つのうち低い方が採用されるため、忠実でも内容が空の要約や、網羅的でも誤った要約は合格できません。
+
+要約にはテキストを含む Agent の最後のメッセージが使用され、元のテキストにはデフォルトで実行入力の最初のユーザーメッセージが使用されます。要約対象のテキストが Tool の結果など別の場所にある場合は、`source` または `sourceExtractor` を渡します。
+
+## 使用例
+
+文書を要約した内容を、その文書と照らして採点します。
+
+```typescript title="src/mastra/scorers/summarization.ts"
+import { createSummarizationScorer } from '@mastra/evals/scorers/prebuilt'
+
+const scorer = createSummarizationScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const result = await scorer.run({
+  input: {
+    inputMessages: [{ id: '1', role: 'user', content: sourceDocument }],
+  },
+  output: [{ id: '2', role: 'assistant', content: summary }],
+})
+
+console.log(result.score)
+console.log(result.reason)
+```
+
+## 要約の評価
+
+Agent がテキストを要約する場合に、このスコアラーを使用します。
+
+- 文書や文字起こしの要約
+- サポートスレッドやメールのダイジェスト
+- 長い入力を短い出力に圧縮するあらゆるステップ
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description: '主張とカバレッジに関する質問の判定に使用する言語モデル',
+  },
+  {
+    name: 'options',
+    type: 'SummarizationMetricOptions',
+    description: 'スコアラーの設定オプション',
+    isOptional: true,
+    properties: [
+      {
+        type: 'SummarizationMetricOptions',
+        parameters: [
+          {
+            name: 'source',
+            type: 'string',
+            description: '要約の評価基準となるテキスト。デフォルトは実行入力のユーザーメッセージ',
+            isOptional: true,
+          },
+          {
+            name: 'sourceExtractor',
+            type: '(input, output) => string',
+            description:
+              '実行の入力と出力から元のテキストを導出する関数。source より優先されます',
+            isOptional: true,
+          },
+          {
+            name: 'maxQuestions',
+            type: 'number',
+            description: '元のテキストから作成するカバレッジに関する質問数の上限（デフォルト: 10）',
+            isOptional: true,
+          },
+          {
+            name: 'scale',
+            type: 'number',
+            description: '最終スコアに乗算するスケール係数（デフォルト: 1）',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## `.run()` の戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'score',
+    type: 'number',
+    description:
+      '0 から scale までの Summarization スコア（デフォルトでは 0〜1）。整合性とカバレッジのスコアのうち低い方',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description:
+      'スコアの決定要因となった軸と、その根拠となる主張または質問を示す、人が読める説明。テキストには両方の軸のスコアが含まれます',
+  },
+  {
+    name: 'preprocessStepResult',
+    type: 'object',
+    description: '整合性の判定結果と、元のテキストから作成された質問',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'alignment',
+            type: '{ claim: string; supported: boolean; reason: string }[]',
+            description: '要約内の各主張に対する判定結果',
+          },
+          {
+            name: 'questions',
+            type: 'string[]',
+            description: '元のテキストから作成されたカバレッジに関する質問',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'analyzeStepResult',
+    type: 'object',
+    description: 'カバレッジの判定結果',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'coverage',
+            type: '{ question: string; answered: boolean; reason: string }[]',
+            description: '要約だけを使用して回答した、各質問に対する判定結果',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+各軸のスコアは保存されるのではなく、これらの判定結果から算出されます。整合性は `supported: true` である `alignment` エントリの割合、カバレッジは対応する `coverage` エントリが `answered: true` である `questions` の割合です。
+
+## 採点の詳細
+
+### 2 軸による評価
+
+スコアラーは、次の 3 ステップのパイプラインを実行します。
+
+1. **元のテキストに基づく判定**: 要約内の主張を抽出して元のテキストと照合し、元のテキストからクローズドクエスチョンを作成します。すべての質問は、元のテキストに基づく答えが「はい」になるように記述されます。
+1. **カバレッジ**: 要約だけを使用して各質問に回答します。
+1. **採点**: 2 つの割合を計算し、低い方をスコアとします。
+
+カバレッジのステップは、元のテキストを一切受け取らない独立したモデル呼び出しとして実行されます。判定モデルが元のテキストを参照できると、要約ではなく元のテキストから質問に回答してしまい、この軸が測定するために存在する情報の欠落が隠れてしまいます。
+
+### 採点式
+
+```
+Alignment    = supported_claims / total_claims
+Coverage     = answered_questions / total_questions
+Summarization = min(Alignment, Coverage) × scale
+```
+
+要約から主張が得られない場合、または元のテキストから質問が得られない場合、スコアは 0 です。
+
+### スコアの解釈
+
+次の範囲は、デフォルトの `scale` である 1 を前提としています。カスタムスケールを使用する場合は、それに応じて乗算してください。
+
+- **0.9-1.0**: 元のテキストに忠実で、主要なポイントを網羅した優れた要約
+- **0.7-0.8**: 小さな情報の欠落、または裏付けのない詳細がある良い要約
+- **0.4-0.6**: 重要な情報が欠けている、または元のテキストから逸脱している中程度の要約
+- **0.1-0.3**: 元のテキストの大部分が失われている、または矛盾している不十分な要約
+- **0.0**: 要約に判定対象がないか、どの主張も裏付けられていません。どの質問にも答えていない要約もこのスコアになります
+
+### 2 つの軸の読み方
+
+両方の軸の判定結果は実行結果に残ります。整合性の判定結果は前処理ステップ、カバレッジの判定結果は分析ステップにあります。各判定結果には、対応する主張または質問と、その判定理由が含まれます。整合性スコアが低い場合とカバレッジスコアが低い場合では、意味が異なります。
+
+- カバレッジが高く整合性スコアが低い場合、要約が詳細を捏造または歪曲しています
+- 整合性が高くカバレッジスコアが低い場合、要約は正確ですが、多くの情報が欠けています
+
+reason フィールドには、スコアの決定要因となった軸の名前が示されます。
+
+### スコアに含まれない要素
+
+長さはスコアに一切影響しません。元のテキストを一語一句繰り返す要約は、すべての主張が裏付けられ、すべての質問に答えるため、スコアは 1 になります。圧縮の度合いもテスト対象に含める場合は、独自の長さチェックを追加してください。
+
+### コスト
+
+各評価では、モデルが 3 回呼び出されます。`maxQuestions` はカバレッジに関する処理量の上限を設定します。この処理量は、上限がなければ元のテキストの長さに応じて増加します。10 個の質問では内容を表現できない長い文書の場合は、値を増やしてください。
+
+## スコアラーの設定
+
+### 実行入力を要約する
+
+```typescript
+const scorer = createSummarizationScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+### 別の場所にある文書を要約する
+
+```typescript
+import { extractToolResults } from '@mastra/evals/scorers/utils'
+
+const scorer = createSummarizationScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    sourceExtractor: (input, output) => {
+      return extractToolResults(output)
+        .filter(({ toolName }) => toolName === 'fetchDocument')
+        .map(({ result }) => String(result))
+        .join('\n\n')
+    },
+    maxQuestions: 20,
+  },
+})
+```
+
+## 例
+
+一連の文書を使用して、要約 Agent を評価します。
+
+```typescript title="src/example-summarization.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createSummarizationScorer } from '@mastra/evals/scorers/prebuilt'
+import { summarizerAgent } from './agent'
+
+const scorer = createSummarizationScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: { maxQuestions: 10 },
+})
+
+const result = await runEvals({
+  target: summarizerAgent,
+  scorers: [scorer],
+  data: [
+    {
+      input:
+        'The company was founded in 1995 by John Smith. It started with 10 employees and grew to 500 by 2020. The company is based in Seattle.',
+    },
+  ],
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+`runEvals` の詳細については、[runEvals リファレンス](/reference/evals/run-evals)を参照してください。
+
+このスコアラーを Agent に追加する方法については、[Scorers の概要](/docs/evals/overview#adding-scorers-to-agents)ガイドを参照してください。
+
+## Faithfulness との比較
+
+| ユースケース | Summarization | Faithfulness |
+| - | - | - |
+| **測定対象** | 裏付けとカバレッジの両方 | 裏付けのみ |
+| **評価基準** | 要約対象となる元のテキスト | 取得したコンテキストまたは Tool の結果 |
+| **情報の欠落を検出** | はい | いいえ |
+| **元のテキスト全体が必要** | はい | いいえ。コンテキストだけで十分です |
+
+取得したコンテキストに回答が根拠付けられているかを確認する場合は、`faithfulness` を使用します。出力が長いテキストの代わりとなることを意図している場合は、`summarization` を使用します。
+
+## 関連項目
+
+- [Faithfulness Scorer](/reference/evals/faithfulness): 回答がコンテキストに根拠付けられているかを測定します
+- [Completeness Scorer](/reference/evals/completeness): モデルを使用せずに要素のカバレッジを比較します
+- [Content Similarity Scorer](/reference/evals/content-similarity): モデルを使用せずにテキストの類似性を比較します
+- [Custom Scorers](/docs/evals/custom-scorers): 独自の評価指標を作成します

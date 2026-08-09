@@ -1,0 +1,428 @@
+---
+title: "リファレンス：createScorer | Evals"
+description: Mastra でカスタムスコアラーを作成するためのドキュメントです。JavaScript 関数または LLM ベースのプロンプトを使用して、独自の評価ロジックを定義できます。
+packages:
+  - "@mastra/core"
+---
+
+# createScorer
+
+Mastra は、入出力のペアを評価するカスタムスコアラーを定義できる、統一された `createScorer` ファクトリーを提供します。各評価ステップには、ネイティブ JavaScript 関数または LLM ベースのプロンプトオブジェクトを使用できます。カスタムスコアラーは Agent と Workflow のステップに追加できます。
+
+## カスタムスコアラーの作成方法
+
+`createScorer` ファクトリーを使用し、名前、説明、任意の judge 設定を指定してスコアラーを定義します。その後、ステップメソッドをチェーンして評価パイプラインを構築します。少なくとも `generateScore` ステップを指定する必要があります。
+
+**プロンプトオブジェクトステップ**は、`description` + `createPrompt` と、`outputSchema`（`preprocess`／`analyze` の場合）を持つオブジェクトとして表すステップ設定です。これらのステップは judge LLM を呼び出します。**関数ステップ**は通常の関数であり、judge を呼び出しません。
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+
+const scorer = createScorer({
+  id: 'my-custom-scorer',
+  name: 'My Custom Scorer', // Optional, defaults to id
+  description: 'Evaluates responses based on custom criteria',
+  type: 'agent', // Optional: for agent evaluation with automatic typing
+  judge: {
+    model: myModel,
+    instructions: 'You are an expert evaluator...',
+  },
+})
+  .preprocess({/* step config */})
+  .analyze({/* step config */})
+  .generateScore(({ run, results }) => {
+    // Return a number
+  })
+  .generateReason({/* step config */})
+```
+
+## `createScorer` のオプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: false,
+    description: 'スコアラーの一意な識別子。`name` が指定されていない場合は名前として使用されます。',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    isOptional: true,
+    description: 'スコアラーの名前。指定しない場合は `id` がデフォルトになります。',
+  },
+  {
+    name: 'description',
+    type: 'string',
+    isOptional: false,
+    description: 'スコアラーの処理内容の説明。',
+  },
+  {
+    name: 'judge',
+    type: 'object',
+    isOptional: true,
+    description: 'LLM ベースのステップで使用する任意の judge 設定。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'model',
+            type: 'LanguageModel',
+            isOptional: false,
+            description: '評価に使用する LLM モデルのインスタンス。',
+          },
+          {
+            name: 'instructions',
+            type: 'string',
+            isOptional: false,
+            description: 'LLM のシステムプロンプト／指示。',
+          },
+          {
+            name: 'jsonPromptInjection',
+            type: "boolean | 'system' | 'inline' | 'auto'",
+            isOptional: true,
+            description:
+              "judge の構造化出力スキーマをモデルに渡す方法を制御します。デフォルトは 'auto' で、対応している場合はネイティブの構造化出力を、それ以外ではインラインのプロンプト注入を使用します。明示的な値は自動ルーティングを上書きします。",
+          },
+          {
+            name: 'inputProcessors',
+            type: 'Processor[]',
+            isOptional: true,
+            description:
+              '内部 judge Agent のメッセージがモデルに届く前に適用する入力 Processor（例：編集、検証）。',
+          },
+          {
+            name: 'outputProcessors',
+            type: 'Processor[]',
+            isOptional: true,
+            description:
+              "内部 judge Agent の出力が返される前に適用する出力 Processor（例：モデレーション、変換）。",
+          },
+          {
+            name: 'errorProcessors',
+            type: 'Processor[]',
+            isOptional: true,
+            description:
+              'Mastra の現行生成 API を使用する judge モデル向けのエラー Processor。`processAPIError` を実装し、LLM API の拒否を検査して再試行を指示できます（例：`StreamErrorRetryProcessor`）。従来のモデルアダプターは `generateLegacy()` を使用するため、エラー Processor を実行しません。',
+          },
+          {
+            name: 'maxProcessorRetries',
+            type: 'number',
+            isOptional: true,
+            description:
+              '1回の judge 生成に対してエラー Processor が再試行できる最大回数。この値なしで errorProcessors を設定した場合、ランタイムのデフォルトは10です。再試行の上限を設けるには明示的に設定してください。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'type',
+    type: 'string',
+    isOptional: true,
+    description:
+      "入出力の型指定。Agent の型を自動設定するには 'agent' を使用します。カスタム型にはジェネリックを使用してください。",
+  },
+  {
+    name: 'prepareRun',
+    type: '(run: ScorerRun) => ScorerRun | Promise<ScorerRun>',
+    isOptional: true,
+    description:
+      "パイプラインの実行前にスコアラーの run データを変換します。メッセージのフィルタリング、コンテキストサイズの制限、スコアラーに不要なフィールドの削除に使用します。[`filterRun()`](/reference/evals/filter-run) ユーティリティは、宣言的なオプションからこの関数を作成します。非同期にもできます。",
+  },
+]}
+/>
+
+この関数は、ステップメソッドをチェーンできるスコアラービルダーを返します。`.run()` メソッドとその入出力の詳細は、[MastraScorer リファレンス](./mastra-scorer)を参照してください。
+
+judge は、**プロンプトオブジェクト**として定義されたステップ（プロンプトモードの `preprocess`、`analyze`、`generateScore`、`generateReason`）でのみ実行されます。関数ステップだけを使用する場合、judge は呼び出されず、確認できる LLM 出力もありません。その場合、スコアと理由は関数で生成する必要があります。
+
+プロンプトオブジェクトステップを実行すると、構造化された LLM 出力は対応する結果フィールド（`preprocessStepResult`、`analyzeStepResult`、または `calculateScore` が `generateScore` で受け取る値）に保存されます。
+
+## judge リクエストの再試行
+
+失敗した judge リクエスト内の一時的なエラーを再試行するには、既存の judge `errorProcessors` 設定を使用します。スコアラーの Workflow、Trace の対象、バッチ項目、スコアの書き込み、完了済みのスコーラーステップは再試行されません。
+
+`@mastra/core` `1.49.0` にはスコアラーのエラー Processor 設定が含まれていません。この設定を使用する前に、スコアラーの Processor をサポートするバージョンへアップグレードするか、その変更だけをバックポートしてください。
+
+次の例では、上限付きの再試行予算を1つ使用します。Processor の `maxRetries` と `judge.maxProcessorRetries` を同じ値に設定してください。Processor の試行回数にモデルの再試行が掛け合わされないよう、内部 judge Agent のモデル再試行はデフォルトの `0` のままにします。
+
+```typescript title="src/mastra/scorers/response-quality.ts"
+import { createScorer } from '@mastra/core/evals'
+import { StreamErrorRetryProcessor } from '@mastra/core/processors'
+
+const isTransientNetworkError = (error: unknown) =>
+  error instanceof Error && /ECONNRESET|ETIMEDOUT|socket hang up/i.test(error.message)
+
+const retryProcessor = new StreamErrorRetryProcessor({
+  maxRetries: 2,
+  maxRetryAfterMs: 30_000,
+  delayMs: ({ retryCount }) => Math.min(1_000 * 2 ** retryCount, 30_000),
+  matchers: [isTransientNetworkError],
+  retryUnknownErrors: false,
+})
+
+export const responseQuality = createScorer({
+  id: 'response-quality',
+  description: 'Scores response quality',
+  judge: {
+    model: myModel,
+    instructions: 'Return a score and concise reason.',
+    errorProcessors: [retryProcessor],
+    maxProcessorRetries: 2,
+  },
+})
+  .generateScore({
+    description: 'Score the response quality.',
+    createPrompt: ({ run }) => `Score: ${run.output}`,
+  })
+  .generateReason({
+    description: 'Explain the score.',
+    createPrompt: () => 'Explain the score.',
+  })
+```
+
+この設定では、失敗したリクエストに対する Provider の試行は最大3回です。初回リクエストに、Processor による2回の再試行を加えた回数です。`generateScore` が完了した後で `generateReason` に再試行可能なエラーが発生した場合、`generateReason` だけが再試行されます。
+
+`StreamErrorRetryProcessor` は、Provider が提供する再試行可能メタデータと、対象を限定したカスタム matcher を尊重します。`retryUnknownErrors` はデフォルトで無効なため、認証、無効なリクエスト、コンテキスト長のエラーは、明示的に一致させない限り直ちに失敗します。`Retry-After` の値はデフォルトで `30_000` ミリ秒を上限とします。この上限を変更するには `maxRetryAfterMs` を使用します。
+
+外側のスコアラーや Workflow に再試行を追加しないでください。追加の試行を意図的に許容する場合を除き、0以外のモデル再試行設定とこの Processor を組み合わせないでください。
+
+### 1つのステップの再試行を上書きする
+
+ステップの `judge` 設定は、スコアラーレベルの judge フィールドを上書きします。Processor 配列はスコアラーレベルの配列を置き換えます。スコアラーレベルの数値上限を継承するには、ステップ設定で `maxProcessorRetries` を省略します。
+
+連携した Processor の再試行には、Mastra の現行生成 API を使用する judge モデルが必要です。従来のモデルアダプターは [`generateLegacy()`](/reference/agents/generateLegacy) を呼び出してエラー Processor を迂回し、その API に固有の AI SDK `maxRetries` のデフォルト値 `2` を使用します。
+
+## 型安全性
+
+型推論と IntelliSense のサポートを向上させるため、スコアラー作成時に入出力型を指定できます。
+
+### Agent 型のショートカット
+
+Agent を評価する場合は、`type: 'agent'` を使用すると Agent の入出力に適切な型が自動的に設定されます。
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+
+// Agent scorer with automatic typing
+const agentScorer = createScorer({
+  id: 'agent-response-quality',
+  description: 'Evaluates agent responses',
+  type: 'agent', // Automatically provides ScorerRunInputForAgent/ScorerRunOutputForAgent
+})
+  .preprocess(({ run }) => {
+    // run.input is automatically typed as ScorerRunInputForAgent
+    const userMessage = run.inputData.inputMessages[0]?.content
+    return { userMessage }
+  })
+  .generateScore(({ run, results }) => {
+    // run.output is automatically typed as ScorerRunOutputForAgent
+    const response = run.output[0]?.content
+    return response.length > 10 ? 1.0 : 0.5
+  })
+```
+
+### ジェネリックによるカスタム型
+
+カスタムの入出力型には、ジェネリックを使用します。
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+
+type CustomInput = { query: string; context: string[] }
+type CustomOutput = { answer: string; confidence: number }
+
+const customScorer = createScorer<CustomInput, CustomOutput>({
+  id: 'custom-scorer',
+  description: 'Evaluates custom data',
+}).generateScore(({ run }) => {
+  // run.input is typed as CustomInput
+  // run.output is typed as CustomOutput
+  return run.output.confidence
+})
+```
+
+### 組み込みの Agent 型
+
+- **`ScorerRunInputForAgent`** - Agent の評価用に `inputMessages`、`rememberedMessages`、`systemMessages`、`taggedSystemMessages` を含みます
+- **`ScorerRunOutputForAgent`** - Agent の応答メッセージの配列です
+
+これらの型を使用すると、スコアリングロジックで自動補完、コンパイル時の検証、より分かりやすいドキュメントを利用できます。
+
+## Agent 型による Trace のスコアリング
+
+`type: 'agent'` を使用すると、スコアラーを Agent に直接追加する場合と、Agent のインタラクションから得た Trace をスコアリングする場合の両方に対応できます。スコアラーは、Trace データを適切な Agent の入出力形式へ自動的に変換します。
+
+```typescript
+const agentTraceScorer = createScorer({
+  id: 'agent-trace-length',
+  description: 'Evaluates agent response length',
+  type: 'agent',
+}).generateScore(({ run }) => {
+  // Trace data is automatically transformed to agent format
+  const userMessages = run.inputData.inputMessages
+  const agentResponse = run.output[0]?.content
+
+  // Score based on response length
+  return agentResponse?.length > 50 ? 0 : 1
+})
+
+// Register with Mastra for trace scoring
+const mastra = new Mastra({
+  scorers: {
+    agentTraceScorer,
+  },
+})
+```
+
+## ステップメソッドのシグネチャ
+
+### preprocess
+
+分析前にデータを抽出または変換できる、任意の前処理ステップです。
+
+**関数モード：**
+関数：`({ run, results }) => any`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'run.input',
+    type: 'any',
+    isOptional: false,
+    description:
+      "スコアラーに渡される入力レコード。スコアラーを Agent に追加した場合は、`[{ role: 'user', content: 'hello world' }]` のようなユーザーメッセージの配列です。Workflow で使用した場合は、Workflow の入力です。",
+  },
+  {
+    name: 'run.output',
+    type: 'any',
+    isOptional: false,
+    description:
+      "スコアラーに渡される出力レコード。Agent の場合は通常 Agent の応答、Workflow の場合は Workflow の出力です。",
+  },
+  {
+    name: 'run.runId',
+    type: 'string',
+    isOptional: false,
+    description: 'このスコアリング run の一意な識別子。',
+  },
+  {
+    name: 'run.requestContext',
+    type: 'object',
+    isOptional: true,
+    description: '評価対象の Agent または Workflow ステップからの Request Context（任意）。',
+  },
+  {
+    name: 'results',
+    type: 'object',
+    isOptional: false,
+    description: '空のオブジェクト（前のステップはありません）。',
+  },
+]}
+/>
+
+戻り値：`any`\
+任意の値を返せます。戻り値は、後続ステップで `preprocessStepResult` として使用できます。
+
+**プロンプトオブジェクトモード：**
+
+<PropertiesTable content={[
+  { name: 'description', type: 'string', isOptional: false, description: 'この前処理ステップの処理内容の説明。' },
+  { name: 'outputSchema', type: 'StandardJSONSchemaV1', isOptional: false, description: 'preprocess ステップの期待される出力に対する Standard JSON Schema。' },
+  { name: 'createPrompt', type: 'function', isOptional: false, description: '関数：({ run, results }) => string。LLM に渡すプロンプトを返します。' },
+  { name: 'judge', type: 'object', isOptional: true, description: 'このステップ用の任意の LLM judge（メインの judge を上書きできます）。Judge Object セクションを参照してください。' },
+]}/>
+
+### analyze
+
+入出力と前処理済みデータを処理する、任意の分析ステップです。
+
+**関数モード：**
+関数：`({ run, results }) => any`
+
+<PropertiesTable content={[
+  { name: 'run.input', type: 'any', isOptional: false, description: "スコアラーに渡される入力レコード。Agent では `[{ role: 'user', content: 'hello world' }]` のようなユーザーメッセージの配列、Workflow では Workflow の入力です。" },
+  { name: 'run.output', type: 'any', isOptional: false, description: "スコアラーに渡される出力レコード。Agent では通常 Agent の応答、Workflow では Workflow の出力です。" },
+  { name: 'run.runId', type: 'string', isOptional: false, description: 'このスコアリング run の一意な識別子。' },
+  { name: 'run.requestContext', type: 'object', isOptional: true, description: '評価対象の Agent または Workflow ステップからの Request Context（任意）。' },
+  { name: 'results.preprocessStepResult', type: 'any', isOptional: true, description: '定義されている場合は preprocess ステップの結果（任意）。' },
+]}/>
+
+戻り値：`any`\
+任意の値を返せます。戻り値は、後続ステップで `analyzeStepResult` として使用できます。
+
+**プロンプトオブジェクトモード：**
+
+<PropertiesTable content={[
+  { name: 'description', type: 'string', isOptional: false, description: 'この分析ステップの処理内容の説明。' },
+  { name: 'outputSchema', type: 'StandardJSONSchemaV1', isOptional: false, description: 'analyze ステップの期待される出力に対する Standard JSON Schema。' },
+  { name: 'createPrompt', type: 'function', isOptional: false, description: '関数：({ run, results }) => string。LLM に渡すプロンプトを返します。' },
+  { name: 'judge', type: 'object', isOptional: true, description: 'このステップ用の任意の LLM judge（メインの judge を上書きできます）。Judge Object セクションを参照してください。' },
+]}/>
+
+### `generateScore`
+
+最終的な数値スコアを計算する**必須**ステップです。
+
+**関数モード：**
+関数：`({ run, results }) => number`
+
+<PropertiesTable content={[
+  { name: 'run.input', type: 'any', isOptional: false, description: "スコアラーに渡される入力レコード。Agent では `[{ role: 'user', content: 'hello world' }]` のようなユーザーメッセージの配列、Workflow では Workflow の入力です。" },
+  { name: 'run.output', type: 'any', isOptional: false, description: "スコアラーに渡される出力レコード。Agent では通常 Agent の応答、Workflow では Workflow の出力です。" },
+  { name: 'run.runId', type: 'string', isOptional: false, description: 'このスコアリング run の一意な識別子。' },
+  { name: 'run.requestContext', type: 'object', isOptional: true, description: '評価対象の Agent または Workflow ステップからの Request Context（任意）。' },
+  { name: 'results.preprocessStepResult', type: 'any', isOptional: true, description: '定義されている場合は preprocess ステップの結果（任意）。' },
+  { name: 'results.analyzeStepResult', type: 'any', isOptional: true, description: '定義されている場合は analyze ステップの結果（任意）。' },
+]}/>
+
+戻り値：`number`\
+このメソッドは数値スコアを返す必要があります。
+
+**プロンプトオブジェクトモード：**
+
+<PropertiesTable content={[
+  { name: 'description', type: 'string', isOptional: false, description: 'このスコアリングステップの処理内容の説明。' },
+  { name: 'outputSchema', type: 'StandardJSONSchemaV1', isOptional: false, description: 'generateScore ステップの期待される出力に対する Standard JSON Schema。' },
+  { name: 'createPrompt', type: 'function', isOptional: false, description: '関数：({ run, results }) => string。LLM に渡すプロンプトを返します。' },
+  { name: 'judge', type: 'object', isOptional: true, description: 'このステップ用の任意の LLM judge（メインの judge を上書きできます）。Judge Object セクションを参照してください。' },
+]}/>
+
+プロンプトオブジェクトモードを使用する場合は、LLM の出力を数値スコアに変換する `calculateScore` 関数も指定する必要があります。
+
+<PropertiesTable content={[
+  { name: 'calculateScore', type: 'function', isOptional: false, description: "関数：({ run, results, analyzeStepResult }) => number。LLM の構造化出力を数値スコアに変換します。" },
+]}/>
+
+### `generateReason`
+
+スコアの説明を提供する任意のステップです。
+
+**関数モード：**
+関数：`({ run, results, score }) => string`
+
+<PropertiesTable content={[
+  { name: 'run.input', type: 'any', isOptional: false, description: "スコアラーに渡される入力レコード。Agent では `[{ role: 'user', content: 'hello world' }]` のようなユーザーメッセージの配列、Workflow では Workflow の入力です。" },
+  { name: 'run.output', type: 'any', isOptional: false, description: "スコアラーに渡される出力レコード。Agent では通常 Agent の応答、Workflow では Workflow の出力です。" },
+  { name: 'run.runId', type: 'string', isOptional: false, description: 'このスコアリング run の一意な識別子。' },
+  { name: 'run.requestContext', type: 'object', isOptional: true, description: '評価対象の Agent または Workflow ステップからの Request Context（任意）。' },
+  { name: 'results.preprocessStepResult', type: 'any', isOptional: true, description: '定義されている場合は preprocess ステップの結果（任意）。' },
+  { name: 'results.analyzeStepResult', type: 'any', isOptional: true, description: '定義されている場合は analyze ステップの結果（任意）。' },
+  { name: 'score', type: 'number', isOptional: false, description: 'generateScore ステップで計算されたスコア。' },
+]}/>
+
+戻り値：`string`\
+このメソッドはスコアを説明する文字列を返す必要があります。
+
+**プロンプトオブジェクトモード：**
+
+<PropertiesTable content={[
+  { name: 'description', type: 'string', isOptional: false, description: 'この理由生成ステップの処理内容の説明。' },
+  { name: 'createPrompt', type: 'function', isOptional: false, description: '関数：({ run, results, score }) => string。LLM に渡すプロンプトを返します。' },
+  { name: 'judge', type: 'object', isOptional: true, description: 'このステップ用の任意の LLM judge（メインの judge を上書きできます）。Judge Object セクションを参照してください。' },
+]}/>
+
+すべてのステップ関数は非同期にできます。

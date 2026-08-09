@@ -1,0 +1,155 @@
+---
+title: "Workers | 部署"
+description: "透過在專用 worker 進程中執行 Workflow、cron 排程和背景任務，將背景處理與 API 層分開。"
+packages:
+  - "@mastra/core"
+  - "@mastra/redis-streams"
+  - "@mastra/google-cloud-pubsub"
+  - "@mastra/pg"
+  - "@mastra/libsql"
+---
+
+import Tabs from '@theme/Tabs'
+import TabItem from '@theme/TabItem'
+
+# Workers
+
+:::experimental
+
+此功能目前為測試版。API 已足夠穩定，可用於生產環境，但部分細節可能會有變更。請參閱[已知限制](#known-limitations)，了解目前尚未支援的部分。
+
+:::
+
+Workers 負責處理請求與回應週期以外的背景工作。Workflow 步驟執行、基於 cron 的排程，以及長時間運行的 Tool 調用都會在 workers 中執行，讓 API 維持快速回應。
+
+Workers 預設與 API 在同一進程中運行。處理生產工作負載時，你可以將它們拆分至不同進程或容器，並各自獨立擴展。
+
+## 何時使用 workers
+
+如有以下任何情況，就應使用 workers：
+
+- Workflow 步驟需時超過數秒，而且不應阻塞 API 回應
+- 你需要事件持久性，確保進行中的工作可在進程重新啟動後繼續
+- 系統的不同部分需要獨立擴展（例如增加編排容量，而無需增加 API 執行個體）
+- 背景 Tool 調用應在專用運算資源上運行
+
+如果你的應用程式流量不高，而 Workflow 亦能快速完成，預設的進程內設定已足夠使用。在有實際需要前，毋須設定 worker 基礎設施。
+
+## Worker 類型
+
+Mastra 內置三種 worker 類型，每種負責特定類型的背景處理。
+
+### 編排 worker
+
+訂閱 [PubSub](/docs/server/pubsub) 匯流排上的 Workflow 事件，並執行 Workflow 步驟。每個 `workflow.start`、步驟轉換和生命週期事件都會經由此 worker 處理。
+
+在拆分式部署中，編排 worker 會從分散式 PubSub 後端拉取事件，並透過 HTTP 將步驟執行委派回 API。在進程內運行時，則會直接執行步驟。
+
+編排 worker 需要支援拉取模式的 PubSub 後端（例如 [`RedisStreamsPubSub`](/reference/pubsub/redis-streams) 或 [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub)）。
+
+### 排程 worker
+
+輪詢儲存空間，尋找已到執行時間的 cron 排程，並發佈 `workflow.start` 事件。它只會產生工作，供編排 worker 接收處理。
+
+排程 worker 會自動讀取 Workflow 定義中的宣告式 `schedule` 欄位。如需了解如何宣告排程，請參閱[排程 Workflow](/docs/workflows/scheduled-workflows)。
+
+**切勿運行多於一個排程 worker 執行個體。** 多個排程 workers 輪詢同一儲存空間，會為同一排程觸發重複事件。
+
+### 背景任務 worker
+
+執行標記為 `background: { enabled: true }` 的 Agent Tool 調用。當 Agent 調用背景 Tool 時，API 會將任務分派給此 worker，而不會阻塞回應串流。
+
+背景任務 worker 透過 PubSub 匯流排管理並行限制、任務生命週期和結果傳遞。
+
+## Workers 的運行方式
+
+### 進程內模式（預設）
+
+如沒有任何設定，Mastra 會在 API 進程內建立並啟動 workers。事件會透過記憶體內 PubSub 傳遞，所有元件共用同一個 Node.js 執行環境。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+
+export const mastra = new Mastra({
+  // Workers run in-process by default.
+  // No pubsub or worker config needed.
+})
+```
+
+除了儲存配接器外，此設定無需任何外部基礎設施。它無法在進程崩潰後繼續運行，而且你不能獨立擴展個別元件。
+
+### 拆分進程
+
+如要讓 workers 在各自的進程中運行，請設定分散式 [PubSub](/docs/server/pubsub) 後端，並使用 `MASTRA_WORKERS` 環境變數控制每個進程會啟動哪些 workers。
+
+<Tabs>
+  <TabItem value="redis" label="Redis Streams + PostgreSQL">
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core/mastra'
+    import { RedisStreamsPubSub } from '@mastra/redis-streams'
+    import { PostgresStore } from '@mastra/pg'
+
+    export const mastra = new Mastra({
+      storage: new PostgresStore({
+        connectionString: process.env.DATABASE_URL!,
+      }),
+      pubsub: new RedisStreamsPubSub({
+        url: process.env.REDIS_URL!,
+      }),
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="gcp" label="Google Cloud Pub/Sub + LibSQL">
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core/mastra'
+    import { GoogleCloudPubSub } from '@mastra/google-cloud-pubsub'
+    import { LibSQLStore } from '@mastra/libsql'
+
+    export const mastra = new Mastra({
+      storage: new LibSQLStore({
+        url: process.env.DATABASE_URL!,
+      }),
+      pubsub: new GoogleCloudPubSub({
+        projectId: process.env.GCP_PROJECT_ID!,
+      }),
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+任何[支援的儲存後端](/reference/workers/overview#supported-storage-backends)都適用。你可以將儲存配接器換成偏好的數據庫。
+
+在多個容器中運行同一個構建產物，並為每個容器設定不同的 [`MASTRA_WORKERS`](/reference/workers/overview#mastra_workers) 值，以控制各進程會啟動哪個 worker。
+
+拆分式部署需要分散式 PubSub 後端（[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) 或 [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub)）、共用的[儲存後端](/reference/workers/overview#supported-storage-backends)，以及編排 worker 與 API 之間的網絡連線。
+
+[Worker 部署指南](/guides/deployment/mastra-workers)會透過 Docker Compose 和 Kubernetes 範例逐步說明此設定。
+
+## 網絡架構
+
+Workers 是內部基礎設施，不會向最終用戶公開，也不需要專屬子網域、公開 URL 或入站 HTTP 路由。
+
+在拆分式部署中：
+
+- **API 伺服器是唯一面向公眾的進程**：它處理所有用戶端 HTTP 請求，包括 REST 端點、Agent 互動、Workflow 觸發，以及任何自訂路由。
+- **Workers 只建立出站連線**：它們從分散式 PubSub 後端拉取事件，並讀寫共用儲存數據庫。它們不會接受來自用戶端的入站流量。
+- **編排 worker 在內部調用 API**：它使用 `MASTRA_STEP_EXECUTION_URL`，透過容器網絡向 API 傳送步驟執行請求。這是內部服務對服務通訊，並非公開端點。
+
+三種 worker（編排、排程、背景任務）全都位於私人網絡中 API 的後方。它們共用 PubSub 後端和儲存數據庫的存取權，但絕不會直接接收來自用戶端的流量。如果 worker 相關功能需要 HTTP 路由（例如為語音整合簽發 token），該路由會在 API 伺服器而非 worker 進程上運行。
+
+## 已知限制
+
+- **沒有無法傳遞訊息佇列**：失敗的事件會收到 nacked 回應並重試，但沒有 DLQ 處理重試全部失敗的事件。
+- **沒有內置健康狀態端點**：Workers 不會公開 HTTP 健康狀態檢查。請使用容器層級的存活探針或進程監察。
+- **排程 worker 只支援單一執行個體**：運行多個排程 worker 進程會導致重複觸發排程。
+- **API 崩潰後，執行作業會停留在「running」狀態**：如果 API 進程在執行 Workflow 步驟時崩潰，該執行作業會停留在 `running` 狀態，且不會自動重試。對於[持久 Agent](/docs/long-running-agents/durable-agents)，請在 Mastra 設定中將 `recovery.durableAgents` 設為 `'auto'`，以便伺服器重新啟動時自動重新驅動孤立的執行作業。詳情請參閱[崩潰復原](/docs/long-running-agents/durable-agents#crash-recovery)。
+
+## 相關內容
+
+- [Worker 部署指南](/guides/deployment/mastra-workers)：Docker Compose 和 Kubernetes 範例
+- [Worker 驗證](/docs/server/auth/workers)：保障 worker 與 API 之間的通訊安全
+- [Workers 參考資料](/reference/workers/overview)：Worker 環境變數和類型的詳細資料，以及支援的儲存後端清單
+- [CLI 參考資料](/reference/cli/mastra#mastra-worker-build)：`mastra worker build` 和 `mastra worker start`
+- [PubSub](/docs/server/pubsub)：事件傳遞後端
+- [排程 Workflow](/docs/workflows/scheduled-workflows)：在 Workflow 上宣告 cron 排程

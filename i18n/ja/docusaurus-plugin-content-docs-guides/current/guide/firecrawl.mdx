@@ -1,0 +1,148 @@
+---
+title: "ガイド：Firecrawl による Web スクレイピング"
+description: "Mastra の Tool で Firecrawl を使用し、Web データを検索、スクレイピング、抽出します。"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# Firecrawl による Web スクレイピング
+
+Firecrawl は、Web サイトをクリーンな Markdown または構造化された JSON に変換する Web データ API です。このガイドでは、Firecrawl を Mastra の Tool に接続し、Agent や Workflow が必要に応じて最新の Web データを検索、スクレイピングできるようにします。
+
+## 前提条件
+
+- Node.js `v22.13.0` 以降がインストールされていること
+- Firecrawl API キー（[https://firecrawl.dev](https://firecrawl.dev) で取得できます）
+- サポートされている [Model Provider](/models) の API キー
+- 既存の Mastra プロジェクト（新しいプロジェクトをセットアップするには、[インストールガイド](/guides/getting-started/quickstart)に従ってください）
+
+## インストール
+
+Firecrawl SDK をインストールします。
+
+```bash npm2yarn
+npm install firecrawl
+```
+
+## 環境変数の設定
+
+プロジェクトルートに `.env` ファイルを作成します。
+
+```bash title=".env"
+FIRECRAWL_API_KEY=fc-your-api-key
+# Optional: FIRECRAWL_API_URL=http://localhost:3002
+```
+
+## Firecrawl Tool の作成
+
+Firecrawl の検索とスクレイピングを Mastra に公開する Tool ファイルを作成します。
+
+<Steps>
+  <StepItem>
+    `src/mastra/tools/firecrawl.ts` を作成し、Firecrawl をセットアップします。
+
+    ```ts title="src/mastra/tools/firecrawl.ts"
+    import { Firecrawl } from 'firecrawl'
+    import { createTool } from '@mastra/core/tools'
+    import { z } from 'zod'
+
+    const firecrawl = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY! })
+
+    export const firecrawlSearch = createTool({
+      id: 'firecrawl-search',
+      description: 'Search the web and return top results.',
+      inputSchema: z.object({ query: z.string().min(1) }),
+      outputSchema: z.object({
+        results: z.array(
+          z.object({
+            title: z.string().nullable(),
+            url: z.string(),
+          }),
+        ),
+      }),
+      execute: async ({ query }) => {
+        const results = await firecrawl.search(query, { limit: 3 })
+        return {
+          results: (results.web ?? []).map(item => ({
+            title: item.title ?? null,
+            url: item.url,
+          })),
+        }
+      },
+    })
+
+    export const firecrawlScrape = createTool({
+      id: 'firecrawl-scrape',
+      description: 'Scrape a URL and return markdown content.',
+      inputSchema: z.object({ url: z.string().url() }),
+      outputSchema: z.object({ markdown: z.string() }),
+      execute: async ({ url }) => {
+        const result = await firecrawl.scrape(url, {
+          formats: ['markdown'],
+          onlyMainContent: true,
+        })
+        return { markdown: result.markdown ?? '' }
+      },
+    })
+    ```
+  </StepItem>
+
+  <StepItem>
+    `src/mastra/agents/web-agent.ts` に新しい Agent を作成します。
+
+    ```ts title="src/mastra/agents/web-agent.ts"
+    import { Agent } from '@mastra/core/agent'
+    import { firecrawlSearch, firecrawlScrape } from '../tools/firecrawl'
+
+    export const webAgent = new Agent({
+      id: 'web-agent',
+      name: 'Web Agent',
+      instructions: 'Use Firecrawl tools to search and scrape web pages, then summarize the results.',
+      model: '__GATEWAY_OPENAI_MODEL__',
+      tools: { firecrawlSearch, firecrawlScrape },
+    })
+    ```
+  </StepItem>
+
+  <StepItem>
+    `src/mastra/index.ts` の Mastra インスタンスに、作成した Agent を登録します。
+
+    ```ts title="src/mastra/index.ts" {2, 5}
+    import { Mastra } from '@mastra/core'
+    import { webAgent } from './agents/web-agent'
+
+    export const mastra = new Mastra({
+      agents: { webAgent },
+    })
+    ```
+  </StepItem>
+</Steps>
+
+## Studio でテストする
+
+開発サーバーを起動し、[Studio](/docs/studio/overview) を開きます。
+
+```bash
+mastra dev
+```
+
+Studio で **Web Agent** を開き、次のプロンプトを試します。
+
+- 「最新の Mastra の changelog を見つけ、直近のリリースを要約してください。」
+- 「Firecrawl の料金を検索し、プランの階層を抽出してください。」
+
+## セルフホストした Firecrawl
+
+Firecrawl をローカルで実行する場合は、`FIRECRAWL_API_URL` を設定するか、クライアントに `apiUrl` を渡します。
+
+```ts title="src/mastra/tools/firecrawl.ts"
+const firecrawl = new Firecrawl({
+  apiKey: process.env.FIRECRAWL_API_KEY!,
+  apiUrl: process.env.FIRECRAWL_API_URL,
+})
+```
+
+## 関連情報
+
+- [Firecrawl ドキュメント](https://docs.firecrawl.dev)

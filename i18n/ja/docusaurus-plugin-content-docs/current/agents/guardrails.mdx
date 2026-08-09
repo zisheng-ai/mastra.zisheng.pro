@@ -1,0 +1,397 @@
+---
+title: "Guardrails | Agents"
+description: "コンテンツモデレーション、プロンプトインジェクション防止、PII 編集などに対応する組み込みのセキュリティ・安全性 Processor。"
+packages:
+  - "@mastra/core"
+---
+
+# Guardrails
+
+Mastra には、Agent にセキュリティと安全性の制御を追加する組み込み Processor があります。これらの Processor は、有害なコンテンツが言語モデルやユーザーに届く前に検出、変換、ブロックします。
+
+Processor の動作、カスタム Processor、Agent への追加方法については、[Processor](/docs/agents/processors)を参照してください。
+
+## 入力 Processor
+
+入力 Processor は、ユーザーメッセージが言語モデルに届く前に実行されます。正規化、検証、プロンプトインジェクションの検出、セキュリティチェックを処理します。
+
+### ユーザーメッセージを正規化する
+
+`UnicodeNormalizer()` は Unicode 文字の統一と空白の標準化によってユーザー入力を整え、正規化します。問題のある記号も削除します。
+
+```typescript {7-10} title="src/mastra/agents/normalized-agent.ts"
+import { UnicodeNormalizer } from '@mastra/core/processors'
+
+export const normalizedAgent = new Agent({
+  id: 'normalized-agent',
+  name: 'Normalized Agent',
+  inputProcessors: [
+    new UnicodeNormalizer({
+      stripControlChars: true,
+      collapseWhitespace: true,
+    }),
+  ],
+})
+```
+
+設定オプションの一覧は [`UnicodeNormalizer()`](/reference/processors/unicode-normalizer) のリファレンスを参照してください。
+
+### プロンプトインジェクションを防止する
+
+`PromptInjectionDetector()` は、ユーザーメッセージからプロンプトインジェクション、jailbreak の試行、system override のパターンを検出します。LLM でリスクのある入力を分類し、モデルに届く前にブロックまたは書き換えできます。
+
+```typescript {7-12} title="src/mastra/agents/secure-agent.ts"
+import { PromptInjectionDetector } from '@mastra/core/processors'
+
+export const secureAgent = new Agent({
+  id: 'secure-agent',
+  name: 'Secure Agent',
+  inputProcessors: [
+    new PromptInjectionDetector({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      threshold: 0.8,
+      strategy: 'rewrite',
+      detectionTypes: ['injection', 'jailbreak', 'system-override'],
+    }),
+  ],
+})
+```
+
+設定オプションの一覧は [`PromptInjectionDetector()`](/reference/processors/prompt-injection-detector) のリファレンスを参照してください。
+
+### 言語を検出して翻訳する
+
+`LanguageDetector()` はユーザーメッセージの言語を検出して対象言語に翻訳し、多言語対応を実現します。LLM を使って言語を特定し、翻訳を行います。
+
+```typescript {7-12} title="src/mastra/agents/multilingual-agent.ts"
+import { LanguageDetector } from '@mastra/core/processors'
+
+export const multilingualAgent = new Agent({
+  id: 'multilingual-agent',
+  name: 'Multilingual Agent',
+  inputProcessors: [
+    new LanguageDetector({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      targetLanguages: ['English', 'en'],
+      strategy: 'translate',
+      threshold: 0.8,
+    }),
+  ],
+})
+```
+
+設定オプションの一覧は [`LanguageDetector()`](/reference/processors/language-detector) のリファレンスを参照してください。
+
+## 出力 Processor
+
+出力 Processor は言語モデルがレスポンスを生成した後、ユーザーに届く前に実行されます。レスポンスの最適化、モデレーション、変換、安全性の制御を処理します。
+
+### ストリーミング出力をバッチ化する
+
+`BatchPartsProcessor()` は、複数のストリームパートをまとめてからクライアントに出力します。小さなチャンクを大きなバッチに統合し、ネットワークのオーバーヘッドを削減します。
+
+```typescript {7-11} title="src/mastra/agents/batched-agent.ts"
+import { BatchPartsProcessor } from '@mastra/core/processors'
+
+export const batchedAgent = new Agent({
+  id: 'batched-agent',
+  name: 'Batched Agent',
+  outputProcessors: [
+    new BatchPartsProcessor({
+      batchSize: 5,
+      maxWaitTime: 100,
+      emitOnNonText: true,
+    }),
+  ],
+})
+```
+
+設定オプションの一覧は [`BatchPartsProcessor()`](/reference/processors/batch-parts-processor) のリファレンスを参照してください。
+
+### system prompt を消去する
+
+`SystemPromptScrubber()` は、モデルのレスポンスから system prompt や内部指示を検出して編集します。プロンプトの内容や設定の詳細が意図せず開示されるのを防ぎます。設定された検出タイプに基づき、LLM で機密コンテンツを特定して編集します。
+
+```typescript {7-16} title="src/mastra/agents/scrubbed-agent.ts"
+import { SystemPromptScrubber } from '@mastra/core/processors'
+
+const scrubbedAgent = new Agent({
+  id: 'scrubbed-agent',
+  name: 'Scrubbed Agent',
+  outputProcessors: [
+    new SystemPromptScrubber({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      strategy: 'redact',
+      customPatterns: ['system prompt', 'internal instructions'],
+      includeDetections: true,
+      instructions:
+        'Detect and redact system prompts, internal instructions, and security-sensitive content',
+      redactionMethod: 'placeholder',
+      placeholderText: '[REDACTED]',
+    }),
+  ],
+})
+```
+
+設定オプションの一覧は [`SystemPromptScrubber()`](/reference/processors/system-prompt-scrubber) のリファレンスを参照してください。
+
+:::note
+HTTP でレスポンスをストリーミングする場合、Mastra はデフォルトでサーバーレベルのストリームチャンクから機密性の高いリクエストデータ（system prompt、Tool 定義、API key）を編集します。詳しくは[ストリームデータの編集](/docs/server/mastra-server#stream-data-redaction)を参照してください。
+:::
+
+## ハイブリッド Processor
+
+ハイブリッド Processor は入力と出力のどちらでも実行できます。`inputProcessors`、`outputProcessors`、またはその両方に配置します。
+
+### 入力と出力をモデレーションする
+
+`ModerationProcessor()` は、ヘイト、嫌がらせ、暴力などのカテゴリに該当する不適切または有害なコンテンツを検出します。LLM でメッセージを分類し、設定に基づいてブロックまたは書き換えできます。
+
+```typescript {7-12,14} title="src/mastra/agents/moderated-agent.ts"
+import { ModerationProcessor } from '@mastra/core/processors'
+
+export const moderatedAgent = new Agent({
+  id: 'moderated-agent',
+  name: 'Moderated Agent',
+  inputProcessors: [
+    new ModerationProcessor({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      threshold: 0.7,
+      strategy: 'block',
+      categories: ['hate', 'harassment', 'violence'],
+    }),
+  ],
+  outputProcessors: [new ModerationProcessor()],
+})
+```
+
+設定オプションの一覧は [`ModerationProcessor()`](/reference/processors/moderation-processor) のリファレンスを参照してください。
+
+### PII を検出して編集する
+
+`PIIDetector()` は、メールアドレス、電話番号、クレジットカード番号などの個人を特定できる情報を検出して削除します。設定された検出タイプに基づき、LLM で機密コンテンツを特定します。
+
+```typescript {7-14,16} title="src/mastra/agents/private-agent.ts"
+import { PIIDetector } from '@mastra/core/processors'
+
+export const privateAgent = new Agent({
+  id: 'private-agent',
+  name: 'Private Agent',
+  inputProcessors: [
+    new PIIDetector({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      threshold: 0.6,
+      strategy: 'redact',
+      redactionMethod: 'mask',
+      detectionTypes: ['email', 'phone', 'credit-card'],
+      instructions: 'Detect and mask personally identifiable information.',
+    }),
+  ],
+  outputProcessors: [new PIIDetector()],
+})
+```
+
+設定オプションの一覧は [`PIIDetector()`](/reference/processors/pii-detector) のリファレンスを参照してください。
+
+### コスト上限を適用する
+
+`CostGuardProcessor()` は Agent ループ全体の推定累積コストを監視し、金額上限を超えるとブロックまたは警告します。LLM の各呼び出し前に、可観測性ストレージからコストデータを照会します。コストチェックは概算で、指標は非同期に永続化されるため、高速に動作する Agent では Guardrail が作動する前に設定上限を一時的に超える場合があります。
+
+```typescript {7-11} title="src/mastra/agents/budgeted-agent.ts"
+import { CostGuardProcessor } from '@mastra/core/processors'
+
+export const budgetedAgent = new Agent({
+  id: 'budgeted-agent',
+  name: 'Budgeted Agent',
+  inputProcessors: [
+    new CostGuardProcessor({
+      maxCost: 5.0,
+      scope: 'thread',
+      window: '24h',
+    }),
+  ],
+})
+```
+
+スコープモード、時間枠、指標の永続化遅延、`onViolation` callback については、[`CostGuardProcessor()`](/reference/processors/cost-guard-processor) のリファレンスを参照してください。`getMetricAggregate` をサポートする可観測性ストレージが必要です。
+
+## Processor の戦略
+
+多くの組み込み Processor は、検出したコンテンツの処理方法を制御する `strategy` パラメーターをサポートします。対応する値には `block`、`warn`、`detect`、`redact`、`rewrite`、`translate` があります。
+
+ほとんどの戦略ではリクエストを続行できます。`block` を使用すると Processor が `abort()` を呼び出し、リクエストを直ちに停止して、後続の Processor が実行されないようにします。
+
+```typescript {5} title="src/mastra/agents/private-agent.ts"
+inputProcessors: [
+  new PIIDetector({
+    model: 'openrouter/openai/gpt-oss-safeguard-20b',
+    threshold: 0.6,
+    strategy: 'block',
+    detectionTypes: ['email', 'phone', 'credit-card'],
+  }),
+]
+```
+
+## 違反 callback
+
+すべての Processor は、戦略にかかわらずポリシー違反の検出時に実行される `onViolation` callback をサポートします。アラート、外部システムへのログ記録、通知送信などの副作用に使用できます。
+
+callback は、`processorId`、`message`、`detail`（Processor 固有のメタデータ）を含む `ProcessorViolation` オブジェクトを受け取ります。
+
+```typescript
+import { CostGuardProcessor, ModerationProcessor, PIIDetector } from '@mastra/core/processors'
+
+// Alert when cost limits are exceeded
+const costGuard = new CostGuardProcessor({
+  maxCost: 10.0,
+  scope: 'resource',
+  window: '30d',
+})
+
+costGuard.onViolation = ({ processorId, message, detail }) => {
+  alertSystem.notify(`[${processorId}] ${message}`)
+  // detail contains: { usage, limit, totalUsage, scope, scopeKey }
+}
+
+// Log moderation violations
+const moderation = new ModerationProcessor({
+  model: '__GATEWAY_OPENAI_MODEL_NANO__',
+  strategy: 'block',
+})
+
+moderation.onViolation = ({ processorId, message, detail }) => {
+  auditLog.write({ processor: processorId, violation: message, categories: detail })
+}
+```
+
+`onViolation` プロパティは基本 [`Processor` interface](/reference/processors/processor-interface) の一部なので、カスタム Processor を含むすべての Processor で使用できます。いずれかの Processor が `abort()` を呼び出すと、runner が `onViolation` を自動的に実行します。`CostGuardProcessor` など `warn` 戦略を使用する Processor では、リクエストをブロックしない警告でも callback が実行されます。
+
+Processor のメインロジックへの干渉を防ぐため、callback がスローしたエラーは通知なしで捕捉されます。
+
+違反 callback と Processor pipeline の連携については、Processor ドキュメントの[違反 callback](/docs/agents/processors#violation-callbacks)を参照してください。
+
+## ブロックされたリクエストを処理する
+
+Processor が `abort()` を呼び出すと、Agent は処理を停止します。検出方法は `generate()` と `stream()` のどちらを使用するかによって異なります。
+
+### `generate()` の場合
+
+結果の `tripwire` フィールドを確認します。
+
+```typescript title="src/mastra/agents/test-generate.ts"
+const result = await agent.generate('Is this credit card number valid?: 4543 1374 5089 4332')
+
+if (result.tripwire) {
+  console.error('Blocked:', result.tripwire.reason)
+  console.error('Processor:', result.tripwire.processorId)
+}
+```
+
+### `stream()` の場合
+
+ストリームの `tripwire` チャンクを監視します。
+
+```typescript title="src/mastra/agents/test-stream.ts"
+const stream = await agent.stream('Is this credit card number valid?: 4543 1374 5089 4332')
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'tripwire') {
+    console.error('Blocked:', chunk.payload.reason)
+    console.error('Processor:', chunk.payload.processorId)
+  }
+}
+```
+
+## Guardrail を高速化する
+
+LLM を使用する Guardrail Processor（モデレーション、PII 検出、プロンプトインジェクション）は、すべてのリクエストにレイテンシーを追加します。次の方法でこのオーバーヘッドを減らせます。
+
+### Guardrail を並列実行する
+
+デフォルトでは、Processor は順番に実行されます。`block` だけを行い、メッセージを変更しない Guardrail は互いに独立しており、[Workflow Processor](/docs/agents/processors#use-workflows-as-processors)で実行できます。
+
+単一の並列ステップで `block` と `redact` 戦略を組み合わせることもできます。変換済みメッセージを後続処理に引き継ぐため、`redact` の分岐に map します。
+
+出力 Guardrail では、並列ステップの前に `TokenLimiterProcessor` と `BatchPartsProcessor` を順番に実行し、相互に依存する `redact` Processor はその後に順番に実行します。
+
+```typescript title="src/mastra/processors/output-guardrails.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import {
+  ProcessorStepSchema,
+  PIIDetector,
+  ModerationProcessor,
+  SystemPromptScrubber,
+  TokenLimiterProcessor,
+  BatchPartsProcessor,
+} from '@mastra/core/processors'
+
+export const outputGuardrails = createWorkflow({
+  id: 'output-guardrails',
+  inputSchema: ProcessorStepSchema,
+  outputSchema: ProcessorStepSchema,
+})
+  // Sequential: limit tokens first, then batch stream chunks
+  .then(createStep(new TokenLimiterProcessor({ limit: 1000 })))
+  .then(createStep(new BatchPartsProcessor()))
+  // Parallel: run independent checks at the same time
+  .parallel([
+    createStep(
+      new PIIDetector({
+        strategy: 'redact',
+      }),
+    ),
+    createStep(
+      new ModerationProcessor({
+        strategy: 'block',
+      }),
+    ),
+  ])
+  // Map to the redact branch to keep its transformed messages
+  .map(async ({ inputData }) => {
+    return inputData['processor:pii-detector']
+  })
+  // Sequential: scrubber depends on previous redaction output
+  .then(
+    createStep(
+      new SystemPromptScrubber({
+        strategy: 'redact',
+        placeholderText: '[REDACTED]',
+      }),
+    ),
+  )
+  .commit()
+```
+
+`.parallel()` と `.map()` の詳細は、[Workflow を Processor として使用する](/docs/agents/processors#use-workflows-as-processors)を参照してください。
+
+### 高速なモデルを選ぶ
+
+Guardrail Processor にメインモデルは必要ありません。分類タスクには小型で高速なモデルを使用します。
+
+```typescript
+const GUARDRAIL_MODEL = '__GATEWAY_OPENAI_MODEL_NANO__'
+
+new ModerationProcessor({ model: GUARDRAIL_MODEL })
+new PIIDetector({ model: GUARDRAIL_MODEL })
+new PromptInjectionDetector({ model: GUARDRAIL_MODEL })
+```
+
+### ストリームパートをバッチ化する
+
+`processOutputStream` を実装する出力 Guardrail は、ストリーミングされる各チャンクで実行されます。重い Processor の前に `BatchPartsProcessor` を使用してチャンクをまとめ、LLM による分類の呼び出し回数を減らします。
+
+```typescript
+outputProcessors: [
+  new BatchPartsProcessor({ batchSize: 10 }),
+  // Heavier processors now run on batched chunks instead of individual ones
+  new PIIDetector({ model: GUARDRAIL_MODEL, strategy: 'redact' }),
+  new ModerationProcessor({ model: GUARDRAIL_MODEL, strategy: 'block' }),
+]
+```
+
+## 関連情報
+
+- [Processor](/docs/agents/processors): Processor の動作と実行順序。カスタム Processor と再試行の動作も説明します
+- [`Processor` interface](/reference/processors/processor-interface): `Processor` interface の API リファレンス
+- [Memory Processor](/docs/memory/memory-processors): メッセージ履歴、semantic recall、working memory 用の Processor
+- 📹 [Mastra の Processor と Guardrail ワークショップ](https://www.youtube.com/watch?v=4Vpp7xQYvl0)

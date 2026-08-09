@@ -1,0 +1,367 @@
+---
+title: "參考：ToolSearchProcessor | 處理器"
+description: "ToolSearchProcessor 的 Mastra 文件；此處理器讓擁有大型 Tool 程式庫的 Agent 能探索並載入執行階段定義的 Tool。"
+packages:
+  - "@mastra/core"
+---
+
+# ToolSearchProcessor
+
+`ToolSearchProcessor` 是一種**輸入處理器**，可探索並載入執行階段定義的 Tool。它不會預先將所有 Tool 提供給 Agent，而是提供兩個中繼 Tool（`search_tools` 和 `load_tool`），讓 Agent 能依需求尋找並載入 Tool。使用大型 Tool 程式庫時，這能減少情境 token 用量。
+
+## 使用範例
+
+```typescript
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: {
+    createIssue: githubTools.createIssue,
+    sendEmail: emailTools.send,
+    getWeather: weatherTools.forecast,
+    // ... many more tools
+  },
+  search: {
+    topK: 5,
+    minScore: 0.1,
+  },
+})
+```
+
+## 建構函式參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'ToolSearchProcessorOptions',
+    description: 'Tool 搜尋處理器的設定選項',
+    isOptional: false,
+    properties: [
+      {
+        type: 'ToolSearchProcessorOptions',
+        parameters: [
+          {
+            name: 'tools',
+            type: 'Record<string, Tool>',
+            description:
+              '所有可動態搜尋並載入的 Tool。這些 Tool 不會立即提供給 Agent，必須先透過搜尋探索，再依需求載入。',
+            isOptional: false,
+          },
+          {
+            name: 'includeResolvedTools',
+            type: 'boolean',
+            description:
+              '也讓 Agent 為此請求解析的 Tool（需要呼叫端憑證的 MCP Tool，或動態 Tool 函式回傳的任何項目）可供搜尋，並在 Agent 載入前不將其放入提示詞。中繼 Tool 一律不會被保留不傳。每個請求都會分別為請求解析的 Tool 建立索引，因此各請求會搜尋及載入自己的 Tool 執行個體。',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'search',
+            type: '{ topK?: number; minScore?: number; autoLoad?: boolean }',
+            description: '搜尋行為的設定。',
+            isOptional: true,
+          },
+          {
+            name: 'search.topK',
+            type: 'number',
+            description: '搜尋結果中最多回傳的 Tool 數量。',
+            isOptional: true,
+            default: '5',
+          },
+          {
+            name: 'search.minScore',
+            type: 'number',
+            description: '搜尋結果納入 Tool 所需的最低相關性分數（0–1）。',
+            isOptional: true,
+            default: '0',
+          },
+          {
+            name: 'search.autoLoad',
+            type: 'boolean',
+            description:
+              '設為 true 時，search_tools 回傳的 Tool 會在搜尋過程中立即啟用。不會公開 load_tool 中繼 Tool，將「搜尋後載入」的兩步驟流程縮減為單一搜尋步驟。探索到的 Tool 會在下一輪可用。由於每個相符項目都會啟用，topK 應採用保守值。',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'storage',
+            type: "'in-memory' | 'context'",
+            description:
+              "已載入 Tool 狀態的儲存位置。'in-memory'（預設）會在記憶體內的對應表中依對話串追蹤已載入 Tool，並透過 TTL 清除（請參閱 ttl）；重新啟動時狀態會遺失，匿名請求會共用 'default' 項目。'context' 會從對話訊息衍生已載入狀態：只要訊息中仍有提及 Tool 名稱的 search_tools/load_tool 結果，該 Tool 就會保持載入；它可承受重新啟動、不需要記憶體，而且該結果不再出現在訊息中時，會自動卸載 Tool。'context' 儲存區需選擇加入。",
+            isOptional: true,
+            default: "'in-memory'",
+          },
+          {
+            name: 'ttl',
+            type: 'number',
+            description:
+              "記憶體內對話串狀態的存留時間，以毫秒為單位。只適用於預設的 'in-memory' 儲存區；對話串閒置超過此時間後，系統會清除其狀態。設為 0 可停用清除。'context' 儲存區會忽略此設定。",
+            isOptional: true,
+            default: '3600000',
+          },
+          {
+            name: 'filter',
+            type: '(args: ToolSearchFilterArgs) => boolean | Promise<boolean>',
+            description:
+              '選用、可感知請求的掛鉤，用來從搜尋結果隱藏 Tool、封鎖 Tool 載入，或針對目前請求隱藏已載入的 Tool。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 回傳值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "設為 'tool-search' 的處理器識別碼",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: "設為 'Tool Search Processor' 的處理器顯示名稱",
+    isOptional: false,
+  },
+  {
+    name: 'processInputStep',
+    type: '(args: ProcessInputStepArgs) => Promise<ProcessInputStepResult>',
+    description:
+      '處理每個步驟，以將搜尋／載入中繼 Tool 及先前載入的所有 Tool 注入 Agent 的 Tool 集合。',
+    isOptional: false,
+  },
+]}
+/>
+
+## 方法
+
+### 狀態檢查（舊版 `'in-memory'` 儲存區）
+
+這些方法只會操作預設的 `'in-memory'` 儲存區。對於狀態存放在對話訊息而非處理程序內對應表的 `'context'` 儲存區，這些方法不會執行任何操作。
+
+#### `clearState(threadId)`
+
+清除單一對話串的已載入 Tool 狀態。
+
+```typescript
+processor.clearState('thread-123')
+```
+
+#### `clearAllState()`
+
+清除所有對話串的已載入 Tool 狀態。
+
+```typescript
+processor.clearAllState()
+```
+
+#### `getStateStats()`
+
+回傳追蹤中的對話串數量與最早存取時間，供記憶體增長偵錯使用。
+
+```typescript
+const { threadCount, oldestAccessTime } = processor.getStateStats()
+```
+
+回傳：`{ threadCount: number; oldestAccessTime: number | null }`
+
+#### `cleanupNow()`
+
+立即執行 TTL 清除，不等待排定的掃描。
+
+```typescript
+const cleaned = processor.cleanupNow()
+```
+
+回傳：`number`：已清除的對話串數量。
+
+## 可感知請求的篩選
+
+使用 `filter` 對執行階段定義的 Tool 套用請求專屬原則。掛鉤會接收解析後的 Tool ID（`toolName`）、Tool、請求情境和階段。`toolName` 是 `search_tools` 回傳的 ID，可能與 `tools` 物件中使用的鍵不同。
+
+```typescript
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: allTools,
+  filter: ({ toolName, requestContext, phase }) => {
+    const plan = requestContext?.get('plan')
+
+    if (phase === 'search') {
+      return true
+    }
+
+    return plan === 'pro' || !toolName.startsWith('premium_')
+  },
+})
+```
+
+`phase` 值說明篩選器套用的位置：
+
+- `search`：篩選 `search_tools` 回傳的結果。
+- `load`：阻止 `load_tool` 載入不允許的 Tool。
+- `active`：若已載入的 Tool 不再獲得允許，針對目前請求將它隱藏。
+
+如果掛鉤擲回錯誤或遭拒，`ToolSearchProcessor` 會將該 Tool 視為不允許用於此請求。掛鉤可能會為每個相符的搜尋候選項目執行，因此非同步原則檢查應保持輕量或使用快取。`search_tools` 中繼 Tool 一律可用。除非啟用 `search.autoLoad`，否則 `load_tool` 也可使用。直接透過 Agent 或 `processInputStep` 傳入的 Tool 仍可使用，除非在 `ToolSearchProcessor` 之外加以篩選，或啟用 `includeResolvedTools`。
+
+## 搜尋為請求解析的 Tool
+
+`tools` 選項在建構時就會固定，因此無法列出僅存在於個別請求的 Tool（例如需要呼叫端憑證的 MCP Tool，或動態 `tools` 函式回傳的任何項目）。根據預設，這些 Tool 會略過搜尋，並在每一輪占用提示詞空間。
+
+設定 `includeResolvedTools: true`，可為這些 Tool 建立該請求的索引，並在 Agent 載入前不將其放入提示詞：
+
+```typescript title="src/mastra/agents/mcp-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: staticTools,
+  includeResolvedTools: true,
+})
+
+const agent = new Agent({
+  id: 'mcp-agent',
+  name: 'mcp-agent',
+  instructions: 'Search for a tool when you need a capability you do not have.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // Resolved per request, then searchable alongside staticTools
+  tools: async ({ requestContext }) => mcpClient.getTools(requestContext.get('userToken')),
+  inputProcessors: [toolSearch],
+})
+```
+
+每個請求都會單獨建立索引，因此某個呼叫端載入的 Tool，絕不會解析為另一個呼叫端同名 Tool 的執行個體。
+
+此選項會套用至為請求解析的每個 Tool，包括記憶體、Workspace、Skill 與瀏覽器 Tool。只有 `search_tools` 和 `load_tool` 中繼 Tool 會留在提示詞中，因此 Agent 隱含依賴的任何 Tool，都必須先透過搜尋找到，才能呼叫。
+
+## 延伸使用範例
+
+```typescript title="src/mastra/agents/dynamic-tools-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+// Tools from various integrations
+import { githubTools } from './tools/github'
+import { slackTools } from './tools/slack'
+import { dbTools } from './tools/database'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: {
+    ...githubTools, // createIssue, listPRs, mergePR, ...
+    ...slackTools, // sendMessage, createChannel, ...
+    ...dbTools, // query, insert, update, ...
+  },
+  search: {
+    topK: 5,
+    minScore: 0.1,
+  },
+})
+
+const agent = new Agent({
+  id: 'dynamic-tools-agent',
+  name: 'dynamic-tools-agent',
+  instructions:
+    'You are a helpful assistant with access to many tools. Use search_tools to find relevant tools, then load_tool to make them available.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [toolSearch],
+})
+```
+
+Agent 的作業流程如下：
+
+1. Agent 收到用戶訊息
+1. Agent 使用關鍵字（例如「github issue」）呼叫 `search_tools`
+1. Agent 檢視結果，並以 Tool 名稱呼叫 `load_tool`
+1. 已載入的 Tool 會在下一輪可用
+1. Agent 以一般方式使用已載入的 Tool
+
+## 使用 `autoLoad` 進行單步驟探索
+
+將 `search.autoLoad` 設為 `true`，即可略過個別載入步驟。`search_tools` 回傳的 Tool 會立即啟用，而且不會公開 `load_tool` 中繼 Tool。每次探索可省去一輪模型互動，減少 token 用量與延遲，而且在不同 Provider 上的運作方式相同。
+
+```typescript
+const toolSearch = new ToolSearchProcessor({
+  tools: allTools,
+  search: {
+    topK: 3,
+    autoLoad: true,
+  },
+})
+```
+
+使用 `autoLoad` 時，作業流程如下：
+
+1. Agent 收到用戶訊息
+1. Agent 使用關鍵字呼叫 `search_tools`
+1. 相符的 Tool 會自動啟用，並在下一輪可用
+1. Agent 以一般方式使用 Tool
+
+每個相符項目都會啟用，因此 `topK` 應保持較小（例如 `3`），避免加入 Agent 不需要的 Tool。啟用的 Tool 會附加在現有 Tool 之後，讓支援提示詞快取的 Provider 能維持穩定的快取提示詞前綴。
+
+## 已載入 Tool 的儲存方式
+
+`storage` 選項控制已載入 Tool 集合的追蹤位置。預設為 `'in-memory'`，而 `'context'` 儲存區需選擇加入。
+
+### `'in-memory'`（預設）
+
+已載入的 Tool 會在記憶體內對應表中依對話串追蹤，並由 `ttl` 選項控制以 TTL 為基礎的清除（預設一小時）。這是原本的行為：
+
+- 不需要記憶體設定。
+- 處理程序重新啟動時，狀態會遺失。
+- 沒有對話串 ID 的請求會共用單一 `'default'` 項目。
+
+使用 `clearState`、`clearAllState`、`getStateStats` 和 `cleanupNow` 檢查或重設此儲存區。
+
+### `'context'`
+
+已載入狀態會從對話訊息衍生：只要訊息中仍有提及 Tool 名稱的 `search_tools` 或 `load_tool` 結果，該 Tool 就會保持載入。此模式：
+
+- 不需要記憶體設定。
+- 可承受重新啟動：保存的訊息歷史記錄就是持久記錄。
+- 一旦該結果不再出現在訊息中，就會自動卸載 Tool。
+
+```typescript
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: allTools,
+  storage: 'context',
+})
+```
+
+兩種模式載入 Tool 時都適合使用快取：載入只會附加內容，因此支援提示詞快取的 Provider 能維持穩定的快取提示詞前綴。
+
+卸載 Tool 會改變傳送給模型的 Tool 定義，使快取前綴發生位移，導致下一輪需要寫入快取，而非命中快取。在 `'in-memory'` 模式中，對話串狀態因 `ttl` 被逐出時會發生此情況。在 `'context'` 模式中，Tool 探索結果不再出現在訊息中時會發生此情況（例如刪減較舊訊息時）。Tool 會卸載，模型必須重新搜尋才能再次使用。這是預期行為：移除未使用的 Tool，是以一次快取寫入換取後續輪次較小的前綴。
+
+## 與其他處理器搭配使用
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { ToolSearchProcessor, TokenLimiter } from '@mastra/core/processors'
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [
+    new ToolSearchProcessor({
+      tools: allTools,
+      search: { topK: 5 },
+    }),
+    // Place TokenLimiter last to ensure context fits
+    new TokenLimiter(127000),
+  ],
+})
+```
+
+## 相關資源
+
+- [處理器](/docs/agents/processors)
+- [使用 Tool](/docs/agents/using-tools)

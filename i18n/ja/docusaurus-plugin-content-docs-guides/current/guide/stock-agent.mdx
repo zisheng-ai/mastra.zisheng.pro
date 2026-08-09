@@ -1,0 +1,158 @@
+---
+title: "ガイド：AI 株価 Agent の構築"
+description: 指定したシンボルについて前日の株価の終値を取得する Agent を Mastra で作成する方法を説明します。
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# AI 株価 Agent の構築
+
+このガイドでは、指定したシンボルについて前日の株価の終値を取得する Agent を作成します。Tool を作成して Agent に追加し、その Agent を使って株価を取得します。
+
+## 前提条件
+
+- Node.js `v22.13.0` 以降がインストールされていること
+- サポートされている [Model Provider](/models) の API キー
+- 既存の Mastra プロジェクト（新しいプロジェクトをセットアップするには、[インストールガイド](/guides/getting-started/quickstart)に従ってください）
+
+## Agent の作成
+
+Mastra で Agent を作成するには、`Agent` クラスで定義し、Mastra に登録します。
+
+<Steps>
+  <StepItem>
+    新しいファイル `src/mastra/agents/stockAgent.ts` を作成し、Agent を定義します。
+
+    ```ts title="src/mastra/agents/stockAgent.ts"
+    import { Agent } from '@mastra/core/agent'
+
+    export const stockAgent = new Agent({
+      id: 'stock-agent',
+      name: 'Stock Agent',
+      instructions:
+        'You are a helpful assistant that provides current stock prices. When asked about a stock, use the stock price tool to fetch the stock price.',
+      model: '__GATEWAY_OPENAI_MODEL__',
+    })
+    ```
+  </StepItem>
+
+  <StepItem>
+    `src/mastra/index.ts` ファイルで Agent を登録します。
+
+    ```ts title="src/mastra/index.ts" {2, 5}
+    import { Mastra } from '@mastra/core'
+    import { stockAgent } from './agents/stockAgent'
+
+    export const mastra = new Mastra({
+      agents: { stockAgent },
+    })
+    ```
+  </StepItem>
+</Steps>
+
+## 株価 Tool の作成
+
+Stock Agent はまだ現在の株価を把握できません。これを可能にするため、Tool を作成して Agent に追加します。
+
+<Steps>
+  <StepItem>
+    新しいファイル `src/mastra/tools/stockPrices.ts` を作成します。その中に、指定したシンボルについて前日の株価の終値を取得する `stockPrices` Tool を追加します。
+
+    ```ts title="src/mastra/tools/stockPrices.ts"
+    import { createTool } from '@mastra/core/tools'
+    import { z } from 'zod'
+
+    const getStockPrice = async (symbol: string) => {
+      const data = await fetch(
+        `https://mastra-stock-data.vercel.app/api/stock-data?symbol=${symbol}`,
+      ).then(r => r.json())
+      return data.prices['4. close']
+    }
+
+    export const stockPrices = createTool({
+      id: 'Get Stock Price',
+      inputSchema: z.object({
+        symbol: z.string(),
+      }),
+      description: `Fetches the last day's closing stock price for a given symbol`,
+      execute: async inputData => {
+        console.log('Using tool to fetch stock price for', inputData.symbol)
+        return {
+          symbol: inputData.symbol,
+          currentPrice: await getStockPrice(inputData.symbol),
+        }
+      },
+    })
+    ```
+  </StepItem>
+
+  <StepItem>
+    `src/mastra/agents/stockAgent.ts` で、作成した `stockPrices` Tool を import して Agent に追加します。
+
+    ```ts title="src/mastra/agents/stockAgent.ts" {9-11}
+    import { Agent } from '@mastra/core/agent'
+    import { stockPrices } from '../tools/stockPrices'
+
+    export const stockAgent = new Agent({
+      id: 'stock-agent',
+      name: 'Stock Agent',
+      instructions:
+        'You are a helpful assistant that provides current stock prices. When asked about a stock, use the stock price tool to fetch the stock price.',
+      model: '__GATEWAY_OPENAI_MODEL__',
+      tools: {
+        stockPrices,
+      },
+    })
+    ```
+  </StepItem>
+</Steps>
+
+## Agent サーバーの実行
+
+Mastra の API を介して Agent を操作する方法を説明します。
+
+<Steps>
+  <StepItem>
+    `mastra dev` コマンドを使って、Agent をサービスとして実行できます。
+
+    ```bash
+    mastra dev
+    ```
+
+    登録済みの Agent とやり取りするためのエンドポイントを公開するサーバーが起動します。[Studio](/docs/studio/overview) では、UI を介して `stockAgent` と `stockPrices` Tool をテストできます。
+  </StepItem>
+
+  <StepItem>
+    デフォルトでは、`mastra dev` は `http://localhost:4111` で実行されます。Stock Agent は次の URL で利用できます。
+
+    ```
+    POST http://localhost:4111/api/agents/stockAgent/generate
+    ```
+  </StepItem>
+
+  <StepItem>
+    コマンドラインから `curl` を使って Agent とやり取りできます。
+
+    ```bash
+    curl -X POST http://localhost:4111/api/agents/stockAgent/generate \
+      -H "Content-Type: application/json" \
+      -d '{
+        "messages": [
+          { "role": "user", "content": "What is the current stock price of Apple (AAPL)?" }
+        ]
+      }'
+    ```
+
+    次のような JSON 応答を受け取ります。
+
+    ```json
+    {
+      "text": "The current price of Apple (AAPL) is $174.55.",
+      "agent": "Stock Agent"
+    }
+    ```
+
+    これは、Agent がリクエストを正常に処理し、`stockPrices` Tool で株価を取得して結果を返したことを示します。
+  </StepItem>
+</Steps>

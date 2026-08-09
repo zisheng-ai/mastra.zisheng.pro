@@ -1,0 +1,447 @@
+---
+title: "工作記憶 | 記憶"
+description: "了解如何在 Mastra 中設定工作記憶，以儲存持久的使用者資料及偏好。"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+  - "@mastra/mongodb"
+  - "@mastra/oracledb"
+  - "@mastra/pg"
+  - "@mastra/upstash"
+---
+
+# 工作記憶
+
+[訊息歷史](/docs/memory/message-history)及[語義召回](./semantic-recall)可協助 Agent 記住對話，而工作記憶則讓它們能夠在多次互動之間保留持久的使用者資訊。
+
+工作記憶是 Agent 的活躍暫存區：它會把使用者或工作的重要資訊保持在隨時可用的狀態。工作記憶可在對話期間保留使用者的姓名、偏好或其他重要資料。
+
+這適合用來維持持續且始終相關，並應該隨時供 Agent 使用的狀態。
+
+如果你使用[觀察式記憶](/docs/memory/observational-memory)，`observationalMemory.observation.manageWorkingMemory` 可讓 OM 為 Agent 更新工作記憶。
+
+:::tip[📹 觀看影片]
+
+觀看 [Mastra 工作記憶](https://www.youtube.com/watch?v=UMy_JHLf1n8\&pp=ygUVbWFzdHJhIHdvcmtpbmcgbWVtb3J5)，了解 Agent 如何在多次互動之間，保持持久的使用者上下文隨時可用。
+
+:::
+
+工作記憶可以在兩種不同的作用域中持久保留：
+
+- **資源作用域**（預設）：同一使用者的所有對話執行緒都會持久保留記憶
+- **執行緒作用域**：每個對話執行緒的記憶互相隔離
+
+**要求：**切換作用域後，Agent 不會看到另一個作用域的記憶——執行緒作用域的記憶與資源作用域的記憶完全分開。
+
+## 快速開始
+
+以下是為 Agent 設定工作記憶的最簡範例：
+
+```typescript {11-15}
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+
+// Create agent with working memory enabled
+const agent = new Agent({
+  id: 'personal-assistant',
+  name: 'PersonalAssistant',
+  instructions: 'You are a helpful personal assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    options: {
+      workingMemory: {
+        enabled: true,
+      },
+    },
+  }),
+})
+```
+
+## 運作方式
+
+工作記憶是一段 Markdown 文字，Agent 可以隨時間更新，以儲存一直相關的資訊。
+
+## 記憶持久性作用域
+
+工作記憶可在兩種不同的作用域中運作，讓你選擇記憶如何跨對話持久保留：
+
+### 資源作用域記憶（預設）
+
+工作記憶預設會在同一使用者（resourceId）的所有對話執行緒之間持久保留，從而提供持久的使用者記憶：
+
+```typescript
+const memory = new Memory({
+  storage,
+  options: {
+    workingMemory: {
+      enabled: true,
+      scope: 'resource', // Memory persists across all user threads
+      template: `# User Profile
+- **Name**:
+- **Location**:
+- **Interests**:
+- **Preferences**:
+- **Long-term Goals**:
+`,
+    },
+  },
+})
+```
+
+**使用情境：**
+
+- 記住使用者偏好的個人助手
+- 保留客戶上下文的客戶服務機械人
+- 追蹤學生進度的教育應用程式
+
+### 配合 Agent 使用
+
+使用資源作用域記憶時，請確保在記憶選項中傳入 `resource` 參數：
+
+```typescript
+// Resource-scoped memory requires resource
+const response = await agent.generate('Hello!', {
+  memory: {
+    thread: 'conversation-123',
+    resource: 'user-alice-456', // Same user across different threads
+  },
+})
+```
+
+### 執行緒作用域記憶
+
+執行緒作用域記憶會將工作記憶隔離至個別對話執行緒。每個執行緒都會維護自己獨立的記憶：
+
+```typescript
+const memory = new Memory({
+  storage,
+  options: {
+    workingMemory: {
+      enabled: true,
+      scope: 'thread', // Memory is isolated per thread
+      template: `# User Profile
+- **Name**:
+- **Interests**:
+- **Current Goal**:
+`,
+    },
+  },
+})
+```
+
+**使用情境：**
+
+- 討論不同主題的個別對話
+- 暫時或工作階段特定的資訊
+- 每個執行緒都需要工作記憶，但執行緒是暫時且彼此無關的 Workflow
+
+## 儲存配接器支援
+
+資源作用域工作記憶需要支援 `mastra_resources` 資料表的特定儲存配接器：
+
+### 支援的儲存配接器
+
+- **libSQL** (`@mastra/libsql`)
+- **PostgreSQL** (`@mastra/pg`)
+- **OracleDB** (`@mastra/oracledb`)
+- **Upstash** (`@mastra/upstash`)
+- **MongoDB** (`@mastra/mongodb`)
+
+## 自訂範本
+
+範本會引導 Agent 決定要在工作記憶中追蹤及更新哪些資訊。如果你沒有提供範本，Mastra 會使用預設範本。請根據 Agent 的使用情境定義自訂範本，讓它記住最相關的資訊。對於由多個使用者共用的執行緒，請參閱[多使用者執行緒](./multi-user-threads)。
+
+以下是自訂範本的範例。在這個範例中，只要使用者傳送的訊息包含任何相關資料，Agent 便會儲存使用者的姓名、地點、時區等資料：
+
+```typescript {5-28}
+const memory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: `
+# User Profile
+
+## Personal info
+
+- Name:
+- Location:
+- Timezone:
+
+## Preferences
+
+- Communication Style: [e.g., Formal, Casual]
+- Project Goal:
+- Key Deadlines:
+  - [Deadline 1]: [Date]
+  - [Deadline 2]: [Date]
+
+## Session state
+
+- Last Task Discussed:
+- Open Questions:
+  - [Question 1]
+  - [Question 2]
+`,
+    },
+  },
+})
+```
+
+## 設計有效的範本
+
+結構良好的範本可令資訊保持簡潔，方便 Agent 解析及更新。請將範本視為一份需要助手持續更新的簡短表格。
+
+- **使用簡短而集中的標籤。**避免段落或很長的標題。保持標籤簡短（例如 `## Personal Info` 或 `- Name:`），令更新易於閱讀，並減低遭截斷的機會。
+- **大小寫保持一致。**大小寫不一致（`Timezone:` 與 `timezone:`）可能令更新變得混亂。標題及項目標籤應統一使用標題式大小寫或小寫。
+- **盡量縮短預留位置文字。**使用 `[e.g., Formal]` 或 `[Date]` 等提示，協助 LLM 在正確位置填寫內容。
+- **縮短很長的值。**如果你只需要簡短形式，請加入 `- Name: [First name or nickname]` 或 `- Address (short):` 等指引，而非要求完整的法律文字。
+- **在 `instructions` 中說明更新規則。**你可以直接在 Agent 的 `instructions` 欄位中，指示應如何及何時填寫或清除範本的各個部分。
+
+### 其他範本樣式
+
+如果你只需要幾個項目，可以使用較短的單一區塊：
+
+```typescript
+const basicMemory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: `User Facts:\n- Name:\n- Favorite Color:\n- Current Topic:`,
+    },
+  },
+})
+```
+
+如果你偏好較具敘事性的樣式，亦可以使用短段落格式儲存重要事實：
+
+```typescript
+const paragraphMemory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: `Important Details:\n\nKeep a short paragraph capturing the user's important facts (name, main goal, current task).`,
+    },
+  },
+})
+```
+
+## 結構化工作記憶
+
+除了 Markdown 範本外，你亦可以使用結構化 schema 定義工作記憶。這讓你可以透過 [Standard JSON Schema](https://standardschema.dev/json-schema)（[Zod](https://zod.dev/)、[Valibot](https://valibot.dev/)、[ArkType](https://arktype.io/) 等）指定需要追蹤的確切欄位及類型。使用 schema 時，Agent 會以符合 schema 的 JSON 物件查看及更新工作記憶。
+
+**要求：**你必須指定 `template` 或 `schema` 其中一項，不可同時指定兩者。
+
+### 範例：使用 schema 的工作記憶
+
+```typescript
+import { z } from 'zod'
+import { Memory } from '@mastra/memory'
+
+const userProfileSchema = z.object({
+  name: z.string().optional(),
+  location: z.string().optional(),
+  timezone: z.string().optional(),
+  preferences: z
+    .object({
+      communicationStyle: z.string().optional(),
+      projectGoal: z.string().optional(),
+      deadlines: z.array(z.string()).optional(),
+    })
+    .optional(),
+})
+
+const memory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      schema: userProfileSchema,
+      // template: ... (do not set)
+    },
+  },
+})
+```
+
+提供 schema 後，Agent 會以 JSON 物件接收工作記憶。例如：
+
+```json
+{
+  "name": "Sam",
+  "location": "Berlin",
+  "timezone": "CET",
+  "preferences": {
+    "communicationStyle": "Formal",
+    "projectGoal": "Launch MVP",
+    "deadlines": ["2025-07-01"]
+  }
+}
+```
+
+### 使用 schema 的記憶合併語義
+
+使用 schema 的工作記憶採用**合併語義**，即 Agent 只需要加入它希望新增或更新的欄位。現有欄位會自動保留。
+
+- **物件欄位會深度合併：**只更新所提供的欄位，其他欄位保持不變
+- **將欄位設定為 `null` 即可刪除：**這會明確地從記憶移除該欄位
+- **陣列會整個取代：**提供陣列欄位時，它會取代現有陣列（陣列不會逐項合併）
+
+## 選擇範本或 schema
+
+- 如果你希望 Agent 以自由格式文字區塊（例如使用者設定檔或暫存區）維護記憶，請使用**範本**（Markdown）。範本採用**取代語義**：Agent 每次更新都必須提供完整的記憶內容。
+- 如果你需要可驗證並能以程式方式作為 JSON 存取的結構化、類型安全資料，請使用 **schema**。`workingMemory.schema` 欄位接受任何與 `PublicSchema` 相容的 schema（包括 Zod v3、Zod v4、JSON Schema 或已符合標準的 schema）。Schema 採用**合併語義**：Agent 只需提供要更新的欄位，現有欄位會予以保留。
+- 每次只能啟用一種模式：不支援同時設定 `template` 及 `schema`。
+
+## 範例：多步保留
+
+以下簡化呈現 `User Profile` 範本如何在一段簡短的使用者對話中更新：
+
+```nohighlight
+# User Profile
+
+## Personal info
+
+- Name:
+- Location:
+- Timezone:
+
+--- After user says "My name is **Sam** and I'm from **Berlin**" ---
+
+# User Profile
+- Name: Sam
+- Location: Berlin
+- Timezone:
+
+--- After user adds "By the way I'm normally in **CET**" ---
+
+# User Profile
+- Name: Sam
+- Location: Berlin
+- Timezone: CET
+```
+
+Agent 現在可以在之後的回應中引用 `Sam` 或 `Berlin`，而毋須再次要求提供資料，因為它們已儲存在工作記憶中。
+
+如果 Agent 未有在預期時正確更新工作記憶，你可以在 Agent 的 `instructions` 設定中，加入有關_如何_及_何時_使用此範本的系統指示。
+
+## 設定初始工作記憶
+
+Agent 通常會透過 `updateWorkingMemory` Tool 更新工作記憶，但你亦可以在建立或更新執行緒時，以程式方式設定初始工作記憶。這適合用來注入你希望 Agent 能夠使用，但又不想在每次請求中傳入的使用者資料（例如姓名、偏好或其他資訊）。
+
+### 透過執行緒 metadata 設定工作記憶
+
+建立執行緒時，你可以透過 metadata 的 `workingMemory` 鍵提供初始工作記憶：
+
+```typescript title="src/app/medical-consultation.ts"
+// Create a thread with initial working memory
+const thread = await memory.createThread({
+  threadId: 'thread-123',
+  resourceId: 'user-456',
+  title: 'Medical Consultation',
+  metadata: {
+    workingMemory: `# Patient Profile
+- Name: John Doe
+- Blood Type: O+
+- Allergies: Penicillin
+- Current Medications: None
+- Medical History: Hypertension (controlled)
+`,
+  },
+})
+
+// The agent will now have access to this information in all messages
+await agent.generate("What's my blood type?", {
+  memory: {
+    thread: thread.id,
+    resource: 'user-456',
+  },
+})
+// Response: "Your blood type is O+."
+```
+
+### 以程式方式更新工作記憶
+
+你亦可以更新現有執行緒的工作記憶：
+
+```typescript title="src/app/medical-consultation.ts"
+// Update thread metadata to add/modify working memory
+await memory.updateThread({
+  id: 'thread-123',
+  title: thread.title,
+  metadata: {
+    ...thread.metadata,
+    workingMemory: `# Patient Profile
+- Name: John Doe
+- Blood Type: O+
+- Allergies: Penicillin, Ibuprofen  // Updated
+- Current Medications: Lisinopril 10mg daily  // Added
+- Medical History: Hypertension (controlled)
+`,
+  },
+})
+```
+
+### 直接更新記憶
+
+你亦可以直接使用 `updateWorkingMemory` 方法：
+
+```typescript title="src/app/medical-consultation.ts"
+await memory.updateWorkingMemory({
+  threadId: 'thread-123',
+  resourceId: 'user-456', // Required for resource-scoped memory
+  workingMemory: 'Updated memory content...',
+})
+```
+
+## 唯讀工作記憶
+
+在部分情境下，你可能希望 Agent 能夠存取工作記憶資料，但不能修改。這適用於：
+
+- 需要上下文但不應更新使用者設定檔的**路由 Agent**
+- 應引用記憶但不擁有記憶的多 Agent 系統**子 Agent**
+
+如要啟用唯讀模式，請在記憶選項中設定 `readOnly: true`：
+
+```typescript
+const response = await agent.generate('What do you know about me?', {
+  memory: {
+    thread: 'conversation-123',
+    resource: 'user-alice-456',
+    options: {
+      readOnly: true, // Working memory is provided but cannot be updated
+    },
+  },
+})
+```
+
+## 選擇使用狀態訊號（實驗性功能）
+
+工作記憶預設會作為系統訊息的一部分傳送至模型。你可以設定 `useStateSignals: true`，選擇改以[狀態訊號](/docs/long-running-agents/signals)傳送：
+
+```typescript
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'mastra-storage', url: 'file:./mastra.db' }),
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: '# User\n- name:\n- location:',
+      useStateSignals: true, // experimental: deliver as state signal
+    },
+  },
+})
+```
+
+變更如下：
+
+- **儲存方式相同。**系統會讀寫相同的資源／執行緒 `workingMemory` 欄位。
+- **Tool 的形態相同，但會以新名稱公開。**寫入仍會流經同一個底層 Tool；在這個路徑中，它會註冊為 `setWorkingMemory`（而非 `updateWorkingMemory`）。重新命名可避免舊版移除篩選器刪除 Tool 呼叫部分，讓它們作為一般稽核記錄持久保留，而模型的下一個步驟會自動取得新值。
+- **只改變傳送方式。**`Memory` 不會將工作記憶併入系統提示，而會自動附加 `WorkingMemoryStateProcessor`，由它以 `stateId: 'working-memory'` 的 `state` 訊號發出目前工作記憶。
+
+你會繼承標準狀態訊號的優點：執行緒作用域的追蹤 metadata、透過 `cacheKey` 去除重複項目（令相同快照只發出一次），以及較舊的快照移出視窗時透過 `contextWindow.hasSnapshot` 重新注入。
+
+預設值（`useStateSignals: false`）會維持現有系統訊息行為不變。`useStateSignals` 不支援範本工作記憶 `version: 'vnext'`。
+
+## 範例
+
+- [使用範本的工作記憶](https://github.com/mastra-ai/mastra/tree/main/examples/memory-with-template)
+- [使用 schema 的工作記憶](https://github.com/mastra-ai/mastra/tree/main/examples/memory-with-schema)
+- [每項資源的工作記憶](https://github.com/mastra-ai/mastra/tree/main/examples/memory-per-resource-example)：展示資源作用域記憶持久性的完整範例

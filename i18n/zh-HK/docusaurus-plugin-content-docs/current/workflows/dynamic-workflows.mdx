@@ -1,0 +1,155 @@
+---
+title: "動態 Workflow | Workflow"
+description: "從 JSON 定義建立、保留、更新及運行 Workflow。"
+packages:
+  - "@mastra/core"
+---
+
+# 動態 Workflow
+
+:::experimental
+
+此功能處於 beta 階段。在 API 穩定前，即使不提升 major version，亦可能出現 breaking change。
+
+:::
+
+動態 Workflow 是以資料而非程式碼表示的 Workflow 定義。定義是一份描述 Workflow schema 和步驟 graph 的 JSON 文件。Mastra 會驗證定義，並將它註冊為可運行的 Workflow，然後在 storage 中保留，讓它在 process 重啟後仍然存在。
+
+由於定義不含 JavaScript closure，任何可產生 JSON 的項目都能編寫 Workflow：HTTP client、LLM、視覺化 editor 或你自己的工具。註冊後，動態 Workflow 會使用與程式碼定義 Workflow 相同的 execution API 運行。
+
+## 何時使用動態 Workflow
+
+當使用者、Agent、視覺化 editor 或外部系統需要在毋須修改應用程式碼或重新部署的情況下建立 Workflow，請使用動態 Workflow。
+
+如果 Workflow 屬於應用程式來源，或需要自訂步驟 function，請繼續使用 [`createWorkflow()`](/docs/workflows/overview) 定義。動態 Workflow 可以呼叫已在 `Mastra` instance 上註冊的 Agent、Tool 和 Workflow。
+
+## 快速開始
+
+以下例子會註冊 Tool，從動態 Workflow 呼叫該 Tool，然後運行 Workflow。`LibSQLStore` 會在 `mastra.db` 中保留定義，因此 Mastra 可以在重啟後還原它。
+
+```typescript title="src/dynamic-workflow.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { createTool } from '@mastra/core/tools'
+import { LibSQLStore } from '@mastra/libsql'
+import { z } from 'zod'
+
+const greetingTool = createTool({
+  id: 'create-greeting',
+  description: 'Create a greeting for a name',
+  inputSchema: z.object({
+    name: z.string(),
+  }),
+  outputSchema: z.object({
+    message: z.string(),
+  }),
+  execute: async ({ name }) => ({
+    message: `Hello, ${name}!`,
+  }),
+})
+
+const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+  tools: { 'create-greeting': greetingTool },
+})
+
+await mastra.addDynamicWorkflow({
+  id: 'greeting-workflow',
+  description: 'Create a greeting for the supplied name',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+    },
+    required: ['name'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      message: { type: 'string' },
+    },
+    required: ['message'],
+  },
+  graph: [
+    {
+      type: 'tool',
+      id: 'greet',
+      toolId: 'create-greeting',
+    },
+  ],
+})
+
+const workflow = mastra.getWorkflow('greeting-workflow')
+const run = await workflow.createRun()
+const result = await run.start({
+  inputData: { name: 'Ada' },
+})
+
+if (result.status === 'success') {
+  console.log(result.result.message)
+}
+```
+
+Workflow 會輸出 `Hello, Ada!`。呼叫 [`addDynamicWorkflow()`](/reference/core/addDynamicWorkflow) 時，會先驗證定義，然後才變更 storage 或即時 Workflow registry。
+
+定義使用 JSON Schema，因為它必須能夠來回轉換 JSON。`graph` 描述要呼叫哪些已註冊組件，以及資料如何在它們之間流動。所有 field 和 graph entry 請參閱[動態 Workflow 定義參考資料](/reference/workflows/dynamic-workflow-definition)。
+
+## 建立及更新定義
+
+定義可以來自任何會產生 JSON 的來源。例如，API 路由可以接受視覺化 editor 建立的定義，並直接註冊：
+
+```typescript
+const definition = await request.json()
+await mastra.addDynamicWorkflow(definition)
+```
+
+### 先註冊依賴套件
+
+加入動態 Workflow 前，請在同一個 `Mastra` instance 上註冊所參照的組件。Agent 和巢狀 Workflow entry 使用其 intrinsic ID。Tool entry 使用 `Mastra` `tools` 物件中的 key，因此快速開始例子會先以 `create-greeting` 註冊 Tool，再透過 `toolId` 參照該 key。
+
+當一個步驟的 output 與下一個步驟的 input 不符時，請使用 `mapping` entry。Mapping entry 可以從 Workflow input、先前步驟結果、Workflow state 及 request context 讀取資料。[定義參考資料](/reference/workflows/dynamic-workflow-definition#mapping-steps)列出了支援的 mapping descriptor。
+
+### 取代 Workflow
+
+加入具有相同 `id` 的新定義，即可取代已保留的定義和即時註冊：
+
+```typescript
+await mastra.addDynamicWorkflow(updatedDefinition)
+```
+
+新的 run 會使用已更新的 graph。已開始的 run 則繼續使用原本的 graph。
+
+### 一併加入巢狀 Workflow
+
+當根 Workflow 參照尚未註冊的輔助 Workflow 時，使用 [`addDynamicWorkflows()`](/reference/core/addDynamicWorkflows) 加入完整集合：
+
+```typescript
+await mastra.addDynamicWorkflows([rootDefinition, helperDefinition])
+```
+
+Mastra 會將 bundle 作為整體驗證，並按依賴套件決定註冊次序。如驗證失敗，所有定義都不會註冊。
+
+### 透過 HTTP 管理定義
+
+應用程式毋須直接存取 `Mastra` instance 亦可管理動態 Workflow。請使用以下其中一個介面：
+
+- [Client SDK Workflow API](/reference/client-js/workflows)：從 JavaScript 或 TypeScript client 呼叫 `upsertDynamicWorkflow()`。
+- [伺服器路由](/reference/server/routes)：將定義傳送至 `POST /api/stored/workflows`。
+
+在已驗證身份的伺服器上，管理動態 Workflow 需要 `stored-workflows:read` 和 `stored-workflows:write` 權限。運行已註冊的 Workflow 則需要 `workflows:execute`。
+
+### 保留定義
+
+已儲存的定義使用 `workflowDefinitions` storage domain。啟動時，Mastra 會從 storage 載入 active 定義，並按依賴次序註冊。
+
+如果 storage adapter 不支援此 domain，`addDynamicWorkflow()` 仍會在記憶體中註冊 Workflow，但 process 重啟時定義便會遺失。Adapter 支援詳情請參閱 [storage 參考資料](/reference/storage/overview)。
+
+## 相關內容
+
+- [動態 Workflow 定義](/reference/workflows/dynamic-workflow-definition)
+- [`Mastra.addDynamicWorkflow()`](/reference/core/addDynamicWorkflow)
+- [`Mastra.addDynamicWorkflows()`](/reference/core/addDynamicWorkflows)
+- [Client SDK Workflow API](/reference/client-js/workflows)
+- [伺服器路由](/reference/server/routes)

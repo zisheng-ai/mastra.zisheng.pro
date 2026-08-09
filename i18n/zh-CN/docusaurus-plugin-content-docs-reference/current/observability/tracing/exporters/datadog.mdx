@@ -1,0 +1,179 @@
+---
+title: "参考：DatadogExporter | 可观测性"
+description: 用于 Tracing 的 Datadog LLM Observability Exporter
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# DatadogExporter
+
+将 Tracing 数据发送到 Datadog 的 LLM Observability 产品，用于监控和分析。
+
+:::info
+如果你还使用 `dd-trace` APM 自动埋点，并且需要将其正确设为 Mastra Span 的子项，请改用 [DatadogBridge](/reference/observability/tracing/bridges/datadog)。Exporter 会在执行完成后发送 LLM Observability 数据，因此不会参与 `dd-trace` 的实时 scope。
+:::
+
+## 构造函数
+
+```typescript prettier:false
+new DatadogExporter(config: DatadogExporterConfig)
+```
+
+## `DatadogExporterConfig`
+
+```typescript
+interface DatadogExporterConfig extends BaseExporterConfig {
+  apiKey?: string
+  mlApp?: string
+  site?: string
+  service?: string
+  env?: string
+  agentless?: boolean
+  integrationsEnabled?: boolean
+}
+```
+
+扩展 `BaseExporterConfig`，其中包含：
+
+- `logger?: IMastraLogger` - Logger 实例
+- `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'` - 日志级别（默认值：INFO）
+
+<PropertiesTable
+  props={[
+  {
+    name: 'apiKey',
+    type: 'string',
+    description: 'Datadog API key。agentless 模式必需。未设置时使用 DD_API_KEY 环境变量。',
+    required: false,
+  },
+  {
+    name: 'mlApp',
+    type: 'string',
+    description: '用于对 Trace 进行分组的 ML 应用名称。必需。未设置时使用 DD_LLMOBS_ML_APP 环境变量。',
+    required: false,
+  },
+  {
+    name: 'site',
+    type: 'string',
+    description:
+      "Datadog site（例如 'datadoghq.com'、'datadoghq.eu'、'us3.datadoghq.com'）。未设置时使用 DD_SITE 环境变量。默认值：'datadoghq.com'。",
+    required: false,
+  },
+  {
+    name: 'service',
+    type: 'string',
+    description: '应用的 service 名称。默认使用 mlApp 的值。',
+    required: false,
+  },
+  {
+    name: 'env',
+    type: 'string',
+    description: "环境名称（例如 'production'、'staging'）。未设置时使用 DD_ENV 环境变量。",
+    required: false,
+  },
+  {
+    name: 'agentless',
+    type: 'boolean',
+    description: '使用直接 HTTPS intake（true）或本地 Datadog Agent（false）。默认值：true。',
+    required: false,
+  },
+  {
+    name: 'integrationsEnabled',
+    type: 'boolean',
+    description: '启用 dd-trace 自动集成。默认值：false。',
+    required: false,
+  },
+]}
+/>
+
+## 方法
+
+### `exportTracingEvent`
+
+```typescript prettier:false
+async exportTracingEvent(event: TracingEvent): Promise<void>
+```
+
+将 Tracing 事件导出到 Datadog LLM Observability。
+
+### flush
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+强制将缓冲区中的所有 Span 刷新到 Datadog，而不关闭 Exporter。适用于需要确保运行时终止前已导出 Span 的 serverless 环境。
+
+### shutdown
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+刷新待处理数据并关闭 Exporter。取消所有待处理的清理 timer，并禁用 LLM Observability。
+
+## 用法
+
+### 零配置（使用环境变量）
+
+```typescript
+import { DatadogExporter } from '@mastra/datadog'
+
+// Reads from DD_LLMOBS_ML_APP, DD_API_KEY, DD_SITE, DD_ENV
+const exporter = new DatadogExporter()
+```
+
+### 显式配置
+
+```typescript
+import { DatadogExporter } from '@mastra/datadog'
+
+const exporter = new DatadogExporter({
+  mlApp: 'my-llm-app',
+  apiKey: process.env.DD_API_KEY,
+  site: 'datadoghq.com',
+  env: 'production',
+})
+```
+
+### 使用本地 Datadog Agent
+
+```typescript
+const exporter = new DatadogExporter({
+  mlApp: 'my-llm-app',
+  agentless: false, // Use local Datadog Agent
+  env: 'production',
+})
+```
+
+## Span 映射
+
+Mastra Span 类型会映射到 Datadog LLM Observability Span kind：
+
+| Mastra SpanType | Datadog kind |
+| - | - |
+| `AGENT_RUN` | `agent` |
+| `MODEL_GENERATION` | `workflow` |
+| `MODEL_STEP` | `llm` |
+| `TOOL_CALL` | `tool` |
+| `MCP_TOOL_CALL` | `tool` |
+| `PROVIDER_TOOL_CALL` | `tool` |
+| `WORKFLOW_RUN` | `workflow` |
+| 所有其他类型 | `task` |
+
+所有未映射的 Span 类型（包括 `MODEL_CHUNK`、`WORKFLOW_STEP`、`GENERIC` 和未来的 Span 类型）都会自动默认映射为 `task`。
+
+## 环境变量
+
+Exporter 从以下环境变量读取配置：
+
+| 变量 | 说明 |
+| - | - |
+| `DD_API_KEY` | Datadog API key |
+| `DD_LLMOBS_ML_APP` | ML 应用名称 |
+| `DD_SITE` | Datadog 站点 |
+| `DD_ENV` | 环境名称 |
+| `DD_LLMOBS_AGENTLESS_ENABLED` | 设为 'false' 或 '0' 以使用本地 Agent |

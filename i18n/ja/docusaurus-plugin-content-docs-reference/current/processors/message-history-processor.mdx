@@ -1,0 +1,137 @@
+---
+title: "リファレンス：MessageHistory | Processors"
+description: "会話履歴の取得と永続化を処理する Mastra の MessageHistory Processor のドキュメント。"
+packages:
+  - "@mastra/core"
+  - "@mastra/pg"
+---
+
+# MessageHistory
+
+`MessageHistory` は、メッセージ履歴の取得と永続化の両方を処理する **ハイブリッド Processor** です。入力時にはストレージから過去のメッセージを取得して会話の先頭に追加し、出力時には新しいメッセージをストレージに永続化します。
+
+## 使用例
+
+```typescript
+import { MessageHistory } from '@mastra/core/processors'
+
+const processor = new MessageHistory({
+  storage: memoryStorage,
+  lastMessages: 50,
+})
+```
+
+## コンストラクターパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'MessageHistoryOptions',
+    description: 'メッセージ履歴 Processor の設定オプション',
+    isOptional: false,
+    properties: [
+      {
+        type: 'MessageHistoryOptions',
+        parameters: [
+          {
+            name: 'storage',
+            type: 'MemoryStorage',
+            description: 'メッセージの取得と永続化に使用するストレージインスタンス',
+            isOptional: false,
+          },
+          {
+            name: 'lastMessages',
+            type: 'number',
+            description: '取得する過去のメッセージの最大数。指定しない場合はすべてのメッセージを取得します',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "'message-history' に設定された Processor の識別子",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: "'MessageHistory' に設定された Processor の表示名",
+    isOptional: false,
+  },
+  {
+    name: 'processInput',
+    type: '(args: { messages: MastraDBMessage[]; messageList: MessageList; abort: (reason?: string) => never; tracingContext?: TracingContext; requestContext?: RequestContext }) => Promise<MessageList | MastraDBMessage[]>',
+    description: 'ストレージから過去のメッセージを取得し、メッセージリストに追加します',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputResult',
+    type: '(args: { messages: MastraDBMessage[]; messageList: MessageList; abort: (reason?: string) => never; tracingContext?: TracingContext; requestContext?: RequestContext }) => Promise<MessageList>',
+    description: 'System メッセージを除き、新しいメッセージ（ユーザー入力と Assistant の応答）をストレージに永続化します',
+    isOptional: false,
+  },
+]}
+/>
+
+## 詳細な使用例
+
+```typescript title="src/mastra/agents/memory-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { MessageHistory } from '@mastra/core/processors'
+import { PostgresStorage } from '@mastra/pg'
+
+const storage = new PostgresStorage({
+  connectionString: process.env.DATABASE_URL,
+})
+
+export const agent = new Agent({
+  id: 'memory-agent',
+  name: 'memory-agent',
+  instructions: 'You are a helpful assistant with conversation memory',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [
+    new MessageHistory({
+      storage,
+      lastMessages: 100,
+    }),
+  ],
+  outputProcessors: [
+    new MessageHistory({
+      storage,
+    }),
+  ],
+})
+```
+
+## 動作
+
+### 入力処理
+
+1. Request コンテキストから `threadId` を取得します
+1. ストレージから過去のメッセージを取得します（作成日時の降順）
+1. System メッセージを除外します（データベースに保存しないため）
+1. ID の重複を避けながら、過去のメッセージと受信メッセージを統合します
+1. 過去のメッセージに `source: 'memory'` タグを追加します
+
+### 出力処理
+
+1. Request コンテキストから `threadId` を取得します
+1. Memory 設定で `readOnly` が指定されている場合は永続化をスキップします
+1. メッセージから未完了の Tool 呼び出しを除外します
+1. 新しいユーザー入力と Assistant の応答メッセージをストレージに永続化します
+1. Thread の `updatedAt` タイムスタンプを更新します
+
+## 関連項目
+
+- [Guardrails](/docs/agents/guardrails)

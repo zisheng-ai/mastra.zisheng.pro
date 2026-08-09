@@ -1,0 +1,214 @@
+---
+title: "部署 | Studio"
+description: 瞭解如何在自己的基礎架構或 Mastra platform 上部署 Studio
+packages:
+  - "@mastra/core"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# Studio 部署
+
+Studio 是在瀏覽器中執行的 React 單頁應用程式（SPA），會連線至執行中的 [Mastra 伺服器](/docs/deployment/mastra-server)。
+
+部署 Studio 主要有兩種方式：
+
+- Mastra platform 為你提供代管 Studio，並可透過連結與團隊共用存取權
+- 在自己的基礎架構上自行代管 Studio，可與 Mastra 伺服器一同部署，也能獨立部署為 SPA
+
+本頁將說明如何在自己的基礎架構上部署 Studio。部署細節會依需求與設定而有很大差異，因此這裡著重介紹通用原則與可用選項。
+
+## 快速開始
+
+執行 Studio 最簡單的方式是使用 [`mastra studio`](/reference/cli/mastra#mastra-studio) 指令。
+
+`mastra dev` 會同時執行 Studio 與開發用 API；`mastra studio` 則用來提供獨立的靜態 UI，並連線至已在執行的 Mastra 伺服器。因此如有需要，你可以讓 Studio 與 Mastra 伺服器分開，獨立部署。
+
+開啟終端機並全域安裝 `mastra` CLI：
+
+```bash npm2yarn
+npm install -g mastra
+```
+
+執行 `mastra studio` 指令：
+
+```bash
+mastra studio
+```
+
+在瀏覽器中開啟 [localhost:3000](http://localhost:3000) 即可查看 Studio UI。預設會嘗試連線至在 `http://localhost:4111` 執行的 Mastra 伺服器。若找不到伺服器，畫面會顯示表單，讓你輸入 Mastra 執行個體 URL 與 API 前綴。
+
+此指令使用 Node 內建的 `http` 模組與 [`serve-handler`](https://www.npmjs.com/package/serve-handler) 提供靜態檔案。
+
+:::note
+
+若將 Studio 代管於子路徑下（例如在 Nginx 後方的 `/agents`），請先設定 `MASTRA_STUDIO_BASE_PATH` 再啟動 Studio：
+
+```bash
+MASTRA_STUDIO_BASE_PATH=/agents mastra studio
+```
+
+這會更新 HTML 基底 URL 與靜態資產路由，讓獨立 Studio 能在該子路徑下正常運作。
+
+:::
+
+## Mastra platform
+
+如需 Mastra platform 上的代管 Studio，請參閱 [Mastra platform 上的 Studio](/docs/mastra-platform/studio)。
+
+## 執行伺服器
+
+將 `mastra studio` 作為長時間執行的程序，與執行其他 Node.js 服務沒有不同。部署的所有最佳實務、工具與選項也同樣適用。你可以使用 PM2 等程序管理工具、Docker，或支援 Node.js 應用程式的雲端服務。如同任何 Web 服務，你必須確保 CORS 設定正確並監控錯誤。
+
+:::warning
+
+Studio 連線至 Mastra 伺服器後，便能完整存取 Agent、Workflow 和 Tool。請務必在正式環境中妥善保護（例如置於驗證機制或 VPN 後方），防止未經授權的存取。
+
+詳情請參閱[驗證](/docs/studio/auth)文件。
+
+:::
+
+### 與 API 一同部署
+
+你也可以讓 Studio 與 [Mastra 伺服器](/docs/deployment/mastra-server)一同提供服務，只需部署及管理單一服務。
+
+若要這麼做，請使用 `--studio` 旗標執行 `mastra build`：
+
+```bash
+mastra build --studio
+```
+
+此指令會建立 `.mastra/output/studio` 資料夾，其中包含建置完成的 Studio 資產。定義 `MASTRA_STUDIO_PATH` 環境變數後，Mastra 伺服器也能提供 Studio UI。
+
+```bash
+MASTRA_STUDIO_PATH=.mastra/output/studio node .mastra/output/index.mjs
+```
+
+## 使用 CDN
+
+### 自動部署
+
+部分[雲端 Provider](/docs/deployment/cloud-providers)提供將 Studio 與無伺服器函式一同部署的選項。目前支援的 Provider 為：
+
+- [`VercelDeployer`](/reference/deployer/vercel)
+
+### 手動部署
+
+你無法直接將建置完成的 Studio 資產部署至 CDN，因為 UI 依賴部分執行階段設定。只要進行一些額外設定，即可從建置資產建立獨立 SPA，並部署至任何靜態代管服務。
+
+依照以下範例使用 Vite 建立 SPA。
+
+<Steps>
+  <StepItem>
+    建立新資料夾並初始化 Node.js 專案：
+
+    ```bash npm2yarn
+    mkdir studio-spa
+    cd studio-spa
+    npm init
+    ```
+  </StepItem>
+
+  <StepItem>
+    安裝 `vite` 與 `mastra` 相依套件：
+
+    ```bash npm2yarn
+    npm install vite mastra
+    ```
+  </StepItem>
+
+  <StepItem>
+    在 `package.json` 中加入建置指令碼：
+
+    ```json title="package.json"
+    {
+      "scripts": {
+        "build": "vite build"
+      }
+    }
+    ```
+  </StepItem>
+
+  <StepItem>
+    建立預留位置 `index.html` 檔案：
+
+    ```html title="index.html"
+    <!doctype html>
+    <html>
+      <head></head>
+      <body></body>
+    </html>
+    ```
+  </StepItem>
+
+  <StepItem>
+    建立 `vite.config.js` 檔案。此檔案會將建置完成的 Studio 資產複製至 `dist` 資料夾，並以環境變數值取代 HTML 中的 `%%PLACEHOLDER%%` 值。
+
+    ```js title="vite.config.js"
+    import { defineConfig, loadEnv } from 'vite'
+    import { readFileSync, cpSync, writeFileSync } from 'node:fs'
+    import { resolve, join } from 'node:path'
+
+    const studioDir = resolve(import.meta.dirname, 'node_modules/mastra/dist/studio')
+
+    export default defineConfig(({ mode }) => {
+      const env = loadEnv(mode, process.cwd(), 'MASTRA_')
+
+      return {
+        plugins: [
+          {
+            name: 'mastra-studio',
+            closeBundle() {
+              const outDir = resolve(import.meta.dirname, 'dist')
+              cpSync(studioDir, outDir, { recursive: true })
+
+              const indexPath = join(outDir, 'index.html')
+              const html = readFileSync(indexPath, 'utf-8')
+              writeFileSync(
+                indexPath,
+                html.replaceAll(/%%(\w+)%%/g, (_, key) => env[key] ?? ''),
+              )
+            },
+          },
+        ],
+        build: {
+          emptyOutDir: true,
+        },
+      }
+    })
+    ```
+  </StepItem>
+
+  <StepItem>
+    建立含有必要環境變數的 `.env` 檔案。
+
+    ```env title=".env"
+    MASTRA_SERVER_HOST=localhost
+    MASTRA_SERVER_PORT=4111
+    MASTRA_SERVER_PROTOCOL=http
+    MASTRA_API_PREFIX=/api
+    MASTRA_HIDE_CLOUD_CTA=false
+    MASTRA_CLOUD_API_ENDPOINT=
+    MASTRA_EXPERIMENTAL_FEATURES=false
+    MASTRA_TEMPLATES=false
+    MASTRA_TELEMETRY_DISABLED=true
+    MASTRA_REQUEST_CONTEXT_PRESETS=
+    MASTRA_THEME_TOGGLE=false
+    MASTRA_EXPERIMENTAL_UI=false
+    MASTRA_STUDIO_BASE_PATH=
+    ```
+  </StepItem>
+
+  <StepItem>
+    執行建置指令碼，在 `dist` 資料夾中產生靜態檔案：
+
+    ```bash npm2yarn
+    npm run build
+    ```
+  </StepItem>
+
+  <StepItem>
+    將代管 Provider 指向 `dist` 資料夾並進行部署！
+  </StepItem>
+</Steps>

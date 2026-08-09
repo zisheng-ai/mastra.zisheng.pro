@@ -1,0 +1,1450 @@
+---
+title: "參考：MCPClient | Tools 與 MCP"
+description: MCPClient API 參考——用於管理多個 Model Context Protocol 伺服器及其 Tool 的類別。
+packages:
+  - "@mastra/core"
+  - "@mastra/mcp"
+---
+
+# MCPClient
+
+`MCPClient` 類別讓你在 Mastra 應用程式中管理多個 MCP 伺服器連線及其 Tool。它會處理連線生命週期及 Tool 命名空間，並讓你存取所有已設定伺服器的 Tool。
+
+## 建構函數
+
+建立 MCPClient 類別的新實例。
+
+```typescript prettier:false
+constructor({
+  id?: string;
+  servers: Record<string, MastraMCPServerDefinition>;
+  timeout?: number;
+}: MCPClientOptions)
+```
+
+### MCPClientOptions
+
+<br />
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: true,
+    description:
+      '設定實例的選用獨有標識符。建立多個設定相同的實例時，可用它防止記憶體洩漏。',
+  },
+  {
+    name: 'servers',
+    type: 'Record<string, MastraMCPServerDefinition>',
+    description:
+      '伺服器設定的 map；每個 key 都是獨有的伺服器標識符，而 value 則是伺服器設定。',
+  },
+  {
+    name: 'timeout',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '60000',
+    description: '所有伺服器的全域逾時值（毫秒）；個別伺服器設定可覆寫此值。',
+  },
+]}
+/>
+
+### `MastraMCPServerDefinition`
+
+`servers` map 中的每個伺服器都使用 `MastraMCPServerDefinition` 類型設定。系統會根據提供的參數判斷傳輸類型：
+
+- 如提供 `command`，便會使用 Stdio 傳輸。
+- 如提供 `url`，系統會先嘗試使用 Streamable HTTP 傳輸；若初次連線失敗，則改用舊版 SSE 傳輸。
+
+<br />
+
+<PropertiesTable
+  content={[
+  {
+    name: 'command',
+    type: 'string',
+    isOptional: true,
+    description: '適用於 Stdio 伺服器：要執行的指令。',
+  },
+  {
+    name: 'args',
+    type: 'string[]',
+    isOptional: true,
+    description: '適用於 Stdio 伺服器：要傳入指令的引數。',
+  },
+  {
+    name: 'env',
+    type: 'Record<string, string>',
+    isOptional: true,
+    description: '適用於 Stdio 伺服器：為指令設定的環境變數。',
+  },
+  {
+    name: 'inheritDefaultEnv',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'true',
+    description:
+      "適用於 Stdio 伺服器：子程序環境是否以 MCP SDK 的預設繼承環境為基礎。預設值是精選的允許清單，而非完整程序環境：在 POSIX 上會繼承 HOME、LOGNAME、PATH、SHELL、TERM 及 USER；在 Windows 上會繼承 APPDATA、HOMEDRIVE、HOMEPATH、LOCALAPPDATA、PATH、PROCESSOR_ARCHITECTURE、SYSTEMDRIVE、SYSTEMROOT、TEMP、USERNAME 及 USERPROFILE。設為 `false` 時，只會把 `env` 明確列出的變數傳至子程序。請注意，沒有 PATH 的子程序可能無法啟動並非絕對路徑的指令。",
+  },
+  {
+    name: 'url',
+    type: 'URL',
+    isOptional: true,
+    description: '適用於 HTTP 伺服器（Streamable HTTP 或 SSE）：伺服器的 URL。',
+  },
+  {
+    name: 'requestInit',
+    type: 'RequestInit',
+    isOptional: true,
+    description: '適用於 HTTP 伺服器：fetch API 的要求設定。',
+  },
+  {
+    name: 'eventSourceInit',
+    type: 'EventSourceInit',
+    isOptional: true,
+    description:
+      '適用於 SSE fallback：SSE 連線的自訂 fetch 設定。SSE 使用自訂 header 時必須提供。',
+  },
+  {
+    name: 'fetch',
+    type: 'MastraFetchLike',
+    isOptional: true,
+    description:
+      '適用於 HTTP 伺服器：供所有網絡要求使用的自訂 fetch 實作。它會收到選用的第三個 `requestContext` 參數，當中包含傳入要求的 request scope 資料（例如驗證 cookie、bearer token）。提供此函數後，所有 HTTP 要求都會使用它，讓你加入動態驗證 header、把 request scope credential 轉送至 MCP 伺服器、按要求自訂要求行為，或攔截及修改要求／回應。提供 `fetch` 後，`requestInit`、`eventSourceInit` 及 `authProvider` 會變為選用，因為你可在自訂 fetch 函數內處理這些事項。',
+  },
+  {
+    name: 'allowedHosts',
+    type: 'string[]',
+    isOptional: true,
+    description:
+      '適用於 HTTP 伺服器：選擇啟用的主機允許清單，限制用戶端可代表此伺服器聯絡的主機。每個項目會與 URL host 比對（hostname；如 URL 使用非預設連接埠，則加上連接埠），例如 `"api.example.com"` 或 `"localhost:8080"`。比對必須完全相符，hostname 不分大小寫；不支援萬用字元，亦不檢查 URL scheme。空陣列會拒絕所有要求。如未設定，則不設限制。執行細節請參閱下方「安全性」章節。',
+  },
+  {
+    name: 'logger',
+    type: 'LogHandler',
+    isOptional: true,
+    description: '用於記錄 log 的額外選用 handler。',
+  },
+  {
+    name: 'timeout',
+    type: 'number',
+    isOptional: true,
+    description: '伺服器專用的逾時值（毫秒）。',
+  },
+  {
+    name: 'capabilities',
+    type: 'ClientCapabilities',
+    isOptional: true,
+    description: '伺服器專用的 capabilities 設定。',
+  },
+  {
+    name: 'authProvider',
+    type: 'OAuthClientProvider',
+    isOptional: true,
+    description:
+      '適用於 HTTP 伺服器：用於自動更新 token 及管理 OAuth 流程的 OAuth 驗證 Provider。可使用 MCPOAuthClientProvider 作為即用實作。',
+  },
+  {
+    name: 'enableServerLogs',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'true',
+    description: '是否為此伺服器啟用記錄 log。',
+  },
+  {
+    name: 'forwardInstructions',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'false',
+    description:
+      "當 Agent 使用此伺服器的 Tool 時，是否把該 MCP 伺服器公佈的 instructions 附加至 Agent 的 system prompt。預設停用；由於 instructions 會注入 Agent 的 system prompt，因此只應為你信任的伺服器啟用。",
+  },
+  {
+    name: 'instructionsMaxLength',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '512',
+    description: "可附加至 Agent system prompt 的伺服器 instruction 字元數上限。",
+  },
+  {
+    name: 'requireToolApproval',
+    type: 'boolean | (params: RequireToolApprovalContext) => boolean | Promise<boolean>',
+    isOptional: true,
+    description:
+      '執行此伺服器的 Tool 前要求人工核准。設為 `true` 時，所有 Tool 均須核准。設為函數時，系統會以 Tool 名稱、引數、request context，以及伺服器公佈的任何 Tool annotations 呼叫該函數，動態判斷是否需要核准。',
+  },
+]}
+/>
+
+## Tool 核准
+
+在伺服器定義中使用 `requireToolApproval`，即可要求該伺服器的任何 Tool 在執行前先取得人工核准。這可配合現有的 [human-in-the-loop](/docs/workflows/human-in-the-loop) 核准流程使用。
+
+### 所有 Tool 均須核准
+
+將 `requireToolApproval` 設為 `true`，即可要求伺服器上的每個 Tool 都須取得核准：
+
+```typescript
+const mcp = new MCPClient({
+  servers: {
+    github: {
+      url: new URL('http://localhost:3000/mcp'),
+      requireToolApproval: true,
+    },
+  },
+})
+```
+
+### 使用函數動態核准
+
+傳入函數以逐次呼叫判斷是否需要核准。函數會收到 Tool 名稱、模型傳入的引數、傳入要求中的任何 request context，以及 Tool 的 MCP `annotations`（如伺服器有公佈）：
+
+```typescript
+const mcp = new MCPClient({
+  servers: {
+    github: {
+      url: new URL('http://localhost:3000/mcp'),
+      requireToolApproval: ({ toolName, args, requestContext }) => {
+        // Read-only tools don't need approval
+        if (toolName === 'list_repos') return false
+        // Destructive tools with force flag always need approval
+        if (toolName === 'delete_repo') return args.force === true
+        // Non-admin users need approval for everything else
+        return requestContext?.userRole !== 'admin'
+      },
+    },
+  },
+})
+```
+
+函數亦可為非同步。它會收到傳入要求的 `requestContext`，你可用它進行驗證檢查或其他按要求執行的邏輯。
+
+### 使用受信任伺服器的 Tool annotations
+
+如你信任該 MCP 伺服器，可使用其 [Tool annotations](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#tool-annotations)（`readOnlyHint`、`destructiveHint`、`idempotentHint`、`openWorldHint`、`title`）來決定是否核准：
+
+```typescript
+const mcp = new MCPClient({
+  servers: {
+    github: {
+      url: new URL('http://localhost:3000/mcp'),
+      requireToolApproval: ({ annotations }) => {
+        // Skip approval for tools the server has marked read-only
+        if (annotations?.readOnlyHint) return false
+        // Always require approval for destructive tools
+        if (annotations?.destructiveHint) return true
+        return true
+      },
+    },
+  },
+})
+```
+
+根據 MCP 規格：**除非 Tool annotations 來自受信任的伺服器，否則用戶端必須視其為不受信任**。Annotations 只屬提示性質，並不構成安全邊界。惡意或有錯誤的伺服器可聲稱某個 Tool 是唯讀，即使實際並非如此。只應對你信任的伺服器使用 annotations 來放寬核准要求。
+
+`listTools()` 與 `listToolsets()` 傳回的 Tool 亦會在 `tool.mcp.annotations` 下提供相同 annotations，讓你在把 Tool 接入 Agent 時檢查。
+
+## 伺服器 instructions
+
+當 MCP 伺服器在初始化期間公佈 instructions，`MCPClient` 會為該伺服器儲存它們。把這些 instructions 轉送至 Agent 的 system prompt 屬於**選擇啟用**功能：在伺服器上設定 `forwardInstructions: true`，使用其 Tool（透過 `listTools()` 或 `listToolsets()`）的 Agent 便會自動收到其 instructions。
+
+指引會按伺服器名稱分組，並將每個伺服器的內容截短至 `instructionsMaxLength` 個字元。
+
+```typescript
+const mcp = new MCPClient({
+  servers: {
+    db: {
+      url: new URL('http://localhost:3000/mcp'),
+      forwardInstructions: true,
+      instructionsMaxLength: 512,
+    },
+  },
+})
+
+const agent = new Agent({
+  id: 'db-agent',
+  name: 'DB Agent',
+  instructions: 'Help with database changes.',
+  model,
+  tools: await mcp.listTools(),
+})
+```
+
+省略 `forwardInstructions`（預設值）時，instructions 仍會快取並可透過 [`getServerInstructions()`](#getserverinstructions) 檢查，但不會加入任何 Agent 的 system prompt。
+
+> **安全提示：**伺服器 instructions 會逐字轉送至 Agent 的 system prompt（只受長度截短限制）。惡意或已被入侵的 MCP 伺服器可藉此注入 Agent 會視為受信任系統指引的 instructions。只應為你信任的伺服器啟用 `forwardInstructions`，並建議先以 `getServerInstructions()` 檢視第三方伺服器的 instructions，再作轉送。
+
+## 安全性
+
+### Stdio 伺服器的子程序環境
+
+Stdio 子程序不會繼承完整的父程序環境。子程序環境預設以 MCP SDK 精選的允許清單為基礎（POSIX：`HOME`、`LOGNAME`、`PATH`、`SHELL`、`TERM`、`USER`；Windows：`APPDATA`、`HOMEDRIVE`、`HOMEPATH`、`LOCALAPPDATA`、`PATH`、`PROCESSOR_ARCHITECTURE`、`SYSTEMDRIVE`、`SYSTEMROOT`、`TEMP`、`USERNAME`、`USERPROFILE`），再合併你在 `env` 設定的變數。除非明確傳入，否則不會繼承 API key 等敏感變數。
+
+如要更嚴格地隔離，可設定 `inheritDefaultEnv: false`，令只有已設定的 `env` 項目傳至子程序：
+
+```typescript
+const mcp = new MCPClient({
+  servers: {
+    myTool: {
+      command: '/usr/local/bin/my-mcp-server',
+      inheritDefaultEnv: false,
+      env: { MY_TOOL_API_KEY: process.env.MY_TOOL_API_KEY! },
+    },
+  },
+})
+```
+
+放入 `env` 的變數會逐字轉送，因此來自不受信任來源（例如使用者提供的設定檔）的伺服器設定，應視為不受信任的輸入。
+
+### 使用 `allowedHosts` 限制對外連線的主機
+
+當 HTTP 伺服器 URL 來自不受信任的設定時，攻擊者控制的 URL 可把用戶端指向內部服務（伺服器端要求偽造）。請在這類伺服器設定 `allowedHosts`，限制用戶端可聯絡的主機：
+
+```typescript
+const mcp = new MCPClient({
+  servers: {
+    remote: {
+      url: new URL(untrustedConfig.serverUrl),
+      allowedHosts: ['api.example.com'],
+    },
+  },
+})
+```
+
+執行細節：
+
+- 在預設 fetch 路徑上，傳送至不允許主機的要求（包括每次重新導向）會在**傳送前**被封鎖。系統會手動跟隨重新導向（最多 5 次）以驗證每一步；`Authorization` header 不會跨越至不同來源（scheme、主機或連接埠如有任何變更便會移除，與標準 fetch 行為一致）。
+- 如提供自訂 `fetch`（或自訂 `eventSourceInit.fetch`），初始 URL 仍會在要求前檢查，但重新導向會使用 `response.url` 在**事後**驗證：對外要求可能已發生，而當最終 URL 指向不允許的主機時，回應會被捨棄。自行建立且 `response.url` 為空的 `Response` 會略過此事後檢查。
+- 透過 `authProvider` 發出的 OAuth 要求（授權伺服器 metadata 探索、token 交換及更新）亦會驗證。如授權伺服器與 MCP 伺服器位於不同主機，也請把該主機加入 `allowedHosts`。
+- 主機被封鎖時，連線會以清楚的錯誤結束，重新連線邏輯不會重試。
+
+`allowedHosts` 刻意保持精簡：只精確比對主機，不支援萬用字元或 scheme 檢查。如需更完整的政策（scheme 檢查、IP 範圍規則），請提供自訂 `fetch` 實作；用戶端每次發出要求時都會呼叫它。
+
+### 將 Tool 回應視為不受信任的輸入
+
+MCP 伺服器傳回的 Tool 結果會以模型輸入形式進入 Agent context。惡意或已被入侵的伺服器可利用 Tool 輸出進行 prompt injection。傳輸用戶端不會清理 Tool 回應；清理政策應設於 Agent 層，Mastra 的[輸入及輸出 processor](/docs/agents/processors) 可讓你在內容送達模型前後檢查、轉換或封鎖內容。使用第三方伺服器時，請一併採用 `requireToolApproval` 及上方的 `forwardInstructions` 安全提示。
+
+## 方法
+
+### `listTools()`
+
+擷取所有已設定伺服器的全部 Tool，並以伺服器名稱為 Tool 名稱加上命名空間（格式為 `serverName_toolName`），以避免衝突。
+適合傳入 Agent 定義。
+
+```ts
+new Agent({ id: 'agent', tools: await mcp.listTools() })
+```
+
+### `listToolsWithErrors()`
+
+擷取所有已設定伺服器的全部 Tool，並以伺服器名稱為 Tool 名稱加上命名空間。對於無法連線或列出 Tool 的伺服器，亦會分別傳回錯誤。
+
+```typescript
+const { tools, errors } = await mcp.listToolsWithErrors()
+
+new Agent({ id: 'agent', tools })
+console.log(errors)
+```
+
+### `listToolsets()`
+
+傳回一個物件，把具命名空間的 Tool 名稱（格式為 `serverName.toolName`）對應至其 Tool 實作。
+適合在 runtime 傳入 generate 或 stream 方法。
+
+```typescript
+const res = await agent.stream(prompt, {
+  toolsets: await mcp.listToolsets(),
+})
+```
+
+### `getServerInstructions()`
+
+傳回目前已知的各個已設定 MCP 伺服器 instructions。尚未連線或沒有公佈 instructions 的伺服器會傳回 `undefined`。
+
+```typescript prettier:false
+getServerInstructions(): Record<string, string | undefined>
+```
+
+範例：
+
+```typescript
+await mcp.listTools()
+
+const instructionsByServer = mcp.getServerInstructions()
+console.log(instructionsByServer.db)
+```
+
+### `authenticate()`
+
+為已設定 `MCPOAuthClientProvider` 且重新導向 URL 指向 loopback 位址的伺服器，執行互動式 OAuth authorization-code 流程。它會啟動本機 callback 伺服器，透過 Provider 的 `onRedirectToAuthorization` callback 傳送授權 URL，等待瀏覽器傳回授權碼，將其交換成 token，然後重新連線。請參閱[互動式瀏覽器驗證](#interactive-browser-authentication)。
+
+選用的 `timeoutMs` 會限制流程等待瀏覽器傳回授權碼的時間，逾時即拒絕；預設為 5 分鐘。
+
+```typescript prettier:false
+async authenticate(serverName: string, options?: { timeoutMs?: number }): Promise<void>
+```
+
+### `getServerAuthState()`
+
+傳回已設定伺服器的 OAuth 授權狀態：連線嘗試因授權錯誤被拒後為 `'needs-auth'`；伺服器接受 Provider credential 後為 `'authorized'`；沒有 `authProvider` 或尚未嘗試連線的伺服器則為 `undefined`。
+
+```typescript prettier:false
+getServerAuthState(serverName: string): 'needs-auth' | 'authorized' | undefined
+```
+
+### `cancelAuthentication()`
+
+取消伺服器正在進行的 `authenticate()` 流程，避免已放棄的瀏覽器授權令用戶端無限期等候。它會中止流程（包括 callback 伺服器綁定前的設定階段）、關閉正在監聽的本機 callback 伺服器，而待處理的 `authenticate()` 呼叫會被拒絕。成功取消流程時傳回 `true`；沒有流程正在進行時傳回 `false`。
+
+之後的 `getServerAuthState()` 結果取決於流程進度。在 `401` 拒絕後取消的流程會維持 `'needs-auth'`，並可立即重試。如未嘗試連線，在設定期間取消會令狀態保持不變（通常為 `undefined`）。
+
+```typescript prettier:false
+async cancelAuthentication(serverName: string): Promise<boolean>
+```
+
+### `disconnect()`
+
+中斷所有 MCP 伺服器連線並清理資源。
+
+```typescript prettier:false
+async disconnect(): Promise<void>
+```
+
+### `toMCPServerProxies()`
+
+傳回 `MCPClientServerProxy` 實例的 map，每個已設定伺服器各有一個。每個 proxy 都會把底層用戶端連線包裝為 `MCPServerBase` 實例，讓外部（非 Mastra）MCP 伺服器可在 `mcpServers` 中註冊並顯示於 Studio。
+
+```typescript prettier:false
+async toMCPServerProxies(): Promise<Record<string, MCPClientServerProxy>>
+```
+
+把結果展開至 `Mastra` 的 `mcpServers` 設定：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { MCPClient } from '@mastra/mcp'
+
+const mcpClient = new MCPClient({
+  servers: {
+    'color-mixer': {
+      command: 'node',
+      args: ['path/to/color-mixer-server.js'],
+    },
+  },
+})
+
+export const mastra = new Mastra({
+  mcpServers: {
+    ...(await mcpClient.toMCPServerProxies()),
+  },
+})
+```
+
+這適合把實作 MCP Apps extension 或其他功能的外部 MCP 伺服器連接至 Studio，而毋須用 Mastra `MCPServer` 包裝。
+
+### `resources` 屬性
+
+`MCPClient` 實例有一個 `resources` 屬性，可用來存取資源相關操作。
+
+```typescript
+const mcpClient = new MCPClient({/* ...servers configuration... */})
+
+// Access resource methods via mcpClient.resources
+const allResourcesByServer = await mcpClient.resources.list()
+const templatesByServer = await mcpClient.resources.templates()
+// ... and so on for other resource methods.
+```
+
+#### `resources.list()`
+
+擷取所有已連線 MCP 伺服器的全部可用資源，並按伺服器名稱分組。
+
+```typescript prettier:false
+async list(): Promise<Record<string, Resource[]>>
+```
+
+範例：
+
+```typescript
+const resourcesByServer = await mcpClient.resources.list()
+for (const serverName in resourcesByServer) {
+  console.log(`Resources from ${serverName}:`, resourcesByServer[serverName])
+}
+```
+
+#### `resources.templates()`
+
+擷取所有已連線 MCP 伺服器的全部可用資源範本，並按伺服器名稱分組。
+
+```typescript prettier:false
+async templates(): Promise<Record<string, ResourceTemplate[]>>
+```
+
+範例：
+
+```typescript
+const templatesByServer = await mcpClient.resources.templates()
+for (const serverName in templatesByServer) {
+  console.log(`Templates from ${serverName}:`, templatesByServer[serverName])
+}
+```
+
+#### `resources.read(serverName: string, uri: string)`
+
+讀取伺服器上指定資源的內容。
+
+```typescript prettier:false
+async read(serverName: string, uri: string): Promise<ReadResourceResult>
+```
+
+- `serverName`：伺服器的標識符（`servers` 建構函數選項所用的 key）。
+- `uri`：要讀取資源的 URI。
+
+範例：
+
+```typescript
+const content = await mcpClient.resources.read('myWeatherServer', 'weather://current')
+console.log('Current weather:', content.contents[0].text)
+```
+
+#### `resources.subscribe(serverName: string, uri: string)`
+
+訂閱伺服器上指定資源的更新。
+
+```typescript prettier:false
+async subscribe(serverName: string, uri: string): Promise<object>
+```
+
+範例：
+
+```typescript
+await mcpClient.resources.subscribe('myWeatherServer', 'weather://current')
+```
+
+#### `resources.unsubscribe(serverName: string, uri: string)`
+
+取消訂閱伺服器上指定資源的更新。
+
+```typescript prettier:false
+async unsubscribe(serverName: string, uri: string): Promise<object>
+```
+
+範例：
+
+```typescript
+await mcpClient.resources.unsubscribe('myWeatherServer', 'weather://current')
+```
+
+#### `resources.onUpdated(serverName: string, handler: (params: { uri: string }) => void)`
+
+設定通知 handler；指定伺服器上已訂閱的資源更新時便會呼叫。
+
+```typescript prettier:false
+async onUpdated(serverName: string, handler: (params: { uri: string }) => void): Promise<void>
+```
+
+範例：
+
+```typescript
+mcpClient.resources.onUpdated('myWeatherServer', params => {
+  console.log(`Resource updated on myWeatherServer: ${params.uri}`)
+  // You might want to re-fetch the resource content here
+  // await mcpClient.resources.read("myWeatherServer", params.uri);
+})
+```
+
+#### `resources.onListChanged(serverName: string, handler: () => void)`
+
+設定通知 handler；指定伺服器的可用資源清單有變時便會呼叫。
+
+```typescript prettier:false
+async onListChanged(serverName: string, handler: () => void): Promise<void>
+```
+
+範例：
+
+```typescript
+mcpClient.resources.onListChanged('myWeatherServer', () => {
+  console.log('Resource list changed on myWeatherServer.')
+  // You should re-fetch the list of resources
+  // await mcpClient.resources.list();
+})
+```
+
+### `elicitation` 屬性
+
+`MCPClient` 實例有一個 `elicitation` 屬性，可用來存取 elicitation 相關操作。Elicitation 讓 MCP 伺服器向使用者要求結構化資料。
+
+```typescript
+const mcpClient = new MCPClient({/* ...servers configuration... */})
+
+// Set up elicitation handler
+mcpClient.elicitation.onRequest('serverName', async request => {
+  // Handle elicitation request from server
+  console.log('Server requests:', request.message)
+  console.log('Schema:', request.requestedSchema)
+
+  // Return user response
+  return {
+    action: 'accept',
+    content: { name: 'John Doe', email: 'john@example.com' },
+  }
+})
+```
+
+#### `elicitation.onRequest(serverName: string, handler: ElicitationHandler)`
+
+設定 handler 函數；任何已連線 MCP 伺服器傳送 elicitation 要求時便會呼叫。Handler 會收到要求，並必須傳回回應。
+
+##### `ElicitationHandler` 函數
+
+Handler 函數會收到包含以下內容的要求物件：
+
+- `message`：以人類可讀形式說明所需資料的訊息
+- `requestedSchema`：定義預期回應結構的 JSON schema
+
+Handler 必須傳回包含以下內容的 `ElicitResult`：
+
+- `action`：`'accept'`、`'decline'` 或 `'cancel'` 其中之一
+- `content`：使用者資料（只在 action 為 `'accept'` 時）
+
+**範例：**
+
+```typescript
+mcpClient.elicitation.onRequest('serverName', async request => {
+  console.log(`Server requests: ${request.message}`)
+
+  // Example: Simple user input collection
+  if (request.requestedSchema.properties.name) {
+    // Simulate user accepting and providing data
+    return {
+      action: 'accept',
+      content: {
+        name: 'Alice Smith',
+        email: 'alice@example.com',
+      },
+    }
+  }
+
+  // Simulate user declining the request
+  return { action: 'decline' }
+})
+```
+
+**完整互動範例：**
+
+```typescript
+import { MCPClient } from '@mastra/mcp'
+import { createInterface } from 'readline'
+
+const readline = createInterface({
+  input: process.stdin,
+  output: process.stdout,
+})
+
+function askQuestion(question: string): Promise<string> {
+  return new Promise(resolve => {
+    readline.question(question, answer => resolve(answer.trim()))
+  })
+}
+
+const mcpClient = new MCPClient({
+  servers: {
+    interactiveServer: {
+      url: new URL('http://localhost:3000/mcp'),
+    },
+  },
+})
+
+// Set up interactive elicitation handler
+await mcpClient.elicitation.onRequest('interactiveServer', async request => {
+  console.log(`\n📋 Server Request: ${request.message}`)
+  console.log('Required information:')
+
+  const schema = request.requestedSchema
+  const properties = schema.properties || {}
+  const required = schema.required || []
+  const content: Record<string, any> = {}
+
+  // Collect input for each field
+  for (const [fieldName, fieldSchema] of Object.entries(properties)) {
+    const field = fieldSchema as any
+    const isRequired = required.includes(fieldName)
+
+    let prompt = `${field.title || fieldName}`
+    if (field.description) prompt += ` (${field.description})`
+    if (isRequired) prompt += ' *required*'
+    prompt += ': '
+
+    const answer = await askQuestion(prompt)
+
+    // Handle cancellation
+    if (answer.toLowerCase() === 'cancel') {
+      return { action: 'cancel' }
+    }
+
+    // Validate required fields
+    if (answer === '' && isRequired) {
+      console.log(`❌ ${fieldName} is required`)
+      return { action: 'decline' }
+    }
+
+    if (answer !== '') {
+      content[fieldName] = answer
+    }
+  }
+
+  // Confirm submission
+  console.log('\n📝 You provided:')
+  console.log(JSON.stringify(content, null, 2))
+
+  const confirm = await askQuestion('\nSubmit this information? (yes/no/cancel): ')
+
+  if (confirm.toLowerCase() === 'yes' || confirm.toLowerCase() === 'y') {
+    return { action: 'accept', content }
+  } else if (confirm.toLowerCase() === 'cancel') {
+    return { action: 'cancel' }
+  } else {
+    return { action: 'decline' }
+  }
+})
+```
+
+### `prompts` 屬性
+
+`MCPClient` 實例有一個 `prompts` 屬性，可用來存取 prompt 相關操作。
+
+```typescript
+const mcpClient = new MCPClient({/* ...servers configuration... */})
+
+// Access prompt methods via mcpClient.prompts
+const allPromptsByServer = await mcpClient.prompts.list()
+const { prompt, messages } = await mcpClient.prompts.get({
+  serverName: 'myWeatherServer',
+  name: 'current',
+})
+```
+
+#### `prompts.list()`
+
+擷取所有已連線 MCP 伺服器的全部可用 prompt，並按伺服器名稱分組。
+
+```typescript prettier:false
+async list(): Promise<Record<string, Prompt[]>>
+```
+
+範例：
+
+```typescript
+const promptsByServer = await mcpClient.prompts.list()
+for (const serverName in promptsByServer) {
+  console.log(`Prompts from ${serverName}:`, promptsByServer[serverName])
+}
+```
+
+#### `prompts.get({ serverName, name, args?, version? })`
+
+從伺服器擷取指定 prompt 及其訊息。
+
+```typescript prettier:false
+async get({
+  serverName,
+  name,
+  args?,
+  version?,
+}: {
+  serverName: string;
+  name: string;
+  args?: Record<string, any>;
+  version?: string;
+}): Promise<{ prompt: Prompt; messages: PromptMessage[] }>
+```
+
+範例：
+
+```typescript
+const { prompt, messages } = await mcpClient.prompts.get({
+  serverName: 'myWeatherServer',
+  name: 'current',
+  args: { location: 'London' },
+})
+console.log(prompt)
+console.log(messages)
+```
+
+#### `prompts.onListChanged(serverName: string, handler: () => void)`
+
+設定通知 handler；指定伺服器的可用 prompt 清單有變時便會呼叫。
+
+```typescript prettier:false
+async onListChanged(serverName: string, handler: () => void): Promise<void>
+```
+
+範例：
+
+```typescript
+mcpClient.prompts.onListChanged('myWeatherServer', () => {
+  console.log('Prompt list changed on myWeatherServer.')
+  // You should re-fetch the list of prompts
+  // await mcpClient.prompts.list();
+})
+```
+
+### `tools` 屬性
+
+`MCPClient` 實例有一個 `tools` 屬性，用於訂閱 Tool 清單變更通知。如要擷取 Tool，請使用 `listTools()` 或 `listToolsets()`。
+
+#### `tools.onListChanged(serverName: string, handler: () => void)`
+
+設定通知 handler；指定伺服器的可用 Tool 清單有變時（例如伺服器在 runtime 新增或移除 Tool）便會呼叫。
+
+```typescript prettier:false
+async onListChanged(serverName: string, handler: () => void): Promise<void>
+```
+
+範例：
+
+```typescript
+await mcpClient.tools.onListChanged('myWeatherServer', async () => {
+  console.log('Tool list changed on myWeatherServer.')
+  // You should re-fetch the tools
+  // const tools = await mcpClient.listTools();
+})
+```
+
+### `progress` 屬性
+
+`MCPClient` 實例有一個 `progress` 屬性，用於訂閱 MCP 伺服器在 Tool 執行期間發出的進度通知。
+
+```typescript
+const mcpClient = new MCPClient({
+  servers: {
+    myServer: {
+      url: new URL('http://localhost:4111/api/mcp/myServer/mcp'),
+      // Enabled by default; set to false to disable
+      enableProgressTracking: true,
+    },
+  },
+})
+
+// Subscribe to progress updates for a specific server
+await mcpClient.progress.onUpdate('myServer', params => {
+  console.log('📊 Progress:', params.progress, '/', params.total)
+  if (params.message) console.log('Message:', params.message)
+  if (params.progressToken) console.log('Token:', params.progressToken)
+})
+```
+
+#### `progress.onUpdate(serverName: string, handler)`
+
+註冊 handler 函數，以接收指定伺服器的進度更新。
+
+```typescript prettier:false
+async onUpdate(
+  serverName: string,
+  handler: (params: {
+    progressToken: string;
+    progress: number;
+    total?: number;
+    message?: string;
+  }) => void,
+): Promise<void>
+```
+
+注意事項：
+
+- 當 `enableProgressTracking` 為 true（預設值）時，Tool 呼叫會包含 `progressToken`，讓你把更新與指定 run 關聯。
+- 如在執行 Tool 時傳入 `runId`，它會用作 `progressToken`。
+
+如要停用伺服器的進度追蹤：
+
+```typescript
+const mcpClient = new MCPClient({
+  servers: {
+    myServer: {
+      url: new URL('http://localhost:4111/api/mcp/myServer/mcp'),
+      enableProgressTracking: false,
+    },
+  },
+})
+```
+
+## Elicitation
+
+Elicitation 是一項讓 MCP 伺服器向使用者要求結構化資料的功能。伺服器需要其他資料時，可傳送 elicitation 要求，由用戶端提示使用者處理。Tool 呼叫期間便是常見例子。
+
+### Elicitation 的運作方式
+
+1. **伺服器要求**：MCP 伺服器 Tool 以訊息及 schema 呼叫 `server.elicitation.sendRequest()`
+1. **用戶端 Handler**：系統以該要求呼叫你的 elicitation handler 函數
+1. **使用者互動**：Handler 收集使用者輸入（透過 UI、CLI 等）
+1. **回應**：Handler 傳回使用者的回應（accept/decline/cancel）
+1. **Tool 繼續執行**：伺服器 Tool 收到回應並繼續執行
+
+### 設定 Elicitation
+
+你必須在呼叫使用 elicitation 的 Tool 前設定 elicitation handler：
+
+```typescript
+import { MCPClient } from '@mastra/mcp'
+
+const mcpClient = new MCPClient({
+  servers: {
+    interactiveServer: {
+      url: new URL('http://localhost:3000/mcp'),
+    },
+  },
+})
+
+// Set up elicitation handler
+mcpClient.elicitation.onRequest('interactiveServer', async request => {
+  // Handle the server's request for user input
+  console.log(`Server needs: ${request.message}`)
+
+  // Your logic to collect user input
+  const userData = await collectUserInput(request.requestedSchema)
+
+  return {
+    action: 'accept',
+    content: userData,
+  }
+})
+```
+
+### 回應類型
+
+Elicitation handler 必須傳回以下三種回應類型之一：
+
+- **接受**：使用者已提供資料並確認提交
+
+  ```typescript
+  return {
+    action: 'accept',
+    content: { name: 'John Doe', email: 'john@example.com' },
+  }
+  ```
+
+- **拒絕**：使用者明確拒絕提供資料
+
+  ```typescript
+  return { action: 'decline' }
+  ```
+
+- **取消**：使用者關閉或取消要求
+  ```typescript
+  return { action: 'cancel' }
+  ```
+
+### 根據 Schema 收集輸入
+
+`requestedSchema` 為伺服器所需資料提供結構：
+
+```typescript
+await mcpClient.elicitation.onRequest('interactiveServer', async request => {
+  const { properties, required = [] } = request.requestedSchema
+  const content: Record<string, any> = {}
+
+  for (const [fieldName, fieldSchema] of Object.entries(properties || {})) {
+    const field = fieldSchema as any
+    const isRequired = required.includes(fieldName)
+
+    // Collect input based on field type and requirements
+    const value = await promptUser({
+      name: fieldName,
+      title: field.title,
+      description: field.description,
+      type: field.type,
+      required: isRequired,
+      format: field.format,
+      enum: field.enum,
+    })
+
+    if (value !== null) {
+      content[fieldName] = value
+    }
+  }
+
+  return { action: 'accept', content }
+})
+```
+
+### 最佳做法
+
+- **始終處理 elicitation**：呼叫可能使用 elicitation 的 Tool 前，先設定 handler
+- **驗證輸入**：檢查是否已提供必填欄位
+- **尊重使用者選擇**：妥善處理拒絕及取消回應
+- **清晰的 UI**：清楚顯示所要求的資料及原因
+- **安全性**：切勿自動接受索取敏感資料的要求
+
+## OAuth 驗證
+
+如要連接依照 [MCP Auth Specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) 要求 OAuth 驗證的 MCP 伺服器，請使用 `MCPOAuthClientProvider`：
+
+```typescript
+import { MCPClient, MCPOAuthClientProvider } from '@mastra/mcp'
+
+// Create an OAuth provider
+const oauthProvider = new MCPOAuthClientProvider({
+  redirectUrl: 'http://localhost:3000/oauth/callback',
+  clientMetadata: {
+    redirect_uris: ['http://localhost:3000/oauth/callback'],
+    client_name: 'My MCP Client',
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+  },
+  onRedirectToAuthorization: url => {
+    // Handle authorization redirect (open browser, redirect response, etc.)
+    console.log(`Please visit: ${url}`)
+  },
+})
+
+// Use the provider with MCPClient
+const client = new MCPClient({
+  servers: {
+    protectedServer: {
+      url: new URL('https://mcp.example.com/mcp'),
+      authProvider: oauthProvider,
+    },
+  },
+})
+```
+
+每個伺服器均須使用各自的 `MCPOAuthClientProvider` 實例。Provider 在授權期間保留各伺服器的 session 及 credential 狀態，因此多個伺服器共用一個實例會令其流程互相覆寫。設定多個受保護伺服器時，請分別建立 Provider。
+
+### 互動式瀏覽器驗證
+
+當伺服器因需要授權而拒絕連線時，用戶端會記錄 `'needs-auth'` 狀態，而非直接失敗。呼叫 `authenticate()` 即可完成流程。它會在 Provider 的 loopback 重新導向 URL 啟動一次性 callback 伺服器；如連接埠正在使用，便依序改用下一個連接埠。SDK 隨後在 runtime 執行探索及用戶端註冊。`onRedirectToAuthorization` 會收到授權 URL，讓應用程式在使用者的瀏覽器開啟。瀏覽器傳回授權碼後，token 交換便會完成：
+
+```typescript
+import { MCPClient, MCPOAuthClientProvider } from '@mastra/mcp'
+
+const oauthProvider = new MCPOAuthClientProvider({
+  redirectUrl: 'http://127.0.0.1:5533/oauth/callback',
+  clientMetadata: {
+    redirect_uris: ['http://127.0.0.1:5533/oauth/callback'],
+    client_name: 'My MCP Client',
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+  },
+  onRedirectToAuthorization: url => {
+    // Open the user's browser at the consent page
+    console.log(`Please visit: ${url}`)
+  },
+})
+
+const mcp = new MCPClient({
+  servers: {
+    protectedServer: {
+      url: new URL('https://mcp.example.com/mcp'),
+      authProvider: oauthProvider,
+    },
+  },
+})
+
+try {
+  await mcp.listTools()
+} catch {
+  if (mcp.getServerAuthState('protectedServer') === 'needs-auth') {
+    await mcp.authenticate('protectedServer')
+  }
+}
+```
+
+同一伺服器的並行 `authenticate()` 呼叫會加入待處理流程。不同伺服器會各自驗證。如已儲存有效 token，呼叫會直接重新連線而不開啟瀏覽器。
+
+自行驅動流程的 host 可使用匯出的 `createOAuthCallbackServer` helper 擷取授權碼；它會綁定一次性 loopback 伺服器、驗證 OAuth `state` 參數，並以授權碼完成。由於它建立普通 HTTP 伺服器，因此只適用於本機 loopback 重新導向。使用 HTTPS 重新導向 URL 的 Web 應用程式必須自行託管 callback endpoint 並直接驅動 Provider，不應使用此 helper：
+
+```typescript
+import { createOAuthCallbackServer, getCallbackUrlCandidates } from '@mastra/mcp'
+
+// getCallbackUrlCandidates() lists every URL the helper may bind, so register
+// all of them as redirect_uris during client registration to cover port fallback.
+const redirectUris = getCallbackUrlCandidates('http://127.0.0.1:5533/oauth/callback').map(url =>
+  url.toString(),
+)
+
+const server = await createOAuthCallbackServer({
+  redirectUrl: 'http://127.0.0.1:5533/oauth/callback',
+  state: expectedState,
+})
+
+// server.url reflects the port actually bound — use it as the redirect_uri.
+try {
+  const { code } = await server.waitForCode()
+  // Exchange the code here.
+} finally {
+  await server.close()
+}
+```
+
+### 快速 Token Provider
+
+如要測試，或你已有有效的 access token：
+
+```typescript
+import { MCPClient, createSimpleTokenProvider } from '@mastra/mcp'
+
+const provider = createSimpleTokenProvider('your-access-token', {
+  redirectUrl: 'http://localhost:3000/callback',
+  clientMetadata: {
+    redirect_uris: ['http://localhost:3000/callback'],
+    client_name: 'Test Client',
+  },
+})
+
+const client = new MCPClient({
+  servers: {
+    testServer: {
+      url: new URL('https://mcp.example.com/mcp'),
+      authProvider: provider,
+    },
+  },
+})
+```
+
+### 自訂 Token 儲存空間
+
+如要跨 session 持久儲存 token，請實作 `OAuthStorage` interface：
+
+```typescript
+import { MCPOAuthClientProvider, OAuthStorage } from '@mastra/mcp'
+
+class DatabaseOAuthStorage implements OAuthStorage {
+  constructor(
+    private db: Database,
+    private userId: string,
+  ) {}
+
+  async set(key: string, value: string): Promise<void> {
+    await this.db.query(
+      'INSERT INTO oauth_tokens (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET value = ?',
+      [this.userId, key, value, value],
+    )
+  }
+
+  async get(key: string): Promise<string | undefined> {
+    const result = await this.db.query(
+      'SELECT value FROM oauth_tokens WHERE user_id = ? AND key = ?',
+      [this.userId, key],
+    )
+    return result?.[0]?.value
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.db.query('DELETE FROM oauth_tokens WHERE user_id = ? AND key = ?', [
+      this.userId,
+      key,
+    ])
+  }
+}
+
+const provider = new MCPOAuthClientProvider({
+  redirectUrl: 'http://localhost:3000/callback',
+  clientMetadata: {/* ... */},
+  storage: new DatabaseOAuthStorage(db, 'user-123'),
+})
+```
+
+## 範例
+
+### 靜態 Tool 設定
+
+如整個應用程式只會為這些 Tool 建立一個 MCP 伺服器連線，請使用 `listTools()` 並把 Tool 傳入 Agent：
+
+```typescript
+import { MCPClient } from '@mastra/mcp'
+import { Agent } from '@mastra/core/agent'
+
+const mcp = new MCPClient({
+  servers: {
+    stockPrice: {
+      command: 'npx',
+      args: ['tsx', 'stock-price.ts'],
+      env: {
+        API_KEY: 'your-api-key',
+      },
+      log: logMessage => {
+        console.log(`[${logMessage.level}] ${logMessage.message}`)
+      },
+    },
+    weather: {
+      url: new URL('http://localhost:8080/sse'),
+    },
+  },
+  timeout: 30000, // Global 30s timeout
+})
+
+// Create an agent with access to all tools
+const agent = new Agent({
+  id: 'multi-tool-agent',
+  name: 'Multi-tool Agent',
+  instructions: 'You have access to multiple tool servers.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: await mcp.listTools(),
+})
+
+// Example of using resource methods
+async function checkWeatherResource() {
+  try {
+    const weatherResources = await mcp.resources.list()
+    if (weatherResources.weather && weatherResources.weather.length > 0) {
+      const currentWeatherURI = weatherResources.weather[0].uri
+      const weatherData = await mcp.resources.read('weather', currentWeatherURI)
+      console.log('Weather data:', weatherData.contents[0].text)
+    }
+  } catch (error) {
+    console.error('Error fetching weather resource:', error)
+  }
+}
+checkWeatherResource()
+
+// Example of using prompt methods
+async function checkWeatherPrompt() {
+  try {
+    const weatherPrompts = await mcp.prompts.list()
+    if (weatherPrompts.weather && weatherPrompts.weather.length > 0) {
+      const currentWeatherPrompt = weatherPrompts.weather.find(p => p.name === 'current')
+      if (currentWeatherPrompt) {
+        console.log('Weather prompt:', currentWeatherPrompt)
+      } else {
+        console.log('Current weather prompt not found')
+      }
+    }
+  } catch (error) {
+    console.error('Error fetching weather prompt:', error)
+  }
+}
+checkWeatherPrompt()
+```
+
+### 動態 toolset
+
+如每位使用者都需要新的 MCP 連線，請使用 `listToolsets()`，並在呼叫 stream 或 generate 時加入 Tool：
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { MCPClient } from '@mastra/mcp'
+
+// Create the agent first, without any tools
+const agent = new Agent({
+  id: 'multi-tool-agent',
+  name: 'Multi-tool Agent',
+  instructions: 'You help users check stocks and weather.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+// Later, configure MCP with user-specific settings
+const mcp = new MCPClient({
+  servers: {
+    stockPrice: {
+      command: 'npx',
+      args: ['tsx', 'stock-price.ts'],
+      env: {
+        API_KEY: 'user-123-api-key',
+      },
+      timeout: 20000, // Server-specific timeout
+    },
+    weather: {
+      url: new URL('http://localhost:8080/sse'),
+      requestInit: {
+        headers: {
+          Authorization: `Bearer user-123-token`,
+        },
+      },
+    },
+  },
+})
+
+// Pass all toolsets to stream() or generate()
+const response = await agent.stream('How is AAPL doing and what is the weather?', {
+  toolsets: await mcp.listToolsets(),
+})
+```
+
+## 實例管理
+
+`MCPClient` 類別內置記憶體洩漏防護，用於管理多個實例：
+
+1. 如建立多個設定相同但沒有 `id` 的實例，系統會拋出錯誤以防止記憶體洩漏
+1. 如需要多個設定相同的實例，請為每個實例提供獨有的 `id`
+1. 以相同設定重新建立實例前，請呼叫 `await configuration.disconnect()`
+1. 如只需要一個實例，可考慮把設定移至更高 scope，以免重複建立
+
+例如，如嘗試建立多個設定相同但沒有 `id` 的實例：
+
+```typescript
+// First instance - OK
+const mcp1 = new MCPClient({
+  servers: {/* ... */},
+})
+
+// Second instance with same config - Will throw an error
+const mcp2 = new MCPClient({
+  servers: {/* ... */},
+})
+
+// To fix, either:
+// 1. Add unique IDs
+const mcp3 = new MCPClient({
+  id: 'instance-1',
+  servers: {/* ... */},
+})
+
+// 2. Or disconnect before recreating
+await mcp1.disconnect()
+const mcp4 = new MCPClient({
+  servers: {/* ... */},
+})
+```
+
+## 伺服器生命週期
+
+MCPClient 會妥善處理伺服器連線：
+
+1. 自動管理多個伺服器的連線
+1. 妥善關閉伺服器，避免在開發期間出現錯誤訊息
+1. 中斷連線時妥善清理資源
+
+## 使用自訂 fetch 處理 runtime 定義的驗證
+
+對於 HTTP 伺服器，你可提供自訂 `fetch` 函數來處理 runtime 定義的驗證或攔截要求，亦可處理其他自訂行為。需要在每個要求更新 token，或把傳入要求中的使用者 credential 轉送至 MCP 伺服器時，這尤其有用。
+
+自訂 `fetch` 函數會收到選用的第三個 `requestContext` 參數，讓你存取由 middleware 設定或在 Agent／Tool 執行期間傳入的 request scope 資料（例如驗證 cookie、bearer token）。初次連線 handshake 期間，`requestContext` 為 `null`。
+
+提供 `fetch` 後，`requestInit`、`eventSourceInit` 及 `authProvider` 會變為選用，因為你可在自訂 fetch 函數內處理這些事項。
+
+```typescript
+const mcpClient = new MCPClient({
+  servers: {
+    apiServer: {
+      url: new URL('https://api.example.com/mcp'),
+      fetch: async (url, init, requestContext) => {
+        const headers = new Headers(init?.headers)
+        // Forward auth cookie from the incoming request
+        const cookie = requestContext?.get('cookie')
+        if (cookie) {
+          headers.set('cookie', cookie)
+        }
+        return fetch(url, { ...init, headers })
+      },
+    },
+  },
+})
+
+// Use with an agent — requestContext is automatically forwarded
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'My Agent',
+  instructions: 'You are a helpful assistant.',
+  model: openai('gpt-5.4'),
+  tools: await mcpClient.listTools(),
+})
+
+await agent.generate('Hello!', {
+  requestContext: myRequestContext, // forwarded to the custom fetch
+})
+```
+
+## 在自訂 fetch 內處理驗證失敗
+
+驗證無法使用時，自訂 `fetch` 不應 `throw`。MCP SDK 的 Streamable HTTP 傳輸會在背景開啟長時間運行的 `GET /mcp`「獨立 listener」stream，以接收伺服器推送的通知。該 stream 上的錯誤會以指數退避重試；拋出錯誤的 `fetch` 或正常關閉的 stream 可能導致無限重新連線循環，約每秒嘗試一次。
+
+請改為傳回合成的 `Response`。[MCP Streamable HTTP specification](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports) 把 `405 Method Not Allowed` 定義為伺服器不提供 GET SSE stream 時傳回的訊號，而 SDK 會將它視為終止狀態，以正常停止 listener。伺服器不推送通知時，可藉此停用 listener。
+
+以下模式會在 POST 要求等待 auth token，將其附加至傳出 header，並以合成的 405 提前終止 GET listener：
+
+```typescript
+async function waitForToken(timeoutMs = 5000): Promise<string | null> {
+  // Replace with your token lookup. Return null if no token is available.
+  return getAuthToken({ timeoutMs })
+}
+
+const mcpClient = new MCPClient({
+  servers: {
+    apiServer: {
+      url: new URL('https://api.example.com/mcp'),
+      fetch: async (url, init) => {
+        const method = (init?.method || 'GET').toUpperCase()
+
+        // The SDK opens a background GET stream for server-pushed notifications.
+        // If your server does not use it, short-circuit with 405 to stop reconnect attempts.
+        if (method === 'GET') {
+          return new Response(null, { status: 405, statusText: 'Method Not Allowed' })
+        }
+
+        // POST: wait for the token, then forward the request with an Authorization header.
+        const token = await waitForToken()
+        if (!token) {
+          // Forward the request without a token and let the server reject it.
+          // The SDK surfaces non-2xx POST responses as errors to the caller of
+          // tools/list, tools/call, etc., which is the desired behavior here.
+          return fetch(url, init)
+        }
+
+        const headers = new Headers(init?.headers)
+        headers.set('authorization', `Bearer ${token}`)
+        return fetch(url, { ...init, headers })
+      },
+    },
+  },
+})
+```
+
+只應在伺服器不向用戶端推送通知時，才為 GET listener 傳回 `405`。如伺服器使用獨立 GET stream，亦應在 `GET` 要求附加 auth token，並讓要求通過。
+
+## 使用 SSE 要求 header
+
+使用舊版 SSE MCP 傳輸時，由於 MCP SDK 的一項程式錯誤，你必須同時設定 `requestInit` 及 `eventSourceInit`。你亦可改用自訂 `fetch` 函數；POST 要求及 SSE 連線都會自動使用它：
+
+```ts
+// Option 1: Using requestInit and eventSourceInit (required for SSE)
+const sseClient = new MCPClient({
+  servers: {
+    exampleServer: {
+      url: new URL('https://your-mcp-server.com/sse'),
+      // Note: requestInit alone isn't enough for SSE
+      requestInit: {
+        headers: {
+          Authorization: 'Bearer your-token',
+        },
+      },
+      // This is also required for SSE connections with custom headers
+      eventSourceInit: {
+        fetch(input: Request | URL | string, init?: RequestInit) {
+          const headers = new Headers(init?.headers || {})
+          headers.set('Authorization', 'Bearer your-token')
+          return fetch(input, {
+            ...init,
+            headers,
+          })
+        },
+      },
+    },
+  },
+})
+
+// Option 2: Using custom fetch (simpler, works for both Streamable HTTP and SSE)
+const sseClientWithFetch = new MCPClient({
+  servers: {
+    exampleServer: {
+      url: new URL('https://your-mcp-server.com/sse'),
+      fetch: async (url, init) => {
+        const headers = new Headers(init?.headers || {})
+        headers.set('Authorization', 'Bearer your-token')
+        return fetch(url, {
+          ...init,
+          headers,
+        })
+      },
+    },
+  },
+})
+```
+
+## 相關資料
+
+- 如要建立 MCP 伺服器，請參閱 [MCPServer 文件](./mcp-server)。
+- 如要進一步了解 Model Context Protocol，請參閱 [@modelcontextprotocol/sdk 文件](https://github.com/modelcontextprotocol/typescript-sdk)。
+

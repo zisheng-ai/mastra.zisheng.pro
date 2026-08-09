@@ -1,0 +1,348 @@
+---
+title: "參考：RegexFilterProcessor | 處理器"
+description: "RegexFilterProcessor 的 API 參考；這是一款零成本、以 regex 為基礎的內容篩選器，可封鎖、遮蔽 Agent 訊息中符合模式的內容，或針對該內容提出警告。"
+packages:
+  - "@mastra/core"
+---
+
+# RegexFilterProcessor
+
+`RegexFilterProcessor` 會套用零成本的 regex 模式比對，以篩選、遮蔽或封鎖 Agent 訊息中的內容。它不會呼叫 LLM，所有偵測皆以 regex 為基礎。
+
+此處理器支援常見模式（PII、機密資訊、URL）的內建預設集與自訂 regex 規則，可套用至輸入階段、輸出階段，或兩者皆套用。
+
+## 使用範例
+
+封鎖輸入訊息中的 PII：
+
+```typescript
+import { RegexFilterProcessor } from '@mastra/core/processors'
+
+const filter = new RegexFilterProcessor({
+  presets: ['pii'],
+  strategy: 'block',
+  phase: 'input',
+})
+```
+
+遮蔽輸出中的機密資訊：
+
+```typescript
+import { RegexFilterProcessor } from '@mastra/core/processors'
+
+const filter = new RegexFilterProcessor({
+  presets: ['secrets'],
+  strategy: 'redact',
+  phase: 'output',
+})
+```
+
+自訂規則：
+
+```typescript
+import { RegexFilterProcessor } from '@mastra/core/processors'
+
+const filter = new RegexFilterProcessor({
+  rules: [{ name: 'internal-id', pattern: /INTERNAL-\d{6}/g, replacement: '[INTERNAL_ID]' }],
+  strategy: 'redact',
+})
+```
+
+對於較長的自訂相符項目（例如固定長度的機密資訊，或必須等到結尾分隔符號出現才會符合的值），可加大串流延續視窗：
+
+```typescript
+import { RegexFilterProcessor } from '@mastra/core/processors'
+
+const filter = new RegexFilterProcessor({
+  rules: [
+    {
+      name: 'armored-key',
+      pattern: /-----BEGIN KEY-----[A-Z]+-----END KEY-----/g,
+      replacement: '[KEY]',
+    },
+  ],
+  strategy: 'redact',
+  streamCarryoverSize: 256,
+})
+```
+
+附加至 Agent：
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { RegexFilterProcessor } from '@mastra/core/processors'
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  model: '__GATEWAY_OPENAI_MODEL_NANO__',
+  inputProcessors: [
+    new RegexFilterProcessor({
+      presets: ['pii', 'secrets'],
+      strategy: 'block',
+    }),
+  ],
+})
+```
+
+## 建構函式參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'rules',
+    type: 'RegexRule[]',
+    description:
+      '要套用的自訂 regex 規則。每項規則都有名稱、regex 模式，以及選用的替代字串。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'RegexRule',
+        parameters: [
+          {
+            name: 'name',
+            type: 'string',
+            description: '規則的顯示名稱（用於相符報告和錯誤訊息）。',
+            isOptional: false,
+          },
+          {
+            name: 'pattern',
+            type: 'RegExp',
+            description: '要用於比對的 regex 模式。',
+            isOptional: false,
+          },
+          {
+            name: 'replacement',
+            type: 'string',
+            description: "redact 策略使用的替代字串。預設為 '[REDACTED]'。",
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'presets',
+    type: "('pii' | 'secrets' | 'urls')[]",
+    description:
+      "內建的預設集類別。'pii' 會比對電子郵件地址、電話號碼、SSN 和信用卡號；'secrets' 會比對 API 金鑰、bearer token 和 AWS 金鑰；'urls' 會比對 HTTP/HTTPS URL。",
+    isOptional: true,
+  },
+  {
+    name: 'strategy',
+    type: "'block' | 'redact' | 'warn'",
+    description:
+      "找到符合模式的內容時採用的策略。'block' 會以 TripWire 錯誤中止；'redact' 會以替代文字取代相符內容；'warn' 會記錄警告，但不變更內容並予以放行。",
+    isOptional: true,
+    defaultValue: "'block'",
+  },
+  {
+    name: 'phase',
+    type: "'input' | 'output' | 'all'",
+    description:
+      "要套用篩選器的階段。'input' 會篩選輸入訊息；'output' 會篩選輸出串流與結果；'all' 會同時篩選兩者。",
+    isOptional: true,
+    defaultValue: "'all'",
+  },
+  {
+    name: 'includeRedactedValues',
+    type: 'boolean',
+    description:
+      '是否在每個報告項目中包含已遮蔽的文字。預設關閉，因為這些值正是處理器要移除的資料。',
+    isOptional: true,
+    defaultValue: 'false',
+  },
+  {
+    name: 'streamCarryoverSize',
+    type: 'number',
+    description:
+      '串流遮蔽路徑會在區塊之間保留的尾端字元數，讓跨越區塊邊界的相符內容可被完整遮蔽。預設值留有充足餘裕，足以涵蓋所有內建預設集。若自訂規則的相符內容必須完整出現後才可被規則辨識，例如固定長度的機密資訊或帶有結尾分隔符號的值，而且其長度可能超過視窗，請提高此值。',
+    isOptional: true,
+    defaultValue: '128',
+  },
+]}
+/>
+
+## 回傳值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: "'regex-filter'",
+    description: '處理器識別碼。',
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: "'Regex Filter'",
+    description: '處理器顯示名稱。',
+    isOptional: false,
+  },
+  {
+    name: 'processInput',
+    type: '(args: ProcessInputArgs) => ProcessInputResult',
+    description:
+      '以所有設定的規則檢查輸入訊息，並依策略封鎖、遮蔽或提出警告。phase 為 output 時會略過。',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputStream',
+    type: '(args: ProcessOutputStreamArgs) => Promise<ChunkType | null | undefined>',
+    description: '以所有設定的規則檢查串流 text-delta 區塊。phase 為 input 時會略過。',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputResult',
+    type: '(args: ProcessOutputResultArgs) => ProcessorMessageResult',
+    description:
+      '以所有設定的規則檢查輸出訊息，並依策略封鎖、遮蔽或提出警告。phase 為 input 時會略過。',
+    isOptional: false,
+  },
+]}
+/>
+
+## 錯誤行為
+
+啟用 `block` 策略（預設值）時，只要有任何模式相符，`RegexFilterProcessor` 就會擲回 `retry: false` 的 `TripWire` 錯誤。TripWire 中繼資料包含：
+
+- `processorId`：`'regex-filter'`
+- `matches`：相符物件陣列，包含 `rule`、`match`（遮蔽為 `'[REDACTED_MATCH]'`）與 `index`
+- `strategy`：`'block'`
+
+## 內建預設集
+
+| 預設集 | 模式 | 預設替代值 |
+| - | - | - |
+| `pii` | 電子郵件地址、電話號碼、SSN、信用卡號 | `[EMAIL]`、`[PHONE]`、`[SSN]`、`[CREDIT_CARD]` |
+| `secrets` | API 金鑰、bearer token、AWS 存取金鑰 | `[API_KEY]`、`[BEARER_TOKEN]`、`[AWS_KEY]` |
+| `urls` | HTTP/HTTPS URL | `[URL]` |
+
+## 遮蔽行為
+
+每項規則都會獨立比對，因此兩項規則可能會比對到重疊的文字。例如，未使用分隔符號的信用卡號會同時符合 `phone` 與 `credit-card`。重疊的相符項目會合併為單一區域，並使用最長相符項目的替代值取代一次。
+
+```typescript
+const filter = new RegexFilterProcessor({
+  presets: ['pii'],
+  strategy: 'redact',
+})
+
+// "Charge 4111111111111111 today" becomes "Charge [CREDIT_CARD] today"
+```
+
+替代字串可以使用 `$1` 或 `$&` 參照擷取群組。若單一相符項目的模式也能單獨比對該段文字，這些參照就會解析。若是合併區域，或規則使用 lookbehind 或 lookahead 錨定周圍內容，替代字串會依原樣插入。無論何種情況，該區域都會被遮蔽。
+
+## 遮蔽報告
+
+`redact` 策略會就地改寫文字，因此下游無法得知哪些內容有所變更。請指派 `onViolation` 來記錄變更。處理器會針對每一則已遮蔽的訊息、訊息部分或串流區塊呼叫一次，而位移量是相對於該段文字。它會等待非同步回呼完成並攔截錯誤，因此即使稽核接收端無法使用，也不會導致請求失敗。
+
+```typescript
+import { RegexFilterProcessor, type RegexRedactionDetail } from '@mastra/core/processors'
+
+const filter = new RegexFilterProcessor({
+  presets: ['pii'],
+  strategy: 'redact',
+})
+
+filter.onViolation = async ({ detail }) => {
+  const redaction = detail as RegexRedactionDetail
+
+  for (const entry of redaction.redactions) {
+    await auditLog.write({
+      phase: redaction.phase,
+      messageId: redaction.messageId,
+      rule: entry.rule,
+      offset: entry.index,
+      length: entry.length,
+    })
+  }
+}
+```
+
+系統會等待回呼完成，包括在 `processOutputStream` 中，每個包含相符項目的區塊都會執行回呼。請讓回呼快速完成，或將工作交給佇列，以免緩慢的稽核接收端使串流回應停滯。未附加回呼時，`redact` 路徑會維持同步。
+
+`block` 策略也會透過相同回呼報告。在此情況下，處理器執行器會在攔截到 `TripWire` 時呼叫回呼，因此 `detail` 會包含[錯誤行為](#error-behavior)中說明的 tripwire 中繼資料，而非下方的結構。
+
+遮蔽報告的 `detail` 是 `RegexRedactionDetail`：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'strategy',
+    type: "'redact'",
+    description: '用來區分遮蔽報告與 block 策略的承載資料。',
+    isOptional: false,
+  },
+  {
+    name: 'phase',
+    type: "'processInput' | 'processOutputStream' | 'processOutputResult'",
+    description: '套用遮蔽的處理器方法。',
+    isOptional: false,
+  },
+  {
+    name: 'messageId',
+    type: 'string',
+    description: '文字來源訊息的 ID。串流區塊沒有此值。',
+    isOptional: true,
+  },
+  {
+    name: 'partIndex',
+    type: 'number',
+    description:
+      '已遮蔽部分在訊息 parts 陣列中的索引；該陣列也包含非文字部分。字串內容和串流區塊沒有此值。',
+    isOptional: true,
+  },
+  {
+    name: 'redactions',
+    type: 'RegexRedaction[]',
+    description: '依文字中出現順序排列的遮蔽項目。',
+    isOptional: false,
+    properties: [
+      {
+        type: 'RegexRedaction',
+        parameters: [
+          {
+            name: 'rule',
+            type: 'string',
+            description: '其替代值被採用的規則名稱。',
+            isOptional: false,
+          },
+          {
+            name: 'index',
+            type: 'number',
+            description: '已遮蔽範圍在文字中的起始位移。',
+            isOptional: false,
+          },
+          {
+            name: 'length',
+            type: 'number',
+            description: '已遮蔽範圍的長度。',
+            isOptional: false,
+          },
+          {
+            name: 'replacement',
+            type: 'string',
+            description: '取代該範圍的文字。',
+            isOptional: false,
+          },
+          {
+            name: 'overlappingRules',
+            type: 'string[]',
+            description: '符合此範圍的所有規則名稱；僅在多個規則重疊時設定。',
+            isOptional: true,
+          },
+          {
+            name: 'value',
+            type: 'string',
+            description: '已遮蔽的文字；僅在啟用 includeRedactedValues 時設定。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+預設會省略值。若稽核軌跡複製了它原本要保護的資料，就會擴大本應縮小的曝露範圍。只有當目的地的保護程度與原始資料相同時，才設定 `includeRedactedValues`。也請注意，基於相同理由，`block` 策略的 `TripWire` 中繼資料也不會包含相符文字。

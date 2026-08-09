@@ -1,0 +1,166 @@
+---
+title: "參考：summarizeConversation() | Memory"
+description: "Mastra 中獨立 `summarizeConversation()` 函式的文件，此函式會摘要你傳入的訊息，並從中擷取結構化值。"
+packages:
+  - "@mastra/memory"
+---
+
+# summarizeConversation()
+
+獨立的 `summarizeConversation()` 函式會一次完成對話摘要。它使用支援 [Observational Memory](/reference/memory/observational-memory) 的相同 Observer 管線濃縮你傳入的訊息：不必將 Observational Memory 附加至 Agent，也不會讀取或寫入儲存空間。
+
+系統不會將任何內容寫回 Memory。摘要及擷取的值會回傳給你（以及每個 extractor 的 `onExtracted` hook），由你決定儲存位置，例如自己的資料庫。
+
+當你已經取得訊息，且想明確控制摘要內容時，請使用此函式。若是由 ID 識別的已儲存執行緒，請使用 [`Memory.summarizeThread()`](/reference/memory/summarizeThread)，由它為你載入訊息。
+
+## 使用範例
+
+```typescript
+import { summarizeConversation } from '@mastra/memory'
+
+const result = await summarizeConversation({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  messages,
+  instructions: 'Summarize this voicemail call for the business owner.',
+})
+```
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'string | LanguageModel | DynamicModel',
+    description: "執行摘要的模型，例如 '__GATEWAY_OPENAI_MODEL_MINI__' 這類 router 字串。",
+    isOptional: false,
+  },
+  {
+    name: 'messages',
+    type: 'MastraDBMessage[]',
+    description: '要摘要的對話。為空時，函式會回傳空白結果而不呼叫模型。',
+    isOptional: false,
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description: '附加到摘要器 system prompt 的額外指引，例如應著重的內容或摘要的閱讀對象。',
+    isOptional: true,
+  },
+  {
+    name: 'extract',
+    type: 'Extractor[]',
+    description: '要在對話上執行的 extractor。具有 Zod schema 的 extractor 會以後續結構化輸出呼叫執行；不含 schema 的 extractor 則會行內擷取。每個 extractor 的 `onExtracted` hook 都會收到擷取的值。',
+    isOptional: true,
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    description: '對話所屬的執行緒。預設為 `messages` 中找到的第一個 `threadId`，並會傳給 extractor context。',
+    isOptional: true,
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    description: '對話所屬的資源（使用者）。預設為 `messages` 中找到的第一個 `resourceId`，並會傳給 extractor context。',
+    isOptional: true,
+  },
+  {
+    name: 'memory',
+    type: 'Memory',
+    description: '轉送至 extractor context 的 Memory 執行個體。透過 `Memory.summarizeThread()` 呼叫時會自動設定。',
+    isOptional: true,
+  },
+  {
+    name: 'mastra',
+    type: 'Mastra',
+    description: '用來解析自訂 gateway 模型的 Mastra 執行個體。透過 `Memory.summarizeThread()` 呼叫時會自動設定。',
+    isOptional: true,
+  },
+  {
+    name: 'requestContext',
+    type: 'RequestContext',
+    description: '轉送至摘要模型與 extractor hook 的 request context。',
+    isOptional: true,
+  },
+  {
+    name: 'abortSignal',
+    type: 'AbortSignal',
+    description: '取消摘要呼叫的訊號。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 回傳值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'summary',
+    type: 'string',
+    description: '從對話產生、以密集項目符號呈現的濃縮 observation。',
+  },
+  {
+    name: 'extracted',
+    type: 'Record<string, unknown>',
+    description: '`extract` extractor 產生的值，以 extractor slug 作為 key。',
+  },
+  {
+    name: 'extractionFailures',
+    type: '{ slug: string; error: string }[]',
+    description: '未能產生有效值的 extractor 及其原因。只有至少一個 extractor 失敗時才會存在。',
+  },
+  {
+    name: 'usage',
+    type: '{ inputTokens?: number; outputTokens?: number; totalTokens?: number }',
+    description: '摘要呼叫的 token 使用量。',
+  },
+]}
+/>
+
+## 延伸使用範例
+
+下列範例會根據應用程式已持有的訊息，摘要進行中的語音工作階段，並擷取結構化記錄：
+
+```typescript title="src/session-summary.ts"
+import { summarizeConversation, Extractor } from '@mastra/memory'
+import type { MastraDBMessage } from '@mastra/core/agent'
+import { z } from 'zod'
+import { sessionRecords } from './db'
+
+const sessionSummary = new Extractor({
+  name: 'session-summary',
+  instructions: 'Return a concise summary of the session.',
+  schema: z.object({
+    summary: z.string(),
+    sentiment: z.enum(['positive', 'neutral', 'negative']),
+    followUps: z.array(z.string()),
+  }),
+  metadataKeyPath: false, // don't persist into memory metadata — the hook owns storage
+  onExtracted: async ({ current, threadId }) => {
+    await sessionRecords.upsert({ sessionId: threadId, record: current })
+  },
+})
+
+export async function onSessionEnd(messages: MastraDBMessage[]) {
+  const { summary, extracted, extractionFailures } = await summarizeConversation({
+    model: '__GATEWAY_OPENAI_MODEL_MINI__',
+    messages,
+    instructions: 'Summarize this support session for the account manager.',
+    extract: [sessionSummary],
+  })
+
+  if (extractionFailures?.length) {
+    console.warn('Some extractors failed', extractionFailures)
+  }
+
+  return { summary, extracted }
+}
+```
+
+### 相關內容
+
+- [.summarizeThread()](/reference/memory/summarizeThread)
+- [Memory 類別參考](/reference/memory/memory-class)
+- [Observational Memory](/reference/memory/observational-memory)

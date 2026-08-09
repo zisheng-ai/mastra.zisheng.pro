@@ -1,0 +1,165 @@
+---
+title: "参考：忠实度 Scorer | Evals"
+description: Mastra 忠实度 Scorer 的文档，该 Scorer 用于评估 LLM 输出相对于所提供上下文的事实准确性。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+# 忠实度 Scorer
+
+`createFaithfulnessScorer()` 函数用于评估 LLM 输出相对于所提供上下文的事实准确性。它会从输出中提取声明，并根据上下文进行验证，因此对于衡量 RAG pipeline 响应的可靠性至关重要。
+
+## 参数
+
+`createFaithfulnessScorer()` 函数接受一个 options 对象，其中包含以下属性：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'LanguageModel',
+    required: true,
+    description: '用于评估 Faithfulness 的模型配置。',
+  },
+  {
+    name: 'context',
+    type: 'string[]',
+    required: true,
+    description: '用于验证输出声明的上下文片段数组。',
+  },
+  {
+    name: 'scale',
+    type: 'number',
+    required: false,
+    defaultValue: '1',
+    description: '最高分值。最终分数将归一化到此量表。',
+  },
+]}
+/>
+
+此函数返回 MastraScorer 类的实例。`.run()` 方法接受与其他 Scorer 相同的输入（参见 [MastraScorer 参考](./mastra-scorer)），但返回值包含下文所述的 LLM 特有字段。
+
+## `.run()` 返回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'runId',
+    type: 'string',
+    description: '运行 ID（可选）。',
+  },
+  {
+    name: 'preprocessStepResult',
+    type: 'string[]',
+    description: '从输出中提取的声明数组。',
+  },
+  {
+    name: 'preprocessPrompt',
+    type: 'string',
+    description: '在预处理步骤中发送给 LLM 的 prompt（可选）。',
+  },
+  {
+    name: 'analyzeStepResult',
+    type: 'object',
+    description: "包含判定结果的对象：{ verdicts: Array<{ verdict: 'yes' | 'no' | 'unsure', reason: string }> }",
+  },
+  {
+    name: 'analyzePrompt',
+    type: 'string',
+    description: '在分析步骤中发送给 LLM 的 prompt（可选）。',
+  },
+  {
+    name: 'score',
+    type: 'number',
+    description:
+      '介于 0 和所配置量表之间的分数，表示得到上下文支持的声明比例。',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description:
+      '对分数的详细说明，包括哪些声明得到支持、与上下文矛盾或被标记为无法确定。',
+  },
+  {
+    name: 'generateReasonPrompt',
+    type: 'string',
+    description: '在 generateReason 步骤中发送给 LLM 的 prompt（可选）。',
+  },
+]}
+/>
+
+## 评分详情
+
+该 Scorer 通过根据所提供的上下文验证声明来评估 Faithfulness。
+
+### 评分流程
+
+1. 分析声明和上下文：
+   - 提取所有声明（事实性和推测性）
+   - 根据上下文验证每项声明
+   - 给出以下三种判定之一：
+     - "yes" - 声明得到上下文支持
+     - "no" - 声明与上下文矛盾
+     - "unsure" - 声明无法验证
+1. 计算 Faithfulness 分数：
+   - 统计得到支持的声明
+   - 除以声明总数
+   - 缩放到配置的范围
+
+最终分数：`(supported_claims / total_claims) * scale`
+
+### 分数解读
+
+Faithfulness 分数介于 0 和 1 之间：
+
+- **1.0**：所有声明都准确且得到上下文的直接支持。
+- **0.7 到 0.9**：大多数声明正确，仅有少量增补或遗漏。
+- **0.4 到 0.6**：部分声明得到支持，但其他声明无法验证。
+- **0.1 到 0.3**：大部分内容不准确或缺乏支持。
+- **0.0**：所有声明均为错误或与上下文矛盾。
+
+## 示例
+
+评估 Agent 响应相对于所提供上下文的 Faithfulness：
+
+```typescript title="src/example-faithfulness.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createFaithfulnessScorer } from '@mastra/evals/scorers/prebuilt'
+import { myAgent } from './agent'
+
+// Context is typically populated from agent tool calls or RAG retrieval
+const scorer = createFaithfulnessScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'Tell me about the Tesla Model 3.',
+    },
+    {
+      input: 'What are the key features of this electric vehicle?',
+    },
+  ],
+  scorers: [scorer],
+  target: myAgent,
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+有关 `runEvals` 的更多详情，请参阅 [runEvals 参考](/reference/evals/run-evals)。
+
+要将此 Scorer 添加到 Agent，请参阅 [Scorer 概述](/docs/evals/overview#adding-scorers-to-agents)指南。
+
+## 相关内容
+
+- [Answer Relevancy Scorer](./answer-relevancy)
+- [Hallucination Scorer](./hallucination)

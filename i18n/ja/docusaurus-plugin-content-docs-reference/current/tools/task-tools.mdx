@@ -1,0 +1,221 @@
+---
+title: "リファレンス: Task tools | Tools"
+description: "あらゆる Agent に構造化されたタスク追跡を追加する組み込み Task tools（task_write、task_update、task_complete、task_check）の API リファレンス。"
+packages:
+  - "@mastra/core"
+---
+
+# Task tools
+
+Agent の実行における構造化されたタスクリストを管理する、Agent に依存しない4つの組み込み Tool です。タスクリストはスレッドスコープの `threadState` ストレージドメインに永続化され、Agent の [state-signal](/docs/long-running-agents/signals) レーンに投影されるため、[observational-memory](/docs/memory/observational-memory) による切り詰め後も保持されます。
+
+タスク追跡には、メモリを利用するスレッド（`threadId` + `resourceId`）が必要です。メモリがない場合、Task tools はタスク追跡に Agent のメモリが必要であることを示すエラーを返します。
+
+推奨される設定は [`TaskSignalProvider`](/reference/signals/task-signal-provider) です。4つの Tool と `TaskStateProcessor` を1回の登録にまとめられます。概念ガイドについては、[組み込み Tool](/docs/agents/using-tools#task-tracking) を参照してください。
+
+## 使用例
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { TaskSignalProvider } from '@mastra/core/signals'
+
+const agent = new Agent({
+  id: 'coder',
+  name: 'Coder',
+  instructions: 'Track your progress with the task tools.',
+  model,
+  memory: new Memory(),
+  signals: [new TaskSignalProvider()],
+})
+```
+
+Tool を直接インポートすることもできます。
+
+```typescript title="src/mastra/agents/index.ts"
+import { taskWriteTool, taskUpdateTool, taskCompleteTool, taskCheckTool } from '@mastra/core/tools'
+
+const agent = new Agent({
+  id: 'coder',
+  name: 'Coder',
+  instructions: 'Track your progress with the task tools.',
+  model,
+  memory: new Memory(),
+  tools: { taskWriteTool, taskUpdateTool, taskCompleteTool, taskCheckTool },
+})
+```
+
+## `task_write`
+
+タスクリスト全体を作成または置換します。呼び出すたびに、それまでのリストが置き換えられます。
+
+### 入力スキーマ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'tasks',
+    type: 'TaskItemInput[]',
+    description: '更新後の完全なタスクリスト。',
+    isOptional: false,
+    properties: [
+      {
+        type: 'TaskItemInput',
+        parameters: [
+          {
+            name: 'id',
+            type: 'string',
+            description:
+              "安定したタスク識別子（例: 'task_investigate_tests'）。更新をまたいで変更しないでください。省略すると自動生成されます。",
+            isOptional: true,
+          },
+          {
+            name: 'content',
+            type: 'string',
+            description: "命令形のタスク説明（例: 'Fix authentication bug'）。",
+          },
+          {
+            name: 'status',
+            type: "'pending' | 'in_progress' | 'completed'",
+            description: '現在のタスクステータス。',
+          },
+          {
+            name: 'activeForm',
+            type: 'string',
+            description: "実行中に表示する現在進行形（例: 'Fixing authentication bug'）。",
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+### 出力
+
+人が読める `content` の概要、割り当てられた ID を含む完全な `tasks` 配列、`isError` フラグを持つ `TaskToolResult` を返します。
+
+### 動作
+
+- 1回の呼び出し内で ID は一意でなければなりません。明示的に指定した ID が重複している場合は、代替 ID が生成されます。
+- 既存のリストを書き換える際に ID を省略すると、曖昧さなく一致するタスクが1つだけ存在する場合、その以前の ID が安定性のため再利用されます。
+- `in_progress` ステータスにできるタスクは一度に1つだけです。複数の `in_progress` タスクを送信するとエラーが返されます。
+
+## `task_update`
+
+安定した ID を使って1つのタスクを更新します。変更したフィールドだけを指定してください。
+
+### 入力スキーマ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: '更新するタスクの安定した識別子。',
+    isOptional: false,
+  },
+  {
+    name: 'content',
+    type: 'string',
+    description: '命令形の新しいタスク説明。',
+    isOptional: true,
+  },
+  {
+    name: 'status',
+    type: "'pending' | 'in_progress' | 'completed'",
+    description: '新しいタスクステータス。',
+    isOptional: true,
+  },
+  {
+    name: 'activeForm',
+    type: 'string',
+    description: '新しい現在進行形。',
+    isOptional: true,
+  },
+]}
+/>
+
+`content`、`status`、`activeForm` のうち少なくとも1つが必要です。
+
+### 動作
+
+- 更新によってタスクを `in_progress` に設定すると、それ以外の `in_progress` タスクは自動的に `pending` に戻されます。
+- ID が見つからない場合、利用可能なタスク ID とともにエラーを返します。
+
+## `task_complete`
+
+安定した ID を使って1つのタスクを完了済みにします。
+
+### 入力スキーマ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: '完了済みにするタスクの安定した識別子。',
+    isOptional: false,
+  },
+]}
+/>
+
+### 動作
+
+ID が見つからない場合、利用可能なタスク ID とともにエラーを返します。
+
+## `task_check`
+
+タスクリストの完了ステータスを確認します。入力パラメーターはありません。
+
+### 出力
+
+次の内容を持つ `TaskCheckResult` を返します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'content',
+    type: 'string',
+    description: 'タスク数と未完了タスクの ID を含む、人が読める概要。',
+  },
+  {
+    name: 'tasks',
+    type: 'TaskItem[]',
+    description: '安定した ID を含むタスクリスト全体のスナップショット。',
+  },
+  {
+    name: 'summary',
+    type: 'TaskCheckSummary',
+    description: '構造化された件数。',
+    properties: [
+      {
+        type: 'TaskCheckSummary',
+        parameters: [
+          { name: 'total', type: 'number', description: '追跡中のタスク総数。' },
+          { name: 'completed', type: 'number', description: '完了済みのタスク数。' },
+          { name: 'inProgress', type: 'number', description: '進行中のタスク数。' },
+          { name: 'pending', type: 'number', description: '保留中のタスク数。' },
+          { name: 'incomplete', type: 'number', description: 'まだ完了していないタスク数（進行中 + 保留中）。' },
+          { name: 'hasTasks', type: 'boolean', description: 'タスクが1つ以上存在する場合は true。' },
+          {
+            name: 'allCompleted',
+            type: 'boolean',
+            description: 'タスクが1つ以上存在し、すべてのタスクが完了している場合は true。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'incompleteTasks',
+    type: 'TaskItem[]',
+    description: '引き続き対応が必要なタスク（進行中および保留中）。',
+  },
+  {
+    name: 'isError',
+    type: 'boolean',
+    description: '確認中にエラーが発生したかどうか。',
+  },
+]}
+/>

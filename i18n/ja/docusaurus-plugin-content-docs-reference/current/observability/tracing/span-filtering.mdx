@@ -1,0 +1,120 @@
+---
+title: "リファレンス：Span filtering | Observability"
+description: "excludeSpanTypes、spanFilter、span filtering の動作に関するリファレンス"
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Span filtering
+
+Span filtering は、observability 設定から export する span を制御します。ノイズや span 単位のコストを削減するために使用できます。また、特定の exporter や環境に必要な span だけを残すこともできます。
+
+tracing 設定の簡単な概要については、[Tracing](/docs/observability/tracing/overview)を参照してください。
+
+## 使用例
+
+次の例は、1 つの observability 設定で `excludeSpanTypes` と `spanFilter` を組み合わせる方法を示します。
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { SpanType } from '@mastra/core/observability'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+import { LangfuseExporter } from '@mastra/langfuse'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-app',
+        exporters: [new MastraStorageExporter(), new LangfuseExporter()],
+        excludeSpanTypes: [SpanType.MODEL_CHUNK, SpanType.MODEL_STEP],
+        spanFilter: span => {
+          if (span.type === SpanType.TOOL_CALL && span.attributes?.success) {
+            return false
+          }
+
+          return true
+        },
+      },
+    },
+  }),
+})
+```
+
+## 設定オプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'excludeSpanTypes',
+    type: 'SpanType[]',
+    description:
+      'processor と spanFilter の実行前に、型に基づいて span を破棄します。広範囲を低オーバーヘッドでフィルタリングする場合に使用します。',
+    isOptional: true,
+  },
+  {
+    name: 'spanFilter',
+    type: '(span: AnyExportedSpan) => boolean',
+    description:
+      'export された span を受け取り、保持する場合は true、破棄する場合は false を返します。属性、メタデータ、タイミング、またはエンティティ識別子に基づいてフィルタリングする場合に使用します。',
+    isOptional: true,
+  },
+]}
+/>
+
+### `excludeSpanTypes`
+
+最小限の設定で span のカテゴリ全体を除外する場合は、`excludeSpanTypes` を使用します。
+
+現在サポートされている値については、[`SpanType` enum](https://github.com/mastra-ai/mastra/blob/main/packages/core/src/observability/types/tracing.ts)を参照してください。
+
+```ts title="src/mastra/index.ts"
+import { SpanType } from '@mastra/core/observability'
+
+excludeSpanTypes: [SpanType.MODEL_CHUNK, SpanType.MODEL_STEP, SpanType.WORKFLOW_SLEEP]
+```
+
+### `spanFilter`
+
+export された span の内容に基づいてフィルタリングする場合は、`spanFilter` を使用します。
+
+```ts title="src/mastra/index.ts"
+import { SpanType } from '@mastra/core/observability'
+
+spanFilter: span => {
+  if (span.type === SpanType.MODEL_CHUNK) return false
+  if (span.type === SpanType.TOOL_CALL && span.attributes?.success) return false
+
+  return true
+}
+```
+
+その他の例：
+
+```ts title="src/mastra/index.ts"
+// Only export spans from production
+spanFilter: span => span.metadata?.environment === 'production'
+
+// Exclude spans from a specific entity
+spanFilter: span => span.entityId !== 'noisy-agent'
+```
+
+## 処理順序
+
+Span filtering は export 時に次の順序で行われます。
+
+1. `includeInternalSpans` が `true` でない限り、内部 span を破棄します。
+1. `excludeSpanTypes` が一致する span 型を除外します。
+1. `spanOutputProcessors` が残りの span を変換します。
+1. `spanFilter` が最終的に export される span を保持するか決定します。
+
+`spanFilter` がエラーをスローした場合、データが暗黙に失われることを防ぐため、Mastra は span を保持してエラーをログに記録します。
+
+## 関連項目
+
+- セットアップと概念については [Tracing の概要](/docs/observability/tracing/overview)
+- `ObservabilityInstanceConfig` については [Configuration API](/reference/observability/tracing/configuration)
+- span データのマスキングについては [Sensitive data filter](/docs/observability/integrations/processors/sensitive-data-filter)

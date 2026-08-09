@@ -1,0 +1,228 @@
+---
+title: "リファレンス：Hono アダプター | Server"
+description: "@mastra/hono サーバーアダプターの API リファレンスです。"
+packages:
+  - "@mastra/hono"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Hono アダプター
+
+`@mastra/hono` パッケージは、Mastra を [Hono](https://hono.dev) で実行するためのサーバーアダプターを提供します。アダプターの一般的な概念（コンストラクターオプション、初期化フローなど）については、[サーバーアダプター](/docs/server/server-adapters)を参照してください。
+
+## インストール
+
+Hono アダプターと Hono フレームワークをインストールします。
+
+```bash npm2yarn
+npm install @mastra/hono@latest hono
+```
+
+## 使用例
+
+```typescript title="server.ts"
+import { Hono } from 'hono'
+import { HonoBindings, HonoVariables, MastraServer } from '@mastra/hono'
+import { mastra } from './mastra'
+
+const app = new Hono<{ Bindings: HonoBindings; Variables: HonoVariables }>()
+const server = new MastraServer({ app, mastra })
+
+await server.init()
+
+export default app
+```
+
+## コンストラクターのパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'app',
+    type: 'Hono',
+    description: 'Hono アプリのインスタンス',
+    isOptional: false,
+  },
+  {
+    name: 'mastra',
+    type: 'Mastra',
+    description: 'Mastra のインスタンス',
+    isOptional: false,
+  },
+  {
+    name: 'prefix',
+    type: 'string',
+    description: 'ルートパスのプレフィックス（例：`/api/v2`）',
+    isOptional: true,
+    defaultValue: "''",
+  },
+  {
+    name: 'openapiPath',
+    type: 'string',
+    description: 'OpenAPI 仕様を配信するパス（例：`/openapi.json`）',
+    isOptional: true,
+    defaultValue: "''",
+  },
+  {
+    name: 'bodyLimitOptions',
+    type: '{ maxSize: number, onError: (err) => unknown }',
+    description: 'リクエストボディのサイズ制限',
+    isOptional: true,
+  },
+  {
+    name: 'streamOptions',
+    type: '{ redact?: boolean }',
+    description: 'ストリームの秘匿化設定。true の場合、ストリームから機密データを秘匿します。',
+    isOptional: true,
+    defaultValue: '{ redact: true }',
+  },
+  {
+    name: 'customRouteAuthConfig',
+    type: 'Map<string, boolean>',
+    description:
+      'ルートごとの認証オーバーライド。キーは `METHOD:PATH`（例：`GET:/api/health`）です。値が `false` の場合はルートを公開し、`true` の場合は認証を必須にします。',
+    isOptional: true,
+  },
+  {
+    name: 'tools',
+    type: 'Record<string, Tool>',
+    description: 'サーバーで利用可能な Tool',
+    isOptional: true,
+  },
+  {
+    name: 'taskStore',
+    type: 'InMemoryTaskStore',
+    description: 'A2A（Agent-to-Agent）操作用のタスクストア',
+    isOptional: true,
+  },
+  {
+    name: 'mcpOptions',
+    type: 'MCPOptions',
+    typeDescription: '{ serverless?: boolean, sessionIdGenerator?: () => string }',
+    description:
+      'MCP トランスポートのオプション。Cloudflare Workers や Vercel Edge などのステートレス環境では `serverless: true` を設定します。',
+    isOptional: true,
+  },
+]}
+/>
+
+## カスタムルートの追加
+
+Hono アプリにルートを直接追加します。
+
+```typescript title="server.ts"
+import { Hono } from 'hono'
+import { HonoBindings, HonoVariables, MastraServer } from '@mastra/hono'
+
+const app = new Hono<{ Bindings: HonoBindings; Variables: HonoVariables }>()
+const server = new MastraServer({ app, mastra })
+
+// Before init - runs before Mastra middleware
+app.get('/early-health', c => c.json({ status: 'ok' }))
+
+await server.init()
+
+// After init - has access to Mastra context
+app.get('/custom', c => {
+  const mastraInstance = c.get('mastra')
+  return c.json({ agents: Object.keys(mastraInstance.listAgents()) })
+})
+```
+
+:::tip
+
+`init()` より前に追加したルートは、Mastra コンテキストなしで実行されます。Mastra インスタンスとリクエストコンテキストにアクセスするには、`init()` より後にルートを追加してください。
+
+:::
+
+Mastra が管理する認証や `requiresAuth` などのルートメタデータが必要な場合は、[`registerApiRoute()`](/reference/server/register-api-route) を推奨します。`app` に直接マウントする生の Hono ルートでは、`createAuthMiddleware()` を使用します。
+
+```typescript title="server.ts"
+import { Hono } from 'hono'
+import { createAuthMiddleware, HonoBindings, HonoVariables, MastraServer } from '@mastra/hono'
+import { mastra } from './mastra'
+
+const app = new Hono<{ Bindings: HonoBindings; Variables: HonoVariables }>()
+const server = new MastraServer({ app, mastra })
+
+await server.init()
+
+app.get('/custom/protected', createAuthMiddleware({ mastra }), c => {
+  const user = c.get('requestContext').get('user')
+  return c.json({ user })
+})
+
+app.get('/custom/public', createAuthMiddleware({ mastra, requiresAuth: false }), c => {
+  return c.json({ ok: true })
+})
+```
+
+## コンテキストへのアクセス
+
+Hono のミドルウェアとルートハンドラーでは、`c.get()` を介して Mastra コンテキストにアクセスします。
+
+```typescript
+app.get('/custom', async c => {
+  const mastra = c.get('mastra')
+  const requestContext = c.get('requestContext')
+  const abortSignal = c.get('abortSignal')
+
+  const agent = mastra.getAgent('myAgent')
+  return c.json({ agent: agent.name })
+})
+```
+
+利用可能なコンテキストキーは次のとおりです。
+
+| キー | 説明 |
+| - | - |
+| `mastra` | Mastra のインスタンス |
+| `requestContext` | リクエストコンテキストのマップ |
+| `abortSignal` | リクエストのキャンセルシグナル |
+| `tools` | 利用可能な Tool |
+| `taskStore` | A2A 操作用のタスクストア |
+| `customRouteAuthConfig` | ルートごとの認証オーバーライド |
+| `user` | 認証済みユーザー（認証が設定されている場合） |
+
+## ミドルウェアの追加
+
+Hono のミドルウェアは `init()` の前後に追加できます。
+
+```typescript title="server.ts"
+import { Hono } from 'hono'
+import { HonoBindings, HonoVariables, MastraServer } from '@mastra/hono'
+
+const app = new Hono<{ Bindings: HonoBindings; Variables: HonoVariables }>()
+
+// Middleware before init
+app.use('*', async (c, next) => {
+  console.log(`${c.req.method} ${c.req.url}`)
+  await next()
+})
+
+const server = new MastraServer({ app, mastra })
+await server.init()
+
+// Middleware after init has access to Mastra context
+app.use('*', async (c, next) => {
+  const mastra = c.get('mastra')
+  await next()
+})
+```
+
+## 手動初期化
+
+ミドルウェアの順序をカスタマイズするには、`init()` の代わりに各メソッドを個別に呼び出します。詳しくは、[手動初期化](/docs/server/server-adapters#manual-initialization)を参照してください。
+
+## 例
+
+- [Hono アダプター](https://github.com/mastra-ai/mastra/tree/main/examples/server-hono-adapter)：Hono サーバーの基本的なセットアップ
+
+## 関連項目
+
+- [サーバーアダプター](/docs/server/server-adapters)：アダプターに共通する概念
+- [MastraServer リファレンス](/reference/server/mastra-server)：完全な API リファレンス
+- [createRoute() リファレンス](/reference/server/create-route)：型安全なカスタムルートの作成

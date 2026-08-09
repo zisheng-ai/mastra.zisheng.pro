@@ -1,0 +1,339 @@
+---
+title: "參考：createRoute() | Server"
+description: "用於定義具有驗證和 OpenAPI 產生功能的類型安全路由的 createRoute() 函式 API 參考。"
+packages:
+  - "@mastra/server"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# createRoute()
+
+`createRoute()` 函式使用 Zod 驗證建立類型安全的路由。為伺服器轉接器設定 `openapiPath` 後，它會根據提供的 Zod schema 產生 OpenAPI schema 項目。
+
+## 匯入
+
+```typescript
+import { createRoute } from '@mastra/server/server-adapter'
+```
+
+## 簽名
+
+```typescript
+function createRoute<TPath, TQuery, TBody, TResponse, TResponseType>(
+  config: RouteConfig<TPath, TQuery, TBody, TResponse, TResponseType>,
+): ServerRoute
+```
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'method',
+    type: "'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'ALL'",
+    description: 'HTTP 方法',
+    isOptional: false,
+  },
+  {
+    name: 'path',
+    type: 'string',
+    description: '包含選用參數的路由路徑（例如，`/api/items/:id`）',
+    isOptional: false,
+  },
+  {
+    name: 'responseType',
+    type: "'json' | 'stream'",
+    description: '回應格式。內部路由可能使用額外類型（`datastream-response`、`mcp-http`、`mcp-sse`）。',
+    isOptional: false,
+  },
+  {
+    name: 'handler',
+    type: 'ServerRouteHandler',
+    description: '路由處理函式',
+    isOptional: false,
+  },
+  {
+    name: 'pathParamSchema',
+    type: 'ZodSchema',
+    description: '驗證 URL 路徑參數',
+    isOptional: true,
+  },
+  {
+    name: 'queryParamSchema',
+    type: 'ZodSchema',
+    description: '驗證查詢字串參數',
+    isOptional: true,
+  },
+  {
+    name: 'bodySchema',
+    type: 'ZodSchema',
+    description: '驗證請求主體',
+    isOptional: true,
+  },
+  {
+    name: 'responseSchema',
+    type: 'ZodSchema',
+    description: '為 OpenAPI 記錄回應結構',
+    isOptional: true,
+  },
+  {
+    name: 'streamFormat',
+    type: "'sse' | 'stream'",
+    description: "串流格式（當 responseType 為 'stream' 時）",
+    isOptional: true,
+  },
+  {
+    name: 'maxBodySize',
+    type: 'number',
+    description: '以位元組為單位覆寫預設請求主體大小限制',
+    isOptional: true,
+  },
+  {
+    name: 'summary',
+    type: 'string',
+    description: 'OpenAPI 摘要',
+    isOptional: true,
+  },
+  {
+    name: 'description',
+    type: 'string',
+    description: 'OpenAPI 描述',
+    isOptional: true,
+  },
+  {
+    name: 'tags',
+    type: 'string[]',
+    description: 'OpenAPI 標籤',
+    isOptional: true,
+  },
+  {
+    name: 'deprecated',
+    type: 'boolean',
+    description: '將路由標記為已棄用',
+    isOptional: true,
+  },
+  {
+    name: 'onValidationError',
+    type: "(error: ZodError, context: 'query' | 'body' | 'path') => { status: number; body: unknown } | undefined",
+    description:
+      '此路由的自訂驗證錯誤處理器。它會覆寫伺服器層級的 `onValidationError` hook。傳回 `{ status, body }` 以自訂回應，或傳回 `undefined` 以使用預設值。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 處理函式參數
+
+Handler 會接收已驗證的參數以及執行階段情境：
+
+```typescript
+handler: async params => {
+  // From schemas (typed from Zod)
+  params.id // From pathParamSchema
+  params.filter // From queryParamSchema
+  params.name // From bodySchema
+
+  // Runtime context (always available)
+  params.mastra // Mastra instance
+  params.requestContext // Request-scoped context
+  params.tools // Available tools
+  params.abortSignal // Request cancellation signal
+  params.taskStore // A2A task storage
+}
+```
+
+## 傳回值
+
+傳回可透過轉接器註冊的 `ServerRoute` 物件。
+
+## 範例
+
+### 包含路徑參數的 GET 路由
+
+```typescript
+import { createRoute } from '@mastra/server/server-adapter'
+import { z } from 'zod'
+
+const getAgent = createRoute({
+  method: 'GET',
+  path: '/api/agents/:agentId',
+  responseType: 'json',
+  pathParamSchema: z.object({
+    agentId: z.string(),
+  }),
+  responseSchema: z.object({
+    name: z.string(),
+    description: z.string().optional(),
+  }),
+  summary: 'Get agent by ID',
+  tags: ['Agents'],
+  handler: async ({ agentId, mastra }) => {
+    return mastra.getAgent(agentId)
+  },
+})
+```
+
+### 包含請求主體的 POST 路由
+
+```typescript
+const createItem = createRoute({
+  method: 'POST',
+  path: '/api/items',
+  responseType: 'json',
+  bodySchema: z.object({
+    name: z.string(),
+    value: z.number(),
+  }),
+  responseSchema: z.object({
+    id: z.string(),
+    name: z.string(),
+    value: z.number(),
+  }),
+  handler: async ({ name, value, mastra }) => {
+    // name and value are typed from bodySchema
+    return { id: 'new-id', name, value }
+  },
+})
+```
+
+### 使用強制轉換的查詢參數
+
+```typescript
+const listItems = createRoute({
+  method: 'GET',
+  path: '/api/items',
+  responseType: 'json',
+  queryParamSchema: z.object({
+    page: z.coerce.number().default(0),
+    limit: z.coerce.number().default(50),
+    enabled: z.coerce.boolean().optional(),
+  }),
+  handler: async ({ page, limit, enabled, mastra }) => {
+    // page, limit, enabled are typed and coerced
+    return { items: [], page, limit }
+  },
+})
+```
+
+### 串流路由
+
+```typescript
+const streamAgent = createRoute({
+  method: 'POST',
+  path: '/api/agents/:agentId/stream',
+  responseType: 'stream',
+  streamFormat: 'sse',
+  pathParamSchema: z.object({
+    agentId: z.string(),
+  }),
+  bodySchema: z.object({
+    messages: z.array(z.any()),
+  }),
+  handler: async ({ agentId, messages, mastra, abortSignal }) => {
+    const agent = mastra.getAgent(agentId)
+    return agent.stream(messages, { abortSignal })
+  },
+})
+```
+
+### 自訂請求主體大小限制
+
+```typescript
+const uploadRoute = createRoute({
+  method: 'POST',
+  path: '/api/upload',
+  responseType: 'json',
+  maxBodySize: 50 * 1024 * 1024, // 50MB
+  bodySchema: z.object({
+    file: z.string(),
+  }),
+  handler: async ({ file }) => {
+    return { uploaded: true }
+  },
+})
+```
+
+## Schema 模式
+
+### 用於可擴展性的透傳
+
+```typescript
+const bodySchema = z
+  .object({
+    required: z.string(),
+  })
+  .passthrough() // Allow unknown fields
+```
+
+### 日期強制轉換
+
+```typescript
+const querySchema = z.object({
+  fromDate: z.coerce.date().optional(),
+  toDate: z.coerce.date().optional(),
+})
+```
+
+### 聯合類型
+
+```typescript
+const bodySchema = z.object({
+  messages: z.union([z.array(z.any()), z.string()]),
+})
+```
+
+## 錯誤處理
+
+擲回包含 `status` 屬性的錯誤，以從 Handler 傳回特定的 HTTP 狀態碼。若使用 Hono，可以使用 `hono/http-exception` 中的 `HTTPException`：
+
+```typescript
+import { createRoute } from '@mastra/server/server-adapter'
+import { HTTPException } from 'hono/http-exception'
+
+const getAgent = createRoute({
+  method: 'GET',
+  path: '/api/agents/:agentId',
+  responseType: 'json',
+  pathParamSchema: z.object({ agentId: z.string() }),
+  handler: async ({ agentId, mastra }) => {
+    const agent = mastra.getAgent(agentId)
+    if (!agent) {
+      throw new HTTPException(404, { message: `Agent '${agentId}' not found` })
+    }
+    return agent
+  },
+})
+```
+
+對於 Express 或框架無關的程式碼，擲回包含 `status` 屬性的錯誤：
+
+```typescript
+class HttpError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+// In handler:
+throw new HttpError(404, `Agent '${agentId}' not found`)
+```
+
+常見狀態碼：
+
+| 程式碼 | 含義 |
+| - | - |
+| 400 | 錯誤請求 |
+| 401 | 未授權 |
+| 403 | 禁止存取 |
+| 404 | 找不到 |
+| 500 | 內部伺服器錯誤 |
+
+## 相關內容
+
+- [伺服器路由](/reference/server/routes)：預設 Mastra 路由
+- [MastraServer](/reference/server/mastra-server)：伺服器轉接器類
+- [伺服器轉接器](/docs/server/server-adapters)：使用轉接器

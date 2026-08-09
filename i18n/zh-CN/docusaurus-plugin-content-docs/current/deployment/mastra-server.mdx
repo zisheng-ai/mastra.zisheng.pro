@@ -1,0 +1,166 @@
+---
+title: "部署 Mastra Server | Deployment"
+description: "了解如何构建和部署 Mastra Server。"
+packages:
+  - "@mastra/deployer"
+---
+
+# 部署 Mastra Server
+
+Mastra 会将应用编译为独立的 Node.js Server，可在任何支持 Node.js、Bun 或 Deno 的平台上运行。
+
+:::tip
+
+本指南介绍如何部署由 `mastra build` 生成的独立 Server。如果需要将 Mastra 集成到现有 Express 或 Hono 应用中，请改为参阅 [Server Adapter](/docs/server/server-adapters)。
+
+:::
+
+## 构建应用
+
+从项目根目录运行构建命令：
+
+```bash
+mastra build
+```
+
+此命令会创建一个 `.mastra` 目录，其中包含可用于生产环境的 Server。有关所有可用 flag，请阅读 [`mastra build`](/reference/cli/mastra#mastra-build) Reference。
+
+## 构建输出
+
+构建完成后，Mastra 会创建以下结构：
+
+```
+.mastra/
+├── .build/                # Intermediate build artifacts (module maps, analysis)
+└── output/
+    ├── index.mjs          # Server entry point
+    ├── mastra.mjs         # Your bundled Mastra configuration
+    ├── tools.mjs          # Aggregated tool exports
+    ├── tools/             # Individual tool bundles
+    ├── package.json       # Production dependencies
+    ├── node_modules/      # Installed dependencies
+    ├── .npmrc             # Copied from your project (if present)
+    ├── public/            # Static assets (if src/mastra/public exists)
+    └── playground/        # Studio UI (if --studio flag used)
+```
+
+`output` 目录是自包含的。你可以将它复制到任何 Server 并直接运行。
+
+## 运行 Server
+
+使用 Mastra CLI 启动 Server：
+
+```bash
+mastra start
+```
+
+也可以直接使用 Node.js 运行：
+
+```bash
+node .mastra/output/index.mjs
+```
+
+`mastra start` 命令提供以下附加功能：
+
+- 从 `.env.production` 和 `.env` 加载环境变量
+- 为缺失模块提供有用的错误消息
+- 处理进程 signal 以实现优雅关闭
+
+有关所有可用 flag，请阅读 [`mastra start`](/reference/cli/mastra#mastra-start) Reference。
+
+## 构建配置
+
+### 构建时配置
+
+Mastra 在构建应用时读取 `bundler`、`deployer` 和 `server` 选项。请将这些选项保留为传给 `new Mastra()` 的对象的直接属性，以便构建过程能够提取它们。
+
+以下入口文件形式可以正常工作：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+
+export const mastra = new Mastra({
+  bundler: {
+    externals: ['sharp'],
+  },
+  server: {
+    port: 4111,
+  },
+})
+```
+
+每个选项的值可以来自变量、import 或函数调用。选项本身必须保持为直接属性。不要将构建时选项隐藏在工厂调用或对象展开之后：
+
+```typescript title="src/mastra/index.ts"
+const options = {
+  bundler: {
+    externals: ['sharp'],
+  },
+}
+
+// These patterns prevent Mastra from extracting `bundler` during the build.
+export const mastra = new Mastra(createMastraOptions())
+export const otherMastra = new Mastra({ ...options })
+```
+
+当 Mastra 无法提取某个选项时，会对该选项使用默认构建行为。有关可用的 `bundler`、`deployer` 和 `server` 设置，请参阅[配置 Reference](/reference/configuration)。
+
+### Public 文件夹
+
+如果 Mastra 目录中存在 `public` 文件夹（`src/mastra/public`），其内容会在构建期间复制到输出目录。Server 会将这些文件作为静态资源提供。
+
+### Mastra 配置
+
+构建过程会采用 Mastra 实例中的配置。有关 CORS、超时和 middleware 等 Server 行为，请参阅 [Server 概览](/docs/server/mastra-server)。有关所有可用选项，请参阅[配置 Reference](/reference/configuration)。
+
+## 构建过程
+
+构建遵循以下步骤：
+
+1. **定位入口文件**：在 Mastra 目录中查找 `index.ts` 或 `index.js`。
+1. **发现 Tool**：扫描与 `{mastraDir}/tools/**/*.{js,ts}` 匹配的 Tool 文件，并排除测试文件。
+1. **分析依赖项**：确定要打包哪些包，以及要在外部安装哪些包。
+1. **打包代码**：使用 Rollup 进行 tree-shaking，并可选择生成 source map。
+1. **生成 Server**：创建基于 Hono 的 HTTP Server，并保存为 `index.mjs`。
+1. **安装依赖项**：在输出目录中运行 `npm install`。
+1. **复制资源**：复制 `public` 文件夹和 `.npmrc`（如果存在）。
+
+## 环境变量
+
+| 变量 | 说明 |
+| - | - |
+| `PORT` | Server 端口（默认值：`4111`） |
+| `MASTRA_STUDIO_PATH` | Studio 构建目录的路径（默认值：`./playground`） |
+| `MASTRA_SKIP_DOTENV` | 设置后跳过加载 `.env` 文件 |
+| `NODE_OPTIONS` | Node.js 选项（例如，遇到构建内存问题时使用 `--max-old-space-size=4096`） |
+
+## Server 端点
+
+构建后的 Server 会公开用于健康检查、Agent、Workflow 等功能的端点：
+
+| 端点 | 说明 |
+| - | - |
+| `GET /health` | 健康检查端点，返回 `200 OK` |
+| `GET /api/openapi.json` | OpenAPI 规范（如果启用了 `server.build.openAPIDocs`）。 |
+| `GET /swagger-ui` | 交互式 API 文档（如果启用了 `server.build.swaggerUI`） |
+
+此列表并不完整。要查看所有端点，请运行 `mastra dev` 并访问 `http://localhost:4111/swagger-ui`。
+
+要添加自己的端点，请参阅[自定义 API 路由](/docs/server/custom-api-routes)。
+
+## 故障排除
+
+### 构建期间出现内存错误
+
+如果遇到 `JavaScript heap out of memory` 错误：
+
+```bash
+NODE_OPTIONS="--max-old-space-size=4096" mastra build
+```
+
+## 相关内容
+
+- [Server 概览](/docs/server/mastra-server)：配置 Server 行为、middleware 和身份验证
+- [Server Adapter](/docs/server/server-adapters)：使用 Express 或 Hono，而不是 `mastra build`
+- [自定义 API 路由](/docs/server/custom-api-routes)：添加自定义 HTTP 端点
+- [配置 Reference](/reference/configuration)：完整配置选项

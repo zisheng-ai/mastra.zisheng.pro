@@ -1,0 +1,250 @@
+---
+title: "參考：Context precision scorer | Evals"
+description: Mastra Context Precision Scorer 的文件。使用平均精確率評估擷取所得的 context 對產生預期輸出的相關程度和精確度。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Context precision scorer
+
+`createContextPrecisionScorer()` 函式會建立一個 scorer，評估擷取所得的各段 context 對產生預期輸出的相關程度，以及它們的位置是否恰當。它使用**平均精確率（Mean Average Precision，MAP）**，獎勵將相關 context 放在序列較前位置的系統。
+
+它特別適合以下使用情境：
+
+## RAG 系統評估
+
+適合在以下 RAG pipeline 中評估擷取所得的 context：
+
+- context 的排序會影響模型效能
+- 你需要衡量基本相關性以外的擷取質素
+- 較早出現的相關 context 比較後出現的更有價值
+
+## Context window 最佳化
+
+在針對以下情況最佳化 context 選擇時使用：
+
+- 有限的 context window
+- token 預算限制
+- 多步推理任務
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description: '用於評估 context 相關性的語言模型',
+    required: true,
+  },
+  {
+    name: 'options',
+    type: 'ContextPrecisionMetricOptions',
+    description: 'scorer 的設定選項',
+    required: true,
+    children: [
+      {
+        name: 'context',
+        type: 'string[]',
+        description: '要評估相關性的 context 片段陣列',
+        required: false,
+      },
+      {
+        name: 'contextExtractor',
+        type: '(input, output) => string[]',
+        description: '從執行輸入和輸出動態擷取 context 的函式',
+        required: false,
+      },
+      {
+        name: 'scale',
+        type: 'number',
+        description: '最終分數的乘數因子（預設值：1）',
+        required: false,
+      },
+    ],
+  },
+]}
+/>
+
+必須提供 `context` 或 `contextExtractor` 其中之一。如兩者皆有提供，會優先使用 `contextExtractor`。
+
+## `.run()` 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'score',
+    type: 'number',
+    description: '介乎 0 與 scale 之間的平均精確率分數（預設為 0 至 1）',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description: 'context precision 評估的易讀說明',
+  },
+]}
+/>
+
+## 評分詳情
+
+### 平均精確率（MAP）
+
+Context Precision 使用**平均精確率**同時評估相關性和位置：
+
+1. **Context 評估**：根據每段 context 對產生預期輸出是否有幫助，將其分類為相關或不相關
+1. **精確率計算**：對位置 `i` 上的每段相關 context，精確率 = `relevant_items_so_far / (i + 1)`
+1. **平均精確率**：將所有精確率值相加，再除以相關項目的總數
+1. **最終分數**：乘以 scale 因子，並四捨五入至小數點後兩位
+
+### 評分公式
+
+```
+MAP = (Σ Precision@k) / R
+
+Where:
+- Precision@k = (relevant items in positions 1...k) / k
+- R = total number of relevant items
+- Only calculated at positions where relevant items appear
+```
+
+### 分數解讀
+
+- **0.9-1.0**：極佳的精確率——所有相關 context 都在序列前方
+- **0.7-0.8**：良好的精確率——大部分相關 context 的位置恰當
+- **0.4-0.6**：中等的精確率——相關 context 與不相關內容混雜
+- **0.1-0.3**：較差的精確率——相關 context 很少或位置不佳
+- **0.0**：找不到相關 context
+
+### 原因分析
+
+reason 欄位會說明：
+
+- 哪些 context 片段被判定為相關／不相關
+- 位置如何影響 MAP 計算
+- 評估使用的具體相關性準則
+
+### 最佳化分析
+
+使用結果來：
+
+- **改善擷取**：排序前先篩走不相關的 context
+- **最佳化排序**：確保相關 context 優先出現
+- **調整 chunk 大小**：在 context 細節與相關性精確度之間取得平衡
+- **評估 embedding**：測試不同的 embedding 模型，以改善擷取效果
+
+### 計算範例
+
+context：`[relevant, irrelevant, relevant, irrelevant]`
+
+- 位置 0：相關 → 精確率 = 1/1 = 1.0
+- 位置 1：略過（不相關）
+- 位置 2：相關 → 精確率 = 2/3 = 0.67
+- 位置 3：略過（不相關）
+
+MAP = (1.0 + 0.67) / 2 = 0.835 ≈ **0.83**
+
+## Scorer 設定
+
+### 動態擷取 context
+
+```typescript
+const scorer = createContextPrecisionScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract context dynamically based on the query
+      const query = input?.inputMessages?.[0]?.content || ''
+
+      // Example: Retrieve from a vector database
+      const searchResults = vectorDB.search(query, { limit: 10 })
+      return searchResults.map(result => result.content)
+    },
+    scale: 1,
+  },
+})
+```
+
+### 大型 context 評估
+
+```typescript
+const scorer = createContextPrecisionScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      // Simulate retrieved documents from vector database
+      'Document 1: Highly relevant content...',
+      'Document 2: Somewhat related content...',
+      'Document 3: Tangentially related...',
+      'Document 4: Not relevant...',
+      'Document 5: Highly relevant content...',
+      // ... up to dozens of context pieces
+    ],
+  },
+})
+```
+
+## 範例
+
+針對不同查詢評估 RAG 系統擷取 context 的精確度：
+
+```typescript title="src/example-context-precision.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createContextPrecisionScorer } from '@mastra/evals/scorers/prebuilt'
+import { myAgent } from './agent'
+
+const scorer = createContextPrecisionScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract context from agent's retrieved documents
+      return output.metadata?.retrievedContext || []
+    },
+  },
+})
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'How does photosynthesis work in plants?',
+    },
+    {
+      input: 'What are the mental and physical benefits of exercise?',
+    },
+  ],
+  scorers: [scorer],
+  target: myAgent,
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+如要進一步了解 `runEvals`，請參閱 [runEvals 參考文件](/reference/evals/run-evals)。
+
+如要將此 scorer 加至 Agent，請參閱 [Scorer 概覽](/docs/evals/overview#adding-scorers-to-agents)指南。
+
+## 與 context relevance 比較
+
+按需要選擇合適的 scorer：
+
+| 使用情境 | Context Relevance | Context Precision |
+| - | - | - |
+| **RAG 評估** | 重視使用情況時 | 重視排序時 |
+| **Context 質素** | 細緻程度 | 二元相關性 |
+| **偵測遺漏** | ✓ 識別缺漏 | ✗ 不作評估 |
+| **使用情況追蹤** | ✓ 追蹤運用情況 | ✗ 不作考慮 |
+| **位置敏感度** | ✗ 不受位置影響 | ✓ 獎勵較前位置 |
+
+## 相關內容
+
+- [Answer Relevancy Scorer](/reference/evals/answer-relevancy)：評估答案有否回應問題
+- [Faithfulness Scorer](/reference/evals/faithfulness)：衡量答案是否以 context 為依據
+- [自訂 Scorer](/docs/evals/custom-scorers)：建立你自己的評估指標

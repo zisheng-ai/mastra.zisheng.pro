@@ -1,0 +1,148 @@
+---
+title: "參考：Agent.listSuspendedRuns() | Agents"
+description: "`Agent.listSuspendedRuns()` 的 API 參考；此方法會從儲存空間找出已暫停的 Agent 執行，令核准狀態在重新啟動後仍然保留。"
+packages:
+  - "@mastra/core"
+---
+
+# Agent.listSuspendedRuns()
+
+**新增版本：** `@mastra/core@1.43.0`
+
+`.listSuspendedRuns()` 方法會從 Workflow 快照儲存空間列出已暫停的 Agent 執行：這些執行可能正在等候需要[核准](/docs/agents/agent-approval)的 Tool 呼叫，亦可能正在等候曾呼叫 `suspend()` 的 Tool。由於查找以儲存空間而非記憶體內狀態為基礎，因此可在伺服器重新啟動後運作，亦支援多個伺服器實例。
+
+將傳回的 `runId` 傳送至 [`resumeStream()`](/docs/agents/agent-approval#runtime-suspension-with-suspend)、`approveToolCall()` 或 `declineToolCall()`，即可繼續執行。
+
+篩選條件的約定與 Workflow 執行列表 API（`listWorkflowRuns`）一致，並額外提供 Agent 層級的 `threadId` 篩選條件。
+
+## 使用範例
+
+找出對話中待處理的執行並繼續執行。檢查 `requiresApproval` 以選擇正確的繼續方式：核准暫停使用 `approveToolCall()`／`declineToolCall()`，而以 `suspend()` 暫停的執行則使用帶有恢復資料的 `resumeStream()`：
+
+```typescript
+const { runs } = await agent.listSuspendedRuns({
+  threadId: 'thread-123',
+  resourceId: 'user-456',
+})
+
+const run = runs[0]
+const toolCall = run?.toolCalls[0]
+
+if (run && toolCall) {
+  const stream = toolCall.requiresApproval
+    ? await agent.approveToolCall({ runId: run.runId, toolCallId: toolCall.toolCallId })
+    : await agent.resumeStream({ name: 'San Francisco' }, { runId: run.runId })
+}
+```
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'AgentListSuspendedRunsOptions',
+    isOptional: true,
+    defaultValue: '{}',
+    description: '用於限定結果範圍的篩選和分頁設定。',
+    properties: [
+      {
+        type: 'AgentListSuspendedRunsOptions',
+        parameters: [
+          {
+            name: 'threadId',
+            type: 'string',
+            isOptional: true,
+            description: '只傳回屬於此記憶體執行緒的執行。',
+          },
+          {
+            name: 'resourceId',
+            type: 'string',
+            isOptional: true,
+            description: '只傳回屬於此記憶體資源的執行。',
+          },
+          {
+            name: 'fromDate',
+            type: 'Date',
+            isOptional: true,
+            description: '只傳回在此日期或之後建立的執行。',
+          },
+          {
+            name: 'toDate',
+            type: 'Date',
+            isOptional: true,
+            description: '只傳回在此日期或之前建立的執行。',
+          },
+          {
+            name: 'perPage',
+            type: 'number',
+            isOptional: true,
+            description:
+              '每頁項目數量。同時提供 perPage 和 page 時會套用分頁，否則會傳回所有相符的執行。',
+          },
+          {
+            name: 'page',
+            type: 'number',
+            isOptional: true,
+            description: '以零為起始索引的頁碼。',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'result',
+    type: 'Promise<AgentListSuspendedRunsResult>',
+    description: '解析後傳回相符執行及分頁前總數的 promise。',
+  },
+]}
+/>
+
+```typescript
+interface AgentListSuspendedRunsResult {
+  runs: AgentRun[]
+  /** Total number of matching runs, before pagination */
+  total: number
+}
+
+interface AgentRun {
+  /** Run ID accepted by resumeStream(), approveToolCall(), and declineToolCall() */
+  runId: string
+  status: 'suspended'
+  threadId?: string
+  resourceId?: string
+  /** When the run suspended */
+  suspendedAt: Date
+  /** Suspended tool calls awaiting approval or resume data */
+  toolCalls: AgentRunToolCall[]
+}
+
+interface AgentRunToolCall {
+  toolCallId?: string
+  toolName?: string
+  /** Arguments the model supplied (approval suspensions only) */
+  args?: unknown
+  /** True when the run is waiting on a tool-call approval */
+  requiresApproval: boolean
+  /** The tool-defined suspend payload when the tool called suspend() */
+  suspendPayload?: unknown
+}
+```
+
+## 查找範圍
+
+結果只限於由你呼叫 `listSuspendedRuns()` 的 Agent 所啟動的執行：快照會保存所屬 Agent 的 ID，因此不會傳回由同一 Mastra 實例中其他 Agent 啟動的執行。在[監督者設定](/docs/agents/agent-approval#tool-approval-supervisor-agents)中，監督者會看到其外層執行（即需要恢復的執行），而子 Agent 的內層執行只有該子 Agent 本身可以看到。使用 `threadId` 和 `resourceId` 篩選，即可將結果範圍限於單一對話。
+
+執行快照只會在執行等候輸入期間保留，並會在執行完成時刪除，因此只有已暫停的執行可從儲存空間中找到。只有在 Mastra 實例已設定持久性[儲存空間 Provider](/docs/storage/overview)時，已暫停的執行才可在重新啟動後保留。使用預設的記憶體內儲存區時，快照會在重新啟動後遺失。
+
+## 相關內容
+
+- [Agent 核准](/docs/agents/agent-approval)
+- [儲存空間](/docs/storage/overview)

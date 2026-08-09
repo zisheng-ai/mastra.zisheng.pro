@@ -1,0 +1,318 @@
+---
+title: "Time travel | Workflow"
+description: "在 Mastra 使用 time travel debug，從特定位置重新執行 Workflow 步驟"
+packages:
+  - "@mastra/core"
+---
+
+# Time travel
+
+Time travel 讓你從任何特定步驟開始重新執行 Workflow，可以使用已儲存的 snapshot 資料，亦可以使用你提供的自訂 context。
+
+這適合用於 debug 失敗的 Workflow、以不同 input 測試個別步驟，或毋須重新運行整個 Workflow 就能從錯誤復原。你也可以使用 time travel，從任何特定步驟開始執行從未運行的 Workflow。
+
+## Time travel 運作方式
+
+在 Workflow run 上呼叫 `timeTravel()` 時：
+
+1. Workflow 會從 storage 載入現有 snapshot（如有）
+1. 目標步驟之前的步驟結果會從 snapshot 或提供的 context 重建
+1. 使用所提供或重建的 input data，從指定步驟開始執行
+1. Workflow 會從該位置繼續執行至完成
+
+Time travel 依賴已保留的 Workflow snapshot，因此必須設定 storage。
+
+## 基本用法
+
+使用 `run.timeTravel()` 從特定步驟重新執行 Workflow：
+
+```typescript
+import { mastra } from './mastra'
+
+const workflow = mastra.getWorkflow('myWorkflow')
+const run = await workflow.createRun()
+
+const result = await run.timeTravel({
+  step: 'step2',
+  inputData: { previousStepResult: 'custom value' },
+})
+```
+
+## 指定目標步驟
+
+你可以使用步驟 reference 或步驟 ID 指定目標步驟：
+
+### 使用步驟 reference
+
+```typescript
+const result = await run.timeTravel({
+  step: step2,
+  inputData: { value: 10 },
+})
+```
+
+### 使用步驟 ID
+
+```typescript
+const result = await run.timeTravel({
+  step: 'step2',
+  inputData: { value: 10 },
+})
+```
+
+### 巢狀 Workflow 步驟
+
+對於巢狀 Workflow 內的步驟，請使用 dot notation、步驟 ID array 或步驟 reference array：
+
+```typescript
+// Using dot notation
+const result = await run.timeTravel({
+  step: 'nestedWorkflow.step3',
+  inputData: { value: 10 },
+})
+
+// Using array of step IDs
+const result = await run.timeTravel({
+  step: ['nestedWorkflow', 'step3'],
+  inputData: { value: 10 },
+})
+
+// Using array of step references
+const result = await run.timeTravel({
+  step: [nestedWorkflow, step3],
+  inputData: { value: 10 },
+})
+```
+
+## 提供 execution context
+
+進行 time travel 時，你可以提供 context 以指定先前步驟的 state：
+
+```typescript {3-13}
+const result = await run.timeTravel({
+  step: 'step2',
+  context: {
+    step1: {
+      status: 'success',
+      payload: { value: 0 },
+      output: { step1Result: 2 },
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+    },
+  },
+})
+```
+
+Context 物件包含以步驟 ID 作為 key 的步驟結果。每個步驟結果包括：
+
+- `status`：步驟的 execution status（`success`、`failed`、`suspended`）
+- `payload`：傳給步驟的 input data
+- `output`：步驟的 output data（適用於成功的步驟）
+- `startedAt`：步驟開始的 timestamp
+- `endedAt`：步驟結束的 timestamp（適用於已完成步驟）
+- `suspendPayload`：傳給 `suspend()` 的資料（適用於已暫停步驟）
+- `resumePayload`：傳給 `resume()` 的資料（適用於已恢復步驟）
+
+## 重新運行失敗的 Workflow
+
+Time travel 對於 debug 及復原失敗的 Workflow execution 特別有用：
+
+```typescript
+const workflow = mastra.getWorkflow('myWorkflow')
+const run = await workflow.createRun()
+
+// Initial run fails at step2
+const failedResult = await run.start({
+  inputData: { value: 1 },
+})
+
+if (failedResult.status === 'failed') {
+  // Re-run from step2 with corrected input
+  const recoveredResult = await run.timeTravel({
+    step: 'step2',
+    inputData: { step1Result: 5 }, // Provide corrected input
+  })
+}
+```
+
+## 對已暫停 Workflow 使用 time travel
+
+你可以透過 time travel，從較早的步驟恢復已暫停 Workflow：
+
+```typescript
+const run = await workflow.createRun()
+
+// Start workflow - suspends at promptAgent step
+const initialResult = await run.start({
+  inputData: { input: 'test' },
+})
+
+if (initialResult.status === 'suspended') {
+  // Time travel back to an earlier step with resume data
+  const result = await run.timeTravel({
+    step: 'getUserInput',
+    resumeData: {
+      userInput: 'corrected input',
+    },
+  })
+}
+```
+
+## 串流 time travel 結果
+
+使用 `timeTravelStream()` 在 time travel 執行期間接收串流事件：
+
+```typescript
+const run = await workflow.createRun()
+
+const stream = run.timeTravelStream({
+  step: 'step2',
+  inputData: { value: 10 },
+})
+
+for await (const event of stream.fullStream) {
+  console.log(event.type, event.payload)
+}
+
+const result = await stream.result
+
+if (result.status === 'success') {
+  console.log(result.result)
+}
+```
+
+## 使用 initial state 進行 time travel
+
+進行 time travel 時，你可以提供 initial state 以設定 Workflow 層級 state：
+
+```typescript
+const result = await run.timeTravel({
+  step: 'step2',
+  inputData: { value: 10 },
+  initialState: {
+    counter: 5,
+    metadata: { source: 'time-travel' },
+  },
+})
+```
+
+## 錯誤處理
+
+Time travel 會在特定情況下擲回錯誤：
+
+### 正在運行的 Workflow
+
+你無法對目前正在運行的 Workflow 進行 time travel：
+
+```typescript
+try {
+  await run.timeTravel({ step: 'step2' })
+} catch (error) {
+  // "This workflow run is still running, cannot time travel"
+}
+```
+
+### 無效步驟 ID
+
+如 Workflow 中不存在目標步驟，time travel 會擲回錯誤：
+
+```typescript
+try {
+  await run.timeTravel({ step: 'nonExistentStep' })
+} catch (error) {
+  // "Time travel target step not found in execution graph: 'nonExistentStep'. Verify the step id/path."
+}
+```
+
+### 無效 input data
+
+啟用 `validateInputs` 後，time travel 會按步驟 schema 驗證 input data：
+
+```typescript
+try {
+  await run.timeTravel({
+    step: 'step2',
+    inputData: { invalidField: 'value' },
+  })
+} catch (error) {
+  // "Invalid inputData: \n- step1Result: Required"
+}
+```
+
+## 巢狀 Workflow context
+
+Time travel 進入巢狀 Workflow 時，你可以為父 Workflow 和巢狀 Workflow 步驟提供 context：
+
+```typescript
+const result = await run.timeTravel({
+  step: 'nestedWorkflow.step3',
+  context: {
+    step1: {
+      status: 'success',
+      payload: { value: 0 },
+      output: { step1Result: 2 },
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+    },
+    nestedWorkflow: {
+      status: 'running',
+      payload: { step1Result: 2 },
+      startedAt: Date.now(),
+    },
+  },
+  nestedStepsContext: {
+    nestedWorkflow: {
+      step2: {
+        status: 'success',
+        payload: { step1Result: 2 },
+        output: { step2Result: 3 },
+        startedAt: Date.now(),
+        endedAt: Date.now(),
+      },
+    },
+  },
+})
+```
+
+## 使用情況
+
+### Debug 失敗的步驟
+
+以相同或修改後的 input 重新運行失敗步驟，以診斷問題：
+
+```typescript
+const result = await run.timeTravel({
+  step: failedStepId,
+  context: originalContext, // Use context from the failed run
+})
+```
+
+### 在新的 Workflow run 上測試步驟邏輯
+
+在新的 Workflow run 上以特定 input 測試個別步驟，適合在毋須從頭開始執行 Workflow 的情況下測試步驟邏輯。
+
+```typescript
+const result = await run.timeTravel({
+  step: 'processData',
+  inputData: { testData: 'specific test case' },
+})
+```
+
+### 從暫時故障復原
+
+重新運行因暫時問題（網絡錯誤、rate limit）而失敗的步驟：
+
+```typescript
+// After fixing the external service issue
+const result = await run.timeTravel({
+  step: 'callExternalApi',
+  inputData: savedInputData,
+})
+```
+
+## 相關內容
+
+- [Snapshot](/docs/workflows/snapshots)
+- [暫停及恢復](/docs/workflows/suspend-and-resume)
+- [錯誤處理](/docs/workflows/error-handling)
+- [Control Flow](/docs/workflows/control-flow)

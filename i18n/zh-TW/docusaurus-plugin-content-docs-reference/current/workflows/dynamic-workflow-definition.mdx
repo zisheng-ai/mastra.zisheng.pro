@@ -1,0 +1,301 @@
+---
+title: "參考：動態 Workflow 定義 | Workflows"
+description: "用來保存與註冊動態 Workflow 的 JSON 定義格式參考。"
+packages:
+  - "@mastra/core"
+---
+
+# 動態 Workflow 定義
+
+:::experimental
+
+動態 Workflow 目前處於 beta 階段。在 API 穩定前，即使未提高主要版本，也可能包含破壞性變更。
+
+:::
+
+動態 Workflow 定義是與 JSON 相容的 `DynamicWorkflowGraph`，可由 [`Mastra.addDynamicWorkflow()`](/reference/core/addDynamicWorkflow)、已儲存 Workflow 的伺服器路由，以及 Client SDK workflows API 接受。
+
+完整設定與使用範例請參閱[動態 Workflow](/docs/workflows/dynamic-workflows)。
+
+## 定義欄位
+
+| 欄位 | 型別 | 必填 | 說明 |
+| - | - | - | - |
+| `id` | `string` | 是 | 唯一的 Workflow ID。這也是用來擷取與執行 Workflow 的 ID。 |
+| `description` | `string` | 否 | 人類可讀的說明 |
+| `inputSchema` | `JsonSchema` | 是 | Workflow 輸入的 JSON Schema |
+| `outputSchema` | `JsonSchema` | 是 | Workflow 輸出的 JSON Schema |
+| `stateSchema` | `JsonSchema` | 否 | 共用 Workflow 狀態的 JSON Schema |
+| `requestContextSchema` | `JsonSchema` | 否 | 從 request context 讀取之值的 JSON Schema |
+| `metadata` | `Record<string, unknown>` | 否 | 儲存時會保留的任意 JSON 中繼資料 |
+| `graph` | `SerializedStepFlowEntry[]` | 是 | 組成 Workflow 的步驟項目 |
+
+Schema 使用 JSON Schema 而非 Zod，讓定義能完整寫入 JSON 後再還原。Mastra 註冊 Workflow 時，會將每個 schema 轉換為 Zod。
+
+```json
+{
+  "id": "greeting-workflow",
+  "description": "Returns a greeting for the supplied name",
+  "inputSchema": {
+    "type": "object",
+    "properties": { "name": { "type": "string" } },
+    "required": ["name"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": { "message": { "type": "string" } },
+    "required": ["message"]
+  },
+  "graph": [
+    {
+      "type": "mapping",
+      "id": "create-greeting",
+      "mapConfig": "{\"message\":{\"template\":\"Hello, ${initData.name}!\"}}"
+    }
+  ]
+}
+```
+
+## 圖項目
+
+`graph` 中的項目會依序執行。每個項目都會接收前一個項目的輸出，第一個項目則會接收 Workflow 輸入。
+
+| 項目型別 | 說明 |
+| - | - |
+| `agent` | 叫用已註冊的 Agent |
+| `tool` | 叫用已註冊的 Tool |
+| `mapping` | 在步驟之間重新組織資料 |
+| `workflow` | 以巢狀步驟的形式叫用已註冊的 Workflow |
+| `parallel` | 同時執行多個步驟並合併其輸出 |
+| `conditional` | 同時執行 predicate 為 true 的每個分支 |
+| `foreach` | 針對陣列輸入的每個項目執行一個步驟 |
+| `loop` | 在 predicate 成立期間，或直到成立為止，重複執行步驟 |
+| `sleep` | 暫停固定時間 |
+| `sleepUntil` | 暫停至固定日期 |
+
+使用 [`.agent()`](/reference/workflows/workflow-methods/agent) 與 [`.tool()`](/reference/workflows/workflow-methods/tool) 的程式碼定義 Workflow，在序列化時會產生相同的宣告式項目。
+
+### Agent 步驟
+
+`agent` 項目會依 ID 叫用已註冊的 Agent。Agent 步驟接受 `{ prompt: string }` 作為輸入，預設回傳 `{ text: string }`。
+
+```json
+{
+  "type": "agent",
+  "id": "summarize",
+  "agentId": "support-agent"
+}
+```
+
+`id` 用來識別 Workflow 中的這個呼叫位置。無論 Agent 本身的 ID 為何，後續步驟都會以 `stepResults.summarize` 存取結果。
+
+新增 `outputSchema`，即可向 Agent 要求結構化輸出：
+
+```json
+{
+  "type": "agent",
+  "id": "extract-subtopics",
+  "agentId": "support-agent",
+  "outputSchema": {
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": { "title": { "type": "string" } },
+      "required": ["title"]
+    }
+  }
+}
+```
+
+在 Agent 之前使用 `mapping` 項目，即可根據 Workflow 資料建立其 `{ prompt }` 輸入。
+
+Agent 項目接受選用的 `description` 與 `options` 物件：
+
+```json
+{
+  "type": "agent",
+  "id": "summarize",
+  "agentId": "support-agent",
+  "description": "Summarize the incoming request",
+  "options": { "retries": 2, "metadata": { "team": "support" } }
+}
+```
+
+只有 `retries` 與 `metadata` 會保存。儲存程式碼定義的 Workflow 時，值為函式的 `onFinish` 與 `toolChoice` 等選項會遭拒絕。其他 Agent 呼叫選項不會保存。
+
+### Tool 步驟
+
+`tool` 項目會透過 `Mastra` `tools` 物件中的註冊 key 叫用 Tool。Mastra 註冊 Workflow 時，會從登錄檔解析 Tool 的輸入與輸出 schema。
+
+```json
+{
+  "type": "tool",
+  "id": "lookup",
+  "toolId": "lookup-customer"
+}
+```
+
+Tool 項目接受與 Agent 項目相同的選用 `description` 與 `options` 欄位。只有 `retries` 與 `metadata` 會保存。
+
+### Mapping 步驟
+
+`mapping` 項目會重新組織資料。其 `mapConfig` 是編碼物件的 JSON 字串。每個 key 都會成為步驟輸出中的 key，每個 descriptor 則定義一個來源。
+
+| Descriptor | 說明 |
+| - | - |
+| `{ "value": ... }` | 固定 JSON 值 |
+| `{ "template": "..." }` | 以 `${...}` 預留位置建立的字串 |
+| `{ "initData": true, "path": "a.b" }` | 來自 Workflow 輸入的值 |
+| `{ "step": "step-id", "path": "a.b" }` | 來自前一步驟輸出的值 |
+| `{ "requestContextPath": "a.b" }` | 來自 request context 的值 |
+
+`step` 來源也接受步驟 ID 陣列：
+
+```json
+{ "step": ["escalate", "auto-reply"], "path": "text" }
+```
+
+第一個具有非空結果的列出步驟會提供該值。這可用來選取 `conditional` 項目後實際執行的分支。
+
+Template 會針對 `initData`、`inputData`、`state`、`requestContext` 與 `stepResults.<step-id>` 解析預留位置：
+
+```json
+{
+  "type": "mapping",
+  "id": "build-prompt",
+  "mapConfig": "{\"prompt\":{\"template\":\"Summarize this request: ${initData.request}\"}}"
+}
+```
+
+Template 解析出的物件與陣列會字串化為 JSON。存在結果中的 `null` 值會轉譯為空字串。若 template 參照的步驟沒有成功輸出，run 就會失敗。
+
+Mapping 項目必須是頂層圖項目，不能放在 `parallel`、`conditional`、`foreach` 或 `loop` 容器內。
+
+### 巢狀 Workflow 步驟
+
+`workflow` 項目會叫用另一個已註冊的 Workflow。目標可以由程式碼定義，也可以是已儲存的 Workflow。
+
+```json
+{
+  "type": "workflow",
+  "id": "lookup-first",
+  "workflowId": "lookup-customer-workflow"
+}
+```
+
+`id` 用來識別呼叫位置。同一個巢狀 Workflow 可在不同呼叫位置 ID 下出現多次，後續步驟則以 `stepResults.<id>` 存取各自的結果。`workflow` 項目也接受選用的 `description`。
+
+### Parallel 項目
+
+`parallel` 項目會同時執行多個單一步驟，並將其輸出合併為以步驟 ID 作為 key 的物件。
+
+```json
+{
+  "type": "parallel",
+  "steps": [
+    { "type": "tool", "id": "first", "toolId": "lookup-customer" },
+    { "type": "tool", "id": "second", "toolId": "lookup-customer" }
+  ]
+}
+```
+
+每個子項目都必須是 `agent`、`tool` 或 `workflow` 項目。所有子項目都會直接接收 parallel 項目的輸入。
+
+### Conditional 項目
+
+`conditional` 項目會將每個步驟與宣告式 predicate 配對，並執行 predicate 為 true 的每個分支。
+
+```json
+{
+  "type": "conditional",
+  "steps": [
+    { "type": "agent", "id": "escalate", "agentId": "support-agent" },
+    { "type": "agent", "id": "auto-reply", "agentId": "support-agent" }
+  ],
+  "predicates": [
+    { "op": "eq", "left": { "path": "inputData.priority" }, "right": { "literal": "urgent" } },
+    { "op": "ne", "left": { "path": "inputData.priority" }, "right": { "literal": "urgent" } }
+  ]
+}
+```
+
+每個子項目都必須是 `agent`、`tool` 或 `workflow` 項目，且每個子項目都需要 predicate。所有子項目都會直接接收 conditional 項目的輸入。
+
+### Predicate
+
+Conditional 項目與迴圈使用 JSON predicate DSL。運算元是 `{ "path": "..." }` 參照或 `{ "literal": ... }` 值。路徑會針對 `initData`、`inputData`、`stepResults` 與 `state` 解析。
+
+| 運算子 | 結構 |
+| - | - |
+| `eq`, `ne`, `lt`, `lte`, `gt`, `gte` | `{ "op": "eq", "left": ..., "right": ... }` |
+| `in`, `notIn` | `{ "op": "in", "value": ..., "set": [...] }` |
+| `exists`, `notExists` | `{ "op": "exists", "path": "..." }` |
+| `truthy`, `falsy` | `{ "op": "truthy", "value": ... }` |
+| `and`, `or` | `{ "op": "and", "args": [...] }` |
+| `not` | `{ "op": "not", "arg": ... }` |
+
+缺少路徑不會擲回錯誤。無法解析路徑時，以路徑為基礎的運算子會回傳 `false`。使用 `exists` 或 `notExists`，可分辨缺少值與 falsy 值。
+
+### Foreach 項目
+
+`foreach` 項目會針對陣列輸入中的每個項目執行一次本體。前一個項目必須產生原始陣列。結果會保留輸入順序，並行數量預設為 `1`。
+
+```json
+{
+  "type": "foreach",
+  "step": { "type": "workflow", "id": "write-blurb", "workflowId": "blurb-workflow" },
+  "opts": { "concurrency": 3 }
+}
+```
+
+本體可以是 `agent`、`tool` 或 `workflow` 項目，但不能是 `mapping` 項目。
+
+### Loop 項目
+
+`loop` 會在 predicate 成立期間（`dowhile`），或直到 predicate 成立為止（`dountil`），重複執行一個步驟。
+
+```json
+{
+  "type": "loop",
+  "loopType": "dountil",
+  "step": { "type": "tool", "id": "poll", "toolId": "check-status" },
+  "predicate": {
+    "op": "eq",
+    "left": { "path": "inputData.status" },
+    "right": { "literal": "done" }
+  }
+}
+```
+
+迴圈本體必須是單一步驟，已儲存的迴圈則需要宣告式 predicate。
+
+### Sleep 項目
+
+`sleep` 項目會暫停固定毫秒數。`sleepUntil` 項目會暫停至以 ISO 日期字串表示的固定日期。已儲存定義需要常值。
+
+```json
+{ "type": "sleep", "id": "wait", "duration": 5000 }
+```
+
+```json
+{ "type": "sleepUntil", "id": "wait-for-launch", "date": "2027-01-01T00:00:00.000Z" }
+```
+
+若持續時間或日期必須在執行階段計算，請使用程式碼定義的 Workflow。
+
+## 驗證
+
+Mastra 會先驗證定義，再加以保存或註冊：
+
+- 結構：項目結構與必填欄位，包括 mapping 只能位於頂層等放置規則。
+- 參照：每個 `agentId` 與 `workflowId` 都必須能從即時登錄檔或同一個 bundle 解析。`toolId` 必須符合 Tool 註冊 key。
+- Schema 流程：每個項目的輸入都必須與前一個輸出相容，包括推斷的 mapping 輸出。
+
+驗證錯誤會包含點號路徑，例如 `graph.2.steps.0`，用來指出無效項目。
+
+## 相關內容
+
+- [使用動態 Workflow](/docs/workflows/dynamic-workflows)
+- [`Mastra.addDynamicWorkflow()`](/reference/core/addDynamicWorkflow)
+- [`Mastra.addDynamicWorkflows()`](/reference/core/addDynamicWorkflows)
+- [Client SDK workflows API](/reference/client-js/workflows)

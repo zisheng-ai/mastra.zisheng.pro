@@ -1,0 +1,235 @@
+---
+title: "リファレンス：SentryExporter | Observability"
+description: Tracing 用 Sentry AI モニタリング exporter
+packages:
+  - "@mastra/sentry"
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# SentryExporter
+
+OpenTelemetry セマンティック規約を使用し、AI の Tracing とモニタリングのために Tracing データを Sentry へ送信します。
+
+## コンストラクター
+
+```typescript prettier:false
+new SentryExporter(config: SentryExporterConfig)
+```
+
+## `SentryExporterConfig`
+
+```typescript
+interface SentryExporterConfig extends BaseExporterConfig {
+  dsn?: string
+  environment?: string
+  tracesSampleRate?: number
+  release?: string
+  options?: Partial<Sentry.NodeOptions>
+}
+```
+
+`BaseExporterConfig` を拡張し、次の項目を含みます。
+
+- `logger?: IMastraLogger` - Logger インスタンス
+- `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'` - ログレベル（デフォルト：INFO）
+
+<PropertiesTable
+  props={[
+  {
+    name: 'dsn',
+    type: 'string',
+    description:
+      'Data Source Name。イベントの送信先を SDK に指定します。このパラメーターまたは SENTRY_DSN 環境変数のいずれかを設定する必要があります。未指定の場合は SENTRY_DSN 環境変数を使用します。',
+    required: false,
+  },
+  {
+    name: 'environment',
+    type: 'string',
+    description:
+      "デプロイ環境（環境による Issue とアラートのフィルタリングを有効にします）。未指定の場合は SENTRY_ENVIRONMENT 環境変数を使用します。デフォルト：'production'。",
+    required: false,
+  },
+  {
+    name: 'tracesSampleRate',
+    type: 'number',
+    description: 'Sentry へ送信する Transaction の割合（0.0 = 0%、1.0 = 100%）。デフォルト：1.0。',
+    required: false,
+  },
+  {
+    name: 'release',
+    type: 'string',
+    description:
+      'デプロイされたコードのバージョン（リグレッションの特定とデプロイの追跡に役立ちます）。未指定の場合は SENTRY_RELEASE 環境変数を使用します。',
+    required: false,
+  },
+  {
+    name: 'options',
+    type: 'Partial<Sentry.NodeOptions>',
+    description:
+      '追加の Sentry SDK オプション（integrations、beforeSend など）。利用可能なオプションについては Sentry SDK ドキュメントを参照してください。',
+    required: false,
+  },
+]}
+/>
+
+## メソッド
+
+### `exportTracingEvent`
+
+```typescript prettier:false
+async exportTracingEvent(event: TracingEvent): Promise<void>
+```
+
+Tracing イベントを Sentry へエクスポートします。SPAN\_STARTED、SPAN\_UPDATED、SPAN\_ENDED イベントを処理します。
+
+### flush
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+exporter をシャットダウンせず、保留中のすべての Span を Sentry へ強制的にフラッシュします。保留中のデータが送信されるまで最大2秒待機します。ランタイム終了前に Span が確実にエクスポートされるようにする必要があるサーバーレス環境で役立ちます。
+
+### shutdown
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+アクティブなすべての Span を終了し、内部状態をクリアして、Sentry への接続を閉じます。保留中のデータが送信されるまで最大2秒待機します。
+
+## 使用方法
+
+### ゼロコンフィグ（環境変数を使用）
+
+```typescript
+import { SentryExporter } from '@mastra/sentry'
+
+// Reads from SENTRY_DSN, SENTRY_ENVIRONMENT, SENTRY_RELEASE
+const exporter = new SentryExporter()
+```
+
+### 明示的な設定
+
+```typescript
+import { SentryExporter } from '@mastra/sentry'
+
+const exporter = new SentryExporter({
+  dsn: process.env.SENTRY_DSN,
+  environment: 'production',
+  tracesSampleRate: 1.0,
+  release: '1.0.0',
+})
+```
+
+### サンプリングを使用
+
+```typescript
+const exporter = new SentryExporter({
+  dsn: process.env.SENTRY_DSN,
+  environment: 'production',
+  tracesSampleRate: 0.1, // Send 10% of transactions to Sentry (recommended for high-load backends)
+})
+```
+
+### カスタム Sentry オプションを使用
+
+```typescript
+const exporter = new SentryExporter({
+  dsn: process.env.SENTRY_DSN,
+  environment: 'production',
+  options: {
+    integrations: [
+      // Custom Sentry integrations
+    ],
+    beforeSend: event => {
+      // Custom event processing
+      return event
+    },
+  },
+})
+```
+
+## Span のマッピング
+
+Mastra の Span タイプは Sentry の Operation にマッピングされます。
+
+| Mastra SpanType | Sentry Operation |
+| - | - |
+| `AGENT_RUN` | `gen_ai.invoke_agent` |
+| `MODEL_GENERATION` | `gen_ai.chat` |
+| `MODEL_STEP` | _（スキップ）_ |
+| `MODEL_CHUNK` | _（スキップ）_ |
+| `TOOL_CALL` | `gen_ai.execute_tool` |
+| `MCP_TOOL_CALL` | `gen_ai.execute_tool` |
+| `PROVIDER_TOOL_CALL` | `gen_ai.execute_tool` |
+| `WORKFLOW_RUN` | `workflow.run` |
+| `WORKFLOW_STEP` | `workflow.step` |
+| `WORKFLOW_CONDITIONAL` | `workflow.conditional` |
+| `WORKFLOW_CONDITIONAL_EVAL` | `workflow.conditional` |
+| `WORKFLOW_PARALLEL` | `workflow.parallel` |
+| `WORKFLOW_LOOP` | `workflow.loop` |
+| `WORKFLOW_SLEEP` | `workflow.sleep` |
+| `WORKFLOW_WAIT_EVENT` | `workflow.wait` |
+| `PROCESSOR_RUN` | `ai.processor` |
+| `GENERIC` | `ai.span` |
+
+Trace 階層を簡潔にするため、MODEL\_STEP と MODEL\_CHUNK の Span はスキップされます。これらのデータは MODEL\_GENERATION の Span に集約されます。
+
+## 環境変数
+
+exporter は次の環境変数から設定を読み取ります。
+
+| 変数 | 説明 |
+| - | - |
+| `SENTRY_DSN` | Data Source Name。イベントの送信先を SDK に指定します |
+| `SENTRY_ENVIRONMENT` | デプロイ環境名 |
+| `SENTRY_RELEASE` | デプロイされたコードのバージョン |
+
+## `OpenTelemetry` 属性
+
+exporter は次の標準 OpenTelemetry 属性を設定します。
+
+**共通属性（すべての Span）：**
+
+- `sentry.origin`：`auto.ai.mastra`（Mastra 由来の Span であることを示します）
+- `ai.span.type`：Mastra Span タイプ
+- `gen_ai.conversation.id`：チャットthreadの識別子。`metadata.threadId` から設定され、Sentry の Conversations ビューで Span をグループ化します
+
+**MODEL\_GENERATION Span：**
+
+- `gen_ai.operation.name`：`chat`
+- `gen_ai.system`：モデル Provider
+- `gen_ai.request.model`：モデル識別子
+- `gen_ai.request.messages`：入力メッセージ／プロンプト（JSON）
+- `gen_ai.response.model`：レスポンスモデル
+- `gen_ai.response.text`：出力テキスト
+- `gen_ai.response.tool_calls`：生成中に行われた Tool 呼び出し（JSON 配列）
+- `gen_ai.usage.input_tokens`：入力 token 数
+- `gen_ai.usage.output_tokens`：出力 token 数
+- `gen_ai.usage.total_tokens`：合計 token 数
+- `gen_ai.request.stream`：ストリーミングフラグ
+- `gen_ai.request.temperature`：Temperature パラメーター
+- `gen_ai.completion_start_time`：最初の token の時刻
+
+**TOOL\_CALL Span：**
+
+- `gen_ai.operation.name`：`execute_tool`
+- `gen_ai.tool.name`：Tool 識別子
+- `gen_ai.tool.type`：`function`
+- `gen_ai.tool.call.id`：Tool 呼び出し ID
+- `gen_ai.tool.input`：Tool の入力
+- `gen_ai.tool.output`：Tool の出力
+- `tool.success`：成功フラグ
+
+**AGENT\_RUN Span：**
+
+- `gen_ai.operation.name`：`invoke_agent`
+- `gen_ai.agent.name`：Agent 識別子
+- `gen_ai.pipeline.name`：Agent 名
+- `gen_ai.agent.instructions`：Agent の instructions
+- `gen_ai.response.model`：子 generation のモデル
+- `gen_ai.response.text`：子 generation の出力
+- `gen_ai.usage.*`：子 generation の token 使用量

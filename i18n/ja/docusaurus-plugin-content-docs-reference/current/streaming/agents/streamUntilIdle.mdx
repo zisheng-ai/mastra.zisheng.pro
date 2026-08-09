@@ -1,0 +1,165 @@
+---
+title: "リファレンス：Agent.streamUntilIdle() | Streaming"
+description: "ディスパッチされたすべてのバックグラウンドタスクが完了するまで Agent のストリームを開いたままにする Agent.streamUntilIdle() の API リファレンスです。"
+packages:
+  - "@mastra/core"
+---
+
+# Agent.streamUntilIdle()
+
+**追加バージョン：** `@mastra/core@1.29.0`
+
+:::warning[非推奨]
+
+`streamUntilIdle()` は非推奨です。代わりに、`untilIdle` オプションを指定した `stream()` を使用してください。
+
+```ts
+const result = await agent.stream('Research solana for me', {
+  untilIdle: true,
+  memory: { thread: 't1', resource: 'u1' },
+})
+```
+
+アイドルタイムアウトを設定するには、`untilIdle: { maxIdleMs: 60_000 }` を渡します。
+
+:::
+
+`streamUntilIdle()` は Agent の応答をストリーミングし、実行中にディスパッチされたすべてのバックグラウンドタスクが完了するまでストリームを開いたままにします。タスクが完了すると、その結果が Memory に書き込まれ、LLM が結果に反応できるように Agentic loop が自動的に再開されます。実行中のタスクもキュー内の完了イベントもなくなると、ストリームは閉じます。
+
+Agent がバックグラウンドタスク（通常は長時間実行される Tool やサブ Agent）をディスパッチし、最初の応答に加えて、タスクの完了によってトリガーされるすべての継続処理を単一のストリームで扱いたい場合に使用します。フォアグラウンドのみの実行の場合や、継続処理を手動で管理したい場合（結果を処理するよう Agent に手動でプロンプトを送る場合）は、[`Agent.stream()`](./stream) を使用してください。
+
+## 使用例
+
+```ts
+const stream = await agent.streamUntilIdle('Research solana for me', {
+  memory: { thread: 't1', resource: 'u1' },
+})
+
+for await (const chunk of stream.fullStream) {
+  // chunks from the initial turn AND any continuation turns triggered by
+  // background task completions flow through here
+}
+```
+
+:::info
+
+`streamUntilIdle()` には、[`BackgroundTaskManager`](/reference/configuration#backgroundtasks) と [Memory](/docs/memory/overview) バックエンドの両方が必要です。いずれかがない場合は、通常の `agent.stream()` 呼び出しを使用します。
+
+:::
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'messages',
+    type: 'string | string[] | CoreMessage[] | AiMessageType[] | UIMessageWithMetadata[]',
+    description:
+      'Agent に送信するメッセージ。単一の文字列、文字列の配列、または構造化されたメッセージオブジェクトを指定できます。',
+  },
+  {
+    name: 'options',
+    type: 'AgentExecutionOptions<Output> & { maxIdleMs?: number }',
+    isOptional: true,
+    description:
+      'Agent.stream() が受け付けるすべてのオプションに加えて、maxIdleMs を指定できます。完全な一覧については、Agent.stream() のリファレンスを参照してください。',
+    properties: [
+      {
+        parameters: [
+          {
+            name: 'maxIdleMs',
+            type: 'number',
+            isOptional: true,
+            defaultValue: '300000',
+            description:
+              'ターン間のアイドル状態がこのミリ秒数を超えると、外側のストリームを閉じます。タイマーはラッパーがターン間にある間だけ動作するため、最初のトークンの生成が遅くてもストリームは閉じません。デフォルト：5分。',
+          },
+          {
+            name: 'memory',
+            type: '{ thread?: string | { id: string }; resource?: string }',
+            isOptional: true,
+            description:
+              '実行に使用する Memory のスレッドとリソース。継続処理でバックグラウンドタスクの結果を会話に書き戻すために必要です。',
+          },
+          {
+            name: 'structuredOutput',
+            type: 'PublicStructuredOutputOptions<Output>',
+            isOptional: true,
+            description:
+              'スキーマに基づく構造化出力。Agent.stream() と同じ形式です。集約プロパティは最初のターンだけを対象に解決されることに注意してください。',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+その他のすべてのオプション（`maxSteps`、`modelSettings`、`toolChoice`、`outputProcessors`、`onFinish`、`onChunk` など）については、[`Agent.stream()` のパラメーター](./stream#parameters)を参照してください。`streamUntilIdle()` はこれらを最初のターンに転送します。
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'stream',
+    type: 'MastraModelOutput<Output>',
+    description:
+      '最初のターンとすべての自動継続処理にわたる fullStream を持つ MastraModelOutput。集約プロパティ（text、toolCalls、toolResults、finishReason、messageList、getFullOutput()）は、最初のターンだけを対象に解決されます。',
+  },
+]}
+/>
+
+### 集約プロパティに関する注意事項
+
+`streamUntilIdle()` は、最初のターンの `MastraModelOutput` をラップするプロキシを返します。すべての継続処理にまたがる結合ストリームに置き換えられるのは `fullStream` だけです。その他のすべてのプロパティ（`text`、`toolCalls`、`toolResults`、`finishReason`、`messageList`、`getFullOutput()`）は、**最初のターン**の内部バッファを対象に解決されます。
+
+すべての継続処理を含む集約ビューが必要な場合は、`fullStream` を直接読み取り、蓄積してください。
+
+## 継続処理の動作
+
+内部では、`streamUntilIdle()` は次の処理を行います。
+
+1. `agent.stream(...)` で最初のターンを実行し、その `fullStream` を外側のストリームへパイプします。
+1. 解決された Memory スコープに対するバックグラウンドタスクの完了イベントを購読します。
+1. 各終了イベント（`background-task-completed`、`background-task-failed`、`background-task-cancelled`）をキューに追加します。外側のラッパーがターン間のアイドル状態になると、完了した `toolCallId` の一覧を示すディレクティブを指定して `agent.stream([], ...)` を再度呼び出します。継続ターンは同じ外側のストリームに流れます。
+1. 実行中のタスクもキュー内の完了イベントもなくなると、外側のストリームを閉じます。
+
+## 詳細な使用例
+
+### ターン間のアイドル時間を制限する
+
+```ts title="index.ts"
+const stream = await agent.streamUntilIdle('Kick off the long jobs', {
+  memory: { thread: 't1', resource: 'u1' },
+  maxIdleMs: 60_000, // close the stream after 1 minute of idleness between turns
+})
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'background-task-completed') {
+    console.log('Task complete:', chunk.payload.taskId)
+  }
+}
+```
+
+### 継続処理全体のテキストを集約する
+
+```ts title="index.ts"
+const stream = await agent.streamUntilIdle('Research and summarize', {
+  memory: { thread: 't1', resource: 'u1' },
+})
+
+let fullText = ''
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'text-delta') {
+    fullText += chunk.payload.text
+  }
+}
+```
+
+## 関連情報
+
+- [バックグラウンドタスク](/docs/long-running-agents/background-tasks)
+- [`Agent.stream()` のリファレンス](./stream)
+- [backgroundTasks 設定のリファレンス](/reference/configuration#backgroundtasks)
+- [ストリームチャンクの型](/reference/streaming/ChunkType)

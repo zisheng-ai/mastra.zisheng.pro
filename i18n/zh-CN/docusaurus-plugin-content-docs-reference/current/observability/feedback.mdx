@@ -1,0 +1,536 @@
+---
+title: "参考：反馈 | 可观测性"
+description: "可观测性反馈记录、筛选器和查询方法的 API 参考。"
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# 反馈
+
+**新增于：** `@mastra/core@1.18.0`
+
+反馈 API 用于存储和查询人在回路中的可观测性信号，例如评分、赞踩、评论和纠正。有关使用模式，请参阅[反馈指南](/docs/observability/feedback)。
+
+## 用法示例
+
+以下示例通过可观测性入口为已持久化的 Trace 记录评分。入口中的 `addFeedback()` 是可选方法，因此调用前请确认当前可观测性实现支持该方法。
+
+```typescript
+if (!mastra.observability.addFeedback) {
+  throw new Error('Feedback is not supported by the active observability implementation')
+}
+
+await mastra.observability.addFeedback({
+  traceId: 'trace-123',
+  spanId: 'span-456',
+  feedback: {
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'Helpful answer.',
+  },
+})
+```
+
+## 创建反馈
+
+### `addFeedback(args)`
+
+通过可观测性入口向已持久化的 Trace 或 Span 添加反馈。
+
+```typescript
+await mastra.observability.addFeedback?.({
+  traceId: 'trace-123',
+  spanId: 'span-456',
+  feedback: {
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'Helpful answer.',
+  },
+})
+```
+
+<PropertiesTable
+  content={[
+  { name: 'traceId', type: 'string', description: '作为反馈目标锚点的 Trace。', isOptional: true },
+  { name: 'spanId', type: 'string', description: '作为反馈目标锚点的 Span。', isOptional: true },
+  {
+    name: 'correlationContext',
+    type: 'CorrelationContext',
+    description: '用于发出反馈的实时 Span 或 Trace 上下文，无需从存储中重新载入目标。',
+    isOptional: true,
+  },
+  { name: 'feedback', type: 'FeedbackInput', description: '要添加的反馈负载。' },
+]}
+/>
+
+### `createFeedback(args)`
+
+通过可观测性存储域创建一条反馈记录。存储层调用会直接写入存储，因此需要包含 `timestamp`。
+
+```typescript
+await observability.createFeedback({
+  feedback: {
+    feedbackId: 'feedback-1',
+    timestamp: new Date(),
+    traceId: 'trace-123',
+    spanId: 'span-456',
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'Helpful answer.',
+  },
+})
+```
+
+HTTP 和客户端 SDK 的创建路由接受 `CreateFeedbackBody`，并在服务端设置 `timestamp`。省略 `feedbackId` 时，该路由会自动生成：
+
+```typescript
+await mastraClient.createFeedback({
+  feedback: {
+    traceId: 'trace-123',
+    spanId: 'span-456',
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+  },
+})
+```
+
+### `batchCreateFeedback(args)`
+
+通过可观测性存储域创建多条反馈记录。HTTP 路由和 `@mastra/client-js` 不提供此方法。
+
+```typescript
+await observability.batchCreateFeedback({
+  feedbacks: [
+    {
+      feedbackId: 'feedback-1',
+      timestamp: new Date(),
+      traceId: 'trace-123',
+      feedbackSource: 'user',
+      feedbackType: 'rating',
+      value: 1,
+    },
+    {
+      feedbackId: 'feedback-2',
+      timestamp: new Date(),
+      traceId: 'trace-123',
+      feedbackSource: 'qa',
+      feedbackType: 'comment',
+      value: 'Needs a citation before shipping.',
+    },
+  ],
+})
+```
+
+## 列出反馈
+
+### `listFeedback(args?)`
+
+以分页模式或增量模式返回反馈记录。
+
+```typescript
+const response = await mastraClient.listFeedback({
+  filters: {
+    feedbackType: 'rating',
+    feedbackSource: 'studio',
+  },
+  pagination: { page: 0, perPage: 20 },
+  orderBy: { field: 'timestamp', direction: 'DESC' },
+})
+```
+
+<PropertiesTable
+  content={[
+  { name: 'mode', type: "'page' | 'delta'", description: "列表模式。默认为 'page'。", isOptional: true },
+  { name: 'filters', type: 'FeedbackFilter', description: '反馈记录的筛选条件。', isOptional: true },
+  {
+    name: 'pagination',
+    type: '{ page?: number; perPage?: number }',
+    description: '分页模式的分页配置。`page` 从零开始计数。',
+    isOptional: true,
+  },
+  {
+    name: 'orderBy',
+    type: "{ field?: 'timestamp'; direction?: 'ASC' | 'DESC' }",
+    description: '分页模式的排序配置。',
+    isOptional: true,
+  },
+  {
+    name: 'after',
+    type: 'string',
+    description: '用于增量轮询的增量游标。仅在增量模式下有效。',
+    isOptional: true,
+  },
+  {
+    name: 'limit',
+    type: 'number',
+    description: '增量模式下返回的最大更新数。',
+    isOptional: true,
+  },
+]}
+/>
+
+## OLAP 查询
+
+OLAP 反馈查询针对数值型 `value` 字段执行操作。
+
+### `getFeedbackAggregate(args)`
+
+返回一个反馈聚合值。
+
+```typescript
+const response = await mastraClient.getFeedbackAggregate({
+  feedbackType: 'rating',
+  feedbackSource: 'user',
+  aggregation: 'avg',
+  comparePeriod: 'previous_day',
+})
+```
+
+<PropertiesTable
+  content={[
+  { name: 'feedbackType', type: 'string', description: '要聚合的反馈类型。' },
+  { name: 'feedbackSource', type: 'string', description: '要聚合的反馈来源。', isOptional: true },
+  {
+    name: 'aggregation',
+    type: "'sum' | 'avg' | 'min' | 'max' | 'count' | 'count_distinct' | 'last'",
+    description: '要应用的聚合方式。',
+  },
+  { name: 'filters', type: 'FeedbackFilter', description: '其他筛选条件。', isOptional: true },
+  {
+    name: 'comparePeriod',
+    type: "'previous_period' | 'previous_day' | 'previous_week'",
+    description: '可选的环比比较周期。',
+    isOptional: true,
+  },
+]}
+/>
+
+### `getFeedbackBreakdown(args)`
+
+返回按维度分组的反馈值。
+
+```typescript
+const response = await mastraClient.getFeedbackBreakdown({
+  feedbackType: 'rating',
+  groupBy: ['entityName'],
+  aggregation: 'avg',
+})
+```
+
+### `getFeedbackTimeSeries(args)`
+
+返回按时间间隔分桶的反馈值。
+
+```typescript
+const response = await mastraClient.getFeedbackTimeSeries({
+  feedbackType: 'rating',
+  interval: '1h',
+  aggregation: 'avg',
+  groupBy: ['feedbackSource'],
+})
+```
+
+### `getFeedbackPercentiles(args)`
+
+返回按时间间隔分桶的百分位值。
+
+```typescript
+const response = await mastraClient.getFeedbackPercentiles({
+  feedbackType: 'rating',
+  percentiles: [0.5, 0.95],
+  interval: '1d',
+})
+```
+
+## 类型
+
+### `FeedbackRecord`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'feedbackId',
+    type: 'string | null',
+    description: '此反馈事件的唯一 ID。省略时由服务端路由生成。',
+    isOptional: true,
+  },
+  { name: 'timestamp', type: 'Date', description: '记录反馈的时间。' },
+  {
+    name: 'traceId',
+    type: 'string | null',
+    description: '可用时作为反馈目标锚点的 Trace。',
+    isOptional: true,
+  },
+  {
+    name: 'spanId',
+    type: 'string | null',
+    description: '可用时作为反馈目标锚点的 Span。',
+    isOptional: true,
+  },
+  {
+    name: 'feedbackSource',
+    type: 'string | null',
+    description: "可选的来源元数据，例如 'user'、'qa'、'studio' 或 'system'。",
+    isOptional: true,
+  },
+  {
+    name: 'source',
+    type: 'string | null',
+    description: '`feedbackSource` 的已弃用别名。',
+    isOptional: true,
+  },
+  {
+    name: 'feedbackType',
+    type: 'string',
+    description: "反馈类型，例如 'rating'、'thumbs'、'comment' 或 'correction'。",
+  },
+  {
+    name: 'value',
+    type: 'number | string',
+    description: '反馈值。数值支持聚合、明细、时间序列和百分位查询。',
+  },
+  {
+    name: 'comment',
+    type: 'string | null',
+    description: '反馈的补充评论或上下文。',
+    isOptional: true,
+  },
+  {
+    name: 'feedbackUserId',
+    type: 'string | null',
+    description: '提供反馈的用户。',
+    isOptional: true,
+  },
+  {
+    name: 'sourceId',
+    type: 'string | null',
+    description: '此反馈所关联的来源记录 ID，例如实验结果 ID。',
+    isOptional: true,
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown> | null',
+    description: '反馈记录的用户自定义元数据。',
+    isOptional: true,
+  },
+]}
+/>
+
+### 共享上下文字段
+
+反馈记录可以包含共享的可观测性上下文字段，用于筛选、分组，以及与 Trace、日志、指标和分数建立关联。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'entityType',
+    type: 'EntityType | null',
+    description: '产生该信号的实体类型。',
+    isOptional: true,
+  },
+  {
+    name: 'entityId',
+    type: 'string | null',
+    description: '产生该信号的实体 ID。',
+    isOptional: true,
+  },
+  {
+    name: 'entityName',
+    type: 'string | null',
+    description: '产生该信号的实体名称。',
+    isOptional: true,
+  },
+  {
+    name: 'parentEntityType',
+    type: 'EntityType | null',
+    description: '父实体的实体类型。',
+    isOptional: true,
+  },
+  { name: 'parentEntityId', type: 'string | null', description: '父实体的 ID。', isOptional: true },
+  { name: 'parentEntityName', type: 'string | null', description: '父实体的名称。', isOptional: true },
+  {
+    name: 'rootEntityType',
+    type: 'EntityType | null',
+    description: '根实体的实体类型。',
+    isOptional: true,
+  },
+  { name: 'rootEntityId', type: 'string | null', description: '根实体的 ID。', isOptional: true },
+  { name: 'rootEntityName', type: 'string | null', description: '根实体的名称。', isOptional: true },
+  { name: 'userId', type: 'string | null', description: '触发执行的人类终端用户。', isOptional: true },
+  {
+    name: 'organizationId',
+    type: 'string | null',
+    description: '多租户组织或账户。',
+    isOptional: true,
+  },
+  { name: 'resourceId', type: 'string | null', description: '更广泛的资源上下文。', isOptional: true },
+  { name: 'runId', type: 'string | null', description: '执行运行标识符。', isOptional: true },
+  {
+    name: 'sessionId',
+    type: 'string | null',
+    description: '用于对 Trace 分组的会话标识符。',
+    isOptional: true,
+  },
+  { name: 'threadId', type: 'string | null', description: '对话线程标识符。', isOptional: true },
+  { name: 'requestId', type: 'string | null', description: '用于关联的 HTTP 请求 ID。', isOptional: true },
+  { name: 'environment', type: 'string | null', description: '部署环境。', isOptional: true },
+  { name: 'serviceName', type: 'string | null', description: '服务名称。', isOptional: true },
+  {
+    name: 'scope',
+    type: 'Record<string, unknown> | null',
+    description: '包、应用版本或部署元数据。',
+    isOptional: true,
+  },
+  {
+    name: 'entityVersionId',
+    type: 'string | null',
+    description: '产生该信号的实体版本 ID。',
+    isOptional: true,
+  },
+  {
+    name: 'parentEntityVersionId',
+    type: 'string | null',
+    description: '父实体的版本 ID。',
+    isOptional: true,
+  },
+  {
+    name: 'rootEntityVersionId',
+    type: 'string | null',
+    description: '根实体的版本 ID。',
+    isOptional: true,
+  },
+  { name: 'experimentId', type: 'string | null', description: '实验或评估运行标识符。', isOptional: true },
+  {
+    name: 'executionSource',
+    type: 'string | null',
+    description: '执行来源，例如本地、云端或 CI。',
+    isOptional: true,
+  },
+  { name: 'tags', type: 'string[] | null', description: '用于筛选的标签。', isOptional: true },
+]}
+/>
+
+### `FeedbackInput`
+
+将 `FeedbackInput` 与 `mastra.observability.addFeedback()`、`recordedTrace.addFeedback()` 和 `recordedSpan.addFeedback()` 配合使用。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'feedbackSource',
+    type: 'string',
+    description: '反馈的可选来源元数据。',
+    isOptional: true,
+  },
+  { name: 'source', type: 'string', description: '`feedbackSource` 的已弃用别名。', isOptional: true },
+  { name: 'feedbackType', type: 'string', description: '要记录的反馈类型。' },
+  { name: 'value', type: 'number | string', description: '要记录的反馈值。' },
+  { name: 'comment', type: 'string', description: '补充评论或上下文。', isOptional: true },
+  { name: 'feedbackUserId', type: 'string', description: '提供反馈的用户。', isOptional: true },
+  { name: 'userId', type: 'string', description: '`feedbackUserId` 的已弃用别名。', isOptional: true },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown>',
+    description: '其他反馈专用元数据。',
+    isOptional: true,
+  },
+  { name: 'experimentId', type: 'string', description: '实验或评估运行标识符。', isOptional: true },
+  {
+    name: 'sourceId',
+    type: 'string',
+    description: '此反馈所关联的来源记录 ID。',
+    isOptional: true,
+  },
+]}
+/>
+
+### `FeedbackFilter`
+
+在 `listFeedback()` 和 OLAP 查询的 `filters` 中使用 `FeedbackFilter`。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'timestamp',
+    type: '{ start?: Date; end?: Date; startExclusive?: boolean; endExclusive?: boolean }',
+    description: '按时间戳范围筛选。',
+    isOptional: true,
+  },
+  { name: 'traceId', type: 'string', description: '按 Trace ID 筛选。', isOptional: true },
+  { name: 'spanId', type: 'string', description: '按 Span ID 筛选。', isOptional: true },
+  {
+    name: 'feedbackType',
+    type: 'string | string[]',
+    description: '按一种或多种反馈类型筛选。',
+    isOptional: true,
+  },
+  { name: 'feedbackSource', type: 'string', description: '按反馈来源筛选。', isOptional: true },
+  { name: 'source', type: 'string', description: '`feedbackSource` 的已弃用别名。', isOptional: true },
+  {
+    name: 'feedbackUserId',
+    type: 'string',
+    description: '按提供反馈的用户筛选。',
+    isOptional: true,
+  },
+  { name: 'entityType', type: 'EntityType', description: '按实体类型筛选。', isOptional: true },
+  { name: 'entityName', type: 'string', description: '按实体名称筛选。', isOptional: true },
+  { name: 'entityVersionId', type: 'string', description: '按实体版本 ID 筛选。', isOptional: true },
+  { name: 'parentEntityType', type: 'EntityType', description: '按父实体类型筛选。', isOptional: true },
+  { name: 'parentEntityName', type: 'string', description: '按父实体名称筛选。', isOptional: true },
+  {
+    name: 'parentEntityVersionId',
+    type: 'string',
+    description: '按父实体版本 ID 筛选。',
+    isOptional: true,
+  },
+  { name: 'rootEntityType', type: 'EntityType', description: '按根实体类型筛选。', isOptional: true },
+  { name: 'rootEntityName', type: 'string', description: '按根实体名称筛选。', isOptional: true },
+  { name: 'rootEntityVersionId', type: 'string', description: '按根实体版本 ID 筛选。', isOptional: true },
+  { name: 'userId', type: 'string', description: '按人类终端用户 ID 筛选。', isOptional: true },
+  { name: 'organizationId', type: 'string', description: '按组织 ID 筛选。', isOptional: true },
+  { name: 'resourceId', type: 'string', description: '按资源 ID 筛选。', isOptional: true },
+  { name: 'runId', type: 'string', description: '按运行 ID 筛选。', isOptional: true },
+  { name: 'sessionId', type: 'string', description: '按会话 ID 筛选。', isOptional: true },
+  { name: 'threadId', type: 'string', description: '按线程 ID 筛选。', isOptional: true },
+  { name: 'requestId', type: 'string', description: '按请求 ID 筛选。', isOptional: true },
+  { name: 'serviceName', type: 'string', description: '按服务名称筛选。', isOptional: true },
+  { name: 'environment', type: 'string', description: '按环境筛选。', isOptional: true },
+  { name: 'executionSource', type: 'string', description: '按执行来源筛选。', isOptional: true },
+  {
+    name: 'experimentId',
+    type: 'string',
+    description: '按实验或评估运行标识符筛选。',
+    isOptional: true,
+  },
+  {
+    name: 'tags',
+    type: 'string[]',
+    description: '按标签筛选。匹配的记录必须包含所有指定标签。',
+    isOptional: true,
+  },
+]}
+/>
+
+## HTTP 路由
+
+| 方法 | 路径 | 用途 | 权限 |
+| - | - | - | - |
+| `GET` | `/api/observability/feedback` | 列出反馈记录 | 未派生 |
+| `POST` | `/api/observability/feedback` | 创建反馈记录 | 未派生 |
+| `POST` | `/api/observability/feedback/aggregate` | 返回一个聚合值 | `observability:read` |
+| `POST` | `/api/observability/feedback/breakdown` | 按维度对反馈分组 | `observability:read` |
+| `POST` | `/api/observability/feedback/timeseries` | 按时间间隔对反馈分桶 | `observability:read` |
+| `POST` | `/api/observability/feedback/percentiles` | 返回百分位序列 | `observability:read` |
+
+## 相关内容
+
+- [反馈指南](/docs/observability/feedback)
+- [客户端 SDK 可观测性参考](/reference/client-js/observability)
+- [可观测性配置](/reference/observability/tracing/configuration)

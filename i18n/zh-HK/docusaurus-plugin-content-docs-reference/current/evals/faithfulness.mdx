@@ -1,0 +1,165 @@
+---
+title: "參考：忠實度評分器 | Evals"
+description: Mastra 忠實度評分器的說明文件，此評分器會比較所提供的語境，評估 LLM 輸出的事實準確度。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+# 忠實度評分器
+
+`createFaithfulnessScorer()` 函數會比較所提供的語境，評估 LLM 輸出的事實準確度。它會從輸出中擷取聲稱，再根據語境加以核實，因此是衡量 RAG pipeline 回應可靠性的重要工具。
+
+## 參數
+
+`createFaithfulnessScorer()` 函數接受一個包含以下屬性的選項物件：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'LanguageModel',
+    required: true,
+    description: '用於評估忠實度的模型設定。',
+  },
+  {
+    name: 'context',
+    type: 'string[]',
+    required: true,
+    description: '用作核實輸出聲稱依據的語境區塊陣列。',
+  },
+  {
+    name: 'scale',
+    type: 'number',
+    required: false,
+    defaultValue: '1',
+    description: '最高分數值。最終分數會按此量表標準化。',
+  },
+]}
+/>
+
+此函數會傳回 MastraScorer 類別的實例。`.run()` 方法接受與其他評分器相同的輸入（請參閱 [MastraScorer 參考](./mastra-scorer)），但傳回值包含下文說明的 LLM 特定欄位。
+
+## `.run()` 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'runId',
+    type: 'string',
+    description: '執行的 ID（選填）。',
+  },
+  {
+    name: 'preprocessStepResult',
+    type: 'string[]',
+    description: '從輸出擷取的聲稱陣列。',
+  },
+  {
+    name: 'preprocessPrompt',
+    type: 'string',
+    description: '在預處理步驟傳送至 LLM 的提示（選填）。',
+  },
+  {
+    name: 'analyzeStepResult',
+    type: 'object',
+    description: "包含判定的物件：{ verdicts: Array<{ verdict: 'yes' | 'no' | 'unsure', reason: string }> }",
+  },
+  {
+    name: 'analyzePrompt',
+    type: 'string',
+    description: '在分析步驟傳送至 LLM 的提示（選填）。',
+  },
+  {
+    name: 'score',
+    type: 'number',
+    description:
+      '介乎 0 至所設定 scale 的分數，表示獲語境支持的聲稱比例。',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description:
+      '分數的詳細解釋，包括哪些聲稱獲得支持、與語境矛盾，或標記為 unsure。',
+  },
+  {
+    name: 'generateReasonPrompt',
+    type: 'string',
+    description: '在 generateReason 步驟傳送至 LLM 的提示（選填）。',
+  },
+]}
+/>
+
+## 評分詳情
+
+評分器透過根據所提供的語境核實聲稱，評估忠實度。
+
+### 評分流程
+
+1. 分析聲稱及語境：
+   - 擷取所有聲稱（包括事實及推測）
+   - 根據語境核實每項聲稱
+   - 指派以下三種判定之一：
+     - "yes" - 聲稱獲語境支持
+     - "no" - 聲稱與語境矛盾
+     - "unsure" - 聲稱無法核實
+1. 計算忠實度分數：
+   - 點算獲支持的聲稱
+   - 除以聲稱總數
+   - 按所設定的範圍調整比例
+
+最終分數：`(supported_claims / total_claims) * scale`
+
+### 分數解讀
+
+忠實度分數介乎 0 至 1：
+
+- **1.0**：所有聲稱均準確，並獲語境直接支持。
+- **0.7 至 0.9**：大部分聲稱正確，只有少量額外內容或遺漏。
+- **0.4 至 0.6**：部分聲稱獲得支持，但其他聲稱無法核實。
+- **0.1 至 0.3**：大部分內容不準確或缺乏支持。
+- **0.0**：所有聲稱均屬錯誤或與語境矛盾。
+
+## 範例
+
+根據所提供的語境評估 Agent 回應的忠實度：
+
+```typescript title="src/example-faithfulness.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createFaithfulnessScorer } from '@mastra/evals/scorers/prebuilt'
+import { myAgent } from './agent'
+
+// Context is typically populated from agent tool calls or RAG retrieval
+const scorer = createFaithfulnessScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'Tell me about the Tesla Model 3.',
+    },
+    {
+      input: 'What are the key features of this electric vehicle?',
+    },
+  ],
+  scorers: [scorer],
+  target: myAgent,
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+有關 `runEvals` 的詳情，請參閱 [runEvals 參考](/reference/evals/run-evals)。
+
+如要將此評分器加入 Agent，請參閱[評分器概覽](/docs/evals/overview#adding-scorers-to-agents)指南。
+
+## 相關內容
+
+- [答案相關性評分器](./answer-relevancy)
+- [幻覺評分器](./hallucination)

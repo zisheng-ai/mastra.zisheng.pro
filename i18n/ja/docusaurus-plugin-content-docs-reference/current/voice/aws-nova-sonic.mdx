@@ -1,0 +1,433 @@
+---
+title: "リファレンス：AWS Nova Sonic Voice | Voice"
+description: "AWS Bedrock Nova 2 Sonic によるリアルタイムの音声間通信機能を提供する NovaSonicVoice クラスのドキュメントです。"
+packages:
+  - "@mastra/node-audio"
+  - "@mastra/voice-aws-nova-sonic"
+---
+
+# AWS Nova Sonic Voice
+
+`NovaSonicVoice` クラスは、[AWS Bedrock Nova 2 Sonic](https://docs.aws.amazon.com/nova/latest/userguide/speech.html) を利用したリアルタイムの音声間通信機能を提供します。モデルへの双方向ストリームを開き、アシスタント音声、文字起こしテキスト、Tool 呼び出し、ターンの境界、中断に関するイベントを送出します。
+
+## 使用例
+
+```typescript title="src/mastra/voice.ts"
+import { NovaSonicVoice } from '@mastra/voice-aws-nova-sonic'
+import { playAudio, getMicrophoneStream } from '@mastra/node-audio'
+
+// Initialize using the default AWS credential provider chain
+const voice = new NovaSonicVoice({
+  region: 'us-east-1',
+  speaker: 'matthew',
+})
+
+// Or pass explicit credentials
+const voiceWithCredentials = new NovaSonicVoice({
+  region: 'us-east-1',
+  speaker: 'tiffany',
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+  },
+})
+
+// Establish the bidirectional stream
+await voice.connect()
+
+// Listen for assistant audio (Int16Array PCM)
+voice.on('speaking', ({ audioData }) => {
+  if (audioData) playAudio(audioData)
+})
+
+// Listen for transcribed text from the user and assistant
+voice.on('writing', ({ text, role, generationStage }) => {
+  console.log(`${role} (${generationStage ?? 'FINAL'}): ${text}`)
+})
+
+// Stream microphone audio in real time
+const microphoneStream = getMicrophoneStream()
+await voice.send(microphoneStream)
+
+// Disconnect when done
+voice.close()
+```
+
+## 認証
+
+`credentials` オプションを渡さない場合、`NovaSonicVoice` は AWS SDK の認証情報解決チェーンを使用します。Mastra は `@aws-sdk/credential-provider-node` の `defaultProvider()` を呼び出し、環境変数、共有認証情報ファイル、EC2・ECS・EKS の IAM ロール、その他の標準ソースをこの順序で確認します。
+
+静的な認証情報を使用するには、コンストラクターに渡します。
+
+```typescript
+new NovaSonicVoice({
+  region: 'us-east-1',
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+    sessionToken: process.env.AWS_SESSION_TOKEN,
+  },
+})
+```
+
+Voice Provider が認証情報の値をログに記録することはありません。
+
+## 設定
+
+### コンストラクターオプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'region',
+    type: "'us-east-1' | 'us-west-2' | 'ap-northeast-1'",
+    description: 'Nova Sonic モデルをホストする AWS リージョン。',
+    isOptional: true,
+    defaultValue: "'us-east-1'",
+  },
+  {
+    name: 'model',
+    type: 'string',
+    description: '双方向ストリームに使用する Bedrock モデル ID。',
+    isOptional: true,
+    defaultValue: "'amazon.nova-2-sonic-v1:0'",
+  },
+  {
+    name: 'credentials',
+    type: 'AwsCredentialIdentity',
+    description: '静的な AWS 認証情報。省略するとデフォルトの AWS 認証情報 Provider チェーンを使用します。',
+    isOptional: true,
+  },
+  {
+    name: 'speaker',
+    type: 'string | NovaSonicVoiceConfigDetails',
+    description:
+      "アシスタントのデフォルト Voice。'matthew' などの Voice ID 文字列、または言語コードと性別を含むオブジェクトを渡します。",
+    isOptional: true,
+    defaultValue: "'matthew'",
+  },
+  {
+    name: 'languageCode',
+    type: 'NovaSonicLanguageCode',
+    description: 'セッションで使用する言語コード。多言語 Voice は一覧にあるすべての言語をサポートします。',
+    isOptional: true,
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description: 'セッション開始時に送信するシステムプロンプト。connect() の前に addInstructions() を呼び出すことと同等です。',
+    isOptional: true,
+  },
+  {
+    name: 'tools',
+    type: 'NovaSonicToolConfig[]',
+    description:
+      'モデルに公開する Tool。Voice インスタンスを Agent に関連付けると、Agent の Tool が自動的に追加されます。',
+    isOptional: true,
+  },
+  {
+    name: 'sessionConfig',
+    type: 'NovaSonicSessionConfig',
+    description: '推論、ターン検出、Tool 選択の設定。以下の「セッション設定」を参照してください。',
+    isOptional: true,
+  },
+  {
+    name: 'debug',
+    type: 'boolean',
+    description: 'ストリームイベントの詳細ログを有効にします。機密フィールドはマスクされます。',
+    isOptional: true,
+    defaultValue: 'false',
+  },
+]}
+/>
+
+### セッション設定
+
+`sessionConfig` は推論パラメーターとターン交代の動作を制御します。すべてのフィールドは省略可能です。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'inferenceConfiguration',
+    type: 'object',
+    description: 'サンプリングおよびデコードのパラメーター。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          { name: 'maxTokens', type: 'number', description: 'ターンごとに生成する最大トークン数。', isOptional: true },
+          { name: 'temperature', type: 'number', description: 'サンプリング温度。', isOptional: true },
+          { name: 'topP', type: 'number', description: 'Nucleus sampling の確率。', isOptional: true },
+          { name: 'topK', type: 'number', description: 'Top-k sampling。', isOptional: true },
+          { name: 'stopSequences', type: 'string[]', description: '生成を終了するシーケンス。', isOptional: true },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'turnDetectionConfiguration',
+    type: 'object',
+    description: 'ターン検出のエンドポイント感度。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'endpointingSensitivity',
+            type: "'HIGH' | 'MEDIUM' | 'LOW'",
+            description:
+              'モデルがターン完了と判断するまでの停止時間。HIGH は最速（約1.5秒の停止）、MEDIUM はバランス型（約1.75秒）、LOW は最長（約2秒）です。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'toolChoice',
+    type: "'auto' | 'any' | { tool: { name: string } }",
+    description: 'モデルが Tool を呼び出すかどうかを決定する方法。',
+    isOptional: true,
+  },
+  {
+    name: 'enableKnowledgeGrounding',
+    type: 'boolean',
+    description: 'Bedrock ナレッジベースに対する検索拡張グラウンディングを有効にします。',
+    isOptional: true,
+  },
+  {
+    name: 'knowledgeBaseConfig',
+    type: '{ knowledgeBaseId?: string; dataSourceId?: string }',
+    description: 'ナレッジグラウンディングを有効にした場合に使用するナレッジベース。',
+    isOptional: true,
+  },
+]}
+/>
+
+## メソッド
+
+### `connect()`
+
+AWS Bedrock への双方向ストリームを開き、最初のセッション、プロンプト、システムイベントを送信します。`speak`、`listen`、`send` より前に呼び出してください。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: '{ requestContext?: RequestContext }',
+    description: 'セッション中の Tool 呼び出しに伝播する省略可能なリクエストコンテキスト。',
+    isOptional: true,
+  },
+]}
+/>
+
+戻り値：`Promise<void>`
+
+### `speak()`
+
+テキストプロンプトの音声を合成し、音声の生成に合わせて `speaking` イベントを送出します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'input',
+    type: 'string | NodeJS.ReadableStream',
+    description: '合成するテキストまたはテキストストリーム。',
+    isOptional: false,
+  },
+  {
+    name: 'options',
+    type: 'NovaSonicVoiceOptions',
+    description: 'Speaker や言語コードなど、呼び出しごとの上書き設定。',
+    isOptional: true,
+  },
+]}
+/>
+
+戻り値： `Promise<void>`
+
+### `send()`
+
+マイク音声（または任意の PCM ソース）をモデルへストリーミングします。ライブの継続的な会話に使用します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'audioData',
+    type: 'NodeJS.ReadableStream | Int16Array',
+    description: 'モデルに転送する16ビット PCM 音声。',
+    isOptional: false,
+  },
+]}
+/>
+
+戻り値： `Promise<void>`
+
+### `listen()`
+
+`send()` に処理を委譲する便利なラッパーです。有限の音声ストリームを1回だけ文字起こしする場合に使用します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'audioData',
+    type: 'NodeJS.ReadableStream',
+    description: '文字起こしする音声ストリーム。',
+    isOptional: false,
+  },
+]}
+/>
+
+戻り値： `Promise<void>`
+
+### `endAudioInput()`
+
+現在の音声ターンの終了を通知し、モデルが応答を確定できるようにします。ユーザーが発話を終え、Provider にサーバー側のターン検出が設定されていない場合に呼び出してください。
+
+戻り値： `Promise<void>`
+
+### `addInstructions()`
+
+アクティブなセッションのシステムプロンプトを更新します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'instructions',
+    type: 'string',
+    description: 'セッションに適用するシステムプロンプト。',
+    isOptional: true,
+  },
+]}
+/>
+
+戻り値：`void`
+
+### `addTools()`
+
+Voice インスタンスに Tool を登録します。`NovaSonicVoice` を Agent に関連付けると、Agent の Tool が自動的に追加されます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'tools',
+    type: 'ToolsInput',
+    description: 'モデルに公開する Tool。',
+    isOptional: true,
+  },
+]}
+/>
+
+戻り値： `void`
+
+### `getSpeakers()`
+
+Nova 2 Sonic がサポートする Voice の一覧を返します。
+
+戻り値：`Promise<Array<{ voiceId: string; name: string; language: string; locale: string; gender: 'masculine' | 'feminine'; polyglot: boolean }>>`
+
+### `getListener()`
+
+Voice インスタンスが現在開いているストリームを保持しているかどうかを返します。
+
+戻り値：`Promise<{ enabled: boolean }>`
+
+### `close()`
+
+双方向ストリームを閉じ、基盤となる Bedrock クライアントを破棄します。会話の終了時に呼び出してください。
+
+戻り値： `void`
+
+### `on()` / `off()`
+
+イベントリスナーを登録および削除します。共通のイベント API については、[Voice イベント](./voice.events)を参照してください。
+
+## イベント
+
+`NovaSonicVoice` は次のイベントを送出します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'speaking',
+    type: 'event',
+    description: 'アシスタントの音声チャンク。コールバックは { audioData: Int16Array, sampleRate?: number } を受け取ります。',
+  },
+  {
+    name: 'writing',
+    type: 'event',
+    description:
+      "ユーザーまたはアシスタントの文字起こしテキスト。コールバックは { text: string, role: 'assistant' | 'user', generationStage?: 'SPECULATIVE' | 'FINAL' } を受け取ります。",
+  },
+  {
+    name: 'toolCall',
+    type: 'event',
+    description:
+      'モデルが Tool 呼び出しを要求したことを示します。コールバックは { name: string, args: Record<string, any>, id: string } を受け取ります。',
+  },
+  {
+    name: 'interrupt',
+    type: 'event',
+    description:
+      "ユーザーまたはモデルが現在のターンを中断したことを示します。コールバックは { type: 'user' | 'model', timestamp: number } を受け取ります。",
+  },
+  {
+    name: 'turnComplete',
+    type: 'event',
+    description: 'モデルがターンを終えたことを示します。コールバックは { timestamp: number } を受け取ります。',
+  },
+  {
+    name: 'session',
+    type: 'event',
+    description:
+      "セッション状態の遷移。コールバックは { state: 'connecting' | 'connected' | 'disconnected' | 'disconnecting' | 'error' } を受け取ります。",
+  },
+  {
+    name: 'usage',
+    type: 'event',
+    description:
+      'ターンのトークン使用量。コールバックは { inputTokens: number, outputTokens: number, totalTokens: number } を受け取ります。',
+  },
+  {
+    name: 'error',
+    type: 'event',
+    description: 'ストリームまたは Provider のエラー。コールバックは { message: string, code?: string, details?: unknown } を受け取ります。',
+  },
+]}
+/>
+
+`generationStage` は暫定的な文字起こし（`'SPECULATIVE'`）と確定済みの文字起こし（`'FINAL'`）を区別します。永続ストレージには `'FINAL'` のテキスト、ライブキャプションには `'SPECULATIVE'` のテキストを使用してください。
+
+## 使用可能な Voice
+
+Nova 2 Sonic は10のロケールで Voice を提供します。Tiffany と Matthew は多言語 Voice で、サポートされるすべての言語を話せます。
+
+| Voice ID | 名前 | 言語 | ロケール | 性別 | 多言語 |
+| - | - | - | - | - | - |
+| `tiffany` | Tiffany | 英語 | en-US | 女性 | はい |
+| `matthew` | Matthew | 英語 | en-US | 男性 | はい |
+| `amy` | Amy | 英語 | en-GB | 女性 | いいえ |
+| `olivia` | Olivia | 英語 | en-AU | 女性 | いいえ |
+| `kiara` | Kiara | 英語 | en-IN | 女性 | いいえ |
+| `arjun` | Arjun | 英語 | en-IN | 男性 | いいえ |
+| `ambre` | Ambre | フランス語 | fr-FR | 女性 | いいえ |
+| `florian` | Florian | フランス語 | fr-FR | 男性 | いいえ |
+| `beatrice` | Beatrice | イタリア語 | it-IT | 女性 | いいえ |
+| `lorenzo` | Lorenzo | イタリア語 | it-IT | 男性 | いいえ |
+| `tina` | Tina | ドイツ語 | de-DE | 女性 | いいえ |
+| `lennart` | Lennart | ドイツ語 | de-DE | 男性 | いいえ |
+| `lupe` | Lupe | スペイン語 | es-US | 女性 | いいえ |
+| `carlos` | Carlos | スペイン語 | es-US | 男性 | いいえ |
+| `carolina` | Carolina | ポルトガル語 | pt-BR | 女性 | いいえ |
+| `leo` | Leo | ポルトガル語 | pt-BR | 男性 | いいえ |
+| `kiara` | Kiara | ヒンディー語 | hi-IN | 女性 | いいえ |
+| `arjun` | Arjun | ヒンディー語 | hi-IN | 男性 | いいえ |
+
+## 注意事項
+
+- 音声は16ビット PCM としてストリーミングされます。アシスタント音声は `speaking` イベントで `Int16Array` として送出されます。
+- Voice インスタンスでは、ほかのストリーミングメソッドより前に `connect()` を呼び出す必要があります。
+- `close()` は基盤となる `BedrockRuntimeClient` を破棄して HTTP/2 セッションを解放します。
+- Nova 2 Sonic は `us-east-1`、`us-west-2`、`ap-northeast-1` で利用できます。その他のリージョンでは、構築時に設定エラーがスローされます。

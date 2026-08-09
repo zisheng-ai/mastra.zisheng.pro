@@ -1,0 +1,310 @@
+---
+title: "Mastra を Kubernetes にデプロイする | Deployment"
+description: "共有 Pub/Sub とストレージを使用し、Mastra アプリケーションを Kubernetes 上の複数 Pod にデプロイします。"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# Mastra を Kubernetes にデプロイする
+
+Mastra アプリケーションを [Kubernetes](https://kubernetes.io/) 上の複数 Pod で実行し、Load Balancer の背後で水平スケーリングします。各 Pod は独立したプロセスであるため、Pub/Sub Backend とデータベースを共有する必要があります。共有しない場合、1 つの Pod で開始した作業を他の Pod から確認できません。
+
+:::info
+このガイドでは、[Mastra サーバー](/docs/server/mastra-server)のデプロイについて説明します。[Server Adapter](/docs/server/server-adapters) または [Web フレームワーク](/docs/deployment/web-framework)を使用している場合は、そのフレームワークの通常の方法でデプロイしてください。
+:::
+
+:::warning
+複数 Pod のサポートは、現在 **Beta** の [Durable Agent](/docs/long-running-agents/durable-agents) に依存します。API は Minor Version で変更される可能性があります。本番環境で使用する前に、[既知の制限](#known-limitations)を確認してください。
+:::
+
+## 始める前に
+
+次のものが必要です。
+
+- [Mastra アプリケーション](/guides/getting-started/quickstart)
+- [Kubernetes](https://kubernetes.io/docs/setup/) Cluster と [`kubectl`](https://kubernetes.io/docs/tasks/tools/)
+- Cluster から Pull できる Container Registry
+- すべての Pod からアクセスできる共有 [Redis](https://redis.io/) インスタンス
+- すべての Pod からアクセスできる共有 [PostgreSQL](https://www.postgresql.org/) データベース
+
+## 複数 Pod に共有インフラストラクチャが必要な理由
+
+単一の Pod は Run の状態を自身のメモリに保持します。Pod が 1 つであれば、すべてのリクエストが同じプロセスに届くため問題ありません。複数 Pod では、ブラウザーが Pod A からストリーミングしている間に、ユーザーの次のリクエストが Pod B にルーティングされる可能性があります。Pod B には Pod A の Run に関する記録がありません。
+
+Redis と Postgres がこの問題を解決します。
+
+- **Pub/Sub** は Pod 間でイベントを転送します。1 つの Pod でイベントを Publish すると、他の Pod が受信します。Mastra は [`RedisStreamsPubSub`](/reference/pubsub/redis-streams) を使用します。これは、同時に 1 つの Pod だけが会話を所有するようにする Thread ごとの Lease も提供します。[PubSub](/docs/server/pubsub) を参照してください。
+- **ストレージ** は Run の状態を永続化します。[Durable Agent](/docs/long-running-agents/durable-agents) は各 Run を Workflow Snapshot として保存するため、再起動後や別の場所にルーティングされた場合でも、どの Pod からでもデータベースから Run を再開できます。
+
+## 共有インフラストラクチャを設定する
+
+`Mastra` インスタンスを Redis と Postgres に接続します。すべての Pod で同じイメージを実行できるように、接続情報を環境変数から読み取ります。
+
+Backend をインストールします。
+
+```bash npm2yarn
+npm install @mastra/redis-streams @mastra/pg @mastra/redis ioredis
+```
+
+`Mastra` インスタンスに Pub/Sub、ストレージ、共有 Cache を設定します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RedisStreamsPubSub } from '@mastra/redis-streams'
+import { RedisServerCache } from '@mastra/redis'
+import { PostgresStore } from '@mastra/pg'
+import Redis from 'ioredis'
+
+export const mastra = new Mastra({
+  // Carries events between pods, and provides
+  // per-thread leases so one pod owns a conversation at a time.
+  pubsub: new RedisStreamsPubSub({
+    url: process.env.REDIS_URL!,
+  }),
+  // Persists run state so any pod can resume a run.
+  storage: new PostgresStore({
+    id: 'mastra-storage',
+    connectionString: process.env.DATABASE_URL!,
+  }),
+  // Shared event cache so a reconnecting client can replay missed chunks
+  // from any pod, not only the one that started the run.
+  cache: new RedisServerCache({ client: new Redis(process.env.REDIS_URL!) }),
+})
+```
+
+`cache` により、再開可能なストリームが Pod 間で動作します。再接続する Client は、この Cache から受信できなかったイベントを再生するため、Cache を共有する必要があります。デフォルトの In-memory Cache は、1 つのプロセス内でのみ再生に対応します。
+
+## Durable Agent を使用する
+
+通常の [`Agent`](/docs/agents/overview) はストリームと承認状態を 1 つの Pod のメモリに保持するため、リクエストが別の Pod に届くと維持できません。[Durable Agent](/docs/long-running-agents/durable-agents) は Agent Loop を Workflow 内で実行して状態を永続化するため、どの Pod からでも同じ Run を確認または再開できます。
+
+Agent を `createDurableAgent()` でラップします。
+
+```typescript title="src/mastra/agents/assistant.ts"
+import { Agent } from '@mastra/core/agent'
+import { createDurableAgent } from '@mastra/core/agent/durable'
+
+const agent = new Agent({
+  id: 'assistant',
+  name: 'Assistant',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+export const durableAssistant = createDurableAgent({ agent })
+```
+
+上記の `Mastra` インスタンスに Durable Agent を登録します。Run の状態が Postgres に保存され、イベントが Redis を通過するため、すべての Pod から Run にアクセスできるようになります。
+
+## デプロイする
+
+<Steps>
+  <StepItem>
+    Mastra サーバーをビルドしてコンテナ化し、イメージを Registry にプッシュします。ビルドについては [Mastra サーバー](/docs/server/mastra-server)ガイドに従い、サーバーが `process.env.PORT` を読み取り、`0.0.0.0` で Listen することを確認してください。
+  </StepItem>
+
+  <StepItem>
+    共有接続文字列を Secret として保存します。
+
+    ```bash
+    kubectl create secret generic mastra-secrets \
+      --from-literal=REDIS_URL='redis://redis:6379' \
+      --from-literal=DATABASE_URL='postgresql://user:pass@postgres:5432/mastra'
+    ```
+  </StepItem>
+
+  <StepItem>
+    共有 Secret を読み取ってイメージを実行する Deployment を適用します。最初の Pod が単独でデータベース Schema を作成できるように、まず 1 つの Replica で開始し、次の Step でスケールアップします。
+
+    ```yaml title="deployment.yaml"
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: mastra
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: mastra
+      template:
+        metadata:
+          labels:
+            app: mastra
+        spec:
+          containers:
+            - name: mastra
+              image: your-registry/mastra:latest
+              ports:
+                - containerPort: 8080
+              env:
+                - name: PORT
+                  value: '8080'
+              envFrom:
+                - secretRef:
+                    name: mastra-secrets
+              readinessProbe:
+                tcpSocket:
+                  port: 8080
+              livenessProbe:
+                tcpSocket:
+                  port: 8080
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 512Mi
+    ```
+
+    後述の HorizontalPodAutoscaler では、`resources.requests.cpu` の値が必要です。Kubernetes は使用量を要求量で割って CPU 使用率を計算するため、CPU Request がないと Autoscaler は目標値を計算できず、スケーリングしません。
+
+    ```bash
+    kubectl apply -f deployment.yaml
+    ```
+
+    最初の Pod の準備ができたら、スケールアップします。
+
+    ```bash
+    kubectl wait --for=condition=available deployment/mastra
+    kubectl scale deployment/mastra --replicas=3
+    ```
+
+    :::note
+    すべての Replica が同じイメージを実行し、同じ Redis と Postgres に接続します。Run が Pod をまたげるのは、Pod 数ではなくこの共有インフラストラクチャによるものです。
+    :::
+  </StepItem>
+
+  <StepItem>
+    Deployment を Service として公開します。
+
+    ```yaml title="service.yaml"
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: mastra
+    spec:
+      selector:
+        app: mastra
+      ports:
+        - port: 80
+          targetPort: 8080
+    ```
+
+    ```bash
+    kubectl apply -f service.yaml
+    ```
+  </StepItem>
+
+  <StepItem>
+    HorizontalPodAutoscaler で Replica を自動的にスケーリングします。
+
+    ```yaml title="hpa.yaml"
+    apiVersion: autoscaling/v2
+    kind: HorizontalPodAutoscaler
+    metadata:
+      name: mastra
+    spec:
+      scaleTargetRef:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: mastra
+      minReplicas: 3
+      maxReplicas: 10
+      metrics:
+        - type: Resource
+          resource:
+            name: cpu
+            target:
+              type: Utilization
+              averageUtilization: 70
+    ```
+
+    ```bash
+    kubectl apply -f hpa.yaml
+    ```
+
+    :::note
+    CPU ベースの自動スケーリングには、Cluster で [metrics-server](https://github.com/kubernetes-sigs/metrics-server) を実行する必要があります。GKE、EKS、AKS などのマネージド Cluster には含まれています。kind や minikube などのローカル Cluster には含まれないため、先に有効にしてください（`minikube addons enable metrics-server` など）。
+    :::
+  </StepItem>
+
+  <StepItem>
+    Pod が実行されていることを確認します。
+
+    ```bash
+    kubectl get pods -l app=mastra
+    ```
+
+    1 つのターミナルで Service を Port Forward します。このコマンドはフォアグラウンドで実行され続けます。
+
+    ```bash
+    kubectl port-forward service/mastra 8080:80
+    ```
+
+    2 つ目のターミナルから API を呼び出します。
+
+    ```bash
+    curl http://localhost:8080/api/agents
+    ```
+
+    Agent の一覧が JSON で返れば、デプロイから配信されています。
+
+    :::warning
+    エンドポイントを公開する前に、[認証](/docs/server/auth)を設定してください。
+    :::
+  </StepItem>
+</Steps>
+
+## ストリーミングと再接続
+
+Durable Agent は共有 Pub/Sub を介して、Run ごとの Topic にストリームチャンクを Publish します。切断した Client は Run ID とともに `observe()` を呼び出して再接続し、共有 Cache から受信できなかったチャンクを再生します。
+
+```typescript title="src/server/reconnect.ts"
+const { output, cleanup } = await durableAssistant.observe(runId)
+
+for await (const chunk of output.fullStream) {
+  // Chunks from the run, including any missed while disconnected
+}
+
+cleanup()
+```
+
+Run の状態が Postgres、イベントが Redis にあるため、再接続リクエストは Run を開始した Pod だけでなく、どの Pod でも処理できます。[再開可能なストリーム](/docs/long-running-agents/durable-agents#resumable-streams)を参照してください。
+
+複数の Client が同じ Run を同時に確認できます。各 `observe()` 呼び出しは完全なストリームを受信するため、1 人のユーザーが 2 台のデバイスから確認する場合も、2 人が同じ Run を追跡する場合も同期を維持できます。
+
+## Pod をまたぐ Tool 承認
+
+Durable Agent は人間が承認するまで Tool 呼び出しを一時停止します。中断された Run は Postgres に保存されるため、Run を開始した Pod だけでなく、どの Pod でも承認を受け取れます。
+
+承認が必要な Run を開始します。
+
+```typescript title="src/server/approval.ts"
+const { runId } = await durableAssistant.stream('Delete the archived records', {
+  requireToolApproval: true,
+  memory: { thread: 'thread-1', resource: 'user-1' },
+})
+```
+
+Run は Tool の実行前に中断されます。後から任意の Pod で承認します。
+
+```typescript
+await durableAssistant.resume(runId, { approved: true })
+```
+
+承認を処理する Pod が中断された Run を Postgres から読み込みます。その後、承認された Tool を実行して共有 Pub/Sub 経由で結果を Publish するため、Run を確認している Client が続きを受信します。[Tool 承認](/docs/long-running-agents/durable-agents#tool-approval)を参照してください。
+
+## 既知の制限
+
+- デフォルトの In-process 設定では、Run の状態を 1 つの Pod のメモリに保持し、Pod 間で共有しません。ストリーミング、承認、再接続を Pod 間で動作させるには、共有 Redis と Postgres を持つ [Durable Agent](/docs/long-running-agents/durable-agents) を使用してください。
+- Pod をまたぐストリーミング、承認、再接続には Durable Agent が必要です。通常の Agent は Run の状態をメモリに保持し、別の Pod では再開しません。
+- 初期化されていないデータベースに対して複数の Pod を同時に起動すると、Schema 作成が競合して Pod の起動に失敗することがあります。まず 1 つの Replica で Schema を一度だけ作成し、その後スケールアップしてください。
+- より厳密な構成では、アプリ外部で Schema を初期化し（1 回限りの Kubernetes Job など）、すべての Pod の `PostgresStore` に `disableInit: true` を設定します。
+
+## 関連項目
+
+- [PubSub](/docs/server/pubsub)
+- [Durable Agent](/docs/long-running-agents/durable-agents)
+- [Worker](/docs/deployment/workers)：Kubernetes 上でバックグラウンド処理を別のコンテナに分離する
+- [Worker デプロイガイド](/guides/deployment/mastra-workers)：Orchestration、Scheduler、バックグラウンドタスク Worker 用の完全な Kubernetes Manifest
+- [Mastra サーバー](/docs/server/mastra-server)
+- [Deployment の概要](/docs/deployment/overview)

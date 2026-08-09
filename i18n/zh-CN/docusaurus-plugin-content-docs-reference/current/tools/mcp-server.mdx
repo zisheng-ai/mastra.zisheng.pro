@@ -1,0 +1,1922 @@
+---
+title: "参考：MCPServer | Tools 和 MCP"
+description: MCPServer API 参考——用于将 Mastra Tool 和功能公开为 Model Context Protocol Server 的类。
+packages:
+  - "@mastra/core"
+  - "@mastra/mcp"
+---
+
+# MCPServer
+
+`MCPServer` 类提供了将现有 Mastra Tool 和 Agent 公开为 Model Context Protocol (MCP) Server 的功能。这样，任何 MCP Client（如 Cursor、Windsurf 或 Claude Desktop）都能连接并将这些功能提供给 Agent 使用。
+
+请注意，如果只需在 Mastra 应用中直接使用 Tool 或 Agent，则不一定需要创建 MCP Server。此 API 专门用于向_外部_ MCP Client 公开 Mastra Tool 和 Agent。
+
+它同时支持 [stdio（子进程）和 SSE (HTTP) MCP transport](https://modelcontextprotocol.io/docs/concepts/transports)。
+
+## 构造函数
+
+要创建新的 `MCPServer`，需要提供 Server 的基本信息、它将提供的 Tool，以及可选的、希望作为 Tool 公开的 Agent。
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { createTool } from '@mastra/core/tools'
+import { MCPServer } from '@mastra/mcp'
+import { z } from 'zod'
+import { dataProcessingWorkflow } from '../workflows/dataProcessingWorkflow'
+
+const myAgent = new Agent({
+  id: 'my-example-agent',
+  name: 'MyExampleAgent',
+  description: 'A generalist to help with basic questions.',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const weatherTool = createTool({
+  id: 'getWeather',
+  description: 'Gets the current weather for a location.',
+  inputSchema: z.object({ location: z.string() }),
+  execute: async inputData => `Weather in ${inputData.location} is sunny.`,
+})
+
+const server = new MCPServer({
+  id: 'my-custom-server',
+  name: 'My Custom Server',
+  version: '1.0.0',
+  description: 'A server that provides weather data and agent capabilities',
+  instructions:
+    'Use the available tools to help users with weather information and data processing tasks.',
+  tools: { weatherTool },
+  agents: { myAgent }, // this agent will become tool "ask_myAgent"
+  workflows: {
+    dataProcessingWorkflow, // this workflow will become tool "run_dataProcessingWorkflow"
+  },
+})
+```
+
+### 配置属性
+
+构造函数接受包含以下属性的 `MCPServerConfig` 对象：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: false,
+    description:
+      'Server 的唯一标识符。Server 注册到 Mastra 后会保留此 ID，并可通过 getMCPServerById() 获取该 Server。',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    isOptional: false,
+    description: "Server 的描述性名称（例如 'My Weather and Agent Server'）。",
+  },
+  {
+    name: 'version',
+    type: 'string',
+    isOptional: false,
+    description: "Server 的语义化版本（例如 '1.0.0'）。",
+  },
+  {
+    name: 'tools',
+    type: 'ToolsInput',
+    isOptional: false,
+    description:
+      '以 Tool 名称为键、Mastra Tool 定义（使用 `createTool` 或 Vercel AI SDK 创建）为值的对象。这些 Tool 将被直接公开。',
+  },
+  {
+    name: 'agents',
+    type: 'Record<string, Agent>',
+    isOptional: true,
+    description:
+      "以 Agent 标识符为键、Mastra Agent 实例为值的对象。每个 Agent 都会自动转换为名为 `ask_<agentIdentifier>` 的 Tool。Agent 的构造函数配置中**必须**定义非空的 `description` 字符串属性。该描述将用于 Tool 的描述。如果 Agent 的描述缺失或为空，MCPServer 初始化时将抛出错误。",
+  },
+  {
+    name: 'workflows',
+    type: 'Record<string, Workflow>',
+    isOptional: true,
+    description:
+      "以 Workflow 标识符为键、Mastra Workflow 实例为值的对象。每个 Workflow 都会转换为名为 `run_<workflowKey>` 的 Tool。Workflow 的 `inputSchema` 将成为 Tool 的输入 schema。Workflow **必须**具有非空的 `description` 字符串属性，该属性用于 Tool 的描述。如果 Workflow 的描述缺失或为空，将抛出错误。Tool 通过先调用 `workflow.createRun()`，再调用 `run.start({ inputData: <tool_input> })` 来执行 Workflow。如果从 Agent 或 Workflow 派生的 Tool 名称（例如 `ask_myAgent` 或 `run_myWorkflow`）与显式定义的 Tool 名称或其他派生名称冲突，则显式定义的 Tool 优先，并记录警告。导致后续冲突的 Agent/Workflow 将被跳过。",
+  },
+  {
+    name: 'description',
+    type: 'string',
+    isOptional: true,
+    description: 'MCP Server 功能的可选描述。',
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    isOptional: true,
+    description: '说明如何使用 Server 及其功能的可选指令。',
+  },
+  {
+    name: 'mapAuthInfoToUser',
+    type: '({ authInfo, extra, requestContext }) => unknown | null | undefined | Promise<unknown | null | undefined>',
+    isOptional: true,
+    description:
+      '将 `extra.authInfo` 中的 MCP transport 身份验证数据映射为 Mastra FGA 检查所使用的 `user` 值。当受 OAuth 保护的 MCP Server 注册到配置了 FGA Provider 的 Mastra 实例时，请使用此属性。',
+  },
+  {
+    name: 'fga',
+    type: "{ resourceMapping?: Partial<Record<'tool' | 'tools', { fgaResourceType: string; deriveId?: ({ user, resourceId, requestContext }) => string | undefined }>>; permissionMapping?: Record<string, string> }",
+    isOptional: true,
+    description:
+      "覆盖此 MCP Server 的 `tools/list` 和 `tools/call` FGA 检查所用的资源与权限映射。当 MCP 授权范围应不同于内部 Agent 或 Workflow Tool 执行的范围时，请使用此属性。",
+  },
+  {
+    name: 'repository',
+    type: 'Repository', // { url: string; source: string; id: string; }
+    isOptional: true,
+    description: 'Server 源代码的可选仓库信息。',
+  },
+  {
+    name: 'releaseDate',
+    type: 'string', // ISO 8601
+    isOptional: true,
+    description:
+      '此 Server 版本的可选发布日期（ISO 8601 字符串）。如果未提供，则默认为实例化时间。',
+  },
+  {
+    name: 'isLatest',
+    type: 'boolean',
+    isOptional: true,
+    description: '指示这是否为最新版本的可选标志。如果未提供，则默认为 true。',
+  },
+  {
+    name: 'packageCanonical',
+    type: "'npm' | 'docker' | 'pypi' | 'crates' | string",
+    isOptional: true,
+    description:
+      "当 Server 以包的形式分发时，其可选的规范打包格式（例如 'npm'、'docker'）。",
+  },
+  {
+    name: 'packages',
+    type: 'PackageInfo[]',
+    isOptional: true,
+    description: '此 Server 的可选可安装包列表。',
+  },
+  {
+    name: 'remotes',
+    type: 'RemoteInfo[]',
+    isOptional: true,
+    description: '此 Server 的可选远程访问点列表。',
+  },
+  {
+    name: 'resources',
+    type: 'MCPServerResources',
+    isOptional: true,
+    description:
+      '定义 Server 应如何处理 MCP Resource 的对象。有关详情，请参阅“Resource 处理”部分。',
+  },
+  {
+    name: 'prompts',
+    type: 'MCPServerPrompts',
+    isOptional: true,
+    description:
+      '定义 Server 应如何处理 MCP Prompt 的对象。有关详情，请参阅“Prompt 处理”部分。',
+  },
+  {
+    name: 'appResources',
+    type: 'AppResources',
+    isOptional: true,
+    description:
+      '从 `ui://` URI 到应用 Resource 配置的映射。每个条目都定义一个通过 MCP Apps 扩展 (SEP-1865) 提供的交互式 HTML UI。有关详情，请参阅 MCP Apps 部分。',
+  },
+]}
+/>
+
+## 将 Agent 公开为 Tool
+
+`MCPServer` 的一项强大功能是自动将 Mastra Agent 公开为可调用的 Tool。在配置的 `agents` 属性中提供 Agent 时：
+
+- **Tool 命名**：每个 Agent 都会转换为名为 `ask_<agentKey>` 的 Tool，其中 `<agentKey>` 是该 Agent 在 `agents` 对象中使用的键。例如，如果配置 `agents: { myAgentKey: myAgentInstance }`，则会创建名为 `ask_myAgentKey` 的 Tool。
+
+- **Tool 功能**：
+  - **描述**：生成的 Tool 描述格式为：“Ask agent `<AgentName>` a question. Original agent instructions: `<agent description>`”。
+  - **输入**：Tool 需要一个带有 `message` 属性（字符串）的对象参数：`{ message: "Your question for the agent" }`。
+  - **执行**：调用此 Tool 时，它会使用提供的 `query` 调用相应 Agent 的 `generate()` 方法。
+  - **输出**：Agent 的 `generate()` 方法所返回的直接结果将作为 Tool 输出返回。
+
+- **名称冲突。** 如果 `tools` 配置中显式定义的 Tool 与 Agent 派生的 Tool 同名（例如同时存在名为 `ask_myAgentKey` 的 Tool 和键为 `myAgentKey` 的 Agent），则_显式定义的 Tool 优先_。发生此类冲突时，该 Agent 不会转换为 Tool，并会记录一条警告。
+
+这样一来，MCP Client 就能像使用其他 Tool 一样，通过自然语言查询轻松地与 Agent 交互。
+
+### Agent 到 Tool 的转换
+
+在 `agents` 配置属性中提供 Agent 时，`MCPServer` 会自动为每个 Agent 创建对应的 Tool。该 Tool 名为 `ask_<agentIdentifier>`，其中 `<agentIdentifier>` 是 `agents` 对象中使用的键。
+
+生成的 Tool 描述为：“Ask agent `<agent.name>` a question. Agent description: `<agent.description>`”。
+
+要将 Agent 转换为 Tool，实例化时其配置中**必须**设置非空的 `description` 字符串属性（例如 `new Agent({ id: 'my-agent', name: 'myAgent', description: 'This agent does X.', ... })`）。如果传给 `MCPServer` 的 Agent 缺少 `description` 或其值为空，实例化 `MCPServer` 时将抛出错误，Server 设置也会失败。
+
+这样便可通过 MCP 快速公开 Agent 的生成能力，让 Client 能够直接向 Agent“提问”。
+
+### 在 Tool 中访问 MCP 上下文
+
+通过 `MCPServer` 公开的 Tool 可根据调用方式，通过两个不同属性访问 MCP 请求上下文（身份验证、会话 ID 等）：
+
+| 调用模式 | 访问方式 |
+| - | - |
+| 直接调用 Tool | `context?.mcp?.extra` |
+| Agent 调用 Tool | `context?.requestContext?.get("mcp.extra")` |
+
+**通用模式**（适用于两种上下文）：
+
+```typescript
+const mcpExtra = context?.mcp?.extra ?? context?.requestContext?.get('mcp.extra')
+const authInfo = mcpExtra?.authInfo
+```
+
+#### 示例：适用于两种上下文的 Tool
+
+```typescript
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+const fetchUserData = createTool({
+  id: 'fetchUserData',
+  description: 'Fetches user data using authentication from MCP context',
+  inputSchema: z.object({
+    userId: z.string().describe('The ID of the user to fetch'),
+  }),
+  execute: async (inputData, context) => {
+    // Access MCP authentication context
+    // When called directly via MCP: context.mcp.extra
+    // When called via agent: context.requestContext.get('mcp.extra')
+    const mcpExtra = context?.mcp?.extra || context?.requestContext?.get('mcp.extra')
+    const authInfo = mcpExtra?.authInfo
+
+    if (!authInfo?.token) {
+      throw new Error('Authentication required')
+    }
+
+    const response = await fetch(`https://api.example.com/users/${inputData.userId}`, {
+      headers: {
+        Authorization: `Bearer ${authInfo.token}`,
+      },
+    })
+
+    return response.json()
+  },
+})
+```
+
+## 方法
+
+可以在 `MCPServer` 实例上调用以下函数，以控制其行为并获取信息。
+
+### `startStdio()`
+
+使用此方法启动 Server，使其通过标准输入和输出 (stdio) 进行通信。这是以命令行程序运行 Server 时的典型方式。
+
+```typescript prettier:false
+async startStdio(): Promise<void>
+```
+
+以下是使用 stdio 启动 Server 的方式：
+
+```typescript
+const server = new MCPServer({
+  id: 'my-server',
+  name: 'My Server',
+  version: '1.0.0',
+  tools: {/* ... */},
+})
+await server.startStdio()
+```
+
+### `startSSE()`
+
+此方法可将 MCP Server 与现有 Web Server 集成，使用 Server-Sent Events (SSE) 进行通信。Web Server 收到针对 SSE 路径或消息路径的请求时，需要从其代码中调用此方法。
+
+```typescript prettier:false
+async startSSE({
+  url,
+  ssePath,
+  messagePath,
+  req,
+  res,
+}: {
+  url: URL;
+  ssePath: string;
+  messagePath: string;
+  req: any;
+  res: any;
+}): Promise<void>
+```
+
+以下示例展示了如何在 HTTP Server 请求处理程序中使用 `startSSE`。在此示例中，MCP Client 可以通过 `http://localhost:1234/sse` 连接到 MCP Server：
+
+```typescript
+import http from 'http'
+
+const httpServer = http.createServer(async (req, res) => {
+  await server.startSSE({
+    url: new URL(req.url || '', `http://localhost:1234`),
+    ssePath: '/sse',
+    messagePath: '/message',
+    req,
+    res,
+  })
+})
+
+httpServer.listen(PORT, () => {
+  console.log(`HTTP server listening on port ${PORT}`)
+})
+```
+
+下面是 `startSSE` 方法所需值的详细说明：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'url',
+    type: 'URL',
+    description: '用户请求的 Web 地址。',
+  },
+  {
+    name: 'ssePath',
+    type: 'string',
+    description: "Client 为建立 SSE 连接而访问的具体 URL 路径（例如 '/sse'）。",
+  },
+  {
+    name: 'messagePath',
+    type: 'string',
+    description: "Client 用于发送消息的具体 URL 路径（例如 '/message'）。",
+  },
+  {
+    name: 'req',
+    type: 'any',
+    description: '来自 Web Server 的传入请求对象。',
+  },
+  {
+    name: 'res',
+    type: 'any',
+    description: '来自 Web Server、用于返回数据的响应对象。',
+  },
+]}
+/>
+
+### `startHonoSSE()`
+
+此方法可将 MCP Server 与现有 Web Server 集成，使用 Server-Sent Events (SSE) 进行通信。Web Server 收到针对 SSE 路径或消息路径的请求时，需要从其代码中调用此方法。
+
+```typescript prettier:false
+async startHonoSSE({
+  url,
+  ssePath,
+  messagePath,
+  req,
+  res,
+}: {
+  url: URL;
+  ssePath: string;
+  messagePath: string;
+  req: any;
+  res: any;
+}): Promise<void>
+```
+
+以下示例展示了如何在 HTTP Server 请求处理程序中使用 `startHonoSSE`。在此示例中，MCP Client 可以通过 `http://localhost:1234/hono-sse` 连接到 MCP Server：
+
+```typescript
+import http from 'http'
+
+const httpServer = http.createServer(async (req, res) => {
+  await server.startHonoSSE({
+    url: new URL(req.url || '', `http://localhost:1234`),
+    ssePath: '/hono-sse',
+    messagePath: '/message',
+    req,
+    res,
+  })
+})
+
+httpServer.listen(PORT, () => {
+  console.log(`HTTP server listening on port ${PORT}`)
+})
+```
+
+下面是 `startHonoSSE` 方法所需值的详细说明：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'url',
+    type: 'URL',
+    description: '用户请求的 Web 地址。',
+  },
+  {
+    name: 'ssePath',
+    type: 'string',
+    description: "Client 为建立 SSE 连接而访问的具体 URL 路径（例如 '/hono-sse'）。",
+  },
+  {
+    name: 'messagePath',
+    type: 'string',
+    description: "Client 用于发送消息的具体 URL 路径（例如 '/message'）。",
+  },
+  {
+    name: 'req',
+    type: 'any',
+    description: '来自 Web Server 的传入请求对象。',
+  },
+  {
+    name: 'res',
+    type: 'any',
+    description: '来自 Web Server、用于返回数据的响应对象。',
+  },
+]}
+/>
+
+### `startHTTP()`
+
+此方法可将 MCP Server 与现有 Web Server 集成，使用 Streamable HTTP 进行通信。Web Server 收到 HTTP 请求时，需要从其代码中调用此方法。
+
+```typescript prettier:false
+async startHTTP({
+  url,
+  httpPath,
+  req,
+  res,
+  options = { sessionIdGenerator: () => randomUUID() },
+}: {
+  url: URL;
+  httpPath: string;
+  req: http.IncomingMessage;
+  res: http.ServerResponse<http.IncomingMessage>;
+  options?: StreamableHTTPServerTransportOptions;
+}): Promise<void>
+```
+
+以下示例展示了如何在 HTTP Server 请求处理程序中使用 `startHTTP`。在此示例中，MCP Client 可以通过 `http://localhost:1234/http` 连接到 MCP Server：
+
+```typescript
+import http from 'http'
+
+const httpServer = http.createServer(async (req, res) => {
+  await server.startHTTP({
+    url: new URL(req.url || '', 'http://localhost:1234'),
+    httpPath: `/mcp`,
+    req,
+    res,
+    options: {
+      sessionIdGenerator: () => randomUUID(),
+    },
+  })
+})
+
+httpServer.listen(PORT, () => {
+  console.log(`HTTP server listening on port ${PORT}`)
+})
+```
+
+对于 **Serverless 环境**（Supabase Edge Functions、Cloudflare Workers、Vercel Edge 等），请使用 `serverless: true` 启用无状态运行模式：
+
+```typescript
+// Supabase Edge Function example
+import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+import { MCPServer } from '@mastra/mcp'
+// Note: You will need to convert req/res format from Deno to Node
+import { toReqRes, toFetchResponse } from 'fetch-to-node'
+
+const server = new MCPServer({
+  id: 'my-serverless-mcp',
+  name: 'My Serverless MCP',
+  version: '1.0.0',
+  tools: {/* your tools */},
+})
+
+serve(async req => {
+  const url = new URL(req.url)
+
+  if (url.pathname === '/mcp') {
+    // Convert Deno Request to Node.js-compatible format
+    const { req: nodeReq, res: nodeRes } = toReqRes(req)
+
+    await server.startHTTP({
+      url,
+      httpPath: '/mcp',
+      req: nodeReq,
+      res: nodeRes,
+      options: {
+        serverless: true, // ← Enable stateless mode for serverless
+      },
+    })
+
+    return toFetchResponse(nodeRes)
+  }
+
+  return new Response('Not found', { status: 404 })
+})
+```
+
+:::info[何时使用 serverless: true]
+
+部署到每个请求都在全新无状态执行上下文中运行的环境时，请使用 `serverless: true`：
+
+- Supabase Edge Functions
+- Cloudflare Workers
+- Vercel Edge Functions
+- Netlify Edge Functions
+- AWS Lambda
+- Deno Deploy
+
+以下环境请使用默认的基于会话的模式（不设置 `serverless: true`）：
+
+- 长期运行的 Node.js Server
+- Docker 容器
+- 传统托管环境（VPS、独立 Server）
+
+Serverless 模式会禁用会话管理，并为每个请求创建全新的 Server 实例。对于调用之间不保留内存的无状态环境，这是必需的。
+
+默认情况下，Serverless 模式会将每个请求缓冲为单个 JSON 响应，因此 Tool 发送的 `notifications/progress` 永远无法到达 Client。设置 `serverlessStreaming: true` 后，将改用请求范围内的 SSE 流处理请求，从而在最终结果之前发送进度通知：
+
+```typescript
+await server.startHTTP({
+  url,
+  httpPath: '/mcp',
+  req: nodeReq,
+  res: nodeRes,
+  options: {
+    serverless: true,
+    serverlessStreaming: true, // ← Stream request-scoped notifications/progress
+  },
+})
+```
+
+此模式仍然是无状态的：既不需要也不会持久化 `mcp-session-id`。它只启用当前请求范围内的通知（如进度通知）。以下依赖会话的功能仍不可用。
+
+以下 MCP 功能需要会话状态或持久连接，因此在 Serverless 模式下（包括设置 `serverlessStreaming: true` 时）**无法使用**：
+
+- **Elicitation** - Tool 执行期间的交互式用户输入请求需要通过会话管理将响应路由回正确的 Client
+- **Resource 订阅** - `resources/subscribe` 和 `resources/unsubscribe` 需要持久连接来维护订阅状态
+- **Resource 更新通知** - `resources.notifyUpdated()` 需要有效订阅和持久连接才能通知 Client
+- **Prompt 列表变更通知** - `prompts.notifyListChanged()` 需要持久连接才能向 Client 推送更新
+- **Tool 列表变更通知** - `toolActions.notifyListChanged()` 需要持久连接才能向 Client 推送更新
+- **Server 日志通知** - `sendLoggingMessage()` 需要持久连接才能向 Client 推送日志消息
+
+这些功能在长期运行的 Server 环境（Node.js Server、Docker 容器等）中可正常工作。
+
+:::
+
+下面是 `startHTTP` 方法所需值的详细说明：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'url',
+    type: 'URL',
+    description: '用户请求的 Web 地址。',
+  },
+  {
+    name: 'httpPath',
+    type: 'string',
+    description: "MCP Server 处理 HTTP 请求的具体 URL 路径（例如 '/mcp'）。",
+  },
+  {
+    name: 'req',
+    type: 'http.IncomingMessage',
+    description: '来自 Web Server 的传入请求对象。',
+  },
+  {
+    name: 'res',
+    type: 'http.ServerResponse',
+    description: '来自 Web Server、用于返回数据的响应对象。',
+  },
+  {
+    name: 'options',
+    type: 'StreamableHTTPServerTransportOptions',
+    description: 'HTTP transport 的可选配置。有关详情，请参阅下方的选项表。',
+    optional: true,
+  },
+]}
+/>
+
+`StreamableHTTPServerTransportOptions` 对象用于自定义 HTTP transport 的行为。可用选项如下：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'serverless',
+    type: 'boolean',
+    description:
+      '如果为 `true`，则在没有会话管理的无状态模式下运行。每个请求都由全新的 Server 实例独立处理。这对于调用之间无法持久化会话的 Serverless 环境（Cloudflare Workers、Supabase Edge Functions、Vercel Edge 等）至关重要。默认为 `false`。',
+    optional: true,
+  },
+  {
+    name: 'serverlessStreaming',
+    type: 'boolean',
+    description:
+      '如果为 `true`，Serverless 请求将使用请求范围内的 SSE 流，而不是缓冲的 JSON 响应，让请求内的 `notifications/progress` 能在最终结果之前到达 Client。仅与 `serverless: true` 一起使用时生效。默认为 `false`（缓冲的 JSON 响应），以保持向后兼容的行为。它仅启用进度等请求范围内的通知；Elicitation、订阅和请求外通知仍需要会话状态。',
+    optional: true,
+  },
+  {
+    name: 'sessionIdGenerator',
+    type: '(() => string) | undefined',
+    description:
+      '生成唯一会话 ID 的函数。该 ID 应是密码学安全且全局唯一的字符串。返回 `undefined` 可禁用会话管理。',
+  },
+  {
+    name: 'onsessioninitialized',
+    type: '(sessionId: string) => void',
+    description:
+      '初始化新会话时调用的回调。可用于跟踪活跃的 MCP 会话。',
+    optional: true,
+  },
+  {
+    name: 'enableJsonResponse',
+    type: 'boolean',
+    description:
+      '如果为 `true`，Server 将返回纯 JSON 响应，而不使用 Server-Sent Events (SSE) 进行流式传输。默认为 `false`。',
+    optional: true,
+  },
+  {
+    name: 'eventStore',
+    type: 'EventStore',
+    description:
+      '用于恢复消息的事件存储。提供此项后，Client 可以重新连接并恢复消息流。',
+    optional: true,
+  },
+]}
+/>
+
+### `close()`
+
+此方法关闭 Server 并释放所有资源。
+
+```typescript prettier:false
+async close(): Promise<void>
+```
+
+### `getServerInfo()`
+
+此方法返回 Server 的基本信息。
+
+```typescript prettier:false
+getServerInfo(): ServerInfo
+```
+
+### `getServerDetail()`
+
+此方法返回 Server 信息的详细内容。
+
+```typescript prettier:false
+getServerDetail(): ServerDetail
+```
+
+### `getToolListInfo()`
+
+此方法返回创建 Server 时设置的 Tool。这是一个只读列表，适用于调试。
+
+```typescript prettier:false
+getToolListInfo(): ToolListInfo
+```
+
+### `getToolInfo()`
+
+此方法返回特定 Tool 的详细信息。
+
+```typescript prettier:false
+getToolInfo(toolName: string): ToolInfo
+```
+
+### `executeTool()`
+
+此方法执行特定 Tool 并返回结果。
+
+```typescript prettier:false
+executeTool(toolName: string, input: any): Promise<any>
+```
+
+### `getStdioTransport()`
+
+如果使用 `startStdio()` 启动了 Server，可以通过此方法获取管理 stdio 通信的对象。此方法主要用于内部检查或测试。
+
+```typescript prettier:false
+getStdioTransport(): StdioServerTransport | undefined
+```
+
+### `getSseTransport()`
+
+如果使用 `startSSE()` 启动了 Server，可以通过此方法获取管理 SSE 通信的对象。与 `getStdioTransport` 类似，此方法主要用于内部检查或测试。
+
+```typescript prettier:false
+getSseTransport(): SSEServerTransport | undefined
+```
+
+### `getSseHonoTransport()`
+
+如果使用 `startHonoSSE()` 启动了 Server，可以通过此方法获取管理 SSE 通信的对象。与 `getSseTransport` 类似，此方法主要用于内部检查或测试。
+
+```typescript prettier:false
+getSseHonoTransport(): SSETransport | undefined
+```
+
+### `getStreamableHTTPTransport()`
+
+如果使用 `startHTTP()` 启动了 Server，可以通过此方法获取管理 HTTP 通信的对象。与 `getSseTransport` 类似，此方法主要用于内部检查或测试。
+
+```typescript prettier:false
+getStreamableHTTPTransport(): StreamableHTTPServerTransport | undefined
+```
+
+### `tools()`
+
+执行此 MCP Server 提供的特定 Tool。
+
+```typescript prettier:false
+async executeTool(
+  toolId: string,
+  args: any,
+  executionContext?: { messages?: any[]; toolCallId?: string },
+): Promise<any>
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'toolId',
+    type: 'string',
+    description: '要执行的 Tool 的 ID/名称。',
+  },
+  {
+    name: 'args',
+    type: 'any',
+    description: "要传给 Tool execute 函数的参数。",
+  },
+  {
+    name: 'executionContext',
+    type: 'object',
+    isOptional: true,
+    description: 'Tool 执行的可选上下文，例如消息或 toolCallId。',
+  },
+]}
+/>
+
+## Resource 处理
+
+### 什么是 MCP Resource？
+
+Resource 是 Model Context Protocol (MCP) 的核心原语，允许 Server 公开可供 Client 读取并用作 LLM 交互上下文的数据和内容。它可以表示 MCP Server 希望提供的任何类型的数据，例如：
+
+- 文件内容
+- 数据库记录
+- API 响应
+- 实时系统数据
+- 屏幕截图和图像
+- 日志文件
+
+Resource 通过唯一 URI（例如 `file:///home/user/documents/report.pdf`、`postgres://database/customers/schema`）标识，可以包含文本（UTF-8 编码）或二进制数据（base64 编码）。
+
+Client 可以通过以下方式发现 Resource：
+
+1. **直接 Resource**：Server 通过 `resources/list` 端点公开具体 Resource 的列表。
+1. **Resource 模板**：对于运行时定义的 Resource，Server 可以公开 URI 模板 (RFC 6570)，供 Client 用来构造 Resource URI。
+
+要读取 Resource，Client 需要使用该 URI 发出 `resources/read` 请求。如果 Client 已订阅某个 Resource，Server 还可以通知 Client Resource 列表发生变化 (`notifications/resources/list_changed`)，或特定 Resource 内容已更新 (`notifications/resources/updated`)。
+
+有关更多详细信息，请参阅 [MCP 官方 Resource 文档](https://modelcontextprotocol.io/docs/concepts/resources)。
+
+### `MCPServerResources` 类型
+
+`resources` 选项接受 `MCPServerResources` 类型的对象。此类型定义 Server 用于处理 Resource 请求的回调：
+
+```typescript
+export type MCPServerResources = {
+  // Callback to list available resources
+  listResources: () => Promise<Resource[]>
+
+  // Callback to get the content of a specific resource
+  getResourceContent: ({
+    uri,
+  }: {
+    uri: string
+  }) => Promise<MCPServerResourceContent | MCPServerResourceContent[]>
+
+  // Optional callback to list available resource templates
+  resourceTemplates?: () => Promise<ResourceTemplate[]>
+}
+
+export type MCPServerResourceContent = { text?: string } | { blob?: string }
+```
+
+示例：
+
+```typescript
+import { MCPServer } from '@mastra/mcp'
+import type { MCPServerResourceContent, Resource, ResourceTemplate } from '@mastra/mcp'
+
+// Resources/resource templates will generally be dynamically fetched.
+const myResources: Resource[] = [
+  { uri: 'file://data/123.txt', name: 'Data File', mimeType: 'text/plain' },
+]
+
+const myResourceContents: Record<string, MCPServerResourceContent> = {
+  'file://data.txt/123': { text: 'This is the content of the data file.' },
+}
+
+const myResourceTemplates: ResourceTemplate[] = [
+  {
+    uriTemplate: 'file://data/{id}',
+    name: 'Data File',
+    description: 'A file containing data.',
+    mimeType: 'text/plain',
+  },
+]
+
+const myResourceHandlers: MCPServerResources = {
+  listResources: async () => myResources,
+  getResourceContent: async ({ uri }) => {
+    if (myResourceContents[uri]) {
+      return myResourceContents[uri]
+    }
+    throw new Error(`Resource content not found for ${uri}`)
+  },
+  resourceTemplates: async () => myResourceTemplates,
+}
+
+const serverWithResources = new MCPServer({
+  id: 'resourceful-server',
+  name: 'Resourceful Server',
+  version: '1.0.0',
+  tools: {/* ... your tools ... */},
+  resources: myResourceHandlers,
+})
+```
+
+### 向 Client 通知 Resource 变更
+
+如果可用 Resource 或其内容发生变化，Server 可以通知已连接且订阅了特定 Resource 的 Client。
+
+#### `server.resources.notifyUpdated({ uri: string })`
+
+当特定 Resource（通过其 `uri` 标识）的内容更新时，请调用此方法。如果有 Client 订阅了该 URI，它们将收到 `notifications/resources/updated` 消息。
+
+```typescript prettier:false
+async server.resources.notifyUpdated({ uri: string }): Promise<void>
+```
+
+示例：
+
+```typescript
+// After updating the content of 'file://data.txt'
+await serverWithResources.resources.notifyUpdated({ uri: 'file://data.txt' })
+```
+
+#### `server.resources.notifyListChanged()`
+
+当可用 Resource 列表发生变化（例如添加或删除了 Resource）时，请调用此方法。它会向 Client 发送 `notifications/resources/list_changed` 消息，提示其重新获取 Resource 列表。
+
+```typescript prettier:false
+async server.resources.notifyListChanged(): Promise<void>
+```
+
+示例：
+
+```typescript
+// After adding a new resource to the list managed by 'myResourceHandlers.listResources'
+await serverWithResources.resources.notifyListChanged()
+```
+
+## Prompt 处理
+
+### 什么是 MCP Prompt？
+
+Prompt 是 MCP Server 向 Client 公开的可复用模板或 Workflow。它们可以接受参数并包含 Resource 上下文，还支持版本控制，并能规范 LLM 交互。
+
+Prompt 由唯一名称（及可选版本）标识，可以在运行时定义，也可以是静态的。
+
+### `MCPServerPrompts` 类型
+
+`prompts` 选项接受 `MCPServerPrompts` 类型的对象。此类型定义 Server 用于处理 Prompt 请求的回调：
+
+```typescript
+export type MCPServerPrompts = {
+  // Callback to list available prompts
+  listPrompts: () => Promise<Prompt[]>
+
+  // Callback to get the messages/content for a specific prompt
+  getPromptMessages?: ({
+    name,
+    version,
+    args,
+  }: {
+    name: string
+    version?: string
+    args?: any
+  }) => Promise<{ prompt: Prompt; messages: PromptMessage[] }>
+}
+```
+
+示例：
+
+```typescript
+import { MCPServer } from '@mastra/mcp'
+import type { Prompt, PromptMessage, MCPServerPrompts } from '@mastra/mcp'
+
+const prompts: Prompt[] = [
+  {
+    name: 'analyze-code',
+    description: 'Analyze code for improvements',
+    version: 'v1',
+  },
+  {
+    name: 'analyze-code',
+    description: 'Analyze code for improvements (new logic)',
+    version: 'v2',
+  },
+]
+
+const myPromptHandlers: MCPServerPrompts = {
+  listPrompts: async () => prompts,
+  getPromptMessages: async ({ name, version, args }) => {
+    if (name === 'analyze-code') {
+      if (version === 'v2') {
+        const prompt = prompts.find(p => p.name === name && p.version === 'v2')
+        if (!prompt) throw new Error('Prompt version not found')
+        return {
+          prompt,
+          messages: [
+            {
+              role: 'user',
+              content: {
+                type: 'text',
+                text: `Analyze this code with the new logic: ${args.code}`,
+              },
+            },
+          ],
+        }
+      }
+      // Default or v1
+      const prompt = prompts.find(p => p.name === name && p.version === 'v1')
+      if (!prompt) throw new Error('Prompt version not found')
+      return {
+        prompt,
+        messages: [
+          {
+            role: 'user',
+            content: { type: 'text', text: `Analyze this code: ${args.code}` },
+          },
+        ],
+      }
+    }
+    throw new Error('Prompt not found')
+  },
+}
+
+const serverWithPrompts = new MCPServer({
+  id: 'promptful-server',
+  name: 'Promptful Server',
+  version: '1.0.0',
+  tools: {/* ... */},
+  prompts: myPromptHandlers,
+})
+```
+
+### 向 Client 通知 Prompt 变更
+
+如果可用 Prompt 发生变化，Server 可以通知已连接的 Client：
+
+#### `server.prompts.notifyListChanged()`
+
+当可用 Prompt 列表发生变化（例如添加或删除了 Prompt）时，请调用此方法。它会向 Client 发送 `notifications/prompts/list_changed` 消息，提示其重新获取 Prompt 列表。
+
+```typescript
+await serverWithPrompts.prompts.notifyListChanged()
+```
+
+### Prompt 处理的最佳实践
+
+- 使用清晰且具有描述性的 Prompt 名称和描述。
+- 在 `getPromptMessages` 中验证所有必需参数。
+- 如果预计会进行破坏性变更，请包含 `version` 字段。
+- 使用 `version` 参数选择正确的 Prompt 逻辑。
+- Prompt 列表发生变化时通知 Client。
+- 使用信息明确的消息处理错误。
+- 记录参数要求和可用版本。
+
+## 动态 Tool 管理
+
+Tool 通常在构造 `MCPServer` 时提供，但也可以在 Server 运行期间添加或删除。Server 通过 `toolActions` 属性公开这些操作。Tool 列表发生变化时，已连接的 Client 会收到 `notifications/tools/list_changed` 消息，提示其重新获取 Tool 列表。
+
+之所以将此属性命名为 `toolActions`，是因为 `tools()` 是返回已注册 Tool registry 的方法。
+
+### `toolActions.add(tools)`
+
+在运行中的 Server 上注册新 Tool，并通知已连接的 Client。Tool 以其 record key 为键，与传给构造函数的 Tool 相同。使用现有键添加 Tool 会替换原 Tool。
+
+```typescript prettier:false
+async server.toolActions.add(tools: ToolsInput): Promise<void>
+```
+
+示例：
+
+```typescript
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+const searchTool = createTool({
+  id: 'search',
+  description: 'Searches the knowledge base.',
+  inputSchema: z.object({ query: z.string() }),
+  execute: async ({ query }) => ({ results: [] }),
+})
+
+await server.toolActions.add({ searchTool })
+```
+
+### `toolActions.remove(toolIds)`
+
+按 Tool ID 从运行中的 Server 删除 Tool，并通知已连接的 Client。未知的 Tool ID 会被忽略。仅当至少删除一个 Tool 时才会发送通知。
+
+```typescript prettier:false
+async server.toolActions.remove(toolIds: string[]): Promise<void>
+```
+
+示例：
+
+```typescript
+await server.toolActions.remove(['searchTool'])
+```
+
+### `toolActions.notifyListChanged()`
+
+向已连接的 Client 发送 `notifications/tools/list_changed` 消息，但不修改 Tool registry。当 Tool 可用性因其他方式发生变化（例如授权变更）时，请调用此方法。
+
+```typescript prettier:false
+async server.toolActions.notifyListChanged(): Promise<void>
+```
+
+### Mastra registry 同步
+
+Server 注册到 Mastra 实例后，`toolActions.add()` 和 `toolActions.remove()` 也会更新该 Mastra 实例的 Tool registry，与启动时进行的自动 Tool 注册保持一致。新增的 Tool 可通过 `mastra.listTools()` 获取（如果存在 Tool 自身的 `id`，则以它为键），删除的 Tool 则会从 registry 中移除。
+
+## 日志记录
+
+MCP Server 可以使用 `notifications/message` 向 Client 发送结构化日志消息。Client 通过发送 `logging/setLevel` 请求控制详细程度。Server 会丢弃低于所请求最低级别的消息（遵循 RFC 5424 严重性排序）。级别按会话跟踪，因此不同 Client 可以请求不同的详细程度。
+
+### `sendLoggingMessage()`
+
+向所有已连接的 Client 发送日志通知，并遵循各 Client 的最低日志级别。
+
+```typescript prettier:false
+async server.sendLoggingMessage(params: {
+  level: LoggingLevel;
+  data: unknown;
+  logger?: string;
+}): Promise<void>
+```
+
+示例：
+
+```typescript
+await server.sendLoggingMessage({
+  level: 'info',
+  data: { message: 'Sync completed', itemsProcessed: 42 },
+})
+```
+
+### `context.mcp.log()`
+
+在 Tool 的 `execute` 函数中，使用 `context.mcp.log()` 向调用该 Tool 的 Client 发送日志消息。
+
+```typescript prettier:false
+async context.mcp.log(
+  level: LoggingLevel,
+  message: string,
+  data?: Record<string, unknown>
+): Promise<void>
+```
+
+示例：
+
+```typescript
+execute: async ({ location }, context) => {
+  await context.mcp.log('debug', 'Fetching weather', { location })
+  const weather = await fetchWeather(location)
+  await context.mcp.log('info', 'Weather fetched')
+  return weather
+}
+```
+
+## 进度通知
+
+长时间运行的 Tool 可以通过 `notifications/progress` 向调用方 Client 报告进度。只有调用方在请求中包含 `progressToken` 以请求进度跟踪时，才会发送进度（设置 `enableProgressTracking` 后，Mastra `MCPClient` 会这样做）。未发送 token 时，`context.mcp.progress()` 不执行任何操作。
+
+### `context.mcp.progress()`
+
+```typescript prettier:false
+async context.mcp.progress(params: {
+  progress: number;
+  total?: number;
+  message?: string;
+}): Promise<void>
+```
+
+示例：
+
+```typescript
+execute: async ({ items }, context) => {
+  for (const [index, item] of items.entries()) {
+    await processItem(item)
+    await context.mcp.progress({
+      progress: index + 1,
+      total: items.length,
+      message: `Processed ${item.name}`,
+    })
+  }
+  return { done: true }
+}
+```
+
+## 通知传递
+
+通知方法（`resources.notifyListChanged()`、`prompts.notifyListChanged()`、`toolActions.notifyListChanged()` 和 `sendLoggingMessage()`）会通过所有 transport 向每个已连接的 Client 广播：包括 stdio/SSE 连接和每个 Streamable HTTP 会话。`resources.notifyUpdated()` 是例外：它只通知通过 `resources/subscribe` 订阅了相应 Resource URI 的 Client。对于 Streamable HTTP Client，订阅按会话跟踪；旧版 SSE Client 共享主 Server 实例，因此也共享同一组订阅。使用无状态 Serverless 模式的 Client 无法接收通知，因为每个请求都使用临时 Server 实例。
+
+## 示例
+
+有关设置和部署 MCPServer 的实际示例，请参阅[发布 MCP Server 指南](/guides/guide/publishing-mcp-server)。
+
+本页开头的示例还演示了如何使用 Tool 和 Agent 实例化 `MCPServer`。
+
+## Elicitation
+
+### 什么是 Elicitation？
+
+Elicitation 是 Model Context Protocol (MCP) 中的一项功能，允许 Server 向用户请求结构化信息。它支持 Server 在运行时收集更多数据的交互式 Workflow。
+
+`MCPServer` 类自动包含 Elicitation 功能。Tool 会在其 `execute` 函数中收到 `context.mcp` 对象，其中包含用于请求用户输入的 `elicitation.sendRequest()` 方法。
+
+### Tool 执行签名
+
+在 MCP Server 上下文中执行 Tool 时，它们通过 `context.mcp` 对象接收 MCP 特有的功能：
+
+```typescript
+execute: async (inputData, context) => {
+  // input contains the tool's inputData parameters
+  // context.mcp contains server capabilities like elicitation and authentication info
+
+  // Access authentication information (when available)
+  if (context.mcp?.extra?.authInfo) {
+    console.log('Authenticated request from:', context.mcp.extra.authInfo.clientId)
+  }
+
+  // Use elicitation capabilities
+  const result = await context.mcp.elicitation.sendRequest({
+    message: 'Please provide information',
+    requestedSchema: {/* schema */},
+  })
+
+  return result
+}
+```
+
+### Elicitation 的工作原理
+
+常见用例是在 Tool 执行期间收集输入。当 Tool 需要用户输入时，可以使用通过 context 参数提供的 Elicitation 功能：
+
+1. Tool 使用消息和 schema 调用 `context.mcp.elicitation.sendRequest()`
+1. 请求发送到已连接的 MCP Client
+1. Client 向用户展示请求（通过 UI、命令行等）
+1. 用户提供输入、拒绝或取消请求
+1. Client 将响应发回 Server
+1. Tool 收到响应并继续执行
+
+### 在 Tool 中使用 Elicitation
+
+以下示例展示了使用 Elicitation 收集用户联系信息的 Tool：
+
+```typescript
+import { MCPServer } from '@mastra/mcp'
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+const server = new MCPServer({
+  id: 'interactive-server',
+  name: 'Interactive Server',
+  version: '1.0.0',
+  tools: {
+    collectContactInfo: createTool({
+      id: 'collectContactInfo',
+      description: 'Collects user contact information through elicitation',
+      inputSchema: z.object({
+        reason: z.string().optional().describe('Reason for collecting contact info'),
+      }),
+      execute: async (inputData, context) => {
+        const { reason } = inputData
+
+        // Log session info if available
+        console.log('Request from session:', context.mcp?.extra?.sessionId)
+
+        try {
+          // Request user input via elicitation
+          const result = await context.mcp.elicitation.sendRequest({
+            message: reason
+              ? `Please provide your contact information. ${reason}`
+              : 'Please provide your contact information',
+            requestedSchema: {
+              type: 'object',
+              properties: {
+                name: {
+                  type: 'string',
+                  title: 'Full Name',
+                  description: 'Your full name',
+                },
+                email: {
+                  type: 'string',
+                  title: 'Email Address',
+                  description: 'Your email address',
+                  format: 'email',
+                },
+                phone: {
+                  type: 'string',
+                  title: 'Phone Number',
+                  description: 'Your phone number (optional)',
+                },
+              },
+              required: ['name', 'email'],
+            },
+          })
+
+          // Handle the user's response
+          if (result.action === 'accept') {
+            return `Contact information collected: ${JSON.stringify(result.content, null, 2)}`
+          } else if (result.action === 'decline') {
+            return 'Contact information collection was declined by the user.'
+          } else {
+            return 'Contact information collection was cancelled by the user.'
+          }
+        } catch (error) {
+          return `Error collecting contact information: ${error}`
+        }
+      },
+    }),
+  },
+})
+```
+
+### Elicitation 请求 schema
+
+`requestedSchema` 必须是仅包含基本类型属性的扁平对象。支持的类型包括：
+
+- **字符串**：`{ type: 'string', title: 'Display Name', description: 'Help text' }`
+- **数字**：`{ type: 'number', minimum: 0, maximum: 100 }`
+- **布尔值**：`{ type: 'boolean', default: false }`
+- **枚举**：`{ type: 'string', enum: ['option1', 'option2'] }`
+
+示例 schema：
+
+```typescript prettier:false
+{
+  type: 'object',
+  properties: {
+    name: {
+      type: 'string',
+      title: 'Full Name',
+      description: 'Your complete name',
+    },
+    age: {
+      type: 'number',
+      title: 'Age',
+      minimum: 18,
+      maximum: 120,
+    },
+    newsletter: {
+      type: 'boolean',
+      title: 'Subscribe to Newsletter',
+      default: false,
+    },
+  },
+  required: ['name'],
+}
+```
+
+### 响应操作
+
+用户可以通过三种方式响应 Elicitation 请求：
+
+1. **接受** (`action: 'accept'`)：用户提供了数据并确认提交
+   - 包含带有已提交数据的 `content` 字段
+1. **拒绝** (`action: 'decline'`)：用户明确拒绝提供信息
+   - 不包含 content 字段
+1. **取消** (`action: 'cancel'`)：用户未作决定便关闭请求
+   - 不包含 content 字段
+
+Tool 应妥善处理所有三种响应类型。
+
+### 安全注意事项
+
+- **切勿请求敏感信息**，例如密码、社会保障号或信用卡号
+- 根据提供的 schema 验证所有用户输入
+- 妥善处理拒绝和取消操作
+- 明确说明收集数据的原因
+- 尊重用户隐私和偏好
+
+### Tool 执行 API
+
+Tool 执行时，可通过 `options` 参数使用 Elicitation 功能：
+
+```typescript prettier:false
+// Within a tool's execute function
+execute: async (inputData, context) => {
+  // Use elicitation for user input
+  const result = await context.mcp.elicitation.sendRequest({
+    message: string,           // Message to display to user
+    requestedSchema: object    // JSON schema defining expected response structure
+  }): Promise<ElicitResult>
+
+  // Access authentication info if needed
+  if (context.mcp?.extra?.authInfo) {
+    // Use context.mcp.extra.authInfo.token, etc.
+  }
+}
+```
+
+使用基于 HTTP 的 transport（SSE 或 HTTP）时，Elicitation **可感知会话**。多个 Client 连接到同一 Server 时，Elicitation 请求会路由到发起 Tool 执行的 Client 会话。
+
+`ElicitResult` 类型：
+
+```typescript
+type ElicitResult = {
+  action: 'accept' | 'decline' | 'cancel'
+  content?: any // Only present when action is 'accept'
+}
+```
+
+## OAuth 保护
+
+要按照 [MCP 身份验证规范](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)使用 OAuth 身份验证保护 MCP Server，请使用 `createOAuthMiddleware` 函数：
+
+```typescript
+import http from 'node:http'
+import { MCPServer, createOAuthMiddleware, createStaticTokenValidator } from '@mastra/mcp'
+
+const mcpServer = new MCPServer({
+  id: 'protected-server',
+  name: 'Protected MCP Server',
+  version: '1.0.0',
+  tools: {/* your tools */},
+})
+
+// Create OAuth middleware
+const oauthMiddleware = createOAuthMiddleware({
+  oauth: {
+    resource: 'https://mcp.example.com/mcp',
+    authorizationServers: ['https://auth.example.com'],
+    scopesSupported: ['mcp:read', 'mcp:write'],
+    resourceName: 'My Protected MCP Server',
+    validateToken: createStaticTokenValidator(['allowed-token-1']),
+  },
+  mcpPath: '/mcp',
+})
+
+// Create HTTP server with OAuth protection
+const httpServer = http.createServer(async (req, res) => {
+  const url = new URL(req.url || '', 'https://mcp.example.com')
+
+  // Apply OAuth middleware first
+  const result = await oauthMiddleware(req, res, url)
+  if (!result.proceed) return // Middleware handled response (401, metadata, etc.)
+
+  // Token is valid, proceed to MCP handler
+  await mcpServer.startHTTP({ url, httpPath: '/mcp', req, res })
+})
+
+httpServer.listen(3000)
+```
+
+该中间件会自动：
+
+- 在 `/.well-known/oauth-protected-resource` 提供**受保护 Resource 元数据** (RFC 9728)
+- 需要身份验证时，返回带有正确 `WWW-Authenticate` 标头的 `401 Unauthorized`
+- 使用提供的验证器验证 bearer token
+
+### Token 验证
+
+在生产环境中，请使用适当的 token 验证：
+
+```typescript
+import { createOAuthMiddleware, createIntrospectionValidator } from '@mastra/mcp'
+
+// Option 1: Token introspection (RFC 7662)
+const middleware = createOAuthMiddleware({
+  oauth: {
+    resource: 'https://mcp.example.com/mcp',
+    authorizationServers: ['https://auth.example.com'],
+    validateToken: createIntrospectionValidator('https://auth.example.com/oauth/introspect', {
+      clientId: 'mcp-server',
+      clientSecret: 'secret',
+    }),
+  },
+})
+
+// Option 2: Custom validation (JWT, database lookup, etc.)
+const customMiddleware = createOAuthMiddleware({
+  oauth: {
+    resource: 'https://mcp.example.com/mcp',
+    authorizationServers: ['https://auth.example.com'],
+    validateToken: async (token, resource) => {
+      const decoded = await verifyJWT(token)
+      if (!decoded) {
+        return { valid: false, error: 'invalid_token' }
+      }
+      return {
+        valid: true,
+        scopes: decoded.scope?.split(' ') || [],
+        subject: decoded.sub,
+      }
+    },
+  },
+})
+```
+
+### OAuth 中间件选项
+
+<PropertiesTable
+  content={[
+  {
+    name: 'oauth.resource',
+    type: 'string',
+    description: 'MCP Server 的规范 URL。此 URL 会在受保护 Resource 元数据中返回。',
+  },
+  {
+    name: 'oauth.authorizationServers',
+    type: 'string[]',
+    description: '可以为此 Resource 签发 token 的授权 Server URL。',
+  },
+  {
+    name: 'oauth.scopesSupported',
+    type: 'string[]',
+    isOptional: true,
+    defaultValue: "['mcp:read', 'mcp:write']",
+    description: '此 MCP Server 支持的 scope。',
+  },
+  {
+    name: 'oauth.resourceName',
+    type: 'string',
+    isOptional: true,
+    description: '此 Resource Server 的易读名称。',
+  },
+  {
+    name: 'oauth.validateToken',
+    type: '(token: string, resource: string) => Promise<TokenValidationResult>',
+    isOptional: true,
+    description:
+      '用于验证 access token 的函数。如果未提供，则会接受 token 而不进行验证（不建议在生产环境中这样做）。',
+  },
+  {
+    name: 'mcpPath',
+    type: 'string',
+    isOptional: true,
+    defaultValue: "'/mcp'",
+    description: '提供 MCP 端点的路径。只有对此路径的请求需要身份验证。',
+  },
+]}
+/>
+
+## 身份验证上下文
+
+使用基于 HTTP 的 transport 时，Tool 可以通过 `context.mcp.extra` 访问请求元数据。这样就能将身份验证信息、用户上下文或任何自定义数据从 HTTP 中间件传给 MCP Tool。
+
+### 工作原理
+
+在 HTTP 中间件的 `req.auth` 上设置的任何内容，都会在 Tool 中以 `context.mcp.extra.authInfo` 的形式提供：
+
+```
+req.auth = { ... }  →  context?.mcp?.extra?.authInfo.extra = { ... }
+```
+
+### 为 FGA 映射身份验证数据
+
+当 `MCPServer` 注册到配置了细粒度授权 (FGA) Provider 的 Mastra 实例后，Mastra 会在列出或调用 Tool 前检查 `requestContext.get('user')`。HTTP MCP transport 以 `extra.authInfo` 传递已验证身份的数据，因此请使用 `mapAuthInfoToUser` 设置 FGA Provider 所需的用户数据结构。
+
+```typescript
+const server = new MCPServer({
+  id: 'my-server',
+  name: 'My Server',
+  version: '1.0.0',
+  tools: { getUserData },
+  mapAuthInfoToUser: ({ authInfo }) => {
+    const user = authInfo as {
+      extra?: {
+        userId?: string
+        organizationMembershipId?: string
+      }
+    }
+
+    if (!user.extra?.userId) {
+      return null
+    }
+
+    return {
+      id: user.extra.userId,
+      organizationMembershipId: user.extra.organizationMembershipId,
+    }
+  },
+})
+```
+
+### 单独限定 MCP Tool 的 FGA 范围
+
+当 MCP Client 所需的授权范围不同于内部 Agent 或 Workflow Tool 执行的范围时，请使用 `fga.resourceMapping` 和 `fga.permissionMapping`。此覆盖仅适用于该 MCP Server 的 `tools/list` 和 `tools/call` 检查。
+
+```typescript
+import { MastraFGAPermissions } from '@mastra/core/auth/ee'
+
+const server = new MCPServer({
+  id: 'my-server',
+  name: 'My Server',
+  version: '1.0.0',
+  tools: { getUserData },
+  mapAuthInfoToUser: ({ authInfo }) => {
+    const user = authInfo as {
+      extra?: {
+        userId?: string
+        organizationMembershipId?: string
+      }
+    }
+
+    if (!user.extra?.userId) {
+      return null
+    }
+
+    return {
+      id: user.extra.userId,
+      organizationMembershipId: user.extra.organizationMembershipId,
+    }
+  },
+  fga: {
+    resourceMapping: {
+      tool: {
+        fgaResourceType: 'user',
+        deriveId: ({ user }) => (user as { id: string }).id,
+      },
+    },
+    permissionMapping: {
+      [MastraFGAPermissions.TOOLS_EXECUTE]: 'read',
+    },
+  },
+})
+```
+
+### 设置身份验证中间件
+
+要将数据传给 Tool，请先在 HTTP Server 中间件中的 Node.js 请求对象上填充 `req.auth`，再调用 `server.startHTTP()`。
+
+```typescript
+import express from 'express'
+
+type MCPAuthenticatedRequest = express.Request & {
+  auth?: {
+    token: string
+    clientId: string
+    scopes: string[]
+    expiresAt?: number
+    extra?: Record<string, unknown>
+  }
+}
+
+const app = express()
+
+// Auth middleware - set req.auth before the MCP handler
+app.use('/mcp', async (req, res, next) => {
+  const authorization = req.headers.authorization
+
+  if (!authorization?.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Missing bearer token' })
+    return
+  }
+
+  const token = authorization.slice('Bearer '.length)
+
+  try {
+    const user = await verifyToken(token)
+
+    // This entire object becomes context.mcp.extra.authInfo
+    const authenticatedRequest = req as MCPAuthenticatedRequest
+    authenticatedRequest.auth = {
+      token,
+      clientId: user.clientId,
+      scopes: user.scopes,
+      expiresAt: user.expiresAt,
+      extra: {
+        userId: user.userId,
+        email: user.email,
+      },
+    }
+    next()
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' })
+  }
+})
+
+app.all('/mcp', async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`)
+  await server.startHTTP({ url, httpPath: '/mcp', req, res })
+})
+```
+
+### 在 Tool 中访问身份验证数据
+
+在 Tool 的 execute 函数中，可以通过 `context.mcp.extra.authInfo` 访问 `req.auth` 对象：
+
+```typescript
+execute: async (inputData, context) => {
+  // Access the auth data you set in middleware
+  const authInfo = context?.mcp?.extra?.authInfo
+
+  if (!authInfo?.extra?.userId) {
+    return { error: 'Authentication required' }
+  }
+
+  // Use the auth data
+  console.log('User ID:', authInfo.extra.userId)
+  console.log('Email:', authInfo.extra.email)
+
+  const response = await fetch('/api/data', {
+    headers: { Authorization: `Bearer ${authInfo.token}` },
+    signal: context?.mcp?.extra?.signal,
+  })
+
+  return response.json()
+}
+```
+
+### 将 `RequestContext` 传给 Agent
+
+```typescript
+execute: async (inputData, context) => {
+  // Access the auth data you set in middleware
+  const authInfo = context?.mcp?.extra?.authInfo
+
+  const requestContext = context.requestContext || new RequestContext().set('someKey', authInfo)
+
+  if (!authInfo?.extra?.userId) {
+    return { error: 'Authentication required' }
+  }
+
+  // Use the auth data
+  console.log('User ID:', authInfo.extra.userId)
+  console.log('Email:', authInfo.extra.email)
+
+  const agent = context?.mastra?.getAgentById('some-agent-id')
+
+  if (!agent) {
+    return { error: "Agent 'some-agent-id' not found" }
+  }
+
+  const response = await agent.generate(prompt, { requestContext })
+
+  return response.text
+}
+```
+
+### `extra` 对象
+
+完整的 `context.mcp.extra` 对象包含：
+
+| 属性 | 描述 |
+| - | - |
+| `authInfo` | 在中间件的 `req.auth` 上设置的任何内容 |
+| `sessionId` | MCP 连接的会话标识符 |
+| `signal` | 用于取消请求的 AbortSignal |
+| `sendNotification` | 用于发送通知的 MCP 协议函数 |
+| `sendRequest` | 用于发送请求的 MCP 协议函数 |
+
+### 完整示例
+
+安装 [`jose`](https://github.com/panva/jose)，根据身份 Provider 的 JSON Web Key Set (JWKS) 验证 JSON Web Token (JWT)：
+
+```shell npm2yarn
+npm install jose
+```
+
+以下示例先验证 token 的签名、签发者、受众、算法、过期时间和必需 claim，再将其中的用户数据传给 Tool：
+
+```typescript
+import express from 'express'
+import { createRemoteJWKSet, jwtVerify } from 'jose'
+import { MCPServer } from '@mastra/mcp'
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+type MCPAuthenticatedRequest = express.Request & {
+  auth?: {
+    token: string
+    clientId: string
+    scopes: string[]
+    expiresAt?: number
+    extra?: Record<string, unknown>
+  }
+}
+
+const issuer = process.env.JWT_ISSUER
+const audience = process.env.JWT_AUDIENCE
+const jwksUri = process.env.JWT_JWKS_URI
+
+if (!issuer || !audience || !jwksUri) {
+  throw new Error('JWT_ISSUER, JWT_AUDIENCE, and JWT_JWKS_URI are required')
+}
+
+const jwks = createRemoteJWKSet(new URL(jwksUri))
+
+const verifyToken = async (token: string) => {
+  const { payload } = await jwtVerify(token, jwks, {
+    issuer,
+    audience,
+    algorithms: ['RS256'],
+    requiredClaims: ['exp'],
+  })
+
+  const clientId =
+    typeof payload.client_id === 'string'
+      ? payload.client_id
+      : typeof payload.azp === 'string'
+        ? payload.azp
+        : undefined
+
+  if (!payload.sub || typeof payload.email !== 'string' || !clientId || !payload.exp) {
+    throw new Error('Token must contain sub, email, exp, and client_id or azp claims')
+  }
+
+  return {
+    userId: payload.sub,
+    clientId,
+    email: payload.email,
+    expiresAt: payload.exp,
+    scopes: typeof payload.scope === 'string' ? payload.scope.split(' ') : [],
+  }
+}
+
+// 1. Define your tool that uses auth context
+const getUserData = createTool({
+  id: 'get-user-data',
+  description: 'Fetches data for the authenticated user',
+  inputSchema: z.object({}),
+  execute: async (inputData, context) => {
+    const authInfo = context?.mcp?.extra?.authInfo
+
+    if (!authInfo?.extra?.userId) {
+      return { error: 'Authentication required' }
+    }
+
+    // Access the data you set in middleware
+    return {
+      userId: authInfo.extra.userId,
+      email: authInfo.extra.email,
+    }
+  },
+})
+
+// 2. Create the MCP server with your tools
+const server = new MCPServer({
+  id: 'my-server',
+  name: 'My Server',
+  version: '1.0.0',
+  tools: { getUserData },
+})
+
+// 3. Set up Express with auth middleware
+const app = express()
+
+app.use('/mcp', async (req, res, next) => {
+  const authorization = req.headers.authorization
+
+  if (!authorization?.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Missing bearer token' })
+    return
+  }
+
+  const token = authorization.slice('Bearer '.length)
+
+  try {
+    const user = await verifyToken(token)
+
+    // This entire object becomes context.mcp.extra.authInfo
+    const authenticatedRequest = req as MCPAuthenticatedRequest
+    authenticatedRequest.auth = {
+      token,
+      clientId: user.clientId,
+      scopes: user.scopes,
+      expiresAt: user.expiresAt,
+      extra: {
+        userId: user.userId,
+        email: user.email,
+      },
+    }
+    next()
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' })
+  }
+})
+
+app.all('/mcp', async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`)
+  await server.startHTTP({ url, httpPath: '/mcp', req, res })
+})
+
+app.listen(3000)
+```
+
+## MCP Apps (`appResources`)
+
+`appResources` 选项允许通过 [MCP Apps 扩展](https://github.com/modelcontextprotocol/ext-apps)，从 MCP Server 提供交互式 HTML UI。每个条目都将一个 `ui://` URI 映射到一个 HTML 应用，该应用会在 Mastra Studio 的沙盒 iframe 中呈现。
+
+### `AppResources` 类型
+
+<PropertiesTable
+  content={[
+  {
+    name: '键 (URI)',
+    type: 'string',
+    description: '标识应用 Resource 的 `ui://` URI（例如 `ui://calculator/main`）。',
+  },
+]}
+/>
+
+每个值都是一个 `AppResource` 对象：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'name',
+    type: 'string',
+    isOptional: false,
+    description: 'UI Resource 的显示名称。',
+  },
+  {
+    name: 'description',
+    type: 'string',
+    isOptional: true,
+    description: 'UI Resource 的可选描述。',
+  },
+  {
+    name: 'html',
+    type: 'string',
+    isOptional: true,
+    description: 'UI 的内联 HTML 内容。请提供 `html` 或 `htmlPath` 其中之一。',
+  },
+  {
+    name: 'htmlPath',
+    type: 'string',
+    isOptional: true,
+    description: 'HTML 文件的路径。在 Server 启动时解析。请提供 `html` 或 `htmlPath` 其中之一。',
+  },
+  {
+    name: 'meta',
+    type: 'McpUiResourceMeta',
+    isOptional: true,
+    description: '来自官方 ext-apps SDK 的 UI Resource 元数据（CSP、权限、呈现偏好）。',
+  },
+]}
+/>
+
+### 示例
+
+```typescript
+import { MCPServer } from '@mastra/mcp'
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+const calculatorTool = createTool({
+  id: 'calculatorWithUI',
+  description: 'An interactive calculator',
+  inputSchema: z.object({
+    num1: z.number(),
+    num2: z.number(),
+    operation: z.enum(['add', 'subtract']),
+  }),
+  execute: async ({ num1, num2, operation }) => {
+    const result = operation === 'add' ? num1 + num2 : num1 - num2
+    return {
+      content: [{ type: 'text', text: 'An interactive calculator is displayed.' }],
+      structuredContent: { result },
+    }
+  },
+})
+
+const server = new MCPServer({
+  id: 'app-server',
+  name: 'App Server',
+  version: '1.0.0',
+  tools: { calculatorTool },
+  appResources: {
+    'ui://calculator/main': {
+      name: 'Interactive Calculator',
+      html: '<html><body><h2>Calculator</h2>...</body></html>',
+    },
+  },
+})
+```
+
+要将 Tool 与其应用 Resource 关联，请将 Tool 上的 `_meta.ui.resourceUri` 设置为匹配的 `ui://` URI。Server 注册 Tool 时会自动规范化此元数据。有关完整的应用桥接 API 和使用模式，请参阅 [MCP Apps](/docs/mcp/overview)。
+
+## 相关信息
+
+- 要在 Mastra 中连接 MCP Server，请参阅 [MCPClient 文档](./mcp-client)。
+- 要详细了解 Model Context Protocol，请参阅 [@modelcontextprotocol/sdk 文档](https://github.com/modelcontextprotocol/typescript-sdk)。

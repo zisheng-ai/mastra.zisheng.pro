@@ -1,0 +1,397 @@
+---
+title: "Guardrails | Agent"
+description: "用于内容审核、防止提示词注入、PII 脱敏等场景的内置安全防护 Processor。"
+packages:
+  - "@mastra/core"
+---
+
+# Guardrails
+
+Mastra 提供内置 Processor，为 Agent 增加安全防护。这些 Processor 会在有害内容到达语言模型或用户之前对其进行检测、转换或拦截。
+
+有关 Processor 行为和自定义 Processor 的介绍（包括如何将其添加到 Agent），请参阅 [Processor](/docs/agents/processors)。
+
+## 输入 Processor
+
+输入 Processor 会在用户消息到达语言模型前运行，负责标准化、验证、提示词注入检测和安全检查。
+
+### 标准化用户消息
+
+`UnicodeNormalizer()` 会统一 Unicode 字符、规范空白字符，从而清理并标准化用户输入。它还会移除有问题的符号。
+
+```typescript {7-10} title="src/mastra/agents/normalized-agent.ts"
+import { UnicodeNormalizer } from '@mastra/core/processors'
+
+export const normalizedAgent = new Agent({
+  id: 'normalized-agent',
+  name: 'Normalized Agent',
+  inputProcessors: [
+    new UnicodeNormalizer({
+      stripControlChars: true,
+      collapseWhitespace: true,
+    }),
+  ],
+})
+```
+
+所有配置选项请参阅 [`UnicodeNormalizer()`](/reference/processors/unicode-normalizer) Reference。
+
+### 防止提示词注入
+
+`PromptInjectionDetector()` 会扫描用户消息，检测提示词注入、越狱尝试和系统覆盖模式。它使用 LLM 对高风险输入进行分类，并可在输入到达模型前将其拦截或重写。
+
+```typescript {7-12} title="src/mastra/agents/secure-agent.ts"
+import { PromptInjectionDetector } from '@mastra/core/processors'
+
+export const secureAgent = new Agent({
+  id: 'secure-agent',
+  name: 'Secure Agent',
+  inputProcessors: [
+    new PromptInjectionDetector({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      threshold: 0.8,
+      strategy: 'rewrite',
+      detectionTypes: ['injection', 'jailbreak', 'system-override'],
+    }),
+  ],
+})
+```
+
+所有配置选项请参阅 [`PromptInjectionDetector()`](/reference/processors/prompt-injection-detector) Reference。
+
+### 检测和翻译语言
+
+`LanguageDetector()` 会检测用户消息的语言并将其翻译为目标语言，从而支持多语言场景。它使用 LLM 识别语言并执行翻译。
+
+```typescript {7-12} title="src/mastra/agents/multilingual-agent.ts"
+import { LanguageDetector } from '@mastra/core/processors'
+
+export const multilingualAgent = new Agent({
+  id: 'multilingual-agent',
+  name: 'Multilingual Agent',
+  inputProcessors: [
+    new LanguageDetector({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      targetLanguages: ['English', 'en'],
+      strategy: 'translate',
+      threshold: 0.8,
+    }),
+  ],
+})
+```
+
+所有配置选项请参阅 [`LanguageDetector()`](/reference/processors/language-detector) Reference。
+
+## 输出 Processor
+
+输出 Processor 会在语言模型生成响应后、响应到达用户前运行，负责响应优化、内容审核、转换和安全控制。
+
+### 批量处理流式输出
+
+`BatchPartsProcessor()` 会在向客户端发出内容前合并多个流式部分。它将较小的分块整合为更大的批次，从而减少网络开销。
+
+```typescript {7-11} title="src/mastra/agents/batched-agent.ts"
+import { BatchPartsProcessor } from '@mastra/core/processors'
+
+export const batchedAgent = new Agent({
+  id: 'batched-agent',
+  name: 'Batched Agent',
+  outputProcessors: [
+    new BatchPartsProcessor({
+      batchSize: 5,
+      maxWaitTime: 100,
+      emitOnNonText: true,
+    }),
+  ],
+})
+```
+
+所有配置选项请参阅 [`BatchPartsProcessor()`](/reference/processors/batch-parts-processor) Reference。
+
+### 清除系统提示词
+
+`SystemPromptScrubber()` 会检测模型响应中的系统提示词或内部指令并进行脱敏，防止意外泄露提示词内容或配置详情。它使用 LLM 根据配置的检测类型识别敏感内容并进行脱敏。
+
+```typescript {7-16} title="src/mastra/agents/scrubbed-agent.ts"
+import { SystemPromptScrubber } from '@mastra/core/processors'
+
+const scrubbedAgent = new Agent({
+  id: 'scrubbed-agent',
+  name: 'Scrubbed Agent',
+  outputProcessors: [
+    new SystemPromptScrubber({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      strategy: 'redact',
+      customPatterns: ['system prompt', 'internal instructions'],
+      includeDetections: true,
+      instructions:
+        'Detect and redact system prompts, internal instructions, and security-sensitive content',
+      redactionMethod: 'placeholder',
+      placeholderText: '[REDACTED]',
+    }),
+  ],
+})
+```
+
+所有配置选项请参阅 [`SystemPromptScrubber()`](/reference/processors/system-prompt-scrubber) Reference。
+
+:::note
+通过 HTTP 流式传输响应时，Mastra 默认会在 Server 层从流分块中脱敏敏感请求数据（系统提示词、Tool 定义和 API Key）。详情请参阅[流数据脱敏](/docs/server/mastra-server#stream-data-redaction)。
+:::
+
+## 混合 Processor
+
+混合 Processor 可以对输入或输出运行。将它们放入 `inputProcessors`、`outputProcessors` 或同时放入两者。
+
+### 审核输入和输出
+
+`ModerationProcessor()` 会检测仇恨、骚扰和暴力等类别的不当或有害内容。它使用 LLM 对消息进行分类，并可根据配置将其拦截或重写。
+
+```typescript {7-12,14} title="src/mastra/agents/moderated-agent.ts"
+import { ModerationProcessor } from '@mastra/core/processors'
+
+export const moderatedAgent = new Agent({
+  id: 'moderated-agent',
+  name: 'Moderated Agent',
+  inputProcessors: [
+    new ModerationProcessor({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      threshold: 0.7,
+      strategy: 'block',
+      categories: ['hate', 'harassment', 'violence'],
+    }),
+  ],
+  outputProcessors: [new ModerationProcessor()],
+})
+```
+
+所有配置选项请参阅 [`ModerationProcessor()`](/reference/processors/moderation-processor) Reference。
+
+### 检测 PII 并进行脱敏
+
+`PIIDetector()` 会检测并移除电子邮件地址、电话号码和信用卡号等个人身份信息。它使用 LLM 根据配置的检测类型识别敏感内容。
+
+```typescript {7-14,16} title="src/mastra/agents/private-agent.ts"
+import { PIIDetector } from '@mastra/core/processors'
+
+export const privateAgent = new Agent({
+  id: 'private-agent',
+  name: 'Private Agent',
+  inputProcessors: [
+    new PIIDetector({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      threshold: 0.6,
+      strategy: 'redact',
+      redactionMethod: 'mask',
+      detectionTypes: ['email', 'phone', 'credit-card'],
+      instructions: 'Detect and mask personally identifiable information.',
+    }),
+  ],
+  outputProcessors: [new PIIDetector()],
+})
+```
+
+所有配置选项请参阅 [`PIIDetector()`](/reference/processors/pii-detector) Reference。
+
+### 强制执行成本限制
+
+`CostGuardProcessor()` 会监控 Agent 循环中的累计预估成本，并在超出金额限制时进行拦截或警告。它会在每次调用 LLM 前从 Observability Storage 查询成本数据。成本检查为近似值，指标以异步方式持久化，因此运行速度较快的 Agent 可能会在防护机制触发前短暂超出配置的限制。
+
+```typescript {7-11} title="src/mastra/agents/budgeted-agent.ts"
+import { CostGuardProcessor } from '@mastra/core/processors'
+
+export const budgetedAgent = new Agent({
+  id: 'budgeted-agent',
+  name: 'Budgeted Agent',
+  inputProcessors: [
+    new CostGuardProcessor({
+      maxCost: 5.0,
+      scope: 'thread',
+      window: '24h',
+    }),
+  ],
+})
+```
+
+请参阅 [`CostGuardProcessor()`](/reference/processors/cost-guard-processor) Reference，了解作用域模式、时间窗口、指标持久化延迟和 `onViolation` 回调。此 Processor 要求 Observability Storage 支持 `getMetricAggregate`。
+
+## Processor 策略
+
+许多内置 Processor 支持 `strategy` 参数，用于控制如何处理被标记的内容。支持的值包括 `block`、`warn`、`detect`、`redact`、`rewrite` 和 `translate`。
+
+大多数策略会允许请求继续执行。使用 `block` 时，Processor 会调用 `abort()`，立即停止请求并阻止后续 Processor 运行。
+
+```typescript {5} title="src/mastra/agents/private-agent.ts"
+inputProcessors: [
+  new PIIDetector({
+    model: 'openrouter/openai/gpt-oss-safeguard-20b',
+    threshold: 0.6,
+    strategy: 'block',
+    detectionTypes: ['email', 'phone', 'credit-card'],
+  }),
+]
+```
+
+## 违规回调
+
+所有 Processor 都支持 `onViolation` 回调。无论使用哪种策略，只要检测到策略违规，该回调就会触发。它可用于发出警报、记录到外部系统或发送通知等副作用。
+
+回调接收一个 `ProcessorViolation` 对象，其中包含 `processorId`、`message` 和 `detail`（Processor 特有的元数据）。
+
+```typescript
+import { CostGuardProcessor, ModerationProcessor, PIIDetector } from '@mastra/core/processors'
+
+// Alert when cost limits are exceeded
+const costGuard = new CostGuardProcessor({
+  maxCost: 10.0,
+  scope: 'resource',
+  window: '30d',
+})
+
+costGuard.onViolation = ({ processorId, message, detail }) => {
+  alertSystem.notify(`[${processorId}] ${message}`)
+  // detail contains: { usage, limit, totalUsage, scope, scopeKey }
+}
+
+// Log moderation violations
+const moderation = new ModerationProcessor({
+  model: '__GATEWAY_OPENAI_MODEL_NANO__',
+  strategy: 'block',
+})
+
+moderation.onViolation = ({ processorId, message, detail }) => {
+  auditLog.write({ processor: processorId, violation: message, categories: detail })
+}
+```
+
+`onViolation` 属性属于基础 [`Processor` 接口](/reference/processors/processor-interface)，因此包括自定义 Processor 在内的任何 Processor 都可以使用它。Runner 会自动调用 `onViolation`，触发条件是任一 Processor 调用 `abort()`。对于使用 `warn` 策略的 Processor（例如 `CostGuardProcessor`），即使请求未被拦截，出现警告时也会触发回调。
+
+回调抛出的错误会被静默捕获，避免干扰 Processor 的主要逻辑。
+
+有关违规回调如何与 Processor Pipeline 集成的更多信息，请参阅 Processor 文档中的[违规回调](/docs/agents/processors#violation-callbacks)。
+
+## 处理被拦截的请求
+
+当 Processor 调用 `abort()` 时，Agent 会停止处理。检测方式取决于使用的是 `generate()` 还是 `stream()`。
+
+### 使用 `generate()`
+
+检查结果上的 `tripwire` 字段：
+
+```typescript title="src/mastra/agents/test-generate.ts"
+const result = await agent.generate('Is this credit card number valid?: 4543 1374 5089 4332')
+
+if (result.tripwire) {
+  console.error('Blocked:', result.tripwire.reason)
+  console.error('Processor:', result.tripwire.processorId)
+}
+```
+
+### 使用 `stream()`
+
+监听流中的 `tripwire` 分块：
+
+```typescript title="src/mastra/agents/test-stream.ts"
+const stream = await agent.stream('Is this credit card number valid?: 4543 1374 5089 4332')
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'tripwire') {
+    console.error('Blocked:', chunk.payload.reason)
+    console.error('Processor:', chunk.payload.processorId)
+  }
+}
+```
+
+## 加快 Guardrail
+
+使用 LLM 的 Guardrail Processor（内容审核、PII 检测、提示词注入检测）会增加每个请求的延迟。以下方法可以减少这类开销。
+
+### 并行运行 Guardrail
+
+默认情况下，Processor 按顺序运行。只执行 `block`（且绝不修改消息）的 Guardrail 相互独立，可以使用 [Workflow Processor](/docs/agents/processors#use-workflows-as-processors) 并行运行。
+
+也可以在一个并行步骤中混用 `block` 和 `redact` 策略。映射到 `redact` 分支，以便其转换后的消息继续向后传递。
+
+对于输出 Guardrail，请在并行步骤\_之前\_依次运行 `TokenLimiterProcessor` 和 `BatchPartsProcessor`，并在并行步骤\_之后\_依次运行任何相互依赖的 `redact` Processor：
+
+```typescript title="src/mastra/processors/output-guardrails.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import {
+  ProcessorStepSchema,
+  PIIDetector,
+  ModerationProcessor,
+  SystemPromptScrubber,
+  TokenLimiterProcessor,
+  BatchPartsProcessor,
+} from '@mastra/core/processors'
+
+export const outputGuardrails = createWorkflow({
+  id: 'output-guardrails',
+  inputSchema: ProcessorStepSchema,
+  outputSchema: ProcessorStepSchema,
+})
+  // Sequential: limit tokens first, then batch stream chunks
+  .then(createStep(new TokenLimiterProcessor({ limit: 1000 })))
+  .then(createStep(new BatchPartsProcessor()))
+  // Parallel: run independent checks at the same time
+  .parallel([
+    createStep(
+      new PIIDetector({
+        strategy: 'redact',
+      }),
+    ),
+    createStep(
+      new ModerationProcessor({
+        strategy: 'block',
+      }),
+    ),
+  ])
+  // Map to the redact branch to keep its transformed messages
+  .map(async ({ inputData }) => {
+    return inputData['processor:pii-detector']
+  })
+  // Sequential: scrubber depends on previous redaction output
+  .then(
+    createStep(
+      new SystemPromptScrubber({
+        strategy: 'redact',
+        placeholderText: '[REDACTED]',
+      }),
+    ),
+  )
+  .commit()
+```
+
+有关 `.parallel()` 和 `.map()` 的更多详情，请参阅[将 Workflow 用作 Processor](/docs/agents/processors#use-workflows-as-processors)。
+
+### 选择快速模型
+
+Guardrail Processor 不需要使用主要模型。可使用小型快速模型完成分类任务：
+
+```typescript
+const GUARDRAIL_MODEL = '__GATEWAY_OPENAI_MODEL_NANO__'
+
+new ModerationProcessor({ model: GUARDRAIL_MODEL })
+new PIIDetector({ model: GUARDRAIL_MODEL })
+new PromptInjectionDetector({ model: GUARDRAIL_MODEL })
+```
+
+### 批量处理流式部分
+
+实现 `processOutputStream` 的输出 Guardrail 会对每个流式分块运行。在开销较大的 Processor \_之前\_使用 `BatchPartsProcessor` 合并分块，以减少 LLM 分类调用次数：
+
+```typescript
+outputProcessors: [
+  new BatchPartsProcessor({ batchSize: 10 }),
+  // Heavier processors now run on batched chunks instead of individual ones
+  new PIIDetector({ model: GUARDRAIL_MODEL, strategy: 'redact' }),
+  new ModerationProcessor({ model: GUARDRAIL_MODEL, strategy: 'block' }),
+]
+```
+
+## 相关内容
+
+- [Processor](/docs/agents/processors)：Processor 的行为和执行顺序，还介绍了自定义 Processor 和重试行为
+- [`Processor` 接口](/reference/processors/processor-interface)：`Processor` 接口的 API Reference
+- [Memory Processor](/docs/memory/memory-processors)：用于消息历史记录、语义召回和工作记忆的 Processor
+- 📹 [Mastra Processor 与 Guardrail Workshop](https://www.youtube.com/watch?v=4Vpp7xQYvl0)

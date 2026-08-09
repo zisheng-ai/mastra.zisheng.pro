@@ -1,0 +1,99 @@
+---
+title: "リファレンス：UnixSocketPubSub | PubSub"
+description: 単一ホスト上のプロセス間配信向け Unix socket pub/sub 実装である UnixSocketPubSub の API リファレンス。
+packages:
+  - "@mastra/core"
+---
+
+# UnixSocketPubSub
+
+`UnixSocketPubSub` は、Unix domain socket を使用して単一ホスト上のプロセス間でイベントを配信する [`PubSub`](/reference/pubsub/base) 実装です。1 つのプロセスをブローカーとして選出し、ほかのプロセスはクライアントとして接続します。ブローカーが終了すると、残りのクライアントが新しいブローカーを自動的に選出します。
+
+Mastra Code のターミナルインターフェース間でスレッドストリームを調整する場合など、複数のローカルプロセスでストリームを共有する必要があるときに使用します。単一プロセスでの配信には [`EventEmitterPubSub`](/reference/pubsub/event-emitter) を使用してください。ホストをまたぐ分散配信には、[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) または [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub) を使用してください。
+
+`UnixSocketPubSub` は push トランスポートです。イベントは読み取りループなしで到着するため、Mastra は pull Worker を実行しません。
+
+## 使用例
+
+参加するすべてのプロセスが共有する socket のパスを渡します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { UnixSocketPubSub } from '@mastra/core/events'
+
+export const mastra = new Mastra({
+  pubsub: new UnixSocketPubSub('/tmp/mastra/events.sock'),
+})
+```
+
+## コンストラクターパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'socketPath',
+    type: 'string',
+    description: 'Unix domain socket のパス。ストリームを共有するすべてのプロセスで同じパスを使用する必要があります。',
+    isOptional: false,
+  },
+  {
+    name: 'options',
+    type: 'UnixSocketPubSubOptions',
+    description: '任意の設定。',
+    isOptional: true,
+    properties: [
+      {
+        name: 'maxRemoteClientQueuedBytes',
+        type: 'number',
+        description:
+          '低速なリモートクライアントについて、フレームを破棄するまでにバッファリングする最大バイト数。1 つの停止したサブスクライバーがほかのサブスクライバーをブロックするのを防ぎます。',
+        isOptional: true,
+        defaultValue: '67108864',
+      },
+    ],
+  },
+]}
+/>
+
+## プロパティ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'socketPath',
+    type: 'string',
+    description: 'コンストラクターに渡された socket のパス。',
+  },
+  {
+    name: 'supportedModes',
+    type: 'ReadonlyArray<"pull" | "push">',
+    description: '`["push"]` を返します。',
+  },
+  {
+    name: 'isBroker',
+    type: 'boolean',
+    description: 'このインスタンスが現在ブローカーとして動作しているかどうか。',
+  },
+  {
+    name: 'remoteClientCount',
+    type: 'number',
+    description: 'このブローカーに接続しているリモートクライアントの数。このインスタンスがブローカーでない場合は常に 0 です。',
+  },
+]}
+/>
+
+## メソッド
+
+`UnixSocketPubSub` は [`PubSub`](/reference/pubsub/base) 契約を実装します。以下のメソッドはこの実装に固有です。
+
+### `close()`
+
+socket 接続を閉じ、このインスタンスがブローカーの場合はブローカーの役割を解放します。正常なシャットダウン時に呼び出してください。
+
+```typescript
+await pubsub.close()
+```
+
+## ブローカーの選出
+
+最初に socket をバインドしたプロセスがブローカーとなり、接続しているすべてのクライアント間でイベントをルーティングします。ほかのプロセスはクライアントとして接続します。ブローカーが終了すると、排他的なロックファイルによって次の選出が直列化されます。1 つのクライアントだけが新しいブローカーになり、残りのクライアントはそのブローカーを再購読します。これにより、2 つのプロセスが同時にブローカーとして動作するスプリットブレイン状態を回避できます。

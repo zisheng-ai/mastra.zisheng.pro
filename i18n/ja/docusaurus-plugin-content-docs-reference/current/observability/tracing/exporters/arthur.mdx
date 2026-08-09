@@ -1,0 +1,186 @@
+---
+title: "リファレンス: ArthurExporter | Observability"
+description: OpenInference を使用する Tracing 用 Arthur AI exporter
+packages:
+  - "@mastra/arthur"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# ArthurExporter
+
+OpenTelemetry と OpenInference セマンティック規約を使用して、Tracing データを [Arthur Engine](https://github.com/arthur-ai/arthur-engine) へ送信します。
+
+## コンストラクター
+
+```typescript prettier:false
+new ArthurExporter(config: ArthurExporterConfig)
+```
+
+## `ArthurExporterConfig`
+
+```typescript
+type ArthurExporterConfig = Omit<OtelExporterConfig, 'provider' | 'exporter'> & {
+  apiKey?: string
+  endpoint?: string
+  taskId?: string
+  headers?: Record<string, string>
+}
+```
+
+`OtelExporterConfig`（`provider` と `exporter` を除く）を継承し、次の項目を含みます。
+
+- `timeout?: number` - エクスポートのタイムアウト（ミリ秒、デフォルト：30000）
+- `batchSize?: number` - バッチあたりの Span 数（デフォルト：512）
+- `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'` - ログレベル（デフォルト：WARN）
+- `resourceAttributes?: Record<string, any>` - カスタムリソース属性
+
+### メタデータの引き渡し
+
+予約されていない Span 属性は OpenInference の `metadata` ペイロードにシリアライズされます。`tracingOptions.metadata`（例：`companyId`、`tier`）から追加します。`input`、`output`、`sessionId`、thread/user ID、OpenInference ID などの予約フィールドは自動的に除外されます。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'apiKey',
+    type: 'string',
+    description: '認証用 Arthur API キー。未指定の場合は ARTHUR_API_KEY 環境変数を使用します。',
+    required: false,
+  },
+  {
+    name: 'endpoint',
+    type: 'string',
+    description: 'Arthur Engine エンドポイント（例：http://localhost:3030）。未指定の場合は ARTHUR_BASE_URL 環境変数を使用します。',
+    required: false,
+  },
+  {
+    name: 'taskId',
+    type: 'string',
+    description:
+      'Trace を ID で既存の Arthur task へルーティングします。未指定の場合は ARTHUR_TASK_ID 環境変数を使用します。省略すると、Arthur Engine は代わりに serviceName に基づいて Trace をルーティングします。',
+    required: false,
+  },
+  {
+    name: 'headers',
+    type: 'Record<string, string>',
+    description:
+      'OTLP リクエストに追加するヘッダー。apiKey が指定されている場合、Authorization ヘッダーは内部で管理されます。',
+    required: false,
+  },
+  {
+    name: 'timeout',
+    type: 'number',
+    description: 'Span をエクスポートするまでのタイムアウト（ミリ秒、デフォルト：30000）',
+    required: false,
+  },
+  {
+    name: 'batchSize',
+    type: 'number',
+    description: 'エクスポート前にバッチ化する Span 数（デフォルト：512）',
+    required: false,
+  },
+  {
+    name: 'logLevel',
+    type: "'debug' | 'info' | 'warn' | 'error'",
+    description: "Logger のレベル（デフォルト：'warn'）",
+    required: false,
+  },
+  {
+    name: 'resourceAttributes',
+    type: 'Record<string, any>',
+    description: '各 Span に追加するカスタムリソース属性',
+    required: false,
+  },
+]}
+/>
+
+## メソッド
+
+### `exportTracingEvent`
+
+```typescript prettier:false
+async exportTracingEvent(event: TracingEvent): Promise<void>
+```
+
+Tracing イベントを設定済みのエンドポイントへエクスポートします。
+
+### export
+
+```typescript prettier:false
+async export(spans: ReadOnlySpan[]): Promise<void>
+```
+
+OpenInference セマンティック規約に従い、OpenTelemetry を使用して Span をバッチエクスポートします。
+
+### flush
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+exporter をシャットダウンせず、バッファー内のすべての Span を設定済みエンドポイントへ強制的にフラッシュします。ランタイム終了前に Span が確実にエクスポートされるようにする必要がある、サーバーレス環境で役立ちます。
+
+### shutdown
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+保留中のデータをフラッシュし、クライアントをシャットダウンします。
+
+## 使用方法
+
+### ゼロコンフィグ（環境変数を使用）
+
+```typescript
+import { ArthurExporter } from '@mastra/arthur'
+
+// Set ARTHUR_API_KEY and ARTHUR_BASE_URL (optionally ARTHUR_TASK_ID)
+const exporter = new ArthurExporter()
+```
+
+### 明示的な設定
+
+```typescript
+import { ArthurExporter } from '@mastra/arthur'
+
+const exporter = new ArthurExporter({
+  apiKey: process.env.ARTHUR_API_KEY!,
+  endpoint: 'http://localhost:3030',
+  taskId: process.env.ARTHUR_TASK_ID, // Optional
+})
+```
+
+## `OpenInference` セマンティック規約
+
+ArthurExporter は [OpenInference セマンティック規約](https://github.com/Arize-ai/openinference/tree/main/spec) を生成 AI アプリケーション向けに実装し、異なる Observability プラットフォーム間で標準化された Trace 構造を提供します。
+
+## タグのサポート
+
+ArthurExporter は分類とフィルタリングのための Trace タグ付けをサポートします。タグはルート Span にのみ適用され、OpenInference ネイティブの `tag.tags` セマンティック規約にマッピングされます。
+
+### 使用方法
+
+```typescript
+const result = await agent.generate('Hello', {
+  tracingOptions: {
+    tags: ['production', 'experiment-v2', 'user-request'],
+  },
+})
+```
+
+### タグの保存方法
+
+タグは OpenInference の `tag.tags` 属性を使用して保存されます：
+
+```json
+{
+  "tag.tags": ["production", "experiment-v2", "user-request"]
+}
+```
+
+## 関連項目
+
+- [ArthurExporter ドキュメント](/docs/observability/integrations/exporters/arthur)
+- [Arthur Engine ドキュメント](https://docs.arthur.ai/)
+- [Arthur Engine リポジトリ](https://github.com/arthur-ai/arthur-engine)

@@ -1,0 +1,549 @@
+---
+title: "参考：Scorer 实用函数 | Evals"
+description: 用于从 Scorer 运行输入和输出中提取数据的实用函数，包括文本内容、reasoning、system 消息和 Tool 调用。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+# Scorer 实用函数
+
+Mastra 提供工具函数，帮助从 Scorer 运行的输入和输出中提取并处理数据。这些工具函数在自定义 Scorer 的 `preprocess` 步骤中尤其有用。
+
+## Import
+
+```typescript
+import {
+  getAssistantMessageFromRunOutput,
+  getReasoningFromRunOutput,
+  getUserMessageFromRunInput,
+  getSystemMessagesFromRunInput,
+  getCombinedSystemPrompt,
+  extractToolCalls,
+  extractInputMessages,
+  extractAgentResponseMessages,
+  compareTrajectories,
+  createTrajectoryTestRun,
+} from '@mastra/evals/scorers/utils'
+```
+
+Trajectory 提取函数可从 `@mastra/core/evals` 导入：
+
+```typescript
+import {
+  extractTrajectory,
+  extractWorkflowTrajectory,
+  extractTrajectoryFromTrace,
+} from '@mastra/core/evals'
+```
+
+## 消息提取
+
+### `getAssistantMessageFromRunOutput`
+
+从运行输出的第一条 assistant 消息中提取文本内容。
+
+```typescript
+const scorer = createScorer({
+  id: 'my-scorer',
+  description: 'My scorer',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    const response = getAssistantMessageFromRunOutput(run.output)
+    return { response }
+  })
+  .generateScore(({ results }) => {
+    return results.preprocessStepResult?.response ? 1 : 0
+  })
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'output',
+    type: 'ScorerRunOutputForAgent',
+    isOptional: true,
+    description: 'Scorer 运行输出 (array of MastraDBMessage)',
+  },
+]}
+/>
+
+**返回值：** `string | undefined` - The assistant message text, or undefined if no assistant message is found.
+
+### `getUserMessageFromRunInput`
+
+从运行输入的第一条 user 消息中提取文本内容。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const userMessage = getUserMessageFromRunInput(run.input);
+  return { userMessage };
+})
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'input',
+    type: 'ScorerRunInputForAgent',
+    isOptional: true,
+    description: 'Scorer 运行输入 containing input messages',
+  },
+]}
+/>
+
+**返回值：** `string | undefined` - The user message text, or undefined if no user message is found.
+
+### `extractInputMessages`
+
+以数组形式提取所有输入消息的文本内容。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const allUserMessages = extractInputMessages(run.input);
+  return { conversationHistory: allUserMessages.join("\n") };
+})
+```
+
+**返回值：** `string[]` - Array of text strings from each input message.
+
+### `extractAgentResponseMessages`
+
+以数组形式提取所有 assistant 响应消息的文本内容。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const allResponses = extractAgentResponseMessages(run.output);
+  return { allResponses };
+})
+```
+
+**返回值：** `string[]` - 每条 assistant 消息中的文本字符串数组。
+
+## 推理内容提取
+
+### `getReasoningFromRunOutput`
+
+从运行输出中提取 reasoning 文本。这在评估 `deepseek-reasoner` 等会生成思维链 reasoning 的推理模型响应时尤其有用。
+
+Reasoning 可能存储在两个位置：
+
+1. `content.reasoning` - 消息内容中的字符串字段
+1. `content.parts` - `type: 'reasoning'` 且包含 `details` 的 part
+
+```typescript
+import {
+  getReasoningFromRunOutput,
+  getAssistantMessageFromRunOutput,
+} from '@mastra/evals/scorers/utils'
+
+const reasoningQualityScorer = createScorer({
+  id: 'reasoning-quality',
+  name: 'Reasoning Quality',
+  description: 'Evaluates the quality of model reasoning',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    const reasoning = getReasoningFromRunOutput(run.output)
+    const response = getAssistantMessageFromRunOutput(run.output)
+    return { reasoning, response }
+  })
+  .analyze(({ results }) => {
+    const { reasoning } = results.preprocessStepResult || {}
+    return {
+      hasReasoning: !!reasoning,
+      reasoningLength: reasoning?.length || 0,
+      hasStepByStep: reasoning?.includes('step') || false,
+    }
+  })
+  .generateScore(({ results }) => {
+    const { hasReasoning, reasoningLength } = results.analyzeStepResult || {}
+    if (!hasReasoning) return 0
+    // Score based on reasoning length (normalized to 0-1)
+    return Math.min(reasoningLength / 500, 1)
+  })
+  .generateReason(({ results, score }) => {
+    const { hasReasoning, reasoningLength } = results.analyzeStepResult || {}
+    if (!hasReasoning) {
+      return 'No reasoning was provided by the model.'
+    }
+    return `Model provided ${reasoningLength} characters of reasoning. Score: ${score}`
+  })
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'output',
+    type: 'ScorerRunOutputForAgent',
+    isOptional: true,
+    description: 'Scorer 运行输出 (array of MastraDBMessage)',
+  },
+]}
+/>
+
+**返回值：** `string | undefined` - The reasoning text, or undefined if no reasoning is present.
+
+## system 消息提取
+
+### `getSystemMessagesFromRunInput`
+
+从运行输入中提取所有 system 消息，包括标准 system 消息和带标签的 system 消息（例如 memory 指令等专用 prompt）。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const systemMessages = getSystemMessagesFromRunInput(run.input);
+  return { 
+    systemPromptCount: systemMessages.length,
+    systemPrompts: systemMessages 
+  };
+})
+```
+
+**返回值：** `string[]` - Array of system message strings.
+
+### `getCombinedSystemPrompt`
+
+将所有 system 消息合并为一个 prompt 字符串，并用两个换行符连接。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const fullSystemPrompt = getCombinedSystemPrompt(run.input);
+  return { fullSystemPrompt };
+})
+```
+
+**返回值：** `string` - Combined system prompt string.
+
+## Tool 调用提取
+
+### `extractToolCalls`
+
+从运行输出中提取所有 Tool 调用的信息，包括 Tool 名称、调用 ID 及其在消息数组中的位置。
+
+```typescript
+const toolUsageScorer = createScorer({
+  id: 'tool-usage',
+  description: 'Evaluates tool usage patterns',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    const { tools, toolCallInfos } = extractToolCalls(run.output)
+    return {
+      toolsUsed: tools,
+      toolCount: tools.length,
+      toolDetails: toolCallInfos,
+    }
+  })
+  .generateScore(({ results }) => {
+    const { toolCount } = results.preprocessStepResult || {}
+    // Score based on appropriate tool usage
+    return toolCount > 0 ? 1 : 0
+  })
+```
+
+**返回值：**
+
+```typescript prettier:false
+{
+  tools: string[];           // Array of tool names
+  toolCallInfos: ToolCallInfo[];  // Detailed tool call information
+}
+```
+
+其中 `ToolCallInfo` 为：
+
+```typescript
+type ToolCallInfo = {
+  toolName: string // Name of the tool
+  toolCallId: string // Unique call identifier
+  messageIndex: number // Index in the output array
+  invocationIndex: number // Index within message's tool invocations
+}
+```
+
+## 测试工具函数
+
+这些实用函数可帮助创建用于开发 Scorer 的测试数据。
+
+### `createTestMessage`
+
+创建用于测试的 `MastraDBMessage` 对象。
+
+```typescript
+import { createTestMessage } from '@mastra/evals/scorers/utils'
+
+const userMessage = createTestMessage({
+  content: 'What is the weather?',
+  role: 'user',
+})
+
+const assistantMessage = createTestMessage({
+  content: 'The weather is sunny.',
+  role: 'assistant',
+  toolInvocations: [
+    {
+      toolCallId: 'call-1',
+      toolName: 'weatherTool',
+      args: { location: 'London' },
+      result: { temp: 20 },
+      state: 'result',
+    },
+  ],
+})
+```
+
+### `createAgentTestRun`
+
+创建用于测试 Scorer 的完整测试运行对象。
+
+```typescript
+import { createAgentTestRun, createTestMessage } from '@mastra/evals/scorers/utils'
+
+const testRun = createAgentTestRun({
+  inputMessages: [createTestMessage({ content: 'Hello', role: 'user' })],
+  output: [createTestMessage({ content: 'Hi there!', role: 'assistant' })],
+})
+
+// Run your scorer with the test data
+const result = await myScorer.run({
+  input: testRun.input,
+  output: testRun.output,
+})
+```
+
+## Trajectory 工具函数
+
+### `extractTrajectory`
+
+从 Agent 输出消息（`MastraDBMessage[]`）中提取 `Trajectory`。该函数会将 Tool 调用转换为 `ToolCallStep` 对象。`runEvals` pipeline 会为 Trajectory Scorer 自动调用此函数；仅在直接测试时才需要自行调用。
+
+可从 `@mastra/core/evals` 导入。
+
+```typescript
+import { extractTrajectory } from '@mastra/core/evals'
+
+const trajectory = extractTrajectory(agentOutputMessages)
+// trajectory.steps — ToolCallStep[] extracted from toolInvocations
+// trajectory.rawOutput — the original MastraDBMessage[] array
+```
+
+**返回值：** `Trajectory`: Contains `steps: TrajectoryStep[]`, `totalDurationMs`, and `rawOutput`.
+
+### `extractWorkflowTrajectory`
+
+从 Workflow 步骤结果中提取 `Trajectory`。该函数会按照执行路径顺序，将 `StepResult` 记录转换为 `WorkflowStepStep` 对象。
+
+可从 `@mastra/core/evals` 导入。
+
+```typescript
+import { extractWorkflowTrajectory } from '@mastra/core/evals'
+
+const trajectory = extractWorkflowTrajectory(
+  workflowResult.steps, // Record<string, StepResult>
+  workflowResult.stepExecutionPath, // string[] (optional)
+)
+// trajectory.steps — WorkflowStepStep[] in execution order
+```
+
+**返回值：** `Trajectory`: Contains `steps: TrajectoryStep[]`, `totalDurationMs`, and `rawWorkflowResult`.
+
+### `extractTrajectoryFromTrace`
+
+根据可观测性 trace span（`SpanRecord[]`）构建分层 `Trajectory`。该函数会重建父子 span 树，并将每个 span 映射到相应的 `TrajectoryStep` 可辨识联合类型，其中包含嵌套的 `children`。
+
+存在可用 storage 时，首选此提取方法。当目标的 `Mastra` 实例配置了 storage 后端时，`runEvals` pipeline 会自动调用此函数。由于它会捕获完整执行树，包括嵌套的 Agent 运行、Tool 调用和模型生成，因此生成的 trajectory 比 `extractTrajectory` 或 `extractWorkflowTrajectory` 更丰富。
+
+可从 `@mastra/core/evals` 导入。
+
+```typescript
+import { extractTrajectoryFromTrace } from '@mastra/core/evals'
+
+// After fetching a trace from the observability store
+const traceData = await observabilityStore.getTrace({ traceId })
+const trajectory = extractTrajectoryFromTrace(traceData.spans, rootSpanId)
+// trajectory.steps — hierarchical TrajectoryStep[] with children
+```
+
+**Parameters:**
+
+- `spans` (`SpanRecord[]`)：Trace 查询返回的 Span record 数组。
+- `rootSpanId`（`string`，可选）：用作起点的 Span ID。省略时，使用没有 parent 的 Span。
+
+**返回值：** `Trajectory`：包含 `steps: TrajectoryStep[]`，其中具有递归的 `children` 和 `totalDurationMs`。
+
+#### Span 类型映射
+
+| Span 类型 | Trajectory step type | 提取的关键字段 |
+| - | - | - |
+| `TOOL_CALL` | `tool_call` | `toolArgs`, `toolResult`, `success` |
+| `MCP_TOOL_CALL` | `mcp_tool_call` | `toolArgs`, `toolResult`, `mcpServer`, `success` |
+| `MODEL_GENERATION` | `model_generation` | `modelId`, `promptTokens`, `completionTokens`, `finishReason` |
+| `AGENT_RUN` | `agent_run` | `agentId`（来自 entity ID） |
+| `WORKFLOW_RUN` | `workflow_run` | `workflowId`（来自 entity ID） |
+| `WORKFLOW_STEP` | `workflow_step` | `output` |
+| `WORKFLOW_CONDITIONAL` | `workflow_conditional` | `conditionCount`, `selectedSteps` |
+| `WORKFLOW_PARALLEL` | `workflow_parallel` | `branchCount`, `parallelSteps` |
+| `WORKFLOW_LOOP` | `workflow_loop` | `loopType`, `totalIterations` |
+| `WORKFLOW_SLEEP` | `workflow_sleep` | `sleepDurationMs`, `sleepType` |
+| `WORKFLOW_WAIT_EVENT` | `workflow_wait_event` | `eventName`, `eventReceived` |
+| `PROCESSOR_RUN` | `processor_run` | `processorId` |
+
+类型为 `GENERIC`、`MODEL_STEP`、`MODEL_CHUNK` 和 `WORKFLOW_CONDITIONAL_EVAL` 的 span 会被视为噪声并跳过。
+
+### `compareTrajectories`
+
+将实际 trajectory 与预期 trajectory 进行比较，并返回详细的比较结果。`createTrajectoryAccuracyScorerCode` 会在内部使用此函数。
+
+`expected` 参数接受 `Trajectory`（实际 trajectory）或 `{ steps: ExpectedStep[] }`。使用 `ExpectedStep[]` 时，可以仅按名称匹配，也可以按名称 + stepType 匹配，还可以包含要比较的数据。有关详情，请参阅[预期步骤](/reference/evals/trajectory-accuracy#expected-steps)。
+
+```typescript
+import { compareTrajectories } from '@mastra/evals/scorers/utils'
+
+// Using ExpectedStep[] (recommended for expectations)
+// Data fields (e.g. toolArgs) are auto-compared when present on expected steps
+const result = compareTrajectories(
+  actualTrajectory,
+  { steps: [{ name: 'search' }, { name: 'summarize', stepType: 'tool_call' }] },
+  { allowRepeatedSteps: true },
+)
+// result.score — 0.0 to 1.0
+// result.missingSteps — step names not found
+// result.extraSteps — unexpected step names
+// result.outOfOrderSteps — steps found but in wrong order
+```
+
+**返回值：** `TrajectoryComparisonResult`
+
+### `createTrajectoryTestRun`
+
+为 Trajectory Scorer 创建测试运行对象。该函数会将 `Trajectory` 封装为预期的 `ScorerRun` 格式。
+
+```typescript
+import { createTrajectoryTestRun } from '@mastra/evals/scorers/utils'
+
+const run = createTrajectoryTestRun({
+  steps: [
+    { stepType: 'tool_call', name: 'search', toolArgs: { q: 'test' } },
+    { stepType: 'tool_call', name: 'summarize' },
+  ],
+})
+
+const result = await trajectoryScorer.run(run)
+```
+
+### `checkTrajectoryEfficiency`
+
+根据步骤、token 和时长预算评估 trajectory 效率，同时检测冗余调用（使用相同参数调用同一 Tool）。
+
+```typescript
+import { checkTrajectoryEfficiency } from '@mastra/evals/scorers/utils'
+
+const result = checkTrajectoryEfficiency(trajectory, {
+  maxSteps: 5,
+  maxTotalTokens: 2000,
+  maxTotalDurationMs: 5000,
+  noRedundantCalls: true,
+})
+// result.score — 1.0 if within all budgets, lower with penalties
+// result.redundantCalls — duplicate tool+args combos
+// result.overStepBudget — true if maxSteps exceeded
+// result.overTokenBudget — true if maxTotalTokens exceeded
+// result.overDurationBudget — true if maxTotalDurationMs exceeded
+```
+
+**返回值：** `TrajectoryEfficiencyResult`
+
+### `checkTrajectoryBlacklist`
+
+检查 trajectory 是否包含禁止的 Tool 或 Tool 调用序列。
+
+```typescript
+import { checkTrajectoryBlacklist } from '@mastra/evals/scorers/utils'
+
+const result = checkTrajectoryBlacklist(trajectory, {
+  blacklistedTools: ['deleteAll', 'admin-override'],
+  blacklistedSequences: [['escalate', 'admin-override']],
+})
+// result.score — 1.0 if no violations, 0.0 if any found
+// result.violatedTools — blacklisted tools that were called
+// result.violatedSequences — blacklisted sequences that were detected
+```
+
+**返回值：** `TrajectoryBlacklistResult`
+
+### `analyzeToolFailures`
+
+检测 Tool 失败模式，包括重试、回退和参数修正。
+
+```typescript
+import { analyzeToolFailures } from '@mastra/evals/scorers/utils'
+
+const result = analyzeToolFailures(trajectory, {
+  maxRetriesPerTool: 2,
+})
+// result.score — 1.0 if no failure patterns, lower if patterns detected
+// result.patterns — detected patterns (retry, fallback, arg_correction)
+```
+
+**返回值：** `ToolFailureAnalysisResult`
+
+## 完整示例
+
+以下完整示例展示了如何组合使用多个实用函数：
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+import {
+  getAssistantMessageFromRunOutput,
+  getReasoningFromRunOutput,
+  getUserMessageFromRunInput,
+  getCombinedSystemPrompt,
+  extractToolCalls,
+} from '@mastra/evals/scorers/utils'
+
+const comprehensiveScorer = createScorer({
+  id: 'comprehensive-analysis',
+  name: 'Comprehensive Analysis',
+  description: 'Analyzes all aspects of an agent response',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    // Extract all relevant data
+    const userMessage = getUserMessageFromRunInput(run.input)
+    const response = getAssistantMessageFromRunOutput(run.output)
+    const reasoning = getReasoningFromRunOutput(run.output)
+    const systemPrompt = getCombinedSystemPrompt(run.input)
+    const { tools, toolCallInfos } = extractToolCalls(run.output)
+
+    return {
+      userMessage,
+      response,
+      reasoning,
+      systemPrompt,
+      toolsUsed: tools,
+      toolCount: tools.length,
+    }
+  })
+  .generateScore(({ results }) => {
+    const { response, reasoning, toolCount } = results.preprocessStepResult || {}
+
+    let score = 0
+    if (response && response.length > 0) score += 0.4
+    if (reasoning) score += 0.3
+    if (toolCount > 0) score += 0.3
+
+    return score
+  })
+  .generateReason(({ results, score }) => {
+    const { response, reasoning, toolCount } = results.preprocessStepResult || {}
+
+    const parts = []
+    if (response) parts.push('provided a response')
+    if (reasoning) parts.push('included reasoning')
+    if (toolCount > 0) parts.push(`used ${toolCount} tool(s)`)
+
+    return `Score: ${score}. The agent ${parts.join(', ')}.`
+  })
+```

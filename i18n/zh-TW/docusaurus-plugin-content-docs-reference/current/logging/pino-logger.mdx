@@ -1,0 +1,221 @@
+---
+title: "參考文件：PinoLogger | Observability"
+description: PinoLogger 的文件，提供以不同嚴重程度記錄事件的方法。
+packages:
+  - "@mastra/core"
+  - "@mastra/loggers"
+---
+
+# PinoLogger
+
+使用 `new PinoLogger()` 可建立 Logger 執行個體，並取得以不同嚴重程度記錄事件的方法。
+
+## 使用範例
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { PinoLogger } from '@mastra/loggers'
+
+export const mastra = new Mastra({
+  logger: new PinoLogger({
+    name: 'Mastra',
+    level: 'info',
+  }),
+})
+```
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'name',
+    type: 'string',
+    description: '用於將此 logger 的記錄分組並加以識別的標籤。',
+  },
+  {
+    name: 'level',
+    type: `"debug" | "info" | "warn" | "error"`,
+    description: '設定最低記錄層級。低於此層級的訊息會被忽略。',
+  },
+  {
+    name: 'transports',
+    type: 'Record<string, LoggerTransport>',
+    description: '用於持續儲存記錄的 transport 執行個體 map。',
+  },
+  {
+    name: 'overrideDefaultTransports',
+    type: 'boolean',
+    isOptional: true,
+    description: '設為 true 時，停用預設的 console transport。',
+  },
+  {
+    name: 'formatters',
+    type: "pino.LoggerOptions['formatters']",
+    isOptional: true,
+    description: '用於序列化記錄的自訂 Pino formatter。',
+  },
+  {
+    name: 'redact',
+    type: "pino.LoggerOptions['redact']",
+    isOptional: true,
+    description: '從記錄輸出遮蔽敏感欄位的路徑或選項（Pino `redact`）。',
+  },
+  {
+    name: 'prettyPrint',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'true',
+    description: '設為 false 時，停用 `pino-pretty` 並寫入原始 JSON 行（適用於記錄彙整器）。',
+  },
+  {
+    name: 'mixin',
+    type: 'pino.MixinFn',
+    isOptional: true,
+    description: '合併至每個記錄物件的 Pino mixin 函式（例如要求範圍的 `traceId` 或其他共用中繼資料）。',
+  },
+  {
+    name: 'customLevels',
+    type: 'Record<string, number>',
+    isOptional: true,
+    description:
+      '轉送給 Pino 的自訂記錄層級與數值。標準嚴重程度仍透過 `debug`、`info`、`warn` 與 `error` 記錄；其他層級則遵循 Pino 的自訂層級行為。',
+  },
+]}
+/>
+
+## 使用 `mixin` 增加記錄內容
+
+若希望每一行都包含相同的結構化欄位（以便與其他服務建立關聯），請使用 `mixin`：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { PinoLogger } from '@mastra/loggers'
+
+function getTraceContext() {
+  return { traceId: 'abc-123' }
+}
+
+export const mastra = new Mastra({
+  logger: new PinoLogger({
+    name: 'Mastra',
+    level: 'info',
+    mixin() {
+      return getTraceContext()
+    },
+  }),
+})
+```
+
+## 自訂層級
+
+`customLevels` 會直接傳給 Pino。`PinoLogger` 只會公開 `debug`、`info`、`warn` 與 `error`；若要使用其他層級名稱（例如 `audit`），請建立子類別並轉送給底層 Pino 執行個體：
+
+```typescript title="src/mastra/logger.ts"
+import { Mastra } from '@mastra/core'
+import { PinoLogger } from '@mastra/loggers'
+
+type AuditLevel = 'audit'
+
+class MastraPinoWithAudit extends PinoLogger<AuditLevel> {
+  audit(message: string, meta: Record<string, unknown> = {}) {
+    this.logger.audit(meta, message)
+  }
+}
+
+const logger = new MastraPinoWithAudit({
+  name: 'Mastra',
+  level: 'info',
+  customLevels: { audit: 35 },
+})
+
+export const mastra = new Mastra({ logger })
+```
+
+數值遵循 Pino 的排序（內建層級使用 10 至 60）。層級 `35` 位於 `info`（30）與 `warn`（40）之間，因此設定 `level: 'info'` 時，`info` 與 `audit` 記錄都會輸出。
+
+## File transport（結構化記錄）
+
+使用 `FileTransport` 將結構化記錄寫入檔案。logger 接受純文字訊息作為第一個引數，結構化中繼資料作為第二個引數。系統會在內部將兩者轉換為 `BaseLogMessage`，並持續儲存至設定的檔案路徑。
+
+```typescript title="src/mastra/loggers/file-transport.ts"
+import { FileTransport } from '@mastra/loggers/file'
+import { PinoLogger } from '@mastra/loggers/pino'
+
+export const fileLogger = new PinoLogger({
+  name: 'Mastra',
+  transports: { file: new FileTransport({ path: 'test-dir/test.log' }) },
+  level: 'warn',
+})
+```
+
+### File transport 用法
+
+```typescript
+fileLogger.warn('Low disk space', {
+  destinationPath: 'system',
+  type: 'WORKFLOW',
+})
+```
+
+## Upstash transport（遠端記錄匯出）
+
+使用 `UpstashTransport` 將結構化記錄串流至遠端 Redis list。logger 接受字串訊息與結構化中繼資料物件，並支援分散式環境的集中式記錄，以及依 `destinationPath`、`type` 與 `runId` 篩選。
+
+```typescript title="src/mastra/loggers/upstash-transport.ts"
+import { UpstashTransport } from '@mastra/loggers/upstash'
+import { PinoLogger } from '@mastra/loggers/pino'
+
+export const upstashLogger = new PinoLogger({
+  name: 'Mastra',
+  transports: {
+    upstash: new UpstashTransport({
+      listName: 'production-logs',
+      upstashUrl: process.env.UPSTASH_URL!,
+      upstashToken: process.env.UPSTASH_TOKEN!,
+    }),
+  },
+  level: 'info',
+})
+```
+
+### Upstash transport 用法
+
+```typescript
+upstashLogger.info('User signed in', {
+  destinationPath: 'auth',
+  type: 'AGENT',
+  runId: 'run_123',
+})
+```
+
+## 自訂 transport
+
+你可以使用 `createCustomTransport` 公用程式建立自訂 transport，以整合任何記錄服務或串流。
+
+### Sentry transport 範例
+
+使用 `createCustomTransport` 建立自訂 transport，並與 `pino-sentry-transport` 等第三方記錄串流整合。如此即可將記錄轉送至 Sentry 等外部系統，以進行進階監控與 Observability。
+
+```typescript title="src/mastra/loggers/sentry-transport.ts"
+import { createCustomTransport } from '@mastra/core/loggers'
+import { PinoLogger } from '@mastra/loggers/pino'
+import pinoSentry from 'pino-sentry-transport'
+
+const sentryStream = await pinoSentry({
+  sentry: {
+    dsn: 'YOUR_SENTRY_DSN',
+    _experiments: {
+      enableLogs: true,
+    },
+  },
+})
+
+const customTransport = createCustomTransport(sentryStream)
+
+export const sentryLogger = new PinoLogger({
+  name: 'Mastra',
+  level: 'info',
+  transports: { sentry: customTransport },
+})
+```

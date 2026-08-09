@@ -1,0 +1,146 @@
+---
+title: "リファレンス: submitPlanTool | Tools"
+description: "Agentの実行を一時停止し、ユーザーの承認を得るために計画ファイルを提出する組み込みTool、submitPlanToolのAPIリファレンス。"
+packages:
+  - "@mastra/core"
+---
+
+# submitPlanTool
+
+実装計画をユーザーのレビューに提出する、Agentに依存しない組み込みToolです。AgentはMarkdownファイルに計画を書き込み、そのファイルパスをこのToolへ渡します。ユーザーが計画を承認または拒否するまで、Toolは実行を一時停止します。
+
+Toolはネイティブの[Tool一時停止](/docs/agents/agent-approval#runtime-suspension-with-suspend)機構を使用して一時停止します。`suspend({ path })` を呼び出すと、Agentは `tool-call-suspended` イベントを発行します。ホストは計画ファイルを読み取ってユーザーに提示し、その後、承認または拒否の結果とともに実行を再開します。
+
+Agentの実行外（`suspend` が利用できない場合）で実行すると、Toolはファイルパスを含む読みやすいフォールバック文字列を返します。
+
+## 使用例
+
+AgentのToolセットに `submitPlanTool` を追加します。
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { submitPlanTool } from '@mastra/core/tools'
+
+const agent = new Agent({
+  id: 'planner',
+  name: 'Planner',
+  instructions: 'Write a plan to a file before starting work, then submit it for approval.',
+  model,
+  tools: { submitPlanTool },
+})
+```
+
+一時停止を処理して再開します。
+
+```typescript title="src/run.ts"
+import fs from 'node:fs'
+
+const stream = await agent.stream('Refactor the auth module')
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'tool-call-suspended' && chunk.payload.toolName === 'submit_plan') {
+    const { path } = chunk.payload.suspendPayload
+    const plan = fs.readFileSync(path, 'utf-8')
+    console.log(plan)
+
+    // Approve:
+    const resumed = await agent.resumeStream({ action: 'approved' }, { runId: stream.runId })
+    for await (const c of resumed.textStream) process.stdout.write(c)
+  }
+}
+```
+
+フィードバックを付けて拒否するには、次のようにします。
+
+```typescript
+await agent.resumeStream(
+  { action: 'rejected', feedback: 'Add error handling steps' },
+  { runId: stream.runId },
+)
+```
+
+## 入力スキーマ
+
+モデルは次のパラメーターでこのToolを呼び出します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'path',
+    type: 'string',
+    description: "ディスク上にある計画のMarkdownファイルへのパス（例: '.mastracode/plans/add-dark-mode.md'）。",
+    isOptional: false,
+  },
+]}/>
+
+## 一時停止ペイロード
+
+`tool-call-suspended` イベントには `suspendPayload` が含まれます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'path',
+    type: 'string',
+    description: 'Agentが書き込んだ計画ファイルへのパス。',
+  },
+  {
+    name: 'title',
+    type: 'string',
+    description: 'ファイルの読み取り後にホストが設定する計画のタイトル。',
+    isOptional: true,
+  },
+  {
+    name: 'plan',
+    type: 'string',
+    description: 'ファイルの読み取り後にホストが設定する計画の本文。',
+    isOptional: true,
+  },
+]}/>
+
+## 再開データ
+
+`agent.resumeStream()` にオブジェクトを渡します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'action',
+    type: "'approved' | 'rejected'",
+    description: 'ユーザーが計画を承認したか、拒否したか。',
+    isOptional: false,
+  },
+  {
+    name: 'feedback',
+    type: 'string',
+    description:
+      '計画が拒否された場合の修正指示。モデルに提示され、計画を修正して再提出できるようにします。',
+    isOptional: true,
+  },
+  {
+    name: 'path',
+    type: 'string',
+    description: '履歴の再生用に返される計画ファイルのパス。',
+    isOptional: true,
+  },
+  {
+    name: 'title',
+    type: 'string',
+    description: '履歴の再生用に返される計画のタイトル。',
+    isOptional: true,
+  },
+  {
+    name: 'plan',
+    type: 'string',
+    description: '履歴の再生用に返される計画の本文。',
+    isOptional: true,
+  },
+]}/>
+
+## 承認時の動作
+
+- **承認:** Toolはモデルに `"Plan approved. Proceed with implementation following the approved plan."` を返します。
+- **フィードバック付きで拒否:** Toolはフィードバックを返し、計画を修正して再提出するようモデルに求めます。
+- **フィードバックなしで拒否:** Toolは、計画を修正する前にユーザーの次のメッセージを待つようモデルに伝えます。
+
+[AgentController](/docs/harness/agent-controller)内で使用する場合、計画が承認されると、現在のモードから `transitionsTo` で設定されたモードへ切り替わります。`transitionsTo` が設定されていない場合、Controllerは解決済みのデフォルトモードへ切り替わります。詳細については、[モード](/docs/harness/agent-controller#switch-modes-and-models)を参照してください。

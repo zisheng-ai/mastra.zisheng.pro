@@ -1,0 +1,133 @@
+---
+title: "AI SDK | Agent Frameworks"
+description: "Mastra の Processor と Memory を Vercel AI SDK で使用する"
+packages:
+  - "@mastra/ai-sdk"
+  - "@mastra/core"
+  - "@mastra/libsql"
+---
+
+# AI SDK
+
+[Vercel AI SDK](https://sdk.vercel.ai) を直接使用していて、Mastra の完全な Agent API に切り替えることなく [Processor](/docs/agents/processors) や [Memory](/docs/memory/memory-processors) などの機能を追加したい場合は、[`withMastra()`](/reference/ai-sdk/with-mastra) を使って任意の AI SDK モデルをこれらの機能でラップできます。既存の AI SDK コードを維持したまま、入出力処理、会話の永続化、コンテンツフィルタリングを追加する場合に便利です。
+
+:::tip
+
+Mastra を AI SDK UI（`useChat()` など）と組み合わせて使用する場合は、[AI SDK UI ガイド](/guides/build-your-ui/ai-sdk-ui)を参照してください。
+
+:::
+
+## インストール
+
+`withMastra()` 関数を使用するには、`@mastra/ai-sdk` をインストールします。
+
+```bash npm2yarn
+npm install @mastra/ai-sdk@latest
+```
+
+## 例
+
+### Processor を使用する
+
+Processor を使用すると、モデルに送信する前（`processInput`）とレスポンスを受信した後（`processOutputResult`）にメッセージを変換できます。この例では、各段階のメッセージ数を記録するログ Processor を作成し、OpenAI モデルをラップします。
+
+```typescript title="src/example.ts"
+import { openai } from '@ai-sdk/openai'
+import { generateText } from 'ai'
+import { withMastra } from '@mastra/ai-sdk'
+import type { Processor } from '@mastra/core/processors'
+
+const loggingProcessor: Processor<'logger'> = {
+  id: 'logger',
+  async processInput({ messages }) {
+    console.log('Input:', messages.length, 'messages')
+    return messages
+  },
+  async processOutputResult({ messages }) {
+    console.log('Output:', messages.length, 'messages')
+    return messages
+  },
+}
+
+const model = withMastra(openai('gpt-5.4'), {
+  inputProcessors: [loggingProcessor],
+  outputProcessors: [loggingProcessor],
+})
+
+const { text } = await generateText({
+  model,
+  prompt: 'What is 2 + 2?',
+})
+```
+
+### Memory を使用する
+
+Memory は、LLM の呼び出し前にストレージから過去のメッセージを自動的に読み込み、呼び出し後に新しいメッセージを保存します。この例では、会話履歴を永続化するために libSQL ストレージバックエンドを設定し、コンテキストとして直近 10 件のメッセージを読み込みます。
+
+```typescript title="src/memory-example.ts"
+import { openai } from '@ai-sdk/openai'
+import { generateText } from 'ai'
+import { withMastra } from '@mastra/ai-sdk'
+import { LibSQLStore } from '@mastra/libsql'
+
+const storage = new LibSQLStore({
+  id: 'my-app',
+  url: 'file:./data.db',
+})
+await storage.init()
+
+const memoryStorage = await storage.getStore('memory')
+
+const model = withMastra(openai('gpt-5.4'), {
+  memory: {
+    storage: memoryStorage!,
+    threadId: 'user-thread-123',
+    resourceId: 'user-123',
+    lastMessages: 10,
+  },
+})
+
+const { text } = await generateText({
+  model,
+  prompt: 'What did we talk about earlier?',
+})
+```
+
+### Processor と Memory を使用する
+
+Processor と Memory は併用できます。入力 Processor は Memory が過去のメッセージを読み込んだ後に実行され、出力 Processor は Memory がレスポンスを保存する前に実行されます。
+
+```typescript title="src/combined-example.ts"
+import { openai } from '@ai-sdk/openai'
+import { generateText } from 'ai'
+import { withMastra } from '@mastra/ai-sdk'
+import { LibSQLStore } from '@mastra/libsql'
+
+const storage = new LibSQLStore({ id: 'my-app', url: 'file:./data.db' })
+await storage.init()
+
+const memoryStorage = await storage.getStore('memory')
+
+const model = withMastra(openai('gpt-5.4'), {
+  inputProcessors: [myGuardProcessor],
+  outputProcessors: [myLoggingProcessor],
+  memory: {
+    storage: memoryStorage!,
+    threadId: 'thread-123',
+    resourceId: 'user-123',
+    lastMessages: 10,
+  },
+})
+
+const { text } = await generateText({
+  model,
+  prompt: 'Hello!',
+})
+```
+
+## 関連項目
+
+- [`withMastra()`](/reference/ai-sdk/with-mastra)：`withMastra()` の API リファレンス
+- [Processor](/docs/agents/processors)：入力 Processor と出力 Processor について
+- [Memory](/docs/memory/overview)：Mastra の Memory システムの概要
+- [AI SDK UI](/guides/build-your-ui/ai-sdk-ui)：Mastra の Agent、Workflow、Network で AI SDK UI フックを使用する方法

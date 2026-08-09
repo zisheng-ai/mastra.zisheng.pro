@@ -1,0 +1,307 @@
+---
+title: "Memory | v1 移行ガイド"
+description: "v1 へのアップグレード時に Memory 関連の変更を移行する方法を説明します。"
+---
+
+# Memory
+
+Memory 設定で明示的なパラメーターが必須になり、パフォーマンスと予測可能性を高めるためデフォルト設定が更新されました。
+
+## 変更
+
+### Semantic Recall と直近メッセージのデフォルト設定
+
+使用パターンに基づき、デフォルト設定がより適切な値に変更されました。`lastMessages` のデフォルトは 40 から 10 に減り、`semanticRecall` と Thread タイトル生成はデフォルトで無効になりました。これらの変更により、パフォーマンスが向上し、意図しない LLM API 呼び出しが減少します。
+
+以前のデフォルトに依存していた場合は、これらの設定を明示的に指定してください。
+
+```diff
+  const memory = new Memory({
+    storage,
+    vector,
+    embedder,
++   options: {
++     lastMessages: 40, // Was default before
++     semanticRecall: {
++       topK: 2,
++       messageRange: 2,
++       scope: 'thread',
++     }, // Was enabled by default before
++     generateTitle: true, // Was enabled by default before
++   },
+  });
+```
+
+### デフォルトの Memory スコープを `thread` から `resource` へ変更
+
+Working Memory と Semantic Recall のデフォルトスコープが、`'thread'` から `'resource'` に変更されました。この変更は、会話をまたいでユーザー情報を記憶する一般的なユースケースに合わせたものです。Semantic Recall を有効にすると、現在の Thread だけでなく、ユーザーのすべての会話がデフォルトの検索対象になります。
+
+Memory を会話 Thread ごとに分離する以前の動作を維持するには、`scope: 'thread'` を明示的に設定してください。
+
+```diff
+  const memory = new Memory({
+    storage,
+    vector,
+    embedder,
+    options: {
+      workingMemory: {
+        enabled: true,
++       scope: 'thread', // Explicitly set to thread-scoped
+        template: `# User Profile...`,
+      },
+      semanticRecall: {
+        topK: 3,
++       scope: 'thread', // Explicitly set to thread-scoped
+      },
+    },
+  });
+```
+
+### Thread タイトル生成の設定場所
+
+`generateTitle` オプションが `threads.generateTitle` から Memory オプションのトップレベルに移動しました。この変更では、オプションを論理的に適切な位置へ移して API を簡素化しています。
+
+移行するには、`generateTitle` を `threads` 設定から options のトップレベルへ移動します。
+
+```diff
+  const memory = new Memory({
+    storage,
+    vector,
+    embedder,
+    options: {
+-     threads: {
+-       generateTitle: true,
+-     },
++     generateTitle: true,
+    },
+  });
+```
+
+### Semantic Recall のデフォルト設定を最適化
+
+RAG の研究に基づき、Semantic Recall のデフォルト設定が最適化されました。`topK` は 2 から 4 に増え、`messageRange` は `{ before: 2, after: 2 }` から `{ before: 1, after: 1 }` に変更されました。これらの変更により、メッセージ数をわずかに増やすだけで精度が向上します。
+
+以前のデフォルトに依存していた場合は、これらの値を明示的に設定してください。
+
+```diff
+  const memory = new Memory({
+    storage,
+    vector,
+    embedder,
+    options: {
+      semanticRecall: {
++       topK: 2, // Was default before
++       messageRange: { before: 2, after: 2 }, // Was default before
+      },
+    },
+  });
+```
+
+### `memory.readOnly` を `memory.options.readOnly` へ移動
+
+`readOnly` プロパティが Memory オプションのトップレベルから `options` 内へ移動しました。この変更により、`readOnly` が `lastMessages` や `semanticRecall` などの他の Memory 設定オプションと同じ場所になります。
+
+移行するには、`readOnly` をトップレベルから `options` 内へ移動します。
+
+```diff
+  agent.stream('Hello', {
+    memory: {
+      thread: threadId,
+      resource: resourceId,
+-     readOnly: true,
++     options: {
++       readOnly: true,
++     },
+    },
+  });
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/memory-readonly-to-options .
+```
+
+:::
+
+### `Memory.query()` を `Memory.recall()` へ改名
+
+`Memory.query()` メソッドは `Memory.recall()` に改名されました。新しいメソッドは、複数の形式ではなく `{ messages: MastraDBMessage[] }` という単純な形式を返します。この変更により、Memory からメッセージを取得する処理が名前から分かりやすくなり、API も簡素化されます。
+
+移行するには、`query()` を `recall()` に改名し、以前の戻り値形式を前提とするコードを更新します。
+
+```diff
+- const result = await memory.query({ threadId: 'thread-123' });
++ const result = await memory.recall({ threadId: 'thread-123' });
+- // result: { messages: CoreMessage[], uiMessages: UIMessageWithMetadata[], messagesV2: MastraMessageV2[] }
++ // result: { messages: MastraDBMessage[] }
++ const messages = result.messages;
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/memory-query-to-recall .
+```
+
+:::
+
+### `Memory.recall()` のパラメーター変更
+
+`Memory.recall()` メソッドは、ページネーションを含む `StorageListMessagesInput` 形式を使用するようになり、`vectorMessageSearch` パラメーターは `vectorSearchString` に改名されました。これらの変更により、Memory API と Storage のページネーション API が一致し、命名の一貫性も高まります。
+
+移行するには、メソッド名、クエリパラメーター、Vector 検索パラメーターを更新します。
+
+```diff
+- memory.query({
++ memory.recall({
+    threadId: 'thread-123',
+-   vectorMessageSearch: 'What did we discuss?',
+-   selectBy: { ... },
++   vectorSearchString: 'What did we discuss?',
++   page: 0,
++   perPage: 20,
++   orderBy: 'createdAt',
++   filter: { ... },
++   threadConfig: { semanticRecall: true },
+  });
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/memory-vector-search-param .
+```
+
+:::
+
+### `MastraMessageV2` 型を `MastraDBMessage` へ改名
+
+分かりやすくするため、`MastraMessageV2` 型は `MastraDBMessage` に改名されました。新しい名前は、この型がデータベースメッセージ形式であることをより適切に表します。
+
+移行するには、`MastraMessageV2` をすべて `MastraDBMessage` に置き換えます。
+
+```diff
+- import { MastraMessageV2 } from '@mastra/core';
+- function yourCustomFunction(input: MastraMessageV2) {}
++ import { MastraDBMessage } from '@mastra/core';
++ function yourCustomFunction(input: MastraDBMessage) {}
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/memory-message-v2-type .
+```
+
+:::
+
+## 削除
+
+### Working Memory の `text-stream` モード
+
+Working Memory の `use: "text-stream"` オプションが削除されました。`tool-call` モードのみがサポートされます。この変更では、信頼性の低い Streaming モードを削除して Working Memory API を簡素化しています。
+
+移行するには、`use: "text-stream"` オプションを削除します。Working Memory はデフォルトで Tool Call モードを使用します。
+
+```diff
+  const memory = new Memory({
+    storage,
+    vector,
+    embedder,
+    options: {
+      workingMemory: {
+        enabled: true,
+-       use: 'text-stream',
+        template: '...',
+      },
+    },
+  });
+```
+
+### `Memory.rememberMessages()` メソッド
+
+`Memory.rememberMessages()` メソッドが削除されました。このメソッドは `query()`（現在の `recall()`）と同じ機能を実行していたため、1 つのメソッドに統合して API を簡素化しています。
+
+移行するには、`rememberMessages()` の呼び出しを `recall()` に置き換えます。
+
+```diff
+- const { messages } = await memory.rememberMessages({
++ const { messages } = await memory.recall({
+    threadId,
+    resourceId,
+  });
+```
+
+### Memory メソッドの `format` パラメーター
+
+すべての Memory get メソッドから `format` パラメーターが削除されました。`MastraDBMessage` がすべての場所でデフォルトの戻り値形式になりました。AI SDK 形式への変換は、`@mastra/ai-sdk/ui` の専用ユーティリティ関数へ移動しました。この変更では UI 固有の変換コードを別パッケージへ移し、Tree Shaking を改善しています。
+
+移行するには、`format` パラメーターを削除し、AI SDK 形式には変換関数を使用します。
+
+```diff
+- const messages = await memory.getMessages({ threadId, format: 'v2' });
+- const uiMessages = await memory.getMessages({ threadId, format: 'ui' });
+
++ const result = await memory.recall({ threadId });
++ const messages = result.messages; // Always MastraDBMessage[]
++ 
++ // Use conversion functions for AI SDK formats
++ import { toAISdkV5Messages } from '@mastra/ai-sdk/ui';
++ const uiMessages = toAISdkV5Messages(messages);
+```
+
+### `MastraMessageV3` 型
+
+`MastraMessageV3` 型と関連する変換メソッドが削除されました。メッセージは、`MastraMessageV2`（現在の `MastraDBMessage`）と AI SDK v5 形式の間で直接変換されるようになりました。この変更では中間形式を削除し、アーキテクチャを簡素化しています。
+
+移行するには、Storage では `MastraDBMessage`、または AI SDK v5 のメッセージ形式を直接使用します。
+
+```diff
+- import type { MastraMessageV3 } from '@mastra/core/agent';
+- const v3Messages = messageList.get.all.v3();
+
++ // For storage
++ const v2Messages = messageList.get.all.v2();
++ 
++ // For AI SDK v5
++ const uiMessages = messageList.get.all.aiV5.ui();
++ const modelMessages = messageList.get.all.aiV5.model();
+```
+
+### Memory コンストラクターの `processors` 設定
+
+Memory コンストラクターの `processors` 設定オプションはサポートされなくなり、指定するとエラーがスローされます。Processor は Agent レベルで設定し、その動作範囲を Agent の実行に限定してください。
+
+移行するには、`inputProcessors` と `outputProcessors` の一方または両方を使用し、Processor 設定を Memory から Agent へ移動します。
+
+```diff
++ import { TokenLimiter } from '@mastra/core/processors';
++
+  const memory = new Memory({
+    storage,
+    vector,
+    embedder,
+-   processors: [/* ... */],
+  });
+
+  const agent = new Agent({
+    id: 'agent',
+    memory,
++   inputProcessors: [
++     new TokenLimiter({ limit: 4000 }), // Limits historical messages to fit context window
++   ],
+  });
+```
+
+さらに、`@mastra/memory/processors` の import パスが削除されました。代わりに `@mastra/core/processors` から Processor を import してください。詳しくは、[Processor 移行ガイド](/guides/migrations/upgrade-to-v1/processors#memory-processor-exports-moved-to-core)を参照してください。
+
+Agent での Processor の使用方法については、[Processor ドキュメント](/docs/agents/processors)を参照してください。Memory を含む完全な例については、[TokenLimiter リファレンス](/reference/processors/token-limiter-processor#extended-usage-example)を参照してください。

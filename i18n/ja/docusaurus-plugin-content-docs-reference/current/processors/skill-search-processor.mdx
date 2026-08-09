@@ -1,0 +1,182 @@
+---
+title: "リファレンス: SkillSearchProcessor | Processors"
+description: "多数の Skill を持つ Agent が必要に応じて Skill を検出し、読み込めるようにする Mastra の SkillSearchProcessor のドキュメント。"
+packages:
+  - "@mastra/core"
+---
+
+# SkillSearchProcessor
+
+`SkillSearchProcessor` は、必要に応じた Skill の検出と読み込みを可能にする **input processor** です。すべての Skill メタデータを事前に system prompt へ注入する代わりに（`SkillsProcessor` の場合）、2つのメタ Tool（`search_skills` と `load_skill`）を Agent に提供し、必要な Skill を検索して読み込めるようにします。これにより、多数の Skill を持つ Workspace でコンテキストトークンの使用量を削減できます。
+
+デフォルトでは、Skill が有効な `Workspace` を持つ Agent に `SkillSearchProcessor` だけを追加すると、Agent は Skill をオンデマンドで扱います。
+
+- デフォルトの先行読み込み型 `SkillsProcessor` は自動追加されません。
+- 検出と指示の読み込みに `search_skills` と `load_skill` が公開されます。
+- 重複する `skill` Tool と `skill_search` Tool は非表示になります。
+- `skill_read` は引き続き利用できるため、references、scripts、assets など、Skill を補助するファイルを Agent が読み取れます。
+
+`SkillsProcessor` と `SkillSearchProcessor` を明示的に併用すると、Agent は明示的に選択できる手段として先行読み込み型の `skill` Tool と `skill_search` Tool を維持します。
+
+## 使用例
+
+```typescript
+import { SkillSearchProcessor } from '@mastra/core/processors'
+
+const skillSearch = new SkillSearchProcessor({
+  workspace,
+  search: {
+    topK: 5,
+    minScore: 0.1,
+  },
+})
+```
+
+## コンストラクターパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'SkillSearchProcessorOptions',
+    description: 'Skill 検索 processor の設定オプション',
+    isOptional: false,
+    properties: [
+      {
+        type: 'SkillSearchProcessorOptions',
+        parameters: [
+          {
+            name: 'workspace',
+            type: 'Workspace',
+            description: 'Skill を含む Workspace インスタンス。Skill には workspace.skills 経由でアクセスします。',
+            isOptional: false,
+          },
+          {
+            name: 'search',
+            type: '{ topK?: number; minScore?: number }',
+            description: '検索動作の設定。',
+            isOptional: true,
+          },
+          {
+            name: 'search.topK',
+            type: 'number',
+            description: '検索結果として返す Skill の最大数。',
+            isOptional: true,
+            default: '5',
+          },
+          {
+            name: 'search.minScore',
+            type: 'number',
+            description: 'Skill を検索結果に含めるための最小関連度スコア。',
+            isOptional: true,
+            default: '0',
+          },
+          {
+            name: 'ttl',
+            type: 'number',
+            description:
+              'thread の状態を保持する時間（ミリ秒）。この期間操作がないと、thread の状態がクリーンアップされます。クリーンアップを無効にするには 0 を設定します。',
+            isOptional: true,
+            default: '3600000',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "'skill-search' に設定された processor の識別子",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: "'Skill Search Processor' に設定された processor の表示名",
+    isOptional: false,
+  },
+  {
+    name: 'providesSkillDiscovery',
+    type: "'on-demand'",
+    description: 'この processor が Skill の検出と指示の読み込みを担うことを Agent に通知します。',
+    isOptional: false,
+  },
+  {
+    name: 'processInputStep',
+    type: '(args: ProcessInputStepArgs) => Promise<ProcessInputStepResult>',
+    description:
+      '各ステップを処理し、検索・読み込み用のメタ Tool と、以前に読み込んだ Skill の指示を system メッセージとして注入します。',
+    isOptional: false,
+  },
+]}
+/>
+
+## 詳細な使用例
+
+```typescript title="src/mastra/agents/skill-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { SkillSearchProcessor } from '@mastra/core/processors'
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './project' }),
+  skills: ['skills'],
+  bm25: true,
+})
+
+const skillSearch = new SkillSearchProcessor({
+  workspace,
+  search: {
+    topK: 5,
+    minScore: 0.1,
+  },
+})
+
+const agent = new Agent({
+  id: 'skill-agent',
+  name: 'skill-agent',
+  instructions:
+    'You are a helpful assistant. Use search_skills to find relevant skills, then load_skill to load their instructions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  workspace,
+  inputProcessors: [skillSearch],
+})
+```
+
+Agent のワークフローは次のとおりです。
+
+1. Agent がユーザーメッセージを受信する
+1. Agent がキーワード（例: "api design"）を指定して `search_skills` を呼び出す
+1. Agent が結果を確認し、Skill 名を指定して `load_skill` を呼び出す
+1. 次のターンで Skill の指示が system メッセージとして表示される
+1. Agent が読み込んだ Skill の指示に従う
+
+## Workspace のファイル Tool
+
+`SkillSearchProcessor` は Skill の指示を会話に読み込みます。Workspace のファイル Tool によるファイルの読み取りを妨げることはありません。
+
+`references/`、`scripts/`、`assets/` 配下のファイルなど、読み込んだ Skill を補助するファイルには `skill_read` を使用します。
+
+`mastra_workspace_read_file` などの Workspace ファイル Tool は、明示的にファイルを調査または編集するワークフローに使用します。通常のタスク実行中は、`load_skill` が成功したあとに同じ `SKILL.md` ファイルを読み直す必要はありません。
+
+## SkillsProcessor との比較
+
+| | SkillsProcessor | SkillSearchProcessor |
+| - | - | - |
+| スケーリング | すべての Skill を事前に注入 | オンデマンドで検出 |
+| コンテキスト使用量 | Skill 数に応じて増加 | 一定（読み込んだ Skill のみ） |
+| Agent のワークフロー | Skill が常に表示される | Agent が必要に応じて検索し、読み込む |
+| 適した用途 | 少数の Skill（\< 10） | 多数の Skill（10以上） |
+
+## 関連情報
+
+- [ToolSearchProcessor](/reference/processors/tool-search-processor)
+- [Processors](/docs/agents/processors)
+- [Workspace Skills](/docs/workspace/overview)

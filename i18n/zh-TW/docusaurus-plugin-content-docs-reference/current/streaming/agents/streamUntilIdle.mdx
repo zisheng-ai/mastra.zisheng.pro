@@ -1,0 +1,165 @@
+---
+title: "參考：Agent.streamUntilIdle()｜串流"
+description: "Agent.streamUntilIdle() 的 API 參考資料；此方法會讓 Agent 串流保持開啟，直到所有已派送的背景任務完成。"
+packages:
+  - "@mastra/core"
+---
+
+# Agent.streamUntilIdle()
+
+**新增於：** `@mastra/core@1.29.0`
+
+:::warning[已棄用]
+
+`streamUntilIdle()` 已棄用。請改用搭配 `untilIdle` 選項的 `stream()`：
+
+```ts
+const result = await agent.stream('Research solana for me', {
+  untilIdle: true,
+  memory: { thread: 't1', resource: 'u1' },
+})
+```
+
+傳入 `untilIdle: { maxIdleMs: 60_000 }` 可設定閒置逾時。
+
+:::
+
+`streamUntilIdle()` 會串流 Agent 的回應，並持續保持串流開啟，直到執行期間派送的每個背景任務都完成。任務完成時，其結果會寫入 memory，agentic 迴圈也會自動再次進入，讓 LLM 能對結果做出反應。沒有任務正在執行，且沒有完成事件排入佇列後，串流便會關閉。
+
+當 Agent 派送背景任務（通常是長時間執行的 Tool 或 subagent），而你希望單一串流涵蓋初始回應，**加上**每次任務完成所觸發的所有接續回合時，請使用此方法。若執行只包含前景任務，或你偏好手動管理接續回合（手動提示 Agent 處理結果），請使用 [`Agent.stream()`](./stream)。
+
+## 使用範例
+
+```ts
+const stream = await agent.streamUntilIdle('Research solana for me', {
+  memory: { thread: 't1', resource: 'u1' },
+})
+
+for await (const chunk of stream.fullStream) {
+  // chunks from the initial turn AND any continuation turns triggered by
+  // background task completions flow through here
+}
+```
+
+:::info
+
+`streamUntilIdle()` 同時需要 [`BackgroundTaskManager`](/reference/configuration#backgroundtasks) 與 [memory](/docs/memory/overview) 後端。缺少任一項時，會改用一般的 `agent.stream()` 呼叫。
+
+:::
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'messages',
+    type: 'string | string[] | CoreMessage[] | AiMessageType[] | UIMessageWithMetadata[]',
+    description:
+      '要傳送給 Agent 的訊息。可以是單一字串、字串陣列或結構化訊息物件。',
+  },
+  {
+    name: 'options',
+    type: 'AgentExecutionOptions<Output> & { maxIdleMs?: number }',
+    isOptional: true,
+    description:
+      '接受 Agent.stream() 的所有選項，另加 maxIdleMs。完整清單請參閱 Agent.stream() 參考資料。',
+    properties: [
+      {
+        parameters: [
+          {
+            name: 'maxIdleMs',
+            type: 'number',
+            isOptional: true,
+            defaultValue: '300000',
+            description:
+              '回合之間閒置達指定毫秒數後關閉外層串流。計時器只會在 wrapper 位於回合之間時執行，因此第一個 token 較慢也不會關閉串流。預設：5 分鐘。',
+          },
+          {
+            name: 'memory',
+            type: '{ thread?: string | { id: string }; resource?: string }',
+            isOptional: true,
+            description:
+              '此次執行使用的 memory thread 與 resource。接續回合必須有這些設定，才能將背景任務結果寫回對話。',
+          },
+          {
+            name: 'structuredOutput',
+            type: 'PublicStructuredOutputOptions<Output>',
+            isOptional: true,
+            description:
+              '以 schema 為基礎的結構化輸出。其結構與 Agent.stream() 相同。請注意，彙總屬性只會依第一個回合解析。',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+其他所有選項（`maxSteps`、`modelSettings`、`toolChoice`、`outputProcessors`、`onFinish`、`onChunk` 等）請參閱 [`Agent.stream()` 參數](./stream#parameters)。`streamUntilIdle()` 會將這些選項轉送至初始回合。
+
+## 回傳值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'stream',
+    type: 'MastraModelOutput<Output>',
+    description:
+      '此 MastraModelOutput 的 fullStream 涵蓋初始回合與每個自動接續回合。彙總屬性（text、toolCalls、toolResults、finishReason、messageList、getFullOutput()）只會依第一個回合解析。',
+  },
+]}
+/>
+
+### 彙總屬性的注意事項
+
+`streamUntilIdle()` 會回傳第一個回合之 `MastraModelOutput` 的 proxy。只有 `fullStream` 會替換為涵蓋每個接續回合的合併串流。其他所有屬性（`text`、`toolCalls`、`toolResults`、`finishReason`、`messageList` 與 `getFullOutput()`）都會依**第一個回合**的內部緩衝區解析。
+
+若需要涵蓋所有接續回合的彙總檢視，請自行取用 `fullStream` 並累積結果。
+
+## 接續行為
+
+`streamUntilIdle()` 內部會：
+
+1. 透過 `agent.stream(...)` 執行初始回合，並將其 `fullStream` 導入外層串流。
+1. 訂閱已解析 memory 範圍中的背景任務完成事件。
+1. 將每個終止事件（`background-task-completed`、`background-task-failed`、`background-task-cancelled`）排入佇列；當外層 wrapper 在回合之間閒置時，使用列出已完成 `toolCallId` 的指示重新叫用 `agent.stream([], ...)`。接續回合會流入同一個外層串流。
+1. 沒有任務正在執行，且沒有完成事件排入佇列後，關閉外層串流。
+
+## 進階使用範例
+
+### 限制回合之間的閒置時間
+
+```ts title="index.ts"
+const stream = await agent.streamUntilIdle('Kick off the long jobs', {
+  memory: { thread: 't1', resource: 'u1' },
+  maxIdleMs: 60_000, // close the stream after 1 minute of idleness between turns
+})
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'background-task-completed') {
+    console.log('Task complete:', chunk.payload.taskId)
+  }
+}
+```
+
+### 彙總所有接續回合的文字
+
+```ts title="index.ts"
+const stream = await agent.streamUntilIdle('Research and summarize', {
+  memory: { thread: 't1', resource: 'u1' },
+})
+
+let fullText = ''
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'text-delta') {
+    fullText += chunk.payload.text
+  }
+}
+```
+
+## 相關內容
+
+- [背景任務](/docs/long-running-agents/background-tasks)
+- [`Agent.stream()` 參考資料](./stream)
+- [backgroundTasks 設定參考資料](/reference/configuration#backgroundtasks)
+- [串流 chunk 類型](/reference/streaming/ChunkType)

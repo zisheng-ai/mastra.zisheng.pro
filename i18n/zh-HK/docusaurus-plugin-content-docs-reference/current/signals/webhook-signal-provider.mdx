@@ -1,0 +1,207 @@
+---
+title: "參考：WebhookSignalProvider | Signals"
+description: "WebhookSignalProvider 的 API 參考；此推送式 signal Provider 會將傳入的 webhook payload 路由至已訂閱的 Agent thread。"
+packages:
+  - "@mastra/core"
+---
+
+# WebhookSignalProvider
+
+**新增於：** `@mastra/core@1.39.0`
+
+用於推送式事件傳送的具體 signal Provider。它會使用可配置的資源 ID 擷取器配對 payload，將傳入的 webhook payload 路由至已訂閱的 Agent thread。
+
+擴充 [`SignalProvider`](/reference/signals/signal-provider)，並提供公開的訂閱管理功能及內置的 `handleWebhook()` 實作。
+
+## 使用範例
+
+將 GitHub webhook 事件路由至已訂閱的 thread：
+
+```typescript title="src/signals/webhook.ts"
+import { WebhookSignalProvider } from '@mastra/core/signals'
+
+const webhookProvider = new WebhookSignalProvider({
+  extractResourceId: payload => `${payload.repository?.full_name}`,
+  buildNotification: (payload, subscription) => ({
+    source: 'github-webhook',
+    kind: payload.action ?? 'event',
+    summary: `${payload.action} on ${subscription.externalResourceId}`,
+    payload,
+  }),
+})
+```
+
+向 Agent 註冊並訂閱 thread：
+
+```typescript title="src/mastra/index.ts"
+import { Agent } from '@mastra/core/agent'
+
+const agent = new Agent({
+  id: 'agent',
+  signals: [webhookProvider],
+})
+
+// subscribe a thread to a specific repo
+webhookProvider.subscribeThread({ threadId: 'thread-1', resourceId: 'user-1' }, 'mastra-ai/mastra')
+
+// handle an incoming webhook
+const result = await webhookProvider.handleWebhook({
+  body: { repository: { full_name: 'mastra-ai/mastra' }, action: 'push' },
+  headers: {},
+})
+// result.matched === 1
+```
+
+## 建構函數參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'Provider 實例的唯一識別碼。',
+    isOptional: true,
+    defaultValue: "'webhook-signals'",
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: '便於閱讀的名稱。',
+    isOptional: true,
+    defaultValue: "'Webhook Signals'",
+  },
+  {
+    name: 'extractResourceId',
+    type: '(payload: unknown) => string | string[] | undefined',
+    description:
+      '從 webhook payload 擷取外部資源 ID。傳回 `undefined` 可略過該事件。可傳回陣列以配對多個資源。',
+    isOptional: true,
+    defaultValue: '如存在，傳回 `payload.resource` 或 `payload.externalResourceId`',
+  },
+  {
+    name: 'buildNotification',
+    type: '(payload: unknown, subscription: SignalSubscription) => SendNotificationSignalInput',
+    description: '根據 webhook payload 和相符的訂閱建立通知物件。',
+    isOptional: true,
+    defaultValue: "傳回 `{ source: id, kind: 'webhook-event', summary, payload }`",
+  },
+]}
+/>
+
+## 方法
+
+### 訂閱管理
+
+#### `subscribeThread(target, externalResourceId, metadata?)`
+
+訂閱 thread，以接收特定外部資源的 webhook 事件。
+
+```typescript prettier:false
+webhookProvider.subscribeThread(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'mastra-ai/mastra',
+  { watchType: 'push' },
+)
+```
+
+傳回：`SignalSubscription`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'target',
+    type: 'SignalProviderTarget',
+    description: '要訂閱的 thread。必須包含 `threadId` 和 `resourceId`。',
+  },
+  {
+    name: 'externalResourceId',
+    type: 'string',
+    description: '要監察的外部資源（例如完整的 repository 名稱）。',
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown>',
+    description: '與訂閱一併儲存的額外資料。',
+    isOptional: true,
+  },
+]}
+/>
+
+#### `unsubscribeThread(target, externalResourceId)`
+
+取消 thread 對特定外部資源的訂閱。
+
+```typescript prettier:false
+const removed = webhookProvider.unsubscribeThread(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'mastra-ai/mastra',
+)
+```
+
+傳回：`boolean`
+
+### Webhook 處理
+
+#### `handleWebhook(request)`
+
+處理傳入的 webhook request。此方法會從 payload 擷取資源 ID、找出相符的訂閱、為每個訂閱建立通知，然後呼叫 `notify()`。
+
+```typescript prettier:false
+const result = await webhookProvider.handleWebhook({
+  body: { repository: { full_name: 'mastra-ai/mastra' }, action: 'push' },
+  headers: { 'x-github-event': 'push' },
+})
+```
+
+傳回：`Promise<{ status: number; body: { matched: number } }>`
+
+傳回 `{ status: 200, body: { matched: N } }`，其中 `N` 是收到通知的訂閱數目。如無法擷取資源 ID 或沒有相符的訂閱，則傳回 `matched: 0`。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'request',
+    type: 'object',
+    description: '傳入的 webhook request。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'body',
+            type: 'unknown',
+            description: '已解析的 webhook payload。',
+          },
+          {
+            name: 'headers',
+            type: 'Record<string, string>',
+            description: 'Webhook request 的 HTTP header。',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+### 靜態 signal factory
+
+#### `WebhookSignalProvider.signals.subscribe(externalResourceId)`
+
+建立 reactive signal 輸入，讓目前 thread 訂閱外部資源。
+
+```typescript prettier:false
+const signal = WebhookSignalProvider.signals.subscribe('mastra-ai/mastra')
+```
+
+傳回：`{ type: 'reactive'; tagName: string; contents: string; attributes: { resource: string } }`
+
+#### `WebhookSignalProvider.signals.unsubscribe(externalResourceId)`
+
+建立 reactive signal 輸入，讓目前 thread 取消訂閱外部資源。
+
+```typescript prettier:false
+const signal = WebhookSignalProvider.signals.unsubscribe('mastra-ai/mastra')
+```
+
+傳回：`{ type: 'reactive'; tagName: string; contents: string; attributes: { resource: string } }`

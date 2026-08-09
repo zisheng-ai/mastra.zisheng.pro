@@ -1,0 +1,170 @@
+---
+title: "NestJS | フレームワーク"
+description: "Mastra と NestJS を使い始める"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# NestJS プロジェクトに Mastra を統合する
+
+このガイドでは、Mastra と NestJS を使用して Tool を呼び出す AI Agent を構築します。[NestJS サーバーアダプター](/reference/server/nestjs-adapter)は、Mastra の Agent と Workflow のルートを NestJS モジュールとして登録するため、既存の NestJS アプリケーション内で実行できます。
+
+## 始める前に
+
+- サポートされている[モデル Provider](/models) の API キーが必要です。特に希望がなければ、[OpenAI](/models/providers/openai) を使用してください。
+- Node.js `v22.13.0` 以降をインストールしてください
+- NestJS の Express プラットフォーム（`@nestjs/platform-express`）を使用してください
+
+## 新しい NestJS アプリを作成する（任意）
+
+NestJS アプリがすでにある場合は、次の手順に進んでください。
+
+次のコマンドを実行して、新しい NestJS アプリを作成します。
+
+```bash npm2yarn
+npx @nestjs/cli new mastra-nest
+```
+
+これにより `mastra-nest` というプロジェクトが作成されますが、任意の名前に置き換えられます。
+
+## Mastra を初期化する
+
+NestJS プロジェクトのディレクトリに移動します。
+
+```bash
+cd mastra-nest
+```
+
+[`mastra init`](/reference/cli/mastra#mastra-init) を実行します。プロンプトが表示されたら、Provider（OpenAI など）を選択してキーを入力します。
+
+```bash npm2yarn
+npx mastra@latest init
+```
+
+これにより、天気 Agent のサンプルと次のファイルを含む `src/mastra` フォルダーが作成されます。
+
+- `index.ts` - Memory を含む Mastra の設定
+- `tools/weather-tool.ts` - 指定した場所の天気を取得する Tool
+- `agents/weather-agent.ts` - Tool を使用するプロンプトを備えた天気 Agent
+
+次の手順で、`src/mastra/index.ts` ファイルを NestJS アダプターに渡します。
+
+## サーバーアダプターを追加する
+
+NestJS サーバーアダプターパッケージをインストールします。
+
+```bash npm2yarn
+npm install @mastra/nestjs@latest
+```
+
+`src/app.module.ts` を開き、`MastraModule` を登録します。
+
+```typescript title="src/app.module.ts"
+import { Module } from '@nestjs/common'
+import { MastraModule } from '@mastra/nestjs'
+import { mastra } from './mastra'
+
+@Module({
+  imports: [
+    MastraModule.register({
+      mastra,
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+:::note
+
+`MastraModule` はキャッチオールコントローラー（`@All('*')`）を登録します。アプリのモジュールより先に import すると、無関係なルートを捕捉して 404 を返す場合があります。競合を避けるには、`MastraModule` を最後に import するか、専用のプレフィックス（`/api/v1/mastra` など）の下にマウントしてください。
+
+:::
+
+## Agent をテストする
+
+デフォルトでは、Mastra のエンドポイントは `/api` サブパスの下に追加され、Agent または Workflow の ID が使用されます。`mastra init` で作成されるデフォルトの `weather-agent` は、`/api/agents/weather-agent` で利用できます。
+
+NestJS サーバーを起動します。
+
+```bash npm2yarn
+npm run start
+```
+
+別のターミナルウィンドウで、`curl` を使用して天気 Agent に質問します。
+
+```bash
+curl -X POST http://localhost:3000/api/agents/weather-agent/generate -H "Content-Type: application/json" -d "{\"messages\":[{\"role\":\"user\",\"content\":\"What is the weather like in Seoul?\"}]}"
+```
+
+## 独自のサービスで Mastra を使用する
+
+このモジュールは、NestJS サービスから Mastra にアクセスする 2 つの方法をエクスポートします。`MastraService` ラッパーと `MASTRA` インジェクショントークンです。
+
+### MastraService
+
+`MastraService` は、よく使う操作の便利なメソッドを備えた注入可能なラッパーです。
+
+```typescript title="src/agent.service.ts"
+import { Injectable } from '@nestjs/common'
+import { MastraService } from '@mastra/nestjs'
+
+@Injectable()
+export class AgentService {
+  constructor(private readonly mastraService: MastraService) {}
+
+  async chat(agentId: string, message: string) {
+    const agent = this.mastraService.getAgent(agentId)
+    return agent.generate({
+      messages: [{ role: 'user', content: message }],
+    })
+  }
+
+  async runWorkflow(workflowId: string, input: Record<string, unknown>) {
+    const workflow = this.mastraService.getWorkflow(workflowId)
+    return workflow.start({ inputData: input })
+  }
+}
+```
+
+`MastraService` は次を公開します。
+
+- `getMastra()`: 基になる `Mastra` インスタンスを返します
+- `getAgent(id)`: `mastra.getAgent(id)` の短縮形です
+- `getWorkflow(id)`: `mastra.getWorkflow(id)` の短縮形です
+- `getOptions()`: モジュール設定を返します
+- `isShuttingDown`: 正常終了処理の開始後は `true` になります
+
+### MASTRA トークン
+
+`Mastra` インスタンスへ直接アクセスする必要がある場合（Storage、Memory、その他のコア API にアクセスする場合など）は、`MASTRA` トークンを使用して注入します。
+
+```typescript title="src/memory.service.ts"
+import { Injectable, Inject } from '@nestjs/common'
+import { MASTRA } from '@mastra/nestjs'
+import type { Mastra } from '@mastra/core/mastra'
+
+@Injectable()
+export class MemoryService {
+  constructor(@Inject(MASTRA) private readonly mastra: Mastra) {}
+
+  async getThreadMessages(threadId: string) {
+    const memory = this.mastra.getMemory()
+    return memory?.getMessages({ threadId })
+  }
+}
+```
+
+どちらの方法でも、`MastraModule` によって登録された同じシングルトンの `Mastra` インスタンスが使用されます。
+
+## 次のステップ
+
+これで、NestJS 内で動作する Mastra Agent を構築できました。プロジェクトを拡張するには、次を参照してください。
+
+- [Agent の概要](/docs/agents/overview)
+- [Tool の使用](/docs/agents/using-tools)
+- [Agent の Memory](/docs/memory/overview)
+
+NestJS 統合の詳細については、次を参照してください。
+
+- [NestJS Adapter リファレンス](/reference/server/nestjs-adapter)

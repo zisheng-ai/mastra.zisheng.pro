@@ -1,0 +1,691 @@
+---
+title: '參考：DurableAgent | Agents'
+description: 'DurableAgent 的 API 參考；DurableAgent 以持久執行及可恢復串流包裝 Agent。'
+packages:
+  - '@mastra/core'
+---
+
+# DurableAgent
+
+`DurableAgent` 以持久執行及可恢復串流包裝現有的 [`Agent`](/reference/agents/agent)。它會執行 Agent 迴圈，讓客戶端即使中斷連線再重新連線，也不會錯過事件，並透過 [PubSub](/docs/server/pubsub) 串流傳送這些事件。當一次執行必須超越單一請求的生命週期，或需要在連線中斷後繼續時，便應使用它。
+
+你可使用 [`createDurableAgent`](#createdurableagentoptions) factory 建立它；如要在內置 Workflow 引擎上進行「發出後不理」式執行，則使用 [`createEventedAgent`](#createeventedagentoptions)。如要使用由 Inngest 驅動的執行，請使用 `@mastra/inngest` 的 [`createInngestAgent`](/reference/agents/inngest-agent)。
+
+## 使用範例
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Agent } from '@mastra/core/agent'
+import { createDurableAgent } from '@mastra/core/agent/durable'
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'My Agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const durableAgent = createDurableAgent({ agent })
+
+export const mastra = new Mastra({
+  agents: { myAgent: durableAgent },
+})
+```
+
+串流傳送回應並讀取結果。完成該次執行後，`cleanup` 函式會取消訂閱 PubSub：
+
+```typescript
+const { output, runId, cleanup } = await durableAgent.stream('Hello!')
+
+const text = await output.text
+
+cleanup()
+```
+
+### 使用 `durable` 設定旗標
+
+在 `AgentConfig` 設定 `durable: true`；當 Agent 附加至 `Mastra` 實例時，系統便會自動以 `createDurableAgent` 包裝它。如要傳遞 `cache`、`pubsub`、`maxSteps` 或 `cleanupTimeoutMs` 等進階選項，請使用物件。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Agent } from '@mastra/core/agent'
+
+const myAgent = new Agent({
+  id: 'my-agent',
+  name: 'My Agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  durable: true, // or: { maxSteps: 10, cleanupTimeoutMs: 60_000 }
+})
+
+export const mastra = new Mastra({
+  agents: { myAgent },
+})
+```
+
+`mastra.getAgent('myAgent')` 會傳回已包裝的 `DurableAgent`。獨立 Agent（已建構但從未在 `Mastra` 實例註冊）不會變成持久 Agent。包裝會在註冊時套用。
+
+## `createDurableAgent(options)`
+
+以持久執行及可恢復串流包裝 `Agent`。這是建立 `DurableAgent` 的建議方式。
+
+```typescript
+import { createDurableAgent } from '@mastra/core/agent/durable'
+
+const durableAgent = createDurableAgent({ agent })
+```
+
+傳回：`DurableAgent`
+
+### 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'Agent',
+    isOptional: false,
+    description: '要以持久執行功能包裝的 Agent。Agent 方法會委派至此 Agent。',
+  },
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: true,
+    description: 'ID 覆寫。',
+    defaultValue: 'agent.id',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    isOptional: true,
+    description: '名稱覆寫。',
+    defaultValue: 'agent.name',
+  },
+  {
+    name: 'cache',
+    type: 'MastraServerCache | false',
+    isOptional: true,
+    description:
+      '用於儲存串流事件的快取，以啟用可恢復串流。如省略，Agent 會繼承 Mastra 實例的快取，或使用 InMemoryServerCache。設為 `false` 可停用快取，令串流無法恢復。',
+  },
+  {
+    name: 'pubsub',
+    type: 'PubSub',
+    isOptional: true,
+    description: '用於串流傳送事件的 PubSub 實例。',
+    defaultValue: 'EventEmitterPubSub',
+  },
+  {
+    name: 'maxSteps',
+    type: 'number',
+    isOptional: true,
+    description: 'Agent 迴圈的最大步驟數目。',
+  },
+]}
+/>
+
+## `createEventedAgent(options)`
+
+在內置 Workflow 引擎上，以「發出後不理」式持久執行包裝 `Agent`。它與 `createDurableAgent` 一樣會傳回可供串流讀取的結果，但底層 Workflow 會以非阻塞方式（透過 `startAsync`）執行，而非在接通串流前一直執行至完成。當你希望該次執行可獨立於呼叫者繼續進行時，便應使用它。它不接受 `id` 或 `name` 覆寫。
+
+```typescript
+import { createEventedAgent } from '@mastra/core/agent/durable'
+
+const eventedAgent = createEventedAgent({ agent })
+```
+
+傳回：`EventedAgent`（`DurableAgent` 的子類別）
+
+### 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'Agent',
+    isOptional: false,
+    description: '要以事件式持久執行功能包裝的 Agent。',
+  },
+  {
+    name: 'cache',
+    type: 'MastraServerCache | false',
+    isOptional: true,
+    description:
+      '用於儲存串流事件的快取，以啟用可恢復串流。如省略，Agent 會繼承 Mastra 實例的快取，或使用 InMemoryServerCache。設為 `false` 可停用快取。',
+  },
+  {
+    name: 'pubsub',
+    type: 'PubSub',
+    isOptional: true,
+    description: '用於串流傳送事件的 PubSub 實例。',
+    defaultValue: 'EventEmitterPubSub',
+  },
+  {
+    name: 'maxSteps',
+    type: 'number',
+    isOptional: true,
+    description: 'Agent 迴圈的最大步驟數目。',
+  },
+]}
+/>
+
+## 建構函式參數
+
+`DurableAgent` 類別接受與 `createDurableAgent` 相同的選項，另加 `cleanupTimeoutMs`。除非需要建立子類別，否則建議使用 factory。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'Agent',
+    isOptional: false,
+    description: '要以持久執行功能包裝的 Agent。',
+  },
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: true,
+    description: 'ID 覆寫。',
+    defaultValue: 'agent.id',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    isOptional: true,
+    description: '名稱覆寫。',
+    defaultValue: 'agent.name',
+  },
+  {
+    name: 'cache',
+    type: 'MastraServerCache | false',
+    isOptional: true,
+    description:
+      '用於儲存串流事件的快取。如省略，會繼承 Mastra 實例的快取或使用 InMemoryServerCache。設為 `false` 可停用快取。',
+  },
+  {
+    name: 'pubsub',
+    type: 'PubSub',
+    isOptional: true,
+    description: '用於串流傳送事件的 PubSub 實例。',
+    defaultValue: 'EventEmitterPubSub',
+  },
+  {
+    name: 'maxSteps',
+    type: 'number',
+    isOptional: true,
+    description: 'Agent 迴圈的最大步驟數目。',
+  },
+  {
+    name: 'cleanupTimeoutMs',
+    type: 'number',
+    isOptional: true,
+    description:
+      '串流完成或發生錯誤後，自動清理 registry 項目前的寬限時間（毫秒）。設為 0 可停用自動清理，並要求手動呼叫 `cleanup()`。自動清理不會在暫停事件上觸發。',
+    defaultValue: '30000',
+  },
+]}
+/>
+
+## 方法
+
+### 執行
+
+#### `stream(messages, options?)`
+
+使用持久執行串流傳送回應。此方法會立即傳回結果，而結果的 `output` 會隨該次執行進行而產生事件。
+
+```typescript
+const { output, runId, cleanup } = await durableAgent.stream('Hello!', {
+  onChunk: chunk => console.log(chunk),
+  onFinish: result => console.log('done', result),
+})
+
+const text = await output.text
+cleanup()
+```
+
+傳回：[`Promise<DurableAgentStreamResult>`](#durableagentstreamresult)
+
+#### `resume(runId, resumeData, options?)`
+
+恢復已暫停的執行，例如在 Tool 獲批後。請傳入原始串流的 `runId`，以及該次執行正在等候的資料。如該次執行沒有 registry 項目，便會擲回錯誤。
+
+```typescript
+const { output, cleanup } = await durableAgent.resume(runId, {
+  approved: true,
+})
+
+await output.text
+cleanup()
+```
+
+傳回：[`Promise<DurableAgentStreamResult>`](#durableagentstreamresult)
+
+#### `observe(runId, options?)`
+
+重新連線至現有執行，先重播快取事件，再傳送即時事件。請在網絡連線中斷後使用此方法。傳入 `offset` 可由已知位置開始重播。
+
+```typescript
+const { output, cleanup } = await durableAgent.observe(runId, {
+  offset: 0,
+  onChunk: chunk => console.log(chunk),
+})
+
+await output.text
+```
+
+預設情況下，`observe()` 會無限期等候事件。如果執行該次運行的程序意外停止，該次執行會停止產生事件，卻不會發出完成事件，因此被觀察的串流會永遠等候。傳入 `idleTimeoutMs` 可限制等候時間：靜默達指定毫秒數後，串流便會結束。系統會先查詢選用的 `isAlive` 檢查。當該次執行仍在處理中（例如正在進行長時間的 Tool 呼叫，或已暫停以等候人手輸入）時，傳回 `true` 可繼續等候。傳回 `false` 或省略 `isAlive`，串流便會以錯誤結束。`isAlive` 暫時擲回錯誤時，系統會視為「仍然存活」，因此短暫的檢查失敗不會結束仍在運作的串流。
+
+```typescript
+const { output } = await durableAgent.observe(runId, {
+  idleTimeoutMs: 30_000,
+  isAlive: () => runHeartbeat.isFresh(runId),
+})
+```
+
+因閒置逾時而結束執行時，系統會進行與執行發生錯誤時相同的清理（請參閱下方警告），因此會釋放而非保留其快取狀態。兩個選項都須明確啟用。如要沿用以往無限期等候的行為，請省略它們。
+
+傳回：`Promise<DurableAgentStreamResult>`
+
+:::warning
+
+`observe()` 傳回的 `cleanup()` 會銷毀該次執行的 registry 項目及快取事件。只應在完成該次執行後呼叫它。如果該次執行已暫停，而你打算稍後恢復，請勿呼叫 `cleanup()`。讓自動清理計時器在執行完成或發生錯誤後處理。自動清理不會在暫停事件上觸發。
+
+:::
+
+#### `prepare(messages, options?)`
+
+準備一次持久執行，但不啟動它。此方法會在內部 registry 註冊該次執行，並傳回已序列化的 Workflow 輸入。當你需要控制何時及如何觸發 Workflow 時，便應使用此方法。
+
+```typescript
+const { runId, messageId, workflowInput, threadId, resourceId } = await durableAgent.prepare(
+  'Summarize the document',
+  {
+    memory: { threadId: 'thread-1', resourceId: 'user-1' },
+  },
+)
+```
+
+傳回：
+
+```typescript
+interface PrepareResult {
+  runId: string
+  messageId: string
+  workflowInput: any
+  registryEntry: object
+  threadId?: string
+  resourceId?: string
+}
+```
+
+### 復原
+
+#### `recoverActiveRuns(options?)`
+
+找出此 Agent 卡在 `running` 狀態的執行，並由上次保存的快照重新驅動。最多復原 `options.limit` 次執行（預設：100）。傳回復原內容的摘要。
+
+```typescript
+const result = await durableAgent.recoverActiveRuns()
+// { recovered: [{ runId, status }], succeeded: 2, failed: 0 }
+```
+
+傳入 `runId` 可復原單次已知執行：
+
+```typescript
+await durableAgent.recoverActiveRuns({ runId: 'run-abc-123' })
+```
+
+傳回：
+
+```typescript
+interface DurableAgentRecoverActiveRunsResult {
+  recovered: Array<{ runId: string; status: 'success' | 'failed'; error?: Error }>
+  succeeded: number
+  failed: number
+}
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options.runId',
+    type: 'string',
+    isOptional: true,
+    description: '按 ID 復原指定執行。設定後會忽略探索篩選條件。',
+  },
+  {
+    name: 'options.limit',
+    type: 'number',
+    isOptional: true,
+    description: '可探索的有效執行數目上限。預設為 100。',
+  },
+  {
+    name: 'options.createdBefore',
+    type: 'Date',
+    isOptional: true,
+    description: '只復原在此日期前建立的執行。',
+  },
+]}
+/>
+
+#### `recover(runId, options?)`
+
+按 ID 復原單次執行。傳回形狀與 `stream()` 相同的可串流結果。當你需要即時觀察復原串流時，便應使用此方法。
+
+```typescript
+const { output, cleanup } = await durableAgent.recover('run-abc-123', {
+  onChunk: chunk => console.log(chunk),
+  onError: ({ error }) => console.error(error),
+})
+
+await output.text
+cleanup()
+```
+
+傳回：[`Promise<DurableAgentStreamResult>`](#durableagentstreamresult)
+
+## 串流選項
+
+`stream()` 接受 `DurableAgentStreamOptions` 物件。它支援以下 Agent 執行選項及生命週期 callback。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'runId',
+    type: 'string',
+    isOptional: true,
+    description: '此次執行的唯一識別碼。稍後可配合 `resume()` 或 `observe()` 使用。',
+  },
+  {
+    name: 'instructions',
+    type: "AgentExecutionOptions['instructions']",
+    isOptional: true,
+    description:
+      "覆寫 Agent 在此次執行的預設指示。接受靜態字串，或 Agent 所支援的相同動態指示值。",
+  },
+  {
+    name: 'context',
+    type: 'ModelMessage[]',
+    isOptional: true,
+    description: '提供予 Agent 的額外內容訊息。',
+  },
+  {
+    name: 'memory',
+    type: 'object',
+    isOptional: true,
+    description: '用於保存及擷取對話的記憶體設定。',
+  },
+  {
+    name: 'requestContext',
+    type: 'RequestContext',
+    isOptional: true,
+    description: '承載此次執行動態設定及狀態的請求內容。',
+  },
+  {
+    name: 'maxSteps',
+    type: 'number',
+    isOptional: true,
+    description: '此串流可執行的最大步驟數目。',
+  },
+  {
+    name: 'toolsets',
+    type: 'object',
+    isOptional: true,
+    description: '此次執行可用的額外 Tool 集合。',
+  },
+  {
+    name: 'clientTools',
+    type: 'object',
+    isOptional: true,
+    description: '執行期間可用的客戶端 Tool。',
+  },
+  {
+    name: 'toolChoice',
+    type: "'auto' | 'none' | 'required' | { type: 'tool'; toolName: string }",
+    isOptional: true,
+    description: 'Tool 選擇策略。',
+  },
+  {
+    name: 'activeTools',
+    type: 'string[]',
+    isOptional: true,
+    description: "將執行限制於 Agent Tool 中指定名稱的子集。",
+  },
+  {
+    name: 'modelSettings',
+    type: 'object',
+    isOptional: true,
+    description:
+      '模型專用設定，例如 temperature。已序列化的快照跨越程序邊界前，會移除含有憑證的 header（`Authorization`、`X-Api-Key` 及同類 header）。',
+  },
+  {
+    name: 'stopWhen',
+    type: "AgentExecutionOptions['stopWhen']",
+    isOptional: true,
+    description:
+      '提早結束 Agent 迴圈的 predicate 或組合。closure 存放於程序內的執行 registry；跨程序恢復時只會降級使用 `maxSteps`。',
+  },
+  {
+    name: 'system',
+    type: 'string | string[]',
+    isOptional: true,
+    description: '附加於 Agent 指示之後、使用者訊息之前的額外系統訊息。',
+  },
+  {
+    name: 'requireToolApproval',
+    type: 'boolean | ((args: { toolName: string; args: unknown; requestContext: RequestContext; workspace?: string }) => boolean | Promise<boolean>)',
+    isOptional: true,
+    description:
+      '要求批准 Tool 呼叫。傳入 `true` 或 `false` 以管制全部或完全不管制，亦可傳入函式以設定逐次呼叫政策。函式形式的政策存放於程序內的執行 registry；跨程序恢復時會退回使用值為 `true` 的影子設定。',
+  },
+  {
+    name: 'autoResumeSuspendedTools',
+    type: 'boolean',
+    isOptional: true,
+    description: '自動恢復已暫停的 Tool，而非等候外部 `resume()` 呼叫。',
+  },
+  {
+    name: 'toolCallConcurrency',
+    type: 'number',
+    isOptional: true,
+    description: '可並行執行的 Tool 呼叫數目上限。',
+  },
+  {
+    name: 'includeRawChunks',
+    type: 'boolean',
+    isOptional: true,
+    description: '在串流輸出中包含原始 Provider 資料區塊。',
+  },
+  {
+    name: 'maxProcessorRetries',
+    type: 'number',
+    isOptional: true,
+    description: '每次生成中，處理器可重試的最大次數。',
+  },
+  {
+    name: 'structuredOutput',
+    type: 'object',
+    isOptional: true,
+    description: '結構化輸出設定。',
+  },
+  {
+    name: 'untilIdle',
+    type: 'boolean | { maxIdleMs?: number }',
+    isOptional: true,
+    description:
+      '設定後，跨背景工作延續期間會保持串流開啟，直至 Agent 閒置。傳入 `true` 可使用預設 5 分鐘閒置逾時，亦可傳入 `{ maxIdleMs }` 自訂。等同已棄用的 `streamUntilIdle()` 方法。`resume()` 亦支援此選項。',
+  },
+  {
+    name: 'disableBackgroundTasks',
+    type: 'boolean',
+    isOptional: true,
+    description: '停用此次執行的背景工作分派。符合背景執行資格的 Tool 會改為內嵌執行。',
+  },
+  {
+    name: 'tracingOptions',
+    type: "AgentExecutionOptions['tracingOptions']",
+    isOptional: true,
+    description:
+      '轉送至 Agent 及模型 span 的 Trace metadata、標籤、Trace ID、父 span ID 及 `requestContextKeys`。完全可序列化為 JSON。',
+  },
+  {
+    name: 'actor',
+    type: "AgentExecutionOptions['actor']",
+    isOptional: true,
+    description: '轉送至 FGA 檢查及 Tool 執行的逐次呼叫 actor 訊號。',
+  },
+  {
+    name: 'transform',
+    type: "AgentExecutionOptions['transform']",
+    isOptional: true,
+    description:
+      '逐次叫用的 Tool payload 轉換政策。`transformToolPayload` closure 存放於程序內的執行 registry；只會序列化可安全用於 JSON 的 `targets` 影子設定。',
+  },
+  {
+    name: 'prepareStep',
+    type: "AgentExecutionOptions['prepareStep']",
+    isOptional: true,
+    description:
+      '在每次反覆運算開始時，以 `PrepareStepProcessor` 叫用的逐步準備 hook。只限 closure，並儲存於程序內的執行 registry。跨程序恢復會失去此 hook。',
+  },
+  {
+    name: 'isTaskComplete',
+    type: "AgentExecutionOptions['isTaskComplete']",
+    isOptional: true,
+    description:
+      '逐次呼叫的完成政策。Scorer 實例及 `onComplete` 存放於程序內的執行 registry；可安全用於 JSON 的 primitive（`strategy`、`timeout`、`parallel`、`suppressFeedback`、`scorerNames`）會序列化，以供跨程序觀察。',
+  },
+  {
+    name: 'delegation',
+    type: "AgentExecutionOptions['delegation']",
+    isOptional: true,
+    description:
+      '子 Agent 委派 hook（`onDelegationStart`、`onDelegationComplete`、`messageFilter`）。準備時，callback 會嵌入子 Agent 的 Tool wrapper。跨程序恢復會失去這些 callback。',
+  },
+  {
+    name: 'versions',
+    type: 'object',
+    isOptional: true,
+    description: '子 Agent 委派的版本覆寫。',
+  },
+  {
+    name: 'abortSignal',
+    type: 'AbortSignal',
+    isOptional: true,
+    description:
+      '外部中止訊號。訊號會轉送至持久執行的內部 `AbortController`，因此任何一方都可取消執行。跨程序恢復無法復原訊號；如需在恢復後保留中止能力，請向 `resume()` 傳入新訊號。',
+  },
+  {
+    name: 'onChunk',
+    type: '(chunk: ChunkType) => void | Promise<void>',
+    isOptional: true,
+    description: '每個串流資料區塊都會呼叫。',
+  },
+  {
+    name: 'onStepFinish',
+    type: '(result: AgentStepFinishEventData) => void | Promise<void>',
+    isOptional: true,
+    description: 'Agent 迴圈中的步驟完成時呼叫。',
+  },
+  {
+    name: 'onFinish',
+    type: '(result: AgentFinishEventData) => void | Promise<void>',
+    isOptional: true,
+    description: '執行完成時呼叫。',
+  },
+  {
+    name: 'onError',
+    type: '(error: Error) => void | Promise<void>',
+    isOptional: true,
+    description: '執行發生錯誤時呼叫。',
+  },
+  {
+    name: 'onSuspended',
+    type: '(data: AgentSuspendedEventData) => void | Promise<void>',
+    isOptional: true,
+    description: '執行暫停時呼叫，例如等候 Tool 批准。',
+  },
+  {
+    name: 'onAbort',
+    type: "AgentExecutionOptions['onAbort']",
+    isOptional: true,
+    description: '透過 `abortSignal` 或 `result.abort()` 中止執行時呼叫。',
+  },
+  {
+    name: 'onIterationComplete',
+    type: "AgentExecutionOptions['onIterationComplete']",
+    isOptional: true,
+    description:
+      '每次 Agent 迴圈反覆運算後呼叫，並提供最新的 `messageList`、`finishReason` 及 `isFinal` 旗標。在持久 Agent 上只供觀察：傳回 `continue: false` 或意見回饋不會影響迴圈。',
+  },
+]}
+/>
+
+`resume()` 及 `observe()` 接受相同的生命週期 callback（`onChunk`、`onStepFinish`、`onFinish`、`onError`、`onSuspended`）。`observe()` 亦接受 `offset`，以控制重播的開始位置。
+
+## DurableAgentStreamResult
+
+由 `stream()`、`resume()`、`observe()` 及 `recover()` 傳回的物件。
+
+```typescript
+interface DurableAgentStreamResult<OUTPUT = undefined> {
+  output: MastraModelOutput<OUTPUT>
+  readonly fullStream: ReadableStream<any>
+  runId: string
+  threadId?: string
+  resourceId?: string
+  cleanup: () => void
+  abort: () => void
+}
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'output',
+    type: 'MastraModelOutput',
+    description: '串流輸出。等候 `output.text` 可取得完整文字，亦可取用 `output.fullStream`。',
+  },
+  {
+    name: 'fullStream',
+    type: 'ReadableStream',
+    description: '完整事件串流，委派至 `output.fullStream`。',
+  },
+  {
+    name: 'runId',
+    type: 'string',
+    description: '唯一執行 ID。將它傳入 `resume()` 或 `observe()` 以重新連線。',
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    isOptional: true,
+    description: '使用記憶體時的 thread ID。',
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    isOptional: true,
+    description: '使用記憶體時的資源 ID。',
+  },
+  {
+    name: 'cleanup',
+    type: '() => void',
+    description: '取消訂閱 PubSub，並清除該次執行的 registry 項目。完成執行後請呼叫此函式。',
+  },
+  {
+    name: 'abort',
+    type: '() => void',
+    description:
+      '透過切換內部 `AbortController` 中止執行。這會在持久 LLM 執行步驟內顯示為 `AbortError`，並觸發 `onAbort` callback。執行完成後呼叫亦屬安全；在此情況下不會進行任何操作。',
+  },
+]}
+/>
+
+## 相關內容
+
+- [`createInngestAgent()`](/reference/agents/inngest-agent)
+- [Agent 類別](/reference/agents/agent)
+- [PubSub](/docs/server/pubsub)
+- [`.getMemory()`](/reference/agents/getMemory)

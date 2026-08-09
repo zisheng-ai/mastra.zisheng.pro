@@ -1,0 +1,182 @@
+---
+title: "參考：SkillSearchProcessor | 處理器"
+description: "SkillSearchProcessor 的 Mastra 文件；此處理器讓擁有大量 Skill 的 Agent 能依需求探索並載入 Skill。"
+packages:
+  - "@mastra/core"
+---
+
+# SkillSearchProcessor
+
+`SkillSearchProcessor` 是一種**輸入處理器**，可依需求探索並載入 Skill。它不會像 `SkillsProcessor` 一樣，預先將所有 Skill 中繼資料注入系統提示詞，而是提供兩個中繼 Tool（`search_skills` 和 `load_skill`），讓 Agent 能依需求尋找並載入 Skill。當 Workspace 中有許多 Skill 時，這能減少情境 token 用量。
+
+根據預設，如果在啟用 Skill 的 `Workspace` 中只將 `SkillSearchProcessor` 附加至 Agent，Agent 會將 Skill 視為隨選資源：
+
+- 不會自動加入預設會積極載入的 `SkillsProcessor`。
+- 公開 `search_skills` 和 `load_skill`，用於探索及載入指示。
+- 隱藏功能重疊的 `skill` 和 `skill_search` Tool。
+- `skill_read` 仍可使用，讓 Agent 能讀取參考資料、指令碼和資產等 Skill 支援檔案。
+
+如果明確同時設定 `SkillsProcessor` 與 `SkillSearchProcessor`，Agent 會保留積極載入的 `skill` 和 `skill_search` Tool，作為選擇加入的路徑。
+
+## 使用範例
+
+```typescript
+import { SkillSearchProcessor } from '@mastra/core/processors'
+
+const skillSearch = new SkillSearchProcessor({
+  workspace,
+  search: {
+    topK: 5,
+    minScore: 0.1,
+  },
+})
+```
+
+## 建構函式參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'SkillSearchProcessorOptions',
+    description: 'Skill 搜尋處理器的設定選項',
+    isOptional: false,
+    properties: [
+      {
+        type: 'SkillSearchProcessorOptions',
+        parameters: [
+          {
+            name: 'workspace',
+            type: 'Workspace',
+            description: '包含 Skill 的 Workspace 執行個體。透過 workspace.skills 存取 Skill。',
+            isOptional: false,
+          },
+          {
+            name: 'search',
+            type: '{ topK?: number; minScore?: number }',
+            description: '搜尋行為的設定。',
+            isOptional: true,
+          },
+          {
+            name: 'search.topK',
+            type: 'number',
+            description: '搜尋結果中最多回傳的 Skill 數量。',
+            isOptional: true,
+            default: '5',
+          },
+          {
+            name: 'search.minScore',
+            type: 'number',
+            description: '搜尋結果納入 Skill 所需的最低相關性分數。',
+            isOptional: true,
+            default: '0',
+          },
+          {
+            name: 'ttl',
+            type: 'number',
+            description:
+              '對話串狀態的存留時間，以毫秒為單位。對話串閒置超過此時間後，系統會清除其狀態。設為 0 可停用清除。',
+            isOptional: true,
+            default: '3600000',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 回傳值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "設為 'skill-search' 的處理器識別碼",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: "設為 'Skill Search Processor' 的處理器顯示名稱",
+    isOptional: false,
+  },
+  {
+    name: 'providesSkillDiscovery',
+    type: "'on-demand'",
+    description: '向 Agent 表示此處理器負責 Skill 探索及指示載入。',
+    isOptional: false,
+  },
+  {
+    name: 'processInputStep',
+    type: '(args: ProcessInputStepArgs) => Promise<ProcessInputStepResult>',
+    description:
+      '處理每個步驟，以注入搜尋／載入中繼 Tool，並將先前載入的 Skill 指示注入為系統訊息。',
+    isOptional: false,
+  },
+]}
+/>
+
+## 延伸使用範例
+
+```typescript title="src/mastra/agents/skill-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { SkillSearchProcessor } from '@mastra/core/processors'
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './project' }),
+  skills: ['skills'],
+  bm25: true,
+})
+
+const skillSearch = new SkillSearchProcessor({
+  workspace,
+  search: {
+    topK: 5,
+    minScore: 0.1,
+  },
+})
+
+const agent = new Agent({
+  id: 'skill-agent',
+  name: 'skill-agent',
+  instructions:
+    'You are a helpful assistant. Use search_skills to find relevant skills, then load_skill to load their instructions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  workspace,
+  inputProcessors: [skillSearch],
+})
+```
+
+Agent 的作業流程如下：
+
+1. Agent 收到用戶訊息
+1. Agent 使用關鍵字（例如「api design」）呼叫 `search_skills`
+1. Agent 檢視結果，並以 Skill 名稱呼叫 `load_skill`
+1. Skill 的指示會在下一輪以系統訊息形式出現
+1. Agent 遵循已載入 Skill 的指示
+
+## Workspace 檔案 Tool
+
+`SkillSearchProcessor` 會將 Skill 指示載入對話中，但不會阻止 Workspace 檔案 Tool 讀取檔案。
+
+若是已載入 Skill 的支援檔案，例如 `references/`、`scripts/` 或 `assets/` 下的檔案，請使用 `skill_read`。
+
+請保留 `mastra_workspace_read_file` 等 Workspace 檔案 Tool，供明確的檔案檢查或編輯作業流程使用。在一般任務執行期間，`load_skill` 成功後，Agent 不需要再讀取相同的 `SKILL.md` 檔案。
+
+## 與 SkillsProcessor 比較
+
+| | SkillsProcessor | SkillSearchProcessor |
+| - | - | - |
+| 擴充方式 | 預先注入所有 Skill | 依需求探索 |
+| 情境用量 | 隨 Skill 數量增加 | 固定（只包含已載入的 Skill） |
+| Agent 作業流程 | Skill 一律可見 | Agent 依需求搜尋並載入 |
+| 最適合 | 少量 Skill（\< 10） | 大量 Skill（10+） |
+
+## 相關資源
+
+- [ToolSearchProcessor](/reference/processors/tool-search-processor)
+- [處理器](/docs/agents/processors)
+- [Workspace Skill](/docs/workspace/overview)

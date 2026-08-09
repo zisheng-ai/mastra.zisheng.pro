@@ -1,0 +1,270 @@
+---
+title: "移行：.network() から Supervisor Agent へ | 移行ガイド"
+description: ".stream() と .generate() を使用して .network() から Supervisor Agent へ移行し、複数 Agent の連携を改善する方法を説明します。"
+---
+
+# `.network()` から Supervisor Agent へ移行する
+
+複数の Agent を連携させる方法として、従来の `.network()` API に代わり、`Agent.stream()` と `Agent.generate()` を使用する Supervisor Agent を推奨します。このガイドでは、移行の各手順を説明します。
+
+:::warning[.network() の非推奨化]
+
+`.network()` は非推奨で、今後のリリースで削除されます。それまでは既存のコードも動作しますが、現在の開発は Supervisor Agent を中心に進められています。できるだけ早く Supervisor Agent へ移行してください。
+
+:::
+
+## `.network()` を `.stream()` または `.generate()` に置き換える
+
+主な変更は、`.network()` の呼び出しを `.stream()`（Streaming の場合）または `.generate()`（非 Streaming の場合）に置き換えることです。Agent の設定は変わりません。引き続き Agent に `agents`、`workflows`、`tools`、`memory` を定義します。異なるのは、呼び出し方と結果の処理方法です。
+
+`.network()` では、`network-execution-event-step-finish` などのカスタムイベント型を反復処理していました。`.stream()` では、標準の `textStream` または `fullStream` Iterator を使用します。
+
+**変更前：**
+
+```typescript
+const result = await routingAgent.network('Research AI in education')
+
+for await (const chunk of result) {
+  if (chunk.type === 'network-execution-event-step-finish') {
+    console.log(chunk.payload.result)
+  }
+}
+```
+
+**変更後：**
+
+```typescript
+const stream = await supervisorAgent.stream('Research AI in education', {
+  maxSteps: 10,
+})
+
+for await (const chunk of stream.textStream) {
+  process.stdout.write(chunk)
+}
+```
+
+`maxSteps` オプションは、Supervisor が実行できる反復回数を制限します。これは、`.network()` の暗黙的な反復回数制限に代わるものです。
+
+非 Streaming のユースケースでは、同じオプションを指定して `generate()` を使用します。
+
+```typescript
+const result = await supervisorAgent.generate('Research AI in education', {
+  maxSteps: 10,
+})
+
+console.log(result.text)
+```
+
+## Supervisor の指示を明確に記述する
+
+`.network()` では、Routing Agent が汎用的な指示とプリミティブの説明に基づいて呼び出し先を決定していました。Supervisor Agent も同様に動作しますが、明確で具体的な指示を記述すると、委任の精度が向上します。
+
+Supervisor の `instructions` には、利用可能なリソースとそれぞれを使用するタイミングを記載してください。また、リソースを連携させる方法と、タスクの完了を判断する方法も説明してください。
+
+**変更前：**
+
+```typescript
+const routingAgent = new Agent({
+  id: 'routing-agent',
+  instructions: 'You are a network of researchers and writers...',
+  agents: { researchAgent, writingAgent },
+  memory: new Memory(),
+})
+```
+
+**変更後：**
+
+```typescript
+const supervisorAgent = new Agent({
+  id: 'supervisor-agent',
+  instructions: `You coordinate research and writing tasks using specialized agents.
+
+Available resources:
+- researchAgent: Gathers factual data and sources (returns bullet points)
+- writingAgent: Transforms research into narrative content (returns full paragraphs)
+
+Delegation strategy:
+1. For research requests: Delegate to researchAgent first
+2. For writing requests: Delegate to writingAgent (provide research if available)
+3. For complex requests: Delegate to researchAgent first, then writingAgent
+
+Success criteria:
+- All user questions are fully answered
+- Response is well-formatted and complete
+- If information is incomplete, continue iterating`,
+  agents: { researchAgent, writingAgent },
+  memory: new Memory(),
+})
+```
+
+## Subagent に説明を追加する
+
+各 Subagent には、目的と戻り値の形式を説明する `description` フィールドを指定してください。説明には、その Subagent を使用するタイミングも記載します。Supervisor は、これらの説明に基づいて委任先の Agent を決定します。
+
+```typescript
+const researchAgent = new Agent({
+  id: 'research-agent',
+  description: `Specializes in gathering factual information and data on any topic.
+    Returns concise bullet-point summaries with key facts and sources.
+    Does not write full articles or narrative content.`,
+})
+
+const writingAgent = new Agent({
+  id: 'writing-agent',
+  description: `Transforms research material into well-structured written content.
+    Produces full paragraphs and complete articles.
+    Best used after research has been gathered.`,
+})
+```
+
+## イベント処理を更新する
+
+`.network()` 固有のイベントを処理していた場合は、標準の Stream Chunk 型を使用するよう更新します。
+
+| `.network()` イベント | Supervisor Agent の Chunk |
+| - | - |
+| `routing-agent-start` | `step-start` |
+| `routing-agent-end` | `step-finish` |
+| `agent-execution-start` | `step-start`（委任時） |
+| `agent-execution-event-text-delta` | `text-delta` |
+| `agent-execution-event-finish` | `step-finish` |
+| `network-execution-event-step-finish` | `step-finish` + `finishReason: 'stop'` |
+| `network-object` | `object-delta`（structuredOutput を使用） |
+| `network-object-result` | `object`（structuredOutput を使用） |
+
+## 委任 Hook を追加する
+
+Supervisor Agent では、委任のライフサイクルに Hook を追加して、委任の監視、変更、拒否ができます。これらの Hook は、Agent の `defaultOptions` で設定するか、呼び出しごとに渡せます。
+
+`onDelegationStart` は、Supervisor が Subagent に委任する前に呼び出されます。プロンプトを変更したり、Subagent の Step 数を制限したりできます。委任自体を拒否することもできます。
+
+```typescript
+const stream = await supervisorAgent.stream('Research AI in education', {
+  maxSteps: 10,
+  delegation: {
+    onDelegationStart: async context => {
+      console.log(`Delegating to: ${context.primitiveId}`)
+
+      if (context.primitiveId === 'research-agent') {
+        return {
+          proceed: true,
+          modifiedPrompt: `${context.prompt}\n\nFocus on 2024-2025 data.`,
+          modifiedMaxSteps: 5,
+        }
+      }
+
+      if (context.iteration > 8) {
+        return {
+          proceed: false,
+          rejectionReason: 'Max iterations reached. Synthesize current findings.',
+        }
+      }
+
+      return { proceed: true }
+    },
+  },
+})
+```
+
+`onDelegationComplete` は、委任の完了後に呼び出されます。結果を確認し、Supervisor Loop を停止する必要がある場合は `context.bail()` を呼び出します。Supervisor の Memory に保存するフィードバックを返すこともできます。
+
+```typescript
+const stream = await supervisorAgent.stream('Research AI in education', {
+  maxSteps: 10,
+  delegation: {
+    onDelegationComplete: async context => {
+      if (context.error) {
+        context.bail() // Stop further delegations
+        return {
+          feedback: `Delegation to ${context.primitiveId} failed: ${context.error}. Try a different approach.`,
+        }
+      }
+    },
+  },
+})
+```
+
+## メッセージフィルタリングを追加する
+
+デフォルトでは、Subagent は Supervisor の会話コンテキスト全体を受け取ります。共有するメッセージを制御するには `messageFilter` を使用します。たとえば、機密データを削除したり、メッセージ数を制限したりできます。
+
+```typescript
+const stream = await supervisorAgent.stream('Research AI in education', {
+  maxSteps: 10,
+  delegation: {
+    messageFilter: ({ messages, primitiveId, prompt }) => {
+      return messages
+        .filter(msg => {
+          const content =
+            typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+          return !content.includes('confidential')
+        })
+        .slice(-10)
+    },
+  },
+})
+```
+
+## 反復処理の監視を追加する
+
+`onIterationComplete` は、Supervisor Loop の各反復処理後に呼び出されます。進捗を記録したり、Agent を導くフィードバックを提供したりできます。この Hook で実行を早期終了することもできます。
+
+```typescript
+const stream = await supervisorAgent.stream('Research AI in education', {
+  maxSteps: 10,
+  onIterationComplete: async context => {
+    console.log(`Iteration ${context.iteration}/${context.maxIterations}`)
+
+    if (!context.text.includes('recommendations')) {
+      return {
+        continue: true,
+        feedback: 'Please include specific recommendations in your analysis.',
+      }
+    }
+
+    if (context.text.length > 1000 && context.finishReason === 'stop') {
+      return { continue: false }
+    }
+
+    return { continue: true }
+  },
+})
+```
+
+## タスク完了 Scoring を追加する
+
+タスク完了 Scorer は、タスクが完了したかを自動的に検証します。検証に失敗すると、Supervisor は反復処理を続行します。失敗した Scorer のフィードバックは会話コンテキストに含まれるため、Subagent は不足していた内容を確認できます。
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+
+const taskCompleteScorer = createScorer({
+  id: 'task-complete',
+  name: 'Task Completeness',
+}).generateScore(async context => {
+  const text = (context.run.output || '').toString()
+  const hasAnalysis = text.includes('analysis')
+  const hasRecommendations = text.includes('recommendation')
+  return hasAnalysis && hasRecommendations ? 1 : 0
+})
+
+const stream = await supervisorAgent.stream('Research AI in education', {
+  maxSteps: 10,
+  isTaskComplete: {
+    scorers: [taskCompleteScorer],
+    strategy: 'all',
+    onComplete: async result => {
+      console.log('Task complete:', result.complete)
+    },
+  },
+})
+```
+
+## 関連項目
+
+- [Supervisor Agent](/docs/capabilities/subagents)
+- [Agent Network](/docs/agents/networks)
+- [Agent.stream() リファレンス](/reference/streaming/agents/stream)
+- [Agent.generate() リファレンス](/reference/agents/generate)
+- [Agent の承認](/docs/agents/agent-approval)
+- [ガイド：Research Coordinator](/guides/guide/research-coordinator)

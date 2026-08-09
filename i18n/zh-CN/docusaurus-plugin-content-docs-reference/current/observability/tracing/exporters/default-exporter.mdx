@@ -1,0 +1,226 @@
+---
+title: "参考：DefaultExporter | 可观测性"
+description: 已弃用的 DefaultExporter API 参考（已由 MastraStorageExporter 取代）
+packages:
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# DefaultExporter
+
+**自 `@mastra/observability@1.12.0` 起弃用**，请改用 [`MastraStorageExporter`](/reference/observability/tracing/exporters/mastra-storage-exporter)。
+
+:::warning[已弃用]
+
+为保持向后兼容，`DefaultExporter` 目前仍予以保留，但将在未来的主要版本中移除。新项目请使用 [`MastraStorageExporter`](/reference/observability/tracing/exporters/mastra-storage-exporter)。两个类使用相同的构造函数、配置和运行时行为。`DefaultExporter` 会保留原有的 `mastra-default-observability-exporter` Exporter `name`，确保基于它构建的监控规则继续正常工作。
+
+:::
+
+通过自动批处理和重试逻辑将可观测性事件持久化到 Mastra Storage。
+
+## 构造函数
+
+```typescript prettier:false
+new DefaultExporter(config?: DefaultExporterConfig)
+```
+
+<PropertiesTable
+  props={[
+  {
+    name: 'config',
+    type: 'DefaultExporterConfig',
+    description: '批处理和配置选项',
+    required: false,
+  },
+]}
+/>
+
+## `DefaultExporterConfig`
+
+```typescript
+interface DefaultExporterConfig extends BaseExporterConfig {
+  /** Maximum number of spans per batch. Default: 1000 */
+  maxBatchSize?: number
+
+  /** Maximum total buffer size before emergency flush. Default: 10000 */
+  maxBufferSize?: number
+
+  /** Maximum time to wait before flushing batch in milliseconds. Default: 5000 */
+  maxBatchWaitMs?: number
+
+  /** Maximum number of retry attempts. Default: 4 */
+  maxRetries?: number
+
+  /** Base retry delay in milliseconds (uses exponential backoff). Default: 500 */
+  retryDelayMs?: number
+
+  /** Tracing storage strategy or 'auto' for automatic selection. Default: 'auto' */
+  strategy?: TracingStorageStrategy | 'auto'
+}
+```
+
+扩展 `BaseExporterConfig`，其中包含：
+
+- `logger?: IMastraLogger` - Logger 实例
+- `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'` - 日志级别（默认值：INFO）
+
+## `TracingStorageStrategy`
+
+```typescript
+type TracingStorageStrategy = 'realtime' | 'batch-with-updates' | 'insert-only'
+```
+
+### 策略行为
+
+- **realtime**：立即将每个事件持久化到存储
+- **batch-with-updates**：分别对创建和更新操作进行批处理，并按顺序应用
+- **insert-only**：仅处理 SPAN\_ENDED 事件，忽略更新
+
+## 属性
+
+```typescript prettier:false
+readonly name = 'mastra-default-observability-exporter';
+```
+
+## 方法
+
+### init
+
+```typescript prettier:false
+init(options: InitExporterOptions): void
+```
+
+在依赖项就绪后初始化 Exporter。根据存储能力解析 Tracing 策略。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'options',
+    type: 'InitExporterOptions',
+    description: '包含 Mastra 实例和配置的初始化选项',
+    required: true,
+  },
+]}
+/>
+
+### `exportTracingEvent`
+
+```typescript prettier:false
+async exportTracingEvent(event: TracingEvent): Promise<void>
+```
+
+根据解析后的策略处理 Tracing 事件。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'event',
+    type: 'TracingEvent',
+    description: '要导出的 Tracing 事件',
+    required: true,
+  },
+]}
+/>
+
+### flush
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+强制将缓冲区中的所有事件刷新到存储，而不关闭 Exporter。适用于需要确保运行时终止前已导出 Span 的 serverless 环境。
+
+### shutdown
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+刷新缓冲区中的剩余事件并执行清理。
+
+## 自动选择策略
+
+当 `strategy: 'auto'`（默认值）时，Exporter 会查询存储 adapter 的能力：
+
+```typescript
+interface TracingStrategy {
+  /** Strategies supported by this adapter */
+  supported: TracingStorageStrategy[]
+
+  /** Preferred strategy for optimal performance */
+  preferred: TracingStorageStrategy
+}
+```
+
+Exporter 将：
+
+1. 如果存储 adapter 的首选策略可用，则使用该策略
+1. 如果首选策略不可用，则回退到第一个受支持的策略
+1. 如果用户指定的策略不受支持，则记录警告
+
+## 批处理行为
+
+### 刷新触发条件
+
+满足以下任一条件时，缓冲区会刷新：
+
+- 缓冲区大小达到 `maxBatchSize`
+- 从第一个事件进入缓冲区起经过的时间超过 `maxBatchWaitMs`
+- 缓冲区大小达到 `maxBufferSize`（紧急刷新）
+- 调用 `shutdown()`
+
+### 重试逻辑
+
+刷新失败时会使用指数退避进行重试：
+
+- 重试延迟：`retryDelayMs * 2^attempt`
+- 最大尝试次数：`maxRetries`
+- 所有重试均失败后丢弃批次
+
+当存储不支持某种信号或重试次数用尽时，`DefaultExporter` 会通过在 Exporter 和 bridge 上注册的 `onDroppedEvent` handler 发出 `ObservabilityDropEvent`。Drop 事件包含信号、原因、数量、Exporter 名称、存储名称（如果已知）以及经过清理的错误详情。
+
+### 乱序处理
+
+对于 `batch-with-updates` 策略：
+
+- 跟踪已创建的 Span
+- 拒绝尚未创建的 Span 的更新/结束事件
+- 为乱序事件记录警告
+- 维护 sequence number，确保按顺序更新
+
+## 用法
+
+```typescript
+import { DefaultExporter } from '@mastra/observability'
+
+// Default configuration
+const exporter = new DefaultExporter()
+
+// Custom batching configuration
+const customExporter = new DefaultExporter({
+  maxBatchSize: 500,
+  maxBatchWaitMs: 2000,
+  strategy: 'batch-with-updates',
+  logLevel: 'debug',
+})
+```
+
+## 另请参阅
+
+### 文档
+
+- [Tracing 概览](/docs/observability/tracing/overview)：完整指南
+- [Exporter](/docs/observability/integrations/overview#exporters)：Exporter 概念
+
+### 其他 Exporter
+
+- [CloudExporter](/reference/observability/tracing/exporters/cloud-exporter)：Mastra 平台
+- [ConsoleExporter](/reference/observability/tracing/exporters/console-exporter)：调试输出
+- [Langfuse](/reference/observability/tracing/exporters/langfuse)：Langfuse 集成
+- [Braintrust](/reference/observability/tracing/exporters/braintrust)：Braintrust 集成
+
+### 参考
+
+- [配置](/reference/observability/tracing/configuration)：配置选项
+- [接口](/reference/observability/tracing/interfaces)：类型定义

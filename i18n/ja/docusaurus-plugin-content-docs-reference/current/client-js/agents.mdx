@@ -1,0 +1,1024 @@
+---
+title: "リファレンス：Agents API | Client SDK"
+description: client-js SDK を使用して、レスポンスの生成、インタラクションのストリーミング、Agent ツールの管理など、Mastra AI Agent と連携する方法を説明します。
+packages:
+  - "@mastra/ai-sdk"
+  - "@mastra/client-js"
+  - "@mastra/core"
+---
+
+# Agents API
+
+Agents API には、レスポンスの生成やインタラクションのストリーミングなど、Mastra AI Agent と連携するためのメソッドが用意されています。Agent ツールを管理するためのメソッドも提供します。
+
+## すべての Agent の取得
+
+利用可能なすべての Agent を一覧で取得します。
+
+```typescript
+const agents = await mastraClient.listAgents()
+```
+
+Agent ID とシリアライズされた Agent 設定の対応を示すレコードを返します。
+
+## 特定の Agent の操作
+
+ID を指定して特定の Agent インスタンスを取得します。
+
+```typescript title="src/mastra/agents/my-agent.ts"
+export const myAgent = new Agent({
+  id: 'my-agent',
+})
+```
+
+```typescript
+const agent = mastraClient.getAgent('my-agent')
+```
+
+## Agent のメソッド
+
+### `details()`
+
+Agent の詳細情報を取得します。
+
+```typescript
+const details = await agent.details()
+```
+
+### `generate()`
+
+Agent からレスポンスを生成します。
+
+```typescript
+const response = await agent.generate(
+  [
+    {
+      role: 'user',
+      content: 'Hello, how are you?',
+    },
+  ],
+  {
+    memory: {
+      thread: 'thread-abc', // Optional: Thread ID for conversation context
+      resource: 'user-123', // Optional: Resource ID
+    },
+    structuredOutput: {}, // Optional: Structured Output configuration
+  },
+)
+```
+
+メモリオプションとともに、簡略化された文字列形式も使用できます。
+
+```typescript
+const response = await agent.generate('Hello, how are you?', {
+  memory: {
+    thread: 'thread-1',
+    resource: 'resource-1',
+  },
+})
+```
+
+### `stream()`
+
+リアルタイムのインタラクションのために、Agent のレスポンスをストリーミングします。
+
+```typescript
+const response = await agent.stream('Tell me a story')
+
+// Process data stream with the processDataStream util
+response.processDataStream({
+  onChunk: async chunk => {
+    console.log(chunk)
+  },
+})
+```
+
+メモリオプションとともに、簡略化された文字列形式も使用できます。
+
+```typescript
+const response = await agent.stream('Tell me a story', {
+  memory: {
+    thread: 'thread-1',
+    resource: 'resource-1',
+  },
+  clientTools: { colorChangeTool },
+})
+
+response.processDataStream({
+  onChunk: async chunk => {
+    if (chunk.type === 'text-delta') {
+      console.log(chunk.payload.text)
+    }
+  },
+})
+```
+
+レスポンス本文から直接読み取ることもできます。
+
+```typescript
+const reader = response.body.getReader()
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  console.log(new TextDecoder().decode(value))
+}
+```
+
+#### AI SDK 互換形式
+
+`agent.stream(...)` のレスポンスから、AI SDK 形式のパートをクライアント側でストリーミングするには、`response.processDataStream` を `ReadableStream<ChunkType>` でラップし、`toAISdkStream` を使用します。
+
+```typescript title="client-ai-sdk-transform.ts"
+import { createUIMessageStream } from 'ai'
+import { toAISdkStream } from '@mastra/ai-sdk'
+import type { ChunkType, MastraModelOutput } from '@mastra/core/stream'
+
+const response = await agent.stream('Tell me a story')
+
+const chunkStream: ReadableStream<ChunkType> = new ReadableStream<ChunkType>({
+  start(controller) {
+    response
+      .processDataStream({
+        onChunk: async chunk => controller.enqueue(chunk as ChunkType),
+      })
+      .finally(() => controller.close())
+  },
+})
+
+const uiMessageStream = createUIMessageStream({
+  execute: async ({ writer }) => {
+    for await (const part of toAISdkStream(chunkStream as unknown as MastraModelOutput, {
+      from: 'agent',
+    })) {
+      writer.write(part)
+    }
+  },
+})
+
+for await (const part of uiMessageStream) {
+  console.log(part)
+}
+```
+
+### `sendMessage()`
+
+ユーザーが作成した入力を、実行中の Agent run またはアイドル状態のメモリスレッドへ送信します。メッセージによって開始される、またはメッセージを受信するストリームをクライアントでレンダリングできるよう、`subscribeToThread()` と組み合わせて使用します。
+
+```typescript
+const agent = mastraClient.getAgent('support-agent')
+
+const result = await agent.sendMessage({
+  message: {
+    contents: 'Also consider the customer note I just added.',
+    attributes: { sentFrom: 'web' },
+  },
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+
+console.log(result.runId)
+```
+
+`message` には、文字列、テキスト／ファイルパートの配列、または `contents`、`attributes`、`metadata`、`providerOptions` を持つオブジェクトを指定できます。
+
+### `queueMessage()`
+
+ユーザーが作成した入力を、スレッドの次のターンに向けてキューに追加します。スレッドがアクティブな場合、Mastra は現在の run が完了した後に新しい run を開始します。アイドル状態の場合は、すぐに run を開始します。
+
+```typescript
+await agent.queueMessage({
+  message: 'Also check whether the tests need updates.',
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+```
+
+### `sendSignal()`
+
+実行中の Agent run またはメモリスレッドへ、低レベルの signal を送信します。リアクティブなリマインダーや、受信トレイへの保存が不要な通知形式のコンテキストなど、システムが生成するコンテキストに使用します。永続的な通知レコードには、サーバー側の [`Agent.sendNotificationSignal()`](/reference/agents/agent#sendnotificationsignalnotification-options) API を使用してください。ユーザーが作成した入力には、`sendMessage()` または `queueMessage()` を推奨します。
+
+```typescript
+const agent = mastraClient.getAgent('support-agent')
+
+const result = await agent.sendSignal({
+  signal: {
+    type: 'reactive',
+    tagName: 'system-reminder',
+    contents: 'Also consider the latest customer note.',
+  },
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+
+console.log(result.runId)
+```
+
+`ifActive.behavior` と `ifIdle.behavior` を使用して、Mastra が signal を配信、永続化、破棄するか、signal から起動するかを制御します。
+
+```typescript
+await agent.sendSignal({
+  signal: { type: 'reactive', tagName: 'system-reminder', contents: 'Store this for later.' },
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+  ifIdle: {
+    behavior: 'persist',
+  },
+})
+```
+
+アイドル状態から起動するストリームで、モデル設定、ツール、ランタイムコンテキストなどのオプションが必要な場合は、`ifIdle.streamOptions` を渡します。
+
+```typescript
+await agent.sendSignal({
+  signal: { type: 'reactive', tagName: 'system-reminder', contents: 'Start from this signal.' },
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+  ifIdle: {
+    behavior: 'wake',
+    streamOptions: {
+      maxSteps: 3,
+    },
+  },
+})
+```
+
+`{ accepted: true, runId: string }` を返します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'signal',
+    type: "{ type: 'user' | 'reactive' | 'notification' | string; tagName?: string; contents: string | Array<TextPart | FilePart>; attributes?: Record<string, JSONValue>; metadata?: Record<string, unknown>; providerOptions?: ProviderMetadata }",
+    description:
+      '低レベルの signal ペイロード。意味上の signal カテゴリには `type`、モデルに表示される XML タグには `tagName` を使用します。`providerOptions` は生成されるプロンプトターンに付加され、保存される signal メッセージに永続化されます。',
+  },
+  {
+    name: 'runId',
+    type: 'string',
+    isOptional: true,
+    description: '直接対象にする run ID。',
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    isOptional: true,
+    description: 'メモリスレッドのリソース ID。スレッドを対象とする signal では `threadId` とともに使用します。',
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    isOptional: true,
+    description: '対象とするスレッド ID。スレッドを対象とする signal では `resourceId` とともに使用します。',
+  },
+  {
+    name: 'ifActive.behavior',
+    type: "'deliver' | 'persist' | 'discard'",
+    isOptional: true,
+    description: '対象スレッドがアクティブな場合の動作を制御します。デフォルトは `deliver` です。',
+  },
+  {
+    name: 'ifActive.attributes',
+    type: 'Record<string, string | number | boolean>',
+    isOptional: true,
+    description: '対象スレッドがアクティブなときに Mastra が signal を受け入れた場合、signal にマージされる属性。',
+  },
+  {
+    name: 'ifIdle.behavior',
+    type: "'wake' | 'persist' | 'discard'",
+    isOptional: true,
+    description: '対象スレッドがアイドル状態の場合の動作を制御します。デフォルトは `wake` です。',
+  },
+  {
+    name: 'ifIdle.streamOptions',
+    type: "Omit<AgentExecutionOptions, 'messages'>",
+    isOptional: true,
+    description: '`ifIdle.behavior` が `wake` の場合に開始されるストリームのオプション。',
+  },
+  {
+    name: 'ifIdle.attributes',
+    type: 'Record<string, string | number | boolean>',
+    isOptional: true,
+    description: '対象スレッドがアイドル状態のときに Mastra が signal を受け入れた場合、signal にマージされる属性。',
+  },
+]}
+/>
+
+### `subscribeToThread()`
+
+メモリスレッドの生のストリームチャンクを購読します。`sendMessage()`、`queueMessage()`、`sendSignal()`、またはサーバー側の通知配信によって開始または継続される可能性があるスレッドの出力をレンダリングするために使用します。
+
+```typescript
+const agent = mastraClient.getAgent('support-agent')
+
+const subscription = await agent.subscribeToThread({
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+
+await subscription.processDataStream({
+  onChunk: chunk => {
+    console.log(chunk)
+  },
+  reconnect: true,
+})
+```
+
+`subscribeToThread()` は、基盤となる `Response` と `processDataStream()` ヘルパーを返します。このヘルパーは、接続が閉じるかリクエストが中止されるまで購読ストリームを読み取ります。プロキシのアイドルタイムアウト後など、トランスポートが閉じた場合や再接続リクエストが失敗した場合に再購読するには、`reconnect: true` を渡します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'resourceId',
+    type: 'string',
+    isOptional: true,
+    description: 'メモリスレッドのリソース ID。',
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    description: '購読するスレッド ID。',
+  },
+  {
+    name: 'processDataStream().reconnect',
+    type: 'boolean | { maxRetries?: number; delayMs?: number }',
+    isOptional: true,
+    description:
+      '購読ストリームが閉じた場合や再接続リクエストが失敗した場合に再接続します。`true` の場合、1 秒の間隔で無期限に再試行します。',
+  },
+]}
+/>
+
+### `streamUntilIdle()`
+
+レスポンスをストリーミングし、run 中に送出されたすべての[バックグラウンドタスク](/docs/long-running-agents/background-tasks)が完了するまでストリームを開いたままにします。各タスクが完了するたびにサーバーが Agent のループへ再び入り、同じ呼び出し内で LLM が結果に対応できるようにします。Mastra インスタンスでバックグラウンドタスクが[有効になっていること](/reference/configuration#backgroundtasks)と、メモリスレッドが必要です。それ以外の場合、この呼び出しは通常の `stream()` を使用します。
+
+```typescript
+const response = await agent.streamUntilIdle('Research solana for me', {
+  memory: {
+    thread: 'thread-1',
+    resource: 'resource-1',
+  },
+  maxIdleMs: 5 * 60_000, //optional
+})
+
+response.processDataStream({
+  onChunk: async chunk => {
+    if (chunk.type === 'background-task-completed') {
+      console.log('task complete:', chunk.payload.taskId)
+    }
+  },
+})
+```
+
+### `resumeStreamUntilIdle()`
+
+カスタムデータを使用して一時停止中の Agent ストリームを再開し、run 中に送出されたすべての[バックグラウンドタスク](/docs/long-running-agents/background-tasks)が完了するまでストリームを開いたままにします。Agent 内の Workflow の一時停止など、一時停止地点の後から実行を継続する場合に使用します。Mastra インスタンスでバックグラウンドタスクが[有効になっていること](/reference/configuration#backgroundtasks)と、メモリスレッドが必要です。それ以外の場合、この呼び出しは通常の `resumeStream()` を使用します。
+
+```typescript
+const response = await agent.resumeStreamUntilIdle(
+  { approved: true, selectedOption: 'plan-b' },
+  {
+    memory: {
+      thread: 'thread-1',
+      resource: 'resource-1',
+    },
+    runId: 'run-123',
+    toolCallId: 'tool-call-456', // optional
+    maxIdleMs: 5 * 60_000, //optional
+  },
+)
+
+await response.processDataStream({
+  onChunk: chunk => {
+    console.log(chunk)
+  },
+})
+```
+
+ストリームは `stream()` と同じチャンクタイプに加え、タスクのライフサイクルイベント用の `background-task-*` チャンクを出力します。サーバー側 API の全容については [`Agent.streamUntilIdle()`](/reference/streaming/agents/streamUntilIdle)、ペイロード形式については[バックグラウンドタスクのチャンク](/reference/streaming/ChunkType#background-task-chunks)を参照してください。
+
+### `getTool()`
+
+Agent で利用できる特定の Tool に関する情報を取得します。
+
+```typescript
+const tool = await agent.getTool('tool-id')
+```
+
+### `executeTool()`
+
+Agent の特定の Tool を実行します。
+
+```typescript
+const result = await agent.executeTool('tool-id', {
+  data: { input: 'value' },
+})
+```
+
+### `network()`
+
+複数 Agent のインタラクションのために、Agent ネットワークからのレスポンスをストリーミングします。
+
+```typescript
+const response = await agent.network('Research this topic and write a summary')
+
+response.processDataStream({
+  onChunk: async chunk => {
+    console.log(chunk)
+  },
+})
+```
+
+### `listSuspendedRuns()`
+
+ストレージから Agent の一時停止中の run を一覧表示します。対象となるのは、Tool 呼び出しの承認を待っている run、または Tool によって一時停止された run です。検索はストレージに基づくため、サーバーの再起動後や複数のサーバーインスタンス間でも機能します。返された `runId` を `approveToolCall()`、`declineToolCall()`、または `resumeStream()` に渡します。
+
+```typescript
+const { runs, total } = await agent.listSuspendedRuns({
+  threadId: 'thread-456',
+  resourceId: 'user-123',
+})
+
+if (runs[0]) {
+  console.log(runs[0].toolCalls) // [{ toolCallId, toolName, args, requiresApproval }]
+  await agent.approveToolCall({
+    runId: runs[0].runId,
+    toolCallId: runs[0].toolCalls[0].toolCallId,
+  })
+}
+```
+
+任意のフィルター（`threadId`、`resourceId`、`fromDate`、`toDate`）とページネーション（`perPage`、`page`）を指定できます。`{ runs, total }` を返し、`total` はページネーション適用前に一致した run の数です。返される run の形式については、[`Agent.listSuspendedRuns()`](/reference/agents/listSuspendedRuns) を参照してください。
+
+### `approveToolCall()`
+
+保留中の Tool 呼び出しを承認し、継続ストリームを返します。承認レスポンスから再開されたチャンクをレンダリングする場合に使用します。
+
+```typescript
+const response = await agent.approveToolCall({
+  runId: 'run-123',
+  toolCallId: 'tool-call-456',
+})
+
+response.processDataStream({
+  onChunk: async chunk => {
+    console.log(chunk)
+  },
+})
+```
+
+### `sendToolApproval()`
+
+購読中のスレッドに対する保留中の Tool 呼び出しを承認または拒否します。再開されたチャンクを別の継続ストリームではなく既存のスレッド購読経由で受信する場合に、`subscribeToThread()` と組み合わせて使用します。
+
+```typescript
+const result = await agent.sendToolApproval({
+  resourceId: 'user-123',
+  threadId: 'thread-456',
+  toolCallId: 'tool-call-456',
+  approved: true,
+})
+
+console.log(result.accepted)
+```
+
+`{ accepted: true, runId: string, toolCallId?: string }` を返します。
+
+### `declineToolCall()`
+
+保留中の Tool 呼び出しを拒否し、継続ストリームを返します。拒否レスポンスから再開されたチャンクをレンダリングする場合に使用します。
+
+```typescript
+const response = await agent.declineToolCall({
+  runId: 'run-123',
+  toolCallId: 'tool-call-456',
+})
+
+response.processDataStream({
+  onChunk: async chunk => {
+    console.log(chunk)
+  },
+})
+```
+
+### `resumeStream()`
+
+カスタムデータを使用して一時停止中の Agent ストリームを再開します。Agent 内の Workflow の一時停止など、一時停止地点の後から実行を継続する場合に使用します。
+
+```typescript
+const response = await agent.resumeStream(
+  { approved: true, selectedOption: 'plan-b' },
+  {
+    runId: 'run-123',
+    toolCallId: 'tool-call-456', // optional
+  },
+)
+
+await response.processDataStream({
+  onChunk: chunk => {
+    console.log(chunk)
+  },
+})
+```
+
+### `approveToolCallGenerate()`
+
+`generate()`（非ストリーミング）を使用している場合に、保留中の Tool 呼び出しを承認します。完全なレスポンスを返します。
+
+```typescript
+const output = await agent.generate('Find user John', {
+  requireToolApproval: true,
+})
+
+if (output.finishReason === 'suspended') {
+  const result = await agent.approveToolCallGenerate({
+    runId: output.runId,
+    toolCallId: output.suspendPayload.toolCallId,
+  })
+
+  console.log(result.text)
+}
+```
+
+### `declineToolCallGenerate()`
+
+`generate()`（非ストリーミング）を使用している場合に、保留中の Tool 呼び出しを拒否します。完全なレスポンスを返します。
+
+```typescript
+const output = await agent.generate('Find user John', {
+  requireToolApproval: true,
+})
+
+if (output.finishReason === 'suspended') {
+  const result = await agent.declineToolCallGenerate({
+    runId: output.runId,
+    toolCallId: output.suspendPayload.toolCallId,
+  })
+
+  console.log(result.text)
+}
+```
+
+## Agent のスケジュール
+
+Client SDK のスケジュールメソッドを使用して、`/api/schedules` ルート経由で永続化された Agent スケジュールを管理します。概念とサーバー側の例については、[スケジュール](/docs/long-running-agents/schedules)と [`mastra.schedules` リファレンス](/reference/schedules/overview)を参照してください。
+
+### `createSchedule()`
+
+`agentId` を渡して Agent スケジュールを作成します。
+
+```typescript
+const schedule = await mastraClient.createSchedule({
+  agentId: 'pinger',
+  cron: '0 * * * *',
+  prompt: 'Give me a status update.',
+})
+```
+
+### `listSchedules()`
+
+Agent スケジュールを一覧表示します。`agentId`、`threadId`、`resourceId`、`name`、`status` などのフィールドで絞り込めます。
+
+```typescript
+const schedules = await mastraClient.listSchedules({
+  agentId: 'pinger',
+  status: 'active',
+})
+```
+
+### `getSchedule()`
+
+ID を指定して単一の Agent スケジュールを取得します。
+
+```typescript
+const schedule = await mastraClient.getSchedule('agent_pinger')
+```
+
+### `updateSchedule()`
+
+Agent スケジュールを更新します。Agent スケジュールでは、`cron`、`timezone`、`prompt`、`name`、signal 配信オプション、メタデータ、`status` などのフィールドを更新できます。
+
+```typescript
+const updated = await mastraClient.updateSchedule('agent_pinger', {
+  cron: '*/30 * * * *',
+  prompt: 'Give me a status update every 30 minutes.',
+})
+```
+
+### `deleteSchedule()`
+
+Agent スケジュールを削除します。
+
+```typescript
+await mastraClient.deleteSchedule('agent_pinger')
+```
+
+### `runSchedule()`
+
+cron の実行間隔を変更せずに、Agent スケジュールを即座に 1 回実行します。
+
+```typescript
+const run = await mastraClient.runSchedule('agent_pinger')
+```
+
+### `pauseSchedule()`
+
+スケジューラーが実行しないよう、Agent スケジュールを一時停止します。更新されたスケジュールを返します。
+
+```typescript
+await mastraClient.pauseSchedule('agent_pinger')
+```
+
+### `resumeSchedule()`
+
+一時停止中の Agent スケジュールを再開します。次回の実行時刻は現在時刻を基準に再計算されるため、長期間一時停止していたスケジュールが未実行分をまとめて実行することはありません。更新されたスケジュールを返します。
+
+```typescript
+await mastraClient.resumeSchedule('agent_pinger')
+```
+
+### `listScheduleTriggers()`
+
+Agent スケジュールのトリガー履歴を、各実行に結合された run の概要とともに一覧表示します。
+
+```typescript
+const { triggers } = await mastraClient.listScheduleTriggers('agent_pinger', {
+  limit: 50,
+})
+```
+
+## クライアント Tool
+
+クライアント側の Tool を使用すると、Agent から要求されたときにクライアント側でカスタム関数を実行できます。
+
+```typescript
+import { createTool } from '@mastra/client-js'
+import { z } from 'zod'
+
+const colorChangeTool = createTool({
+  id: 'changeColor',
+  description: 'Changes the background color',
+  inputSchema: z.object({
+    color: z.string(),
+  }),
+  execute: async inputData => {
+    document.body.style.backgroundColor = inputData.color
+    return { success: true }
+  },
+})
+
+// Use with generate
+const response = await agent.generate('Change the background to blue', {
+  clientTools: { colorChangeTool },
+})
+
+// Use with stream
+const response = await agent.stream('Tell me a story', {
+  memory: {
+    thread: 'thread-1',
+    resource: 'resource-1',
+  },
+  clientTools: { colorChangeTool },
+})
+
+response.processDataStream({
+  onChunk: async chunk => {
+    if (chunk.type === 'text-delta') {
+      console.log(chunk.payload.text)
+    } else if (chunk.type === 'tool-call') {
+      console.log(
+        `calling tool ${chunk.payload.toolName} with args ${JSON.stringify(
+          chunk.payload.args,
+          null,
+          2,
+        )}`,
+      )
+    }
+  },
+})
+```
+
+### モデル向けにクライアント Tool の出力を整形する
+
+クライアント Tool は `toModelOutput` をサポートし、画像などのマルチモーダルコンテンツを含め、モデルが受け取る内容を制御できます。クライアント Tool はローカルで実行されるため、マッピングも `execute` の完了後にクライアント上で実行されます。変換後の出力は生の結果とともにサーバーへ返されるため、生の結果はストレージやアプリケーションロジックで引き続き利用できます。
+
+```typescript
+const screenshotTool = createTool({
+  id: 'takeScreenshot',
+  description: 'Takes a screenshot of the current page',
+  inputSchema: z.object({}),
+  execute: async () => {
+    const base64 = await captureScreenshot()
+    return { ok: true, data: base64 }
+  },
+  toModelOutput: output => ({
+    type: 'content',
+    value: [{ type: 'media', data: output.data, mediaType: 'image/jpeg' }],
+  }),
+})
+```
+
+### クライアント Tool のトレース
+
+サーバーに `@mastra/observability` がインストールされ、設定されている場合、クライアント側の Tool は現在の `AGENT_RUN` span の子として `CLIENT_TOOL_CALL` span を記録します。モデルがクライアント Tool の呼び出しを出力すると、サーバーはその span を作成し、送信する Tool 呼び出しチャンクへ W3C trace carrier を挿入します。Tool の引数が利用可能になると span を終了します。サーバー側で observability が設定されていない場合、クライアント Tool のトレースは何も行いません。
+
+Client SDK は各クライアント Tool の `execute` 関数の実経過時間も計測してサーバーへ返します。サーバーでは、`toolType: "client"` を持つ `mastra_tool_duration_ms` メトリクスとして出力されます。
+
+Tool の `execute` 関数内からより詳細なテレメトリを取得するには、実行コンテキストの `observe` ヘルパーを使用して、子 span と構造化ログを追加します。
+
+```typescript
+import { createTool } from '@mastra/client-js'
+import { z } from 'zod'
+
+const fetchUserTool = createTool({
+  id: 'fetchUser',
+  description: 'Fetches the current user profile',
+  inputSchema: z.object({ userId: z.string() }),
+  execute: async ({ userId }, { observe }) => {
+    observe.log('info', 'fetching user', { userId })
+    const user = await observe.span('http GET /users', async () => {
+      const res = await fetch(`/api/users/${userId}`)
+      return res.json()
+    })
+    return user
+  },
+})
+```
+
+`observe` は常に利用できます。トレースコンテキストがアクティブでない場合（トレース対象の Agent 外で実行している場合など）、`span` は関数を直接実行し、`log` は何も行いません。null チェックは不要です。
+
+SDK は collector がバッファリングしたすべての内容を OTLP/JSON としてシリアライズし、次のリクエスト本文で返します。サーバーの `@mastra/observability` パッケージは、span が正しい trace に属していることを検証して（trace 間の注入を防止）、各 span／log をサーバー側テレメトリと同じ observability bus へ転送します。observability を設定すると、既存の exporter がこれらを自動的に取り込みます。
+
+## 保存済み Agent
+
+保存済み Agent はデータベースに保存される Agent 設定で、実行時に作成、更新、削除できます。プリミティブ（Tool、Workflow、他の Agent、Scorer）をキーで参照し、Agent のインスタンス化時に Mastra registry から解決されます。メモリは、`lastMessages` や `semanticRecall` などのオプションを持つ `SerializedMemoryConfig` オブジェクトとしてインラインで設定します。
+
+### `listStoredAgents()`
+
+すべての保存済み Agent をページネーション付きで一覧取得します。
+
+```typescript
+const result = await mastraClient.listStoredAgents()
+console.log(result.agents) // Array of stored agents
+console.log(result.total) // Total count
+```
+
+ページネーションと並び順を指定する場合：
+
+```typescript
+const result = await mastraClient.listStoredAgents({
+  page: 0,
+  perPage: 20,
+  orderBy: {
+    field: 'createdAt',
+    direction: 'DESC',
+  },
+})
+```
+
+### `createStoredAgent()`
+
+新しい保存済み Agent を作成します。
+
+```typescript
+const agent = await mastraClient.createStoredAgent({
+  id: 'my-agent',
+  name: 'My Assistant',
+  instructions: 'You are a helpful assistant.',
+  model: {
+    provider: 'openai',
+    name: 'gpt-5.4',
+  },
+})
+```
+
+デフォルトでは、`createStoredAgent()` は初期バージョンをすぐに公開します。`autoPublish` を `false` に設定すると、未公開の下書きを作成し、[`activateVersion()`](#activateversion) を呼び出す前に確認できます。
+
+```typescript
+const draft = await mastraClient.createStoredAgent({
+  id: 'draft-agent',
+  name: 'Draft Assistant',
+  instructions: 'You are a helpful assistant.',
+  model: {
+    provider: 'openai',
+    name: '__AI_SDK_OPENAI_MODEL_BASE__',
+  },
+  autoPublish: false,
+})
+```
+
+`code` source を使用するよう設定された Editor では、保存時に Agent 設定がファイルシステムへ書き込まれるため、初期バージョンが常に公開されます。
+
+すべてのオプションを指定する場合：
+
+```typescript
+const agent = await mastraClient.createStoredAgent({
+  id: 'full-agent',
+  name: 'Full Agent',
+  description: 'A fully configured agent',
+  instructions: 'You are a helpful assistant.',
+  model: {
+    provider: 'openai',
+    name: 'gpt-5.4',
+  },
+  tools: { calculator: {}, weather: {} },
+  workflows: { 'data-processing': {} },
+  agents: { 'subagent-1': {} },
+  memory: {
+    options: {
+      lastMessages: 20,
+      semanticRecall: false,
+    },
+  },
+  scorers: {
+    'quality-scorer': {
+      sampling: { type: 'ratio', rate: 0.1 },
+    },
+  },
+  defaultOptions: {
+    maxSteps: 10,
+  },
+  metadata: {
+    version: '1.0',
+    team: 'engineering',
+  },
+})
+```
+
+### `getStoredAgent()`
+
+特定の保存済み Agent のインスタンスを取得します。
+
+```typescript
+const storedAgent = mastraClient.getStoredAgent('my-agent')
+```
+
+## 保存済み Agent のメソッド
+
+### `details()`
+
+保存済み Agent の設定を取得します。
+
+```typescript
+const details = await storedAgent.details()
+console.log(details.name)
+console.log(details.instructions)
+console.log(details.model)
+```
+
+### `update()`
+
+保存済み Agent の特定のフィールドを更新します。すべてのフィールドは任意です。
+
+```typescript
+const updated = await storedAgent.update({
+  name: 'Updated Agent Name',
+  instructions: 'New instructions for the agent.',
+})
+```
+
+```typescript
+// Update just the tools
+await storedAgent.update({
+  tools: { 'new-tool-1': {}, 'new-tool-2': {} },
+})
+
+// Update metadata
+await storedAgent.update({
+  metadata: {
+    version: '2.0',
+    lastModifiedBy: 'admin',
+  },
+})
+```
+
+### `delete()`
+
+保存済み Agent を削除します。
+
+```typescript
+const result = await storedAgent.delete()
+console.log(result.success) // true
+```
+
+## バージョン管理
+
+`Agent`（コードで定義）と `StoredAgent` の両方のインスタンスに、設定バージョンを管理するためのメソッドがあります。ライフサイクルと選択時の動作については、[Editor のバージョン管理](/docs/editor/overview#versioning)を参照してください。
+
+### 特定のバージョンの Agent を取得
+
+Agent を取得するときにバージョン識別子を渡します。
+
+```typescript
+// Load the published version (default)
+const agent = mastraClient.getAgent('support-agent')
+
+// Load the latest draft
+const draftAgent = mastraClient.getAgent('support-agent', { status: 'draft' })
+
+// Load a specific version
+const versionedAgent = mastraClient.getAgent('support-agent', { versionId: 'abc-123' })
+```
+
+保存済み Agent の場合は、`details()` に status オプションを渡します。
+
+```typescript
+const storedAgent = mastraClient.getStoredAgent('my-agent')
+const draft = await storedAgent.details(undefined, { status: 'draft' })
+```
+
+### `listVersions()`
+
+Agent のすべてのバージョンを一覧表示します。
+
+```typescript
+const versions = await agent.listVersions()
+console.log(versions.items) // Array of version snapshots
+console.log(versions.total)
+```
+
+ページネーションと並び替えを指定する場合：
+
+```typescript
+const versions = await agent.listVersions({
+  page: 0,
+  perPage: 10,
+  orderBy: {
+    field: 'createdAt',
+    direction: 'DESC',
+  },
+})
+```
+
+### `createVersion()`
+
+新しいバージョンスナップショットを作成します。
+
+```typescript
+const version = await agent.createVersion({
+  changeMessage: 'Updated tone to be more friendly',
+})
+```
+
+### `getVersion()`
+
+ID を指定して特定のバージョンを取得します。
+
+```typescript
+const version = await agent.getVersion('version-123')
+console.log(version.versionNumber)
+console.log(version.changedFields)
+console.log(version.createdAt)
+```
+
+### `activateVersion()`
+
+バージョンを、公開中のアクティブバージョンとして設定します。
+
+```typescript
+await agent.activateVersion('version-123')
+```
+
+### `restoreVersion()`
+
+同じ設定を持つ新しいバージョンを作成して、以前のバージョンを復元します。
+
+```typescript
+await agent.restoreVersion('version-456')
+```
+
+### `deleteVersion()`
+
+バージョンを削除します。
+
+```typescript
+await agent.deleteVersion('version-789')
+```
+
+### `compareVersions()`
+
+2 つのバージョンを比較し、差分を返します。
+
+```typescript
+const diff = await agent.compareVersions('version-123', 'version-456')
+console.log(diff.changes) // Fields that changed between versions
+```
+
+### React SDK
+
+React SDK で `useChat` hook を使用する場合は、`requestContext` を通じて `agentVersionId` を渡します。
+
+```typescript title="Version targeting with React SDK"
+import { useChat } from '@mastra/react'
+
+function Chat() {
+  const { messages, input, handleInputChange, handleSubmit } = useChat({
+    agentId: 'support-agent',
+    requestContext: {
+      agentVersionId: 'abc-123',
+    },
+  })
+
+  // ... render chat UI
+}
+```

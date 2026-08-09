@@ -1,0 +1,621 @@
+---
+title: "参考：createScorer | Evals"
+description: 在 Mastra 中创建自定义 Scorer 的文档，介绍如何使用 JavaScript 函数或基于 LLM 的 prompt 定义评估逻辑。
+packages:
+  - "@mastra/core"
+---
+
+# createScorer
+
+Mastra 提供统一的 `createScorer` 工厂，用于定义评估输入/输出对的自定义 scorer。每个评估步骤都可以使用原生 JavaScript 函数或基于 LLM 的 prompt 对象。自定义 scorer 可添加到 Agent 和 Workflow 步骤中。
+
+## 如何创建自定义 scorer
+
+使用 `createScorer` 工厂通过名称、描述和可选的 judge 配置定义 scorer，然后链式调用步骤方法来构建评估 pipeline。必须至少提供一个 `generateScore` 步骤。
+
+**Prompt 对象步骤**是以对象表示的步骤配置，包含 `description` + `createPrompt`（`preprocess`/`analyze` 还包含 `outputSchema`）。这些步骤会调用 judge LLM。**函数步骤**是普通函数，绝不会调用 judge。
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+
+const scorer = createScorer({
+  id: 'my-custom-scorer',
+  name: 'My Custom Scorer', // Optional, defaults to id
+  description: 'Evaluates responses based on custom criteria',
+  type: 'agent', // Optional: for agent evaluation with automatic typing
+  judge: {
+    model: myModel,
+    instructions: 'You are an expert evaluator...',
+  },
+})
+  .preprocess({/* step config */})
+  .analyze({/* step config */})
+  .generateScore(({ run, results }) => {
+    // Return a number
+  })
+  .generateReason({/* step config */})
+```
+
+## `createScorer` 选项
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: false,
+    description: 'scorer 的唯一标识符。未提供 `name` 时用作名称。',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    isOptional: true,
+    description: 'scorer 的名称。未提供时默认为 `id`。',
+  },
+  {
+    name: 'description',
+    type: 'string',
+    isOptional: false,
+    description: 'scorer 功能的描述。',
+  },
+  {
+    name: 'judge',
+    type: 'object',
+    isOptional: true,
+    description: '基于 LLM 的步骤所用的可选 judge 配置。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'model',
+            type: 'LanguageModel',
+            isOptional: false,
+            description: '用于评估的 LLM 模型实例。',
+          },
+          {
+            name: 'instructions',
+            type: 'string',
+            isOptional: false,
+            description: 'LLM 的系统 prompt/指令。',
+          },
+          {
+            name: 'jsonPromptInjection',
+            type: "boolean | 'system' | 'inline' | 'auto'",
+            isOptional: true,
+            description:
+              "控制 judge 的结构化输出 schema 如何传递给模型。默认为 'auto'：支持时使用原生结构化输出，否则使用内联 prompt 注入。显式值会覆盖自动路由。",
+          },
+          {
+            name: 'inputProcessors',
+            type: 'Processor[]',
+            isOptional: true,
+            description:
+              '内部 judge Agent 的消息到达模型前应用的 input processor（例如脱敏、验证）。',
+          },
+          {
+            name: 'outputProcessors',
+            type: 'Processor[]',
+            isOptional: true,
+            description:
+              "内部 judge Agent 的输出返回前应用的 output processor（例如审核、转换）。",
+          },
+          {
+            name: 'errorProcessors',
+            type: 'Processor[]',
+            isOptional: true,
+            description:
+              '用于采用 Mastra 当前生成 API 的 judge 模型的 error processor。它们实现 `processAPIError`，可检查 LLM API 拒绝并发出重试信号，例如 `StreamErrorRetryProcessor`。旧版模型 adapter 使用 `generateLegacy()`，不会运行 error processor。',
+          },
+          {
+            name: 'maxProcessorRetries',
+            type: 'number',
+            isOptional: true,
+            description:
+              'error processor 可重试单次 judge 生成的最大次数。配置 errorProcessors 但未设置此值时，运行时默认为 10。请显式设置此值以限制重试预算。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'type',
+    type: 'string',
+    isOptional: true,
+    description:
+      "输入/输出的类型规范。使用 'agent' 可自动获得 Agent 类型。对于自定义类型，请改用泛型方式。",
+  },
+  {
+    name: 'prepareRun',
+    type: '(run: ScorerRun) => ScorerRun | Promise<ScorerRun>',
+    isOptional: true,
+    description:
+      "在 pipeline 执行前转换 scorer run 数据。可用于过滤消息、限制上下文大小或丢弃 scorer 不需要的字段。[`filterRun()`](/reference/evals/filter-run) 工具可根据声明式选项创建此函数。可以是异步函数。",
+  },
+]}
+/>
+
+此函数返回一个 scorer builder，可在其后链式调用步骤方法。有关 `.run()` 方法及其输入/输出的详情，请参阅 [MastraScorer 参考文档](./mastra-scorer)。
+
+judge 仅针对定义为 **prompt 对象**的步骤运行（prompt 模式下的 `preprocess`、`analyze`、`generateScore`、`generateReason`）。如果仅使用函数步骤，则绝不会调用 judge，也不会产生可供检查的 LLM 输出。在这种情况下，所有 score/reason 都必须由函数生成。
+
+prompt 对象步骤运行时，其结构化 LLM 输出会存储在相应的结果字段中（`preprocessStepResult`、`analyzeStepResult`，或 `generateScore` 中由 `calculateScore` 使用的值）。
+
+## 重试 judge 请求
+
+使用现有的 judge `errorProcessors` 配置来重试失败的 judge 请求中的暂时性故障。这不会重试 scorer workflow、trace target、batch item、score 写入或已完成的 scorer 步骤。
+
+`@mastra/core` `1.49.0` 不包含 scorer error processor 配置。使用此配置前，请升级到支持 scorer processor 的版本，或向后移植该项特定变更。
+
+以下示例使用一个有界重试预算。将 processor `maxRetries` 和 `judge.maxProcessorRetries` 设为相同值。将内部 judge Agent 的模型重试次数保持为默认值 `0`，以免模型重试使 processor 尝试次数成倍增加。
+
+```typescript title="src/mastra/scorers/response-quality.ts"
+import { createScorer } from '@mastra/core/evals'
+import { StreamErrorRetryProcessor } from '@mastra/core/processors'
+
+const isTransientNetworkError = (error: unknown) =>
+  error instanceof Error && /ECONNRESET|ETIMEDOUT|socket hang up/i.test(error.message)
+
+const retryProcessor = new StreamErrorRetryProcessor({
+  maxRetries: 2,
+  maxRetryAfterMs: 30_000,
+  delayMs: ({ retryCount }) => Math.min(1_000 * 2 ** retryCount, 30_000),
+  matchers: [isTransientNetworkError],
+  retryUnknownErrors: false,
+})
+
+export const responseQuality = createScorer({
+  id: 'response-quality',
+  description: 'Scores response quality',
+  judge: {
+    model: myModel,
+    instructions: 'Return a score and concise reason.',
+    errorProcessors: [retryProcessor],
+    maxProcessorRetries: 2,
+  },
+})
+  .generateScore({
+    description: 'Score the response quality.',
+    createPrompt: ({ run }) => `Score: ${run.output}`,
+  })
+  .generateReason({
+    description: 'Explain the score.',
+    createPrompt: () => 'Explain the score.',
+  })
+```
+
+使用此配置时，失败请求最多会向 Provider 发起三次尝试：一次初始请求加两次 processor 重试。如果 `generateScore` 已完成，而 `generateReason` 遇到可重试故障，则只重试 `generateReason`。
+
+`StreamErrorRetryProcessor` 会遵循 Provider 的可重试元数据和精确的自定义 matcher。默认禁用 `retryUnknownErrors`，因此认证、无效请求和上下文长度错误会立即失败，除非显式匹配这些错误。默认将 `Retry-After` 值限制为 `30_000` 毫秒。使用 `maxRetryAfterMs` 可更改该上限。
+
+避免添加外层 scorer 或 workflow 重试。除非明确接受额外尝试，否则请勿将非零的模型重试设置与此 processor 结合使用。
+
+### 覆盖单个步骤的重试配置
+
+步骤的 `judge` 配置会覆盖 scorer 级别的 judge 字段。Processor 数组会替换 scorer 级别的数组。在步骤配置中省略 `maxProcessorRetries`，即可继承 scorer 级别的数值上限。
+
+协调的 processor 重试需要使用 Mastra 当前生成 API 的 judge 模型。旧版模型 adapter 会调用 [`generateLegacy()`](/reference/agents/generateLegacy)，绕过 error processor，并使用该 API 单独设置的 AI SDK `maxRetries` 默认值 `2`。
+
+## 类型安全
+
+创建 scorer 时可以指定输入/输出类型，以获得更好的类型推断和 IntelliSense 支持：
+
+### Agent 类型快捷方式
+
+评估 Agent 时，使用 `type: 'agent'` 可自动获得 Agent 输入/输出的正确类型：
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+
+// Agent scorer with automatic typing
+const agentScorer = createScorer({
+  id: 'agent-response-quality',
+  description: 'Evaluates agent responses',
+  type: 'agent', // Automatically provides ScorerRunInputForAgent/ScorerRunOutputForAgent
+})
+  .preprocess(({ run }) => {
+    // run.input is automatically typed as ScorerRunInputForAgent
+    const userMessage = run.inputData.inputMessages[0]?.content
+    return { userMessage }
+  })
+  .generateScore(({ run, results }) => {
+    // run.output is automatically typed as ScorerRunOutputForAgent
+    const response = run.output[0]?.content
+    return response.length > 10 ? 1.0 : 0.5
+  })
+```
+
+### 使用泛型的自定义类型
+
+对于自定义输入/输出类型，请使用泛型方式：
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+
+type CustomInput = { query: string; context: string[] }
+type CustomOutput = { answer: string; confidence: number }
+
+const customScorer = createScorer<CustomInput, CustomOutput>({
+  id: 'custom-scorer',
+  description: 'Evaluates custom data',
+}).generateScore(({ run }) => {
+  // run.input is typed as CustomInput
+  // run.output is typed as CustomOutput
+  return run.output.confidence
+})
+```
+
+### 内置 Agent 类型
+
+- **`ScorerRunInputForAgent`** - 包含用于 Agent 评估的 `inputMessages`、`rememberedMessages`、`systemMessages` 和 `taggedSystemMessages`
+- **`ScorerRunOutputForAgent`** - Agent 响应消息数组
+
+使用这些类型可为评分逻辑提供自动补全、编译时验证和更完善的文档支持。
+
+## 使用 Agent 类型进行 Trace 评分
+
+使用 `type: 'agent'` 时，scorer 既可直接添加到 Agent，也可为 Agent 交互产生的 Trace 评分。scorer 会自动将 Trace 数据转换为正确的 Agent 输入/输出格式：
+
+```typescript
+const agentTraceScorer = createScorer({
+  id: 'agent-trace-length',
+  description: 'Evaluates agent response length',
+  type: 'agent',
+}).generateScore(({ run }) => {
+  // Trace data is automatically transformed to agent format
+  const userMessages = run.inputData.inputMessages
+  const agentResponse = run.output[0]?.content
+
+  // Score based on response length
+  return agentResponse?.length > 50 ? 0 : 1
+})
+
+// Register with Mastra for trace scoring
+const mastra = new Mastra({
+  scorers: {
+    agentTraceScorer,
+  },
+})
+```
+
+## 步骤方法签名
+
+### preprocess
+
+可选的预处理步骤，可在分析前提取或转换数据。
+
+**函数模式：**
+函数：`({ run, results }) => any`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'run.input',
+    type: 'any',
+    isOptional: false,
+    description:
+      "提供给 scorer 的输入记录。如果 scorer 已添加到 Agent，则它是用户消息数组，例如 `[{ role: 'user', content: 'hello world' }]`.。如果 scorer 用于 workflow，则它是 workflow 的输入。",
+  },
+  {
+    name: 'run.output',
+    type: 'any',
+    isOptional: false,
+    description:
+      "提供给 scorer 的输出记录。对于 Agent，它通常是 Agent 的响应；对于 workflow，它是 workflow 的输出。",
+  },
+  {
+    name: 'run.runId',
+    type: 'string',
+    isOptional: false,
+    description: '此评分 run 的唯一标识符。',
+  },
+  {
+    name: 'run.requestContext',
+    type: 'object',
+    isOptional: true,
+    description: '正在评估的 Agent 或 workflow 步骤中的 Request Context（可选）。',
+  },
+  {
+    name: 'results',
+    type: 'object',
+    isOptional: false,
+    description: '空对象（没有前置步骤）。',
+  },
+]}
+/>
+
+返回值：`any`\
+该方法可以返回任意值。返回值可供后续步骤通过 `preprocessStepResult`.
+
+**Prompt 对象模式：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'description',
+    type: 'string',
+    isOptional: false,
+    description: '此预处理步骤功能的描述。',
+  },
+  {
+    name: 'outputSchema',
+    type: 'StandardJSONSchemaV1',
+    isOptional: false,
+    description: 'preprocess 步骤预期输出的 Standard JSON Schema。',
+  },
+  {
+    name: 'createPrompt',
+    type: 'function',
+    isOptional: false,
+    description: 'Function: ({ run, results }) => string. 返回提供给 LLM 的 prompt。',
+  },
+  {
+    name: 'judge',
+    type: 'object',
+    isOptional: true,
+    description: '此步骤的 LLM judge（可选，可覆盖主 judge）。请参阅 Judge Object 部分。',
+  },
+]}
+/>
+
+### analyze
+
+可选的分析步骤，用于处理输入/输出及所有预处理数据。
+
+**函数模式：**
+函数：`({ run, results }) => any`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'run.input',
+    type: 'any',
+    isOptional: false,
+    description:
+      "提供给 scorer 的输入记录。如果 scorer 已添加到 Agent，则它是用户消息数组，例如 `[{ role: 'user', content: 'hello world' }]`.。如果 scorer 用于 workflow，则它是 workflow 的输入。",
+  },
+  {
+    name: 'run.output',
+    type: 'any',
+    isOptional: false,
+    description:
+      "提供给 scorer 的输出记录。对于 Agent，它通常是 Agent 的响应；对于 workflow，它是 workflow 的输出。",
+  },
+  {
+    name: 'run.runId',
+    type: 'string',
+    isOptional: false,
+    description: '此评分 run 的唯一标识符。',
+  },
+  {
+    name: 'run.requestContext',
+    type: 'object',
+    isOptional: true,
+    description: '正在评估的 Agent 或 workflow 步骤中的 Request Context（可选）。',
+  },
+  {
+    name: 'results.preprocessStepResult',
+    type: 'any',
+    isOptional: true,
+    description: 'preprocess 步骤的结果（如果已定义，可选）。',
+  },
+]}
+/>
+
+返回值：`any`\
+该方法可以返回任意值。返回值可供后续步骤通过 `analyzeStepResult`.
+
+**Prompt 对象模式：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'description',
+    type: 'string',
+    isOptional: false,
+    description: '此分析步骤功能的描述。',
+  },
+  {
+    name: 'outputSchema',
+    type: 'StandardJSONSchemaV1',
+    isOptional: false,
+    description: 'analyze 步骤预期输出的 Standard JSON Schema。',
+  },
+  {
+    name: 'createPrompt',
+    type: 'function',
+    isOptional: false,
+    description: 'Function: ({ run, results }) => string. 返回提供给 LLM 的 prompt。',
+  },
+  {
+    name: 'judge',
+    type: 'object',
+    isOptional: true,
+    description: '此步骤的 LLM judge（可选，可覆盖主 judge）。请参阅 Judge Object 部分。',
+  },
+]}
+/>
+
+### `generateScore`
+
+计算最终数值得分的**必需**步骤。
+
+**函数模式：**
+函数：`({ run, results }) => number`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'run.input',
+    type: 'any',
+    isOptional: false,
+    description:
+      "提供给 scorer 的输入记录。如果 scorer 已添加到 Agent，则它是用户消息数组，例如 `[{ role: 'user', content: 'hello world' }]`.。如果 scorer 用于 workflow，则它是 workflow 的输入。",
+  },
+  {
+    name: 'run.output',
+    type: 'any',
+    isOptional: false,
+    description:
+      "提供给 scorer 的输出记录。对于 Agent，它通常是 Agent 的响应；对于 workflow，它是 workflow 的输出。",
+  },
+  {
+    name: 'run.runId',
+    type: 'string',
+    isOptional: false,
+    description: '此评分 run 的唯一标识符。',
+  },
+  {
+    name: 'run.requestContext',
+    type: 'object',
+    isOptional: true,
+    description: '正在评估的 Agent 或 workflow 步骤中的 Request Context（可选）。',
+  },
+  {
+    name: 'results.preprocessStepResult',
+    type: 'any',
+    isOptional: true,
+    description: 'preprocess 步骤的结果（如果已定义，可选）。',
+  },
+  {
+    name: 'results.analyzeStepResult',
+    type: 'any',
+    isOptional: true,
+    description: 'analyze 步骤的结果（如果已定义，可选）。',
+  },
+]}
+/>
+
+返回值：`number`\
+该方法必须返回数值得分。
+
+**Prompt 对象模式：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'description',
+    type: 'string',
+    isOptional: false,
+    description: '此评分步骤功能的描述。',
+  },
+  {
+    name: 'outputSchema',
+    type: 'StandardJSONSchemaV1',
+    isOptional: false,
+    description: 'generateScore 步骤预期输出的 Standard JSON Schema。',
+  },
+  {
+    name: 'createPrompt',
+    type: 'function',
+    isOptional: false,
+    description: 'Function: ({ run, results }) => string. 返回提供给 LLM 的 prompt。',
+  },
+  {
+    name: 'judge',
+    type: 'object',
+    isOptional: true,
+    description: '此步骤的 LLM judge（可选，可覆盖主 judge）。请参阅 Judge Object 部分。',
+  },
+]}
+/>
+
+使用 prompt 对象模式时，还必须提供 `calculateScore` 函数，将 LLM 输出转换为数值得分：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'calculateScore',
+    type: 'function',
+    isOptional: false,
+    description:
+      '函数：({ run, results, analyzeStepResult }) => number。将 LLM 的结构化输出转换为数值得分。',
+  },
+]}
+/>
+
+### `generateReason`
+
+提供得分说明的可选步骤。
+
+**函数模式：**
+函数：`({ run, results, score }) => string`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'run.input',
+    type: 'any',
+    isOptional: false,
+    description:
+      "提供给 scorer 的输入记录。如果 scorer 已添加到 Agent，则它是用户消息数组，例如 `[{ role: 'user', content: 'hello world' }]`.。如果 scorer 用于 workflow，则它是 workflow 的输入。",
+  },
+  {
+    name: 'run.output',
+    type: 'any',
+    isOptional: false,
+    description:
+      "提供给 scorer 的输出记录。对于 Agent，它通常是 Agent 的响应；对于 workflow，它是 workflow 的输出。",
+  },
+  {
+    name: 'run.runId',
+    type: 'string',
+    isOptional: false,
+    description: '此评分 run 的唯一标识符。',
+  },
+  {
+    name: 'run.requestContext',
+    type: 'object',
+    isOptional: true,
+    description: '正在评估的 Agent 或 workflow 步骤中的 Request Context（可选）。',
+  },
+  {
+    name: 'results.preprocessStepResult',
+    type: 'any',
+    isOptional: true,
+    description: 'preprocess 步骤的结果（如果已定义，可选）。',
+  },
+  {
+    name: 'results.analyzeStepResult',
+    type: 'any',
+    isOptional: true,
+    description: 'analyze 步骤的结果（如果已定义，可选）。',
+  },
+  {
+    name: 'score',
+    type: 'number',
+    isOptional: false,
+    description: 'generateScore 步骤计算出的得分。',
+  },
+]}
+/>
+
+返回值：`string`\
+该方法必须返回用于说明得分的字符串。
+
+**Prompt 对象模式：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'description',
+    type: 'string',
+    isOptional: false,
+    description: '此原因说明步骤功能的描述。',
+  },
+  {
+    name: 'createPrompt',
+    type: 'function',
+    isOptional: false,
+    description: 'Function: ({ run, results, score }) => string. 返回提供给 LLM 的 prompt。',
+  },
+  {
+    name: 'judge',
+    type: 'object',
+    isOptional: true,
+    description: '此步骤的 LLM judge（可选，可覆盖主 judge）。请参阅 Judge Object 部分。',
+  },
+]}
+/>
+
+所有步骤函数都可以是异步函数。

@@ -1,0 +1,171 @@
+---
+title: "リファレンス: DuckDBストレージ | ストレージ"
+description: ローカルでのObservability開発向け組み込み分析バックエンドである、MastraのDuckDBストレージ実装に関するドキュメントです。
+packages:
+  - "@mastra/duckdb"
+  - "@mastra/core"
+---
+
+# DuckDBストレージ
+
+[DuckDB](https://duckdb.org/)は、プロセスに組み込んで使用する分析データベースです。`@mastra/duckdb`パッケージは、外部サービスを実行せずにトレース、ログ、メトリクス、スコア、フィードバックを扱える、ローカル開発向けのOLAPベースのObservabilityストアを提供します。
+
+ベクトル検索については、同じパッケージ内の独立したAPIである[DuckDBベクトルストアのリファレンス](/reference/vectors/duckdb)を参照してください。
+
+## DuckDBを使用する場面
+
+Observability機能のローカル開発に使用します。DuckDBは組み込み型かつファイルベースのため、サーバーが不要ですぐに起動できます。ClickHouseと同じObservabilityシグナルをサポートしているため、本番バックエンドへデプロイする前のダッシュボードのテストやトレースの調査に役立ちます。
+
+現在、DuckDBが実装しているのは`observability`ドメインのみです。[複合ストレージ](/reference/storage/composite)構成で、`memory`と`workflows`には別のストレージアダプター（[LibSQL](/reference/storage/libsql)など）を組み合わせてください。
+
+:::warning
+DuckDBは開発用であり、本番環境には推奨されません。プロセス内で動作し、単一のローカルファイルに永続化するため、一時ファイルシステムを使用するプラットフォーム（Railway、Fly.io、Render、Heroku、サーバーレスコンテナなど）では動作しません。本番環境のObservabilityには[ClickHouse](/reference/storage/clickhouse)を使用してください。
+:::
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/duckdb@latest
+```
+
+## 使用方法
+
+### 複合ストアのObservabilityドメインとして使用する
+
+これは標準的なローカル開発構成です。LibSQLがその他のドメインを、DuckDBがObservabilityを処理します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { LibSQLStore } from '@mastra/libsql'
+import { DuckDBStore } from '@mastra/duckdb'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite-storage',
+    default: new LibSQLStore({
+      id: 'mastra-storage',
+      url: 'file:./mastra.db',
+    }),
+    domains: {
+      observability: new DuckDBStore().observability,
+    },
+  }),
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'mastra',
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+`.observability`アクセサーは、Observabilityドメインストアを直接返します。同等の汎用形式では`getStore()`を使用します。これは、複合型のすべてのストレージアダプターで利用できます。
+
+```typescript
+const observability = await new DuckDBStore().getStore('observability')
+```
+
+### スタンドアロン
+
+`Mastra`の複合ストレージ以外でObservabilityストレージだけが必要な場合は、`DuckDBStore`を直接インスタンス化し、Observabilityドメインにアクセスします。
+
+```typescript
+import { DuckDBStore } from '@mastra/duckdb'
+
+const duckdb = new DuckDBStore({ path: './traces.duckdb' })
+const observability = duckdb.observability
+
+await observability.init()
+```
+
+### インメモリデータベース
+
+一時的なDuckDBインスタンスを使用するには、`:memory:`を渡します。プロセスの終了時にデータが失われるため、ユニットテストや短時間のスクリプトに適しています。
+
+```typescript
+const duckdb = new DuckDBStore({ path: ':memory:' })
+```
+
+## 設定
+
+### `DuckDBStore`のオプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'このストレージインスタンスの一意な識別子。',
+    isOptional: true,
+    defaultValue: "'duckdb'",
+  },
+  {
+    name: 'path',
+    type: 'string',
+    description: 'DuckDBデータベースファイルのパス。一時的なインメモリデータベースには`:memory:`を使用します。',
+    isOptional: true,
+    defaultValue: "'mastra.duckdb'",
+  },
+  {
+    name: 'memoryLimit',
+    type: 'string',
+    description:
+      "DuckDBが使用できる最大メモリ（'2GB'や'512MB'など）。ファイルベースのデータベースでは、メモリ容量を超える処理はディスクに退避されます。専用の分析ワークロードでは、この値を増やしてください。",
+    isOptional: true,
+    defaultValue: "'2GB'",
+  },
+  {
+    name: 'threads',
+    type: 'number',
+    description:
+      'DuckDBが使用できるスレッド数。共有アプリケーションサーバーの全コアをクエリが占有しないようにするには、この値を減らしてください。',
+    isOptional: true,
+    defaultValue: 'one per CPU core',
+  },
+]}
+/>
+
+### 低レベルの型
+
+`@mastra/duckdb`は、複数のMastraストレージインスタンスで単一の基盤データベースを共有するための`DuckDBConnection`と、対応する`DuckDBStorageConfig`型もエクスポートします。ほとんどのアプリケーションでは、これらを直接使用する必要はありません。
+
+## サポートされるドメイン
+
+現在、DuckDBが実装しているストレージドメインは1つです。
+
+| ドメイン | サポート |
+| - | - |
+| `observability` | はい |
+| `memory` | いいえ |
+| `workflows` | いいえ |
+| `scores` | いいえ |
+| `agents` | いいえ |
+
+完全なストレージソリューションにするには、不足しているドメインを扱えるアダプター（ローカル開発では通常[LibSQL](/reference/storage/libsql)）と`DuckDBStore`を組み合わせてください。
+
+## 初期化
+
+`MastraCompositeStore`を介して`Mastra`に渡すと、Observabilityドメインは初回使用時に自動で初期化されます。`Mastra`の外部で明示的に初期化するには、Observabilityストアで`init()`を呼び出します。
+
+```typescript
+import { DuckDBStore } from '@mastra/duckdb'
+
+const duckdb = new DuckDBStore({ path: './traces.duckdb' })
+await duckdb.observability.init()
+```
+
+## Observability戦略
+
+DuckDBは、`MastraStorageExporter`が使用する`event-sourced`戦略をサポートしています。この戦略では、spanをメモリにバッファリングし、完了したイベントをバッチで書き込みます。開発規模のトラフィックに適しています。大規模な本番ワークロードについては、[`MastraStorageExporter`がサポートするストレージProvider](/docs/observability/integrations/exporters/mastra-storage#storage-provider-support)を参照してください。
+
+## 関連項目
+
+- [ストレージの概要](/reference/storage/overview)
+- [複合ストレージ](/reference/storage/composite)
+- [ClickHouseストレージ](/reference/storage/clickhouse): 本番環境向けObservabilityバックエンド
+- [DuckDBベクトルストア](/reference/vectors/duckdb): 同じパッケージを使用したベクトル検索
+- [Observabilityの概要](/docs/observability/overview)

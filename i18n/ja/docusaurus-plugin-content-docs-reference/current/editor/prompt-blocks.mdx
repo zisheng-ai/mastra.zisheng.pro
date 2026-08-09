@@ -1,0 +1,143 @@
+---
+title: "リファレンス: Prompt blocks | Editor"
+description: "Editor の Prompt block の型、テンプレート値、表示条件、バージョン、API に関するリファレンス。"
+packages:
+  - "@mastra/core"
+  - "@mastra/editor"
+---
+
+# Prompt blocks
+
+Prompt block は、Editor で管理する再利用可能な命令テンプレートです。Agent の命令には、インラインテキスト、埋め込み Prompt block、独立してバージョン管理される Prompt block への参照を組み合わせられます。
+
+Studio でのワークフローと一般的な用途については、[Prompt blocks](/docs/editor/overview#prompt-blocks) を参照してください。
+
+## Block の型
+
+| 型 | 説明 |
+| - | - |
+| `text` | Agent のバージョン内にのみ保存される自由形式のテキスト |
+| `prompt_block` | Agent のバージョンに埋め込まれる Prompt block |
+| `prompt_block_ref` | 独立して保存され、バージョン管理される Prompt block への参照 |
+
+参照される Block はランタイムに解決されます。参照先が存在しない場合や未公開の場合、その参照は最終的な命令から除外されます。解決された空でない Block は、2つの改行で連結されます。
+
+次の例では、保存済みの Block とインラインテキストを Agent に追加します。
+
+```typescript title="src/scripts/attach-prompt.ts"
+import { mastra } from '../mastra'
+
+const editor = mastra.getEditor()!
+
+await editor.agent.update({
+  id: 'support-agent',
+  instructions: [
+    { type: 'prompt_block_ref', id: 'brand-voice' },
+    { type: 'text', content: 'Answer only questions about Acme products.' },
+  ],
+})
+```
+
+## テンプレート値
+
+テンプレートは、ランタイムに request context から値を解決します。
+
+| 構文 | Request context | 出力 |
+| - | - | - |
+| <code>{'{{userName}}'}</code> | `{ userName: 'Maya' }` | `Maya` |
+| <code>{'{{user.name}}'}</code> | `{ user: { name: 'Maya' } }` | `Maya` |
+| <code>{"{{task \u007c\u007c 'request'}}"}</code> | `{}` | `request` |
+| <code>{'{{missingValue}}'}</code> | `{}` | `{{missingValue}}` |
+
+変数名は、英字またはアンダースコアで始める必要があります。フォールバックは、単一引用符または二重引用符で囲んだ文字列である必要があります。フォールバックがなく解決できないプレースホルダーは、そのまま残ります。オブジェクトと配列は JSON としてシリアライズされます。その他の値は文字列に変換されます。
+
+値は [request context](/docs/server/request-context) を介して渡します。Editor は独立した Agent の `variables` フィールドを読み取りません。
+
+## 表示条件
+
+Prompt block には、最終的な命令に含めるかどうかを制御する表示条件を設定できます。各条件は、次の3つの要素で構成されます。
+
+- **キー**: `user.role` や `account.plan` など、確認する request context のフィールド。
+- **演算子**: `equals`、`contains`、`exists` など、実行する比較。
+- **値**: 比較対象の値。`exists` 演算子と `not_exists` 演算子では不要です。
+
+たとえば、条件 `user.role` `equals` `admin` では、request context に `{ user: { role: 'admin' } }` が含まれる場合にのみ Block が組み込まれます。
+
+| 演算子 | 例 | Block が組み込まれる条件 |
+| - | - | - |
+| `equals` / `not_equals` | `user.role` equals `admin` | フィールドが値と厳密に等しい、または等しくない |
+| `contains` / `not_contains` | `user.tags` contains `beta` | 文字列に値が含まれる、または配列に項目が含まれる |
+| `greater_than` / `less_than` | `order.total` greater than `100` | 数値フィールドが値より大きい、または小さい |
+| `greater_than_or_equal` / `less_than_or_equal` | `account.seats` greater than or equal to `10` | 数値フィールドが値以上、または値以下である |
+| `in` / `not_in` | `user.region` in `['US', 'CA']` | フィールドが指定された配列に含まれる、または含まれない |
+| `exists` / `not_exists` | `account.plan` exists | フィールドに null 以外の値がある、またはない |
+
+グループは、条件を `AND` または `OR` で組み合わせます。たとえば、次のグループでは、有料プランの管理者に対して Block が組み込まれます。
+
+```typescript
+const rules = {
+  operator: 'AND',
+  conditions: [
+    {
+      field: 'user.role',
+      operator: 'equals',
+      value: 'admin',
+    },
+    {
+      field: 'account.plan',
+      operator: 'in',
+      value: ['pro', 'enterprise'],
+    },
+  ],
+}
+```
+
+ドットパスを使用できます。空のグループは `true` と評価され、不明な演算子は `false` と評価されます。ストレージの型では、グループを最大3階層までネストできます。
+
+条件のない Block は常に組み込まれます。
+
+## プログラムから利用する API
+
+Prompt block には `mastra.getEditor().prompt` を介してアクセスします。完全なメソッドシグネチャについては、[`prompt` namespace](/reference/editor/mastra-editor#namespaces) を参照してください。
+
+Prompt block を作成します。
+
+```typescript title="src/scripts/seed-prompts.ts"
+import { mastra } from '../mastra'
+
+const editor = mastra.getEditor()!
+
+await editor.prompt.create({
+  id: 'brand-voice',
+  name: 'Brand voice',
+  description: 'Acme tone and style guidelines',
+  content: 'Write in a friendly, concise tone. Address the user as {{userName || "there"}}.',
+})
+```
+
+既存の Block を更新します。
+
+```typescript title="src/scripts/update-prompt.ts"
+await editor.prompt.update({
+  id: 'brand-voice',
+  content: 'Write in a friendly, concise tone. Greet the user by name when available.',
+})
+```
+
+コンテンツが変更されると、`update()` は新しいドラフトを作成します。保存された Block をページ単位で取得するには `list()`、1つの Block を取得するには `getById()`、ドラフトへの参照を使ってテンプレートと条件を解決するには `preview(blocks, context)` を使用します。
+
+## REST API
+
+デフォルトの Mastra サーバープレフィックスは `/api` です。カスタムサーバープレフィックスを使用すると、次のパスが変わります。
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `GET` | `/api/stored/prompt-blocks` | 保存された Prompt block の一覧を取得 |
+| `POST` | `/api/stored/prompt-blocks` | 保存する Prompt block を作成 |
+| `GET` | `/api/stored/prompt-blocks/:storedPromptBlockId` | 保存された Prompt block を取得 |
+| `PATCH` | `/api/stored/prompt-blocks/:storedPromptBlockId` | 保存された Prompt block を更新 |
+| `DELETE` | `/api/stored/prompt-blocks/:storedPromptBlockId` | 保存された Prompt block を削除 |
+
+## バージョンの解決
+
+ランタイムの参照は、現在公開されている Block に解決されます。Editor のプレビューは最新のドラフトに解決されます。ドラフト、公開、復元に共通するライフサイクルについては、[Editor のバージョン管理](/docs/editor/overview#versioning) を参照してください。

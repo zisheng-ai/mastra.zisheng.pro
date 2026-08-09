@@ -1,0 +1,128 @@
+---
+title: "Subagents | ファイルベース Agent"
+description: subagents/ 配下で、ファイルベース Agent 専用の子 Agent を宣言します。
+packages:
+  - "@mastra/core"
+---
+
+# Subagents
+
+ファイルベース Agent では、委譲先となる専用の子 Agent、つまり **subagent** を宣言できます。親 Model には、各 subagent がそのディレクトリ名を持つ委譲 Tool として提示されます。親 Model はその Tool を呼び出してタスクを引き渡し、subagent の結果は親の会話に返されます。
+
+ファイルベースの規約については、このページを参照してください。より広範な委譲パターン、Hook、Memory の分離、Tool 承認の伝播、スコアリングについては、[Supervisor Agent](/docs/capabilities/subagents)を参照してください。
+
+## クイックスタート
+
+`subagents/` 配下に subagent ごとのディレクトリを1つずつ宣言します。
+
+```text title="Subagent layout"
+src/mastra/agents/
+└── supervisor/
+    ├── config.ts
+    ├── instructions.md
+    └── subagents/
+        └── researcher/
+            ├── config.ts
+            ├── instructions.md
+            └── tools/
+                └── search.ts
+```
+
+Mastra は `researcher` を独立した Agent として組み立て、Supervisor の `agents` Map に組み込みます。親 Model は、生成された `researcher` 委譲 Tool を使用してタスクを委譲できます。
+
+subagent の `config.ts` には、空でない `description` を設定する必要があります。親 Model は、委譲するかどうかを判断する際にこの値を参照します。
+
+```typescript title="src/mastra/agents/supervisor/subagents/researcher/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  description: 'Researches a topic and returns cited findings.',
+})
+```
+
+## Model が委譲する仕組み
+
+subagent の `description` は、親 Model がルーティングに使用するテキストです。[Tool の description](/reference/file-based-agents/tools#tool-options)と同じように、subagent の役割と、どのような場合に委譲すべきかを記述してください。
+
+検出された subagent に空でない description が指定されていない場合、ビルドは失敗します。
+
+## 分離
+
+subagent は分離されています。親の Tool、Skill、Workspace、Memory、Processor、subagent は継承されません。各子 Agent は、独自のディレクトリを持つ自己完結型の Agent です。
+
+複数の Agent で同じ依存関係を共有する場合は、コードで定義し、各 Agent の config を通じて割り当ててください。
+
+## ネスト
+
+subagent は独自の `subagents/` ディレクトリを宣言でき、トップレベル Agent の下に最大3階層までネストできます。それより深い階層にネストされた `subagents/` ディレクトリは、警告とともに無視されます。
+
+```text title="Nested subagents"
+src/mastra/agents/
+└── supervisor/            # depth 0
+    └── subagents/
+        └── researcher/    # depth 1
+            └── subagents/
+                └── summarizer/ # depth 2
+```
+
+## 命名規則
+
+- subagent ID が親の Tool Key のいずれかと重複すると、ビルドエラーになります。
+- 同じ親の配下に重複する subagent ID があると、ビルドエラーになります。
+- subagent ID が親の `config.agents` にも存在する場合は、`config.agents` のエントリーが優先され、警告がログに記録されます。
+- `config.agents` が関数の場合、静的にマージできないため、検出された subagent は警告とともに無視されます。
+
+## 例
+
+この Supervisor は、調査と執筆のフローを調整します。`researcher` subagent は検索 Tool を所有し、`writer` subagent はファイルの下書き用 Workspace を所有します。
+
+```text title="Research supervisor"
+src/mastra/agents/
+└── research-supervisor/
+    ├── config.ts
+    ├── instructions.md
+    └── subagents/
+        ├── researcher/
+        │   ├── config.ts
+        │   ├── instructions.md
+        │   └── tools/
+        │       └── search_web.ts
+        └── writer/
+            ├── config.ts
+            ├── instructions.md
+            └── workspace/
+                └── draft-template.md
+```
+
+```typescript title="src/mastra/agents/research-supervisor/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+```markdown title="src/mastra/agents/research-supervisor/instructions.md"
+You coordinate research and writing.
+
+Delegate fact gathering to `researcher`. Delegate final drafting to `writer`.
+```
+
+```typescript title="src/mastra/agents/research-supervisor/subagents/researcher/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  description: 'Use to gather facts, sources, and concise research notes for a topic.',
+})
+```
+
+```typescript title="src/mastra/agents/research-supervisor/subagents/writer/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  description: 'Use to turn research notes into a structured draft.',
+})
+```

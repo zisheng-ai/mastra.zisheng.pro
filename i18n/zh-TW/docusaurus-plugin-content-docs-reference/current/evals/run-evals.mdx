@@ -1,0 +1,594 @@
+---
+title: "參考：runEvals | Evals"
+description: "Mastra runEvals 函式的文件，可使用多個評分器批次評估 Agent 與 Workflow。"
+packages:
+  - "@mastra/core"
+---
+
+# runEvals
+
+`runEvals` 函式可同時針對多個評分器執行多筆測試案例，藉此批次評估 Agent 與 Workflow。這對 AI 系統的系統化測試、效能分析與驗證至關重要。
+
+## 使用範例
+
+```typescript
+import { runEvals } from '@mastra/core/evals'
+import { myAgent } from './agents/my-agent'
+import { myScorer1, myScorer2 } from './scorers'
+
+const result = await runEvals({
+  target: myAgent,
+  data: [
+    { input: 'What is machine learning?' },
+    { input: 'Explain neural networks' },
+    { input: 'How does AI work?' },
+  ],
+  scorers: [myScorer1, myScorer2],
+  targetOptions: { maxSteps: 5 },
+  concurrency: 2,
+  onItemComplete: ({ item, targetResult, scorerResults }) => {
+    console.log(`Completed: ${item.input}`)
+    console.log(`Scores:`, scorerResults)
+  },
+})
+
+console.log(`Average scores:`, result.scores)
+console.log(`Processed ${result.summary.totalItems} items`)
+```
+
+### 多輪評估
+
+```typescript
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { weatherAgent } from './agents/weather-agent'
+
+const result = await runEvals({
+  target: weatherAgent,
+  data: [
+    {
+      inputs: [
+        'What is the weather in Brooklyn?',
+        'What about tomorrow?',
+        'Compare the two forecasts.',
+      ],
+    },
+  ],
+  scorers: [checks.calledTool('get_weather', { times: 2 }), checks.includes('Brooklyn')],
+})
+```
+
+### 搭配 gate 與門檻值
+
+```typescript
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { faithfulnessScorer } from './scorers'
+
+const result = await runEvals({
+  target: myAgent,
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  gates: [checks.calledTool('get_weather'), checks.noToolErrors()],
+  scorers: [{ scorer: faithfulnessScorer, threshold: 0.7 }, checks.includes('Brooklyn')],
+})
+
+result.verdict // 'passed' | 'scored' | 'failed'
+result.gateResults // [{ id, passed, score }]
+result.thresholdResults // [{ id, passed, averageScore, threshold }]
+```
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'target',
+    type: 'Agent | Workflow',
+    description: '要評估的 Agent 或 Workflow。',
+    isOptional: false,
+  },
+  {
+    name: 'data',
+    type: 'RunEvalsDataItem[]',
+    description: '包含輸入資料與選填 ground truth 的測試案例陣列。',
+    isOptional: false,
+  },
+  {
+    name: 'scorers',
+    type: 'ScorerEntry[] | AgentScorerConfig | WorkflowScorerConfig',
+    description:
+      '要使用的評分器。每個項目可以是單獨的 `MastraScorer`，或用於追蹤門檻值的 `{ scorer, threshold }`。`AgentScorerConfig` 物件會區分 Agent 層級與軌跡評分器。`WorkflowScorerConfig` 物件則指定 Workflow、個別步驟與軌跡的評分器。若至少提供一個 gate（只執行 gate），此項目可省略。',
+    isOptional: true,
+  },
+  {
+    name: 'gates',
+    type: 'MastraScorer[]',
+    description:
+      '執行若要通過，分數必須達到 1.0 的評分器。若任何 gate 在所有資料項目中的平均分數低於 1.0，判定結果會是 `failed`。每筆資料項目會先執行 gate，再執行一般評分器。提供此項目時可省略 `scorers`。',
+    isOptional: true,
+  },
+  {
+    name: 'targetOptions',
+    type: 'AgentExecutionOptions | WorkflowRunOptions',
+    description:
+      '執行期間轉送給 target 的選項。Agent：傳給 agent.generate() 的選項（例如 maxSteps、modelSettings、instructions）。Workflow：傳給 run.start() 的選項（例如 perStep、outputOptions、initialState）。多輪 Agent 執行（`inputs`／`turns`）時，`runEvals` 會產生並注入共用 thread 與 resource，因此 `memory.thread` 為選填；如要重複使用特定 resource，請提供 `memory.resource`。',
+    isOptional: true,
+  },
+  {
+    name: 'concurrency',
+    type: 'number',
+    description: '同時執行的測試案例數量。',
+    isOptional: true,
+    defaultValue: '1',
+  },
+  {
+    name: 'onItemComplete',
+    type: 'function',
+    description: '每筆測試案例完成後呼叫的 callback 函式。會接收項目、target 結果與評分器結果。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 資料項目結構
+
+<PropertiesTable
+  content={[
+  {
+    name: 'input',
+    type: 'string | string[] | CoreMessage[] | any',
+    description: 'target 的輸入資料。Agent：訊息或字串。Workflow：Workflow 輸入資料。提供 `inputs` 時可省略。',
+    isOptional: true,
+  },
+  {
+    name: 'inputs',
+    type: '(string | string[] | CoreMessage[] | any)[]',
+    description:
+      '多輪輸入。每個項目代表一輪（結構與 `input` 相同），會在同一個 thread 上依序傳送給 Agent。評分器會看到所有輪次累積的輸出。僅支援 Agent target。提供此項目時可省略 `input`。不可與 `turns` 同時使用。',
+    isOptional: true,
+  },
+  {
+    name: 'turns',
+    type: 'EvalTurn[]',
+    description:
+      '含有各輪斷言的多輪對話。每一輪都是 `{ input, gates?, scorers? }` 物件，會在同一個 thread 上依序傳送；其 `gates`／`scorers` 只評估該輪的輸入與輸出。各輪結果會記錄於 `turnResults`，並納入整體 `verdict`。僅支援 Agent target。不可與 `input` 或 `inputs` 同時使用。',
+    isOptional: true,
+  },
+  {
+    name: 'groundTruth',
+    type: 'any',
+    description: '評分時用於比較的預期輸出或參考輸出。',
+    isOptional: true,
+  },
+  {
+    name: 'expectedTrajectory',
+    type: 'TrajectoryExpectation',
+    description:
+      '用於軌跡評分的預期軌跡設定。包括預期步驟、順序、效率預算、封鎖清單與 Tool 失敗容許度。會以 `run.expectedTrajectory` 傳給軌跡評分器，並覆寫評分器 constructor 中的靜態預設值。',
+    isOptional: true,
+  },
+  {
+    name: 'requestContext',
+    type: 'RequestContext',
+    description: '執行期間要傳給 target 的 Request Context。',
+    isOptional: true,
+  },
+  {
+    name: 'tracingContext',
+    type: 'TracingContext',
+    description: '用於可觀測性與偵錯的 tracing context。',
+    isOptional: true,
+  },
+  {
+    name: 'startOptions',
+    type: 'WorkflowRunOptions',
+    description:
+      '各項目的 Workflow 執行選項（例如 initialState、perStep、outputOptions）。會合併至 targetOptions 之上，因此各項目的值優先。僅在 target 為 Workflow 時適用。',
+    isOptional: true,
+  },
+]}
+/>
+
+## Agent 評分器設定
+
+對於 Agent，請使用 `AgentScorerConfig` 區分 Agent 層級評分器與軌跡評分器：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'MastraScorer[]',
+    description: '接收 Agent 原始輸出（MastraDBMessage[]）的評分器。用於評估回應品質、內容等。',
+    isOptional: true,
+  },
+  {
+    name: 'trajectory',
+    type: 'MastraScorer[]',
+    description:
+      '接收預先擷取之 Trajectory 物件的評分器。若已設定儲存空間，pipeline 會從可觀測性 Trace 擷取階層式軌跡（包括巢狀 Tool 呼叫與模型產生作業）。否則會改從 Agent 訊息擷取 Tool 呼叫。',
+    isOptional: true,
+  },
+]}
+/>
+
+## Workflow 評分器設定
+
+對於 Workflow，請使用 `WorkflowScorerConfig` 指定不同層級的評分器：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'workflow',
+    type: 'MastraScorer[]',
+    description: '評估整個 Workflow 輸出的評分器。',
+    isOptional: true,
+  },
+  {
+    name: 'steps',
+    type: 'Record<string, MastraScorer[]>',
+    description: '將步驟 ID 對應至評分器陣列的物件，用於評估個別步驟的輸出。',
+    isOptional: true,
+  },
+  {
+    name: 'trajectory',
+    type: 'MastraScorer[]',
+    description:
+      '接收從 Workflow 執行中預先擷取之 Trajectory 的評分器。若已設定儲存空間，pipeline 會從可觀測性 Trace 擷取階層式軌跡（包括 Workflow 步驟中的巢狀 Agent 執行與 Tool 呼叫）。否則會改從 Workflow 輸出擷取步驟結果。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'scores',
+    type: 'Record<string, any>',
+    description: '所有測試案例的平均分數，依評分器名稱整理。',
+  },
+  {
+    name: 'summary',
+    type: 'object',
+    description: '實驗執行的摘要資訊。',
+  },
+  {
+    name: 'summary.totalItems',
+    type: 'number',
+    description: '已處理的測試案例總數。',
+  },
+  {
+    name: 'verdict',
+    type: "'passed' | 'scored' | 'failed'",
+    description:
+      '提供 `gates` 或含門檻值的評分器時會出現。`passed` = 所有 gate 與門檻值皆符合。`scored` = gate 已通過，但有門檻值未達標。`failed` = 至少有一個 gate 的分數未達 1.0。',
+    isOptional: true,
+  },
+  {
+    name: 'gateResults',
+    type: 'GateResult[]',
+    description: '各 gate 在所有資料項目中的平均結果。每個項目都有 `id`、`passed`（boolean）與 `score`（0–1）。',
+    isOptional: true,
+  },
+  {
+    name: 'thresholdResults',
+    type: 'ThresholdResult[]',
+    description: '各門檻評分器在所有資料項目中的平均結果。每個項目都有 `id`、`passed`、`averageScore` 與 `threshold`。',
+    isOptional: true,
+  },
+  {
+    name: 'turnResults',
+    type: 'TurnResult[]',
+    description:
+      '任何資料項目使用 `turns` 時會出現。每個項目都有 `index`（從零起算的輪次）、選填的 `gateResults`、`thresholdResults`，以及 `scores`（以評分器 ID 為 key 的單獨評分器平均值），並依資料項目中的輪次索引彙總。',
+    isOptional: true,
+  },
+]}
+/>
+
+## EvalTurn
+
+`turns` 陣列中的單一輪次。其 `gates`／`scorers` 只會評估該輪的輸入與輸出：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'input',
+    type: 'string | string[] | CoreMessage[] | any',
+    description: '此輪傳送給 Agent 的輸入。',
+  },
+  {
+    name: 'gates',
+    type: 'MastraScorer[]',
+    description: '此輪若要通過，分數必須達到 1.0 的 gate。任何一輪的 gate 失敗，都會使整體判定結果變成 `failed`。',
+    isOptional: true,
+  },
+  {
+    name: 'scorers',
+    type: 'ScorerEntry[]',
+    description:
+      '只針對此輪評估的評分器（可選擇附帶門檻值）。某一輪未達門檻值（且 gate 通過）時，判定結果會變成 `scored`。',
+    isOptional: true,
+  },
+]}
+/>
+
+## ScorerEntry
+
+`scorers` 陣列中的評分器項目可以是單獨的評分器，也可以是附帶門檻值的評分器：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'scorer',
+    type: 'MastraScorer',
+    description: '評分器執行個體。',
+  },
+  {
+    name: 'threshold',
+    type: 'number | { min?: number; max?: number }',
+    description:
+      '數字代表最低門檻值（分數等於或高於此值即通過）。使用 `{ min, max }` 進行範圍檢查，例如對 hallucination 這類分數越高越差的評分器使用 `{ max: 0.3 }`。`min` 與 `max` 都必須介於 0 到 1。',
+  },
+]}
+/>
+
+## 範例
+
+### Gate 與判定結果
+
+使用 `gates` 設定硬性的通過／失敗要求，並使用 `{ scorer, threshold }` 追蹤品質指標：
+
+```typescript
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+
+const result = await runEvals({
+  target: weatherAgent,
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  gates: [checks.calledTool('get_weather'), checks.noToolErrors()],
+  scorers: [
+    { scorer: faithfulnessScorer, threshold: 0.7 }, // min threshold (number shorthand)
+    { scorer: hallucinationScorer, threshold: { max: 0.3 } }, // max threshold (high = bad)
+    { scorer: toneScorer, threshold: { min: 0.5, max: 0.9 } }, // range threshold
+    checks.includes('Brooklyn'), // bare scorer, no threshold
+  ],
+})
+
+if (result.verdict === 'failed') {
+  console.log(
+    'Gate failures:',
+    result.gateResults?.filter(g => !g.passed),
+  )
+} else if (result.verdict === 'scored') {
+  console.log(
+    'Threshold misses:',
+    result.thresholdResults?.filter(t => !t.passed),
+  )
+}
+```
+
+### Agent 評估
+
+```typescript
+import { createScorer, runEvals } from '@mastra/core/evals'
+
+const myScorer = createScorer({
+  id: 'my-scorer',
+  description: "Check if Agent's response contains ground truth",
+  type: 'agent',
+}).generateScore(({ run }) => {
+  const response = run.output[0]?.content || ''
+  const expectedResponse = run.groundTruth
+  return response.includes(expectedResponse) ? 1 : 0
+})
+
+const result = await runEvals({
+  target: chatAgent,
+  data: [
+    {
+      input: 'What is AI?',
+      groundTruth: 'AI is a field of computer science that creates intelligent machines.',
+    },
+    {
+      input: 'How does machine learning work?',
+      groundTruth: 'Machine learning uses algorithms to learn patterns from data.',
+    },
+  ],
+  scorers: [relevancyScorer],
+  concurrency: 3,
+})
+```
+
+### Agent 軌跡評估
+
+使用 `AgentScorerConfig` 同時評估 Agent 回應與其 Tool 呼叫軌跡：
+
+```typescript
+import { runEvals } from '@mastra/core/evals'
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/code/trajectory'
+
+const trajectoryScorer = createTrajectoryAccuracyScorerCode()
+
+const result = await runEvals({
+  target: chatAgent,
+  data: [
+    {
+      input: 'What is the weather in London?',
+      expectedTrajectory: {
+        steps: [{ stepType: 'tool_call', name: 'weatherTool' }],
+      },
+    },
+  ],
+  scorers: {
+    // agent: [responseQualityScorer], // Optional: add agent-level scorers
+    trajectory: [trajectoryScorer],
+  },
+})
+
+// result.scores.agent — average agent-level scores
+// result.scores.trajectory — average trajectory scores
+```
+
+### 搭配 `targetOptions` 的 Agent
+
+傳入 `maxSteps` 或 `modelSettings` 等執行選項，自訂評估期間的 Agent 行為：
+
+```typescript
+const result = await runEvals({
+  target: chatAgent,
+  data: [{ input: 'Summarize this article' }, { input: 'Translate to French' }],
+  scorers: [relevancyScorer],
+  targetOptions: {
+    maxSteps: 5,
+    modelSettings: { temperature: 0 },
+  },
+})
+```
+
+### Workflow 評估
+
+```typescript
+const workflowResult = await runEvals({
+  target: myWorkflow,
+  data: [
+    { input: { query: 'Process this data', priority: 'high' } },
+    { input: { query: 'Another task', priority: 'low' } },
+  ],
+  scorers: {
+    workflow: [outputQualityScorer],
+    steps: {
+      'validation-step': [validationScorer],
+      'processing-step': [processingScorer],
+    },
+  },
+  onItemComplete: ({ item, targetResult, scorerResults }) => {
+    console.log(`Workflow completed for: ${item.inputData.query}`)
+    if (scorerResults.workflow) {
+      console.log('Workflow scores:', scorerResults.workflow)
+    }
+    if (scorerResults.steps) {
+      console.log('Step scores:', scorerResults.steps)
+    }
+  },
+})
+```
+
+### Workflow 軌跡評估
+
+在 Workflow 評估中加入軌跡評分，以驗證步驟執行順序：
+
+```typescript
+const workflowResult = await runEvals({
+  target: myWorkflow,
+  data: [
+    {
+      input: { query: 'Process this data' },
+      expectedTrajectory: {
+        steps: [
+          { stepType: 'workflow_step', name: 'validate' },
+          { stepType: 'workflow_step', name: 'process' },
+          { stepType: 'workflow_step', name: 'output' },
+        ],
+      },
+    },
+  ],
+  scorers: {
+    workflow: [outputQualityScorer],
+    steps: {
+      validate: [validationScorer],
+    },
+    trajectory: [trajectoryScorer],
+  },
+})
+
+// result.scores.trajectory — workflow trajectory scores
+```
+
+### 搭配各項目 `startOptions` 的 Workflow
+
+在個別資料項目上使用 `startOptions`，自訂每次 Workflow 執行。各項目的值優先於 `targetOptions`：
+
+```typescript
+const result = await runEvals({
+  target: myWorkflow,
+  data: [
+    {
+      input: { query: 'hello' },
+      startOptions: { initialState: { counter: 1 } },
+    },
+    {
+      input: { query: 'world' },
+      startOptions: { initialState: { counter: 2 } },
+    },
+  ],
+  scorers: [outputQualityScorer],
+  targetOptions: { perStep: true },
+})
+```
+
+### 多輪對話評估
+
+使用 `inputs` 在共用 thread 上依序傳送各輪內容。評分器會看到所有輪次累積的輸出：
+
+```typescript
+const result = await runEvals({
+  target: chatAgent,
+  data: [
+    {
+      inputs: ['My favorite city is Brooklyn.', 'What is the weather in my favorite city?'],
+    },
+  ],
+  gates: [checks.calledTool('get_weather')],
+  scorers: [{ scorer: checks.similarity('Brooklyn weather forecast'), threshold: 0.5 }],
+})
+
+// result.verdict: 'passed' | 'scored' | 'failed'
+```
+
+每一輪都使用相同的 `threadId` 執行 `agent.generate()`，因此 Agent 能看到完整對話記錄。`runEvals` 也會注入 `resourceId`（Mastra 記憶體依 resource + thread 限定訊息範圍），其預設值是產生的 thread。如要固定使用特定 resource，請傳入 `targetOptions.memory.resource`。跨輪記憶需要為 Agent 設定記憶體儲存空間，否則每一輪會各自獨立執行。你可以在同一個 `data` 陣列中混用單輪（`input`）與多輪（`inputs`）項目。使用 `inputs` 時可省略 `input`。
+
+評分會將所有輪次累積的輸出用作 `run.output`，但只有第一輪會作為 `run.input`。多輪情境建議使用以輸出為基礎的評分器（`checks.includes`、`checks.calledTool`、`checks.similarity`）。以輸入為基準的評分器（例如 faithfulness）只會看到第一輪輸入。從 Trace 讀取資料的軌跡評分器（`AgentScorerConfig.trajectory`）會解析最後一輪的 span。讀取 `run.output` 的 Tool 呼叫檢查（例如 `checks.calledTool`）仍會看到每一輪。
+
+### 各輪斷言
+
+使用 `turns` 將 `gates`／`scorers` 附加至個別輪次。每項各輪斷言只會看到該輪的輸入與輸出，因此後續輪次的退步不會被先前輪次掩蓋：
+
+```typescript
+const result = await runEvals({
+  target: chatAgent,
+  data: [
+    {
+      turns: [
+        {
+          input: 'What is the weather in Brooklyn?',
+          gates: [checks.calledTool('get_weather')],
+        },
+        {
+          input: 'What about tomorrow?',
+          gates: [checks.calledTool('get_weather')], // must call again this turn
+          scorers: [{ scorer: checks.similarity('tomorrow forecast'), threshold: 0.5 }],
+        },
+      ],
+    },
+  ],
+})
+
+result.verdict // folds in per-turn gate/threshold outcomes
+result.turnResults // [{ index, gateResults, thresholdResults, scores }]
+```
+
+各輪 gate／評分器只會評估該輪（`run.input`／`run.output` 皆屬於該輪）。某一輪的 gate 失敗會使判定結果成為 `failed`。某一輪未達門檻值（且 gate 通過）會使判定結果成為 `scored`。頂層 `scorers`／`gates` 仍會評估整段累積的對話。`turns` 僅支援 Agent，且不可與 `input` 或 `inputs` 同時使用。
+
+## 相關資源
+
+- [多輪 Evals](/docs/evals/multi-turn)：多輪評估的概念指南
+- [Gate 與判定結果](/docs/evals/gates-and-verdicts)：嚴重程度語意的概念指南
+- [快速檢查](/reference/evals/checks)：不使用 LLM、可組合的微型評分器
+- [createScorer()](/reference/evals/create-scorer)：為實驗建立自訂評分器
+- [MastraScorer](/reference/evals/mastra-scorer)：瞭解評分器的結構與方法
+- [軌跡準確度](/reference/evals/trajectory-accuracy)：內建軌跡評估評分器
+- [評分器工具函式](/reference/evals/scorer-utils)：用於擷取軌跡資料的輔助函式
+- [自訂評分器](/docs/evals/custom-scorers)：建立評估邏輯的指南
+- [評分器概觀](/docs/evals/overview)：瞭解評分器概念

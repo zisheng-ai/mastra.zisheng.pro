@@ -1,0 +1,235 @@
+---
+title: "リファレンス: WorkingMemory | Processors"
+description: "永続的なユーザー／コンテキストデータを system instruction として挿入する Mastra の WorkingMemory processor のドキュメント。"
+packages:
+  - "@mastra/core"
+  - "@mastra/pg"
+---
+
+# WorkingMemory
+
+`WorkingMemory` は、working memory のデータを system message として挿入する **input processor** です。ストレージから永続的な情報を取得して LLM 向けの instruction に整形し、Agent が会話をまたいでユーザーのコンテキストを維持できるようにします。
+
+## 使用例
+
+```typescript
+import { WorkingMemory } from '@mastra/core/processors'
+
+const processor = new WorkingMemory({
+  storage: memoryStorage,
+  scope: 'resource',
+  template: {
+    format: 'markdown',
+    content: `# User Profile
+- **Name**:
+- **Preferences**:
+- **Goals**:
+`,
+  },
+})
+```
+
+## コンストラクターパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'Options',
+    description: 'working memory processor の設定オプション',
+    isOptional: false,
+    properties: [
+      {
+        type: 'Options',
+        parameters: [
+          {
+            name: 'storage',
+            type: 'MemoryStorage',
+            description: 'working memory のデータを取得するストレージインスタンス',
+            isOptional: false,
+          },
+          {
+            name: 'template',
+            type: 'WorkingMemoryTemplate',
+            description: 'working memory の形式と構造を定義するテンプレート',
+            isOptional: true,
+            properties: [
+              {
+                type: 'WorkingMemoryTemplate',
+                parameters: [
+                  {
+                    name: 'format',
+                    type: "'markdown' | 'json'",
+                    description: 'working memory コンテンツの形式',
+                    isOptional: false,
+                  },
+                  {
+                    name: 'content',
+                    type: 'string',
+                    description: 'working memory データの構造を定義するテンプレートの内容',
+                    isOptional: false,
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            name: 'scope',
+            type: "'thread' | 'resource'",
+            description:
+              "working memory のスコープ。'thread' は現在の thread に限定し、'resource' はその resource のすべての thread で共有します",
+            isOptional: true,
+            default: "'resource'",
+          },
+          {
+            name: 'useVNext',
+            type: 'boolean',
+            description: 'ガイドラインを改善した次世代の instruction 形式を使用します',
+            isOptional: true,
+          },
+          {
+            name: 'readOnly',
+            type: 'boolean',
+            description:
+              'true の場合、working memory を読み取り専用のコンテキストとして提供します。データは会話に挿入されますが、updateWorkingMemory Tool や更新用 instruction は含まれません。working memory を変更せず参照する必要がある Agent に適しています。',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'templateProvider',
+            type: '{ getWorkingMemoryTemplate(args: { memoryConfig?: MemoryConfig }): Promise<WorkingMemoryTemplate | null> }',
+            description: '実行時にテンプレートを解決する動的なテンプレート Provider',
+            isOptional: true,
+          },
+          {
+            name: 'logger',
+            type: 'IMastraLogger',
+            description: '構造化ログに使用する任意の logger インスタンス',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "'working-memory' に設定された processor の識別子",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: "'WorkingMemory' に設定された processor の表示名",
+    isOptional: false,
+  },
+  {
+    name: 'defaultWorkingMemoryTemplate',
+    type: 'string',
+    description: 'カスタムテンプレートが指定されていない場合に使用するデフォルトの Markdown テンプレート',
+    isOptional: false,
+  },
+  {
+    name: 'processInput',
+    type: '(args: { messages: MastraDBMessage[]; messageList: MessageList; abort: (reason?: string) => never; requestContext?: RequestContext }) => Promise<MessageList | MastraDBMessage[]>',
+    description: 'working memory を取得し、system message としてメッセージリストに追加します',
+    isOptional: false,
+  },
+]}
+/>
+
+## 詳細な使用例
+
+```typescript title="src/mastra/agents/personalized-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { WorkingMemory, MessageHistory } from '@mastra/core/processors'
+import { PostgresStorage } from '@mastra/pg'
+
+const storage = new PostgresStorage({
+  connectionString: process.env.DATABASE_URL,
+})
+
+export const agent = new Agent({
+  id: 'personalized-agent',
+  name: 'personalized-agent',
+  instructions: 'You are a helpful assistant that remembers user preferences',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [
+    new WorkingMemory({
+      storage,
+      scope: 'resource',
+      template: {
+        format: 'markdown',
+        content: `# User Information
+- **Name**:
+- **Location**:
+- **Preferences**:
+- **Communication Style**:
+- **Current Projects**:
+`,
+      },
+    }),
+    new MessageHistory({ storage, lastMessages: 50 }),
+  ],
+  outputProcessors: [new MessageHistory({ storage })],
+})
+```
+
+## JSON 形式の例
+
+```typescript
+import { WorkingMemory } from '@mastra/core/processors'
+
+const processor = new WorkingMemory({
+  storage: memoryStorage,
+  scope: 'resource',
+  template: {
+    format: 'json',
+    content: JSON.stringify({
+      user: {
+        name: { type: 'string' },
+        preferences: { type: 'object' },
+        goals: { type: 'array' },
+      },
+    }),
+  },
+})
+```
+
+## 動作
+
+### 入力処理
+
+1. request context から `threadId` と `resourceId` を取得する
+1. scope に基づき、次のいずれかから working memory を取得する
+   - thread のメタデータ（`scope: 'thread'`）
+   - resource レコード（`scope: 'resource'`）
+1. Provider、オプション、またはデフォルトからテンプレートを解決する
+1. モードに基づいて system instruction を生成する
+   - **通常モード**: 情報の保存／更新に関するガイドライン、テンプレート構造、現在のデータを含める
+   - **読み取り専用モード**（`readOnly: true`）: 更新用 instruction を含めず、現在のデータだけをコンテキストとして含める
+1. `source: 'memory'` タグを付けた system message として instruction を追加する
+
+### Working memory の更新
+
+working memory の更新は、この processor ではなく Memory class が提供する `updateWorkingMemory` Tool を通じて行われます。この processor は、現在の working memory の状態を会話へ挿入する処理だけを担います。
+
+### デフォルトテンプレート
+
+テンプレートを指定しない場合、processor は次のフィールドを持つデフォルトの Markdown テンプレートを使用します。
+
+- 名、姓
+- 所在地、職業
+- 興味、目標
+- イベント、事実、プロジェクト
+
+## 関連情報
+
+- [Guardrails](/docs/agents/guardrails)

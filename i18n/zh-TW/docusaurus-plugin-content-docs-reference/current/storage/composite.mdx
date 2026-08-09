@@ -1,0 +1,440 @@
+---
+title: "參考資料：複合儲存空間 | Storage"
+description: 在 Mastra 中組合多個儲存 backend 的說明文件。
+packages:
+  - "@mastra/clickhouse"
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/mongodb"
+  - "@mastra/pg"
+---
+
+# 複合儲存空間
+
+`MastraCompositeStore` 可以組合來自不同 Provider 的儲存 domain。需要將不同資料庫用於不同用途時，請使用此類別。例如，使用 LibSQL 儲存記憶體，並使用 PostgreSQL 儲存 Workflow。
+
+## 安裝
+
+`MastraCompositeStore` 已包含在 `@mastra/core` 中：
+
+```bash npm2yarn
+npm install @mastra/core@latest
+```
+
+你也需要安裝要組合的儲存 Provider：
+
+```bash npm2yarn
+npm install @mastra/pg@latest @mastra/libsql@latest @mastra/mongodb@latest
+```
+
+## 儲存 domain
+
+Mastra 將儲存空間劃分為多個 domain，每個 domain 處理特定類型的資料。各 domain 可由不同的儲存 adapter 提供支援，而每個儲存套件都會匯出 domain 類別。
+
+| Domain | 說明 |
+| - | - |
+| `memory` | Agent 的對話持久化。儲存 thread（對話 session）、訊息、資源（使用者身分）與 working memory（跨對話的持久上下文）。 |
+| `workflows` | Workflow 執行狀態。當 Workflow 因等候人工輸入、外部事件或排程繼續執行而暫停時，其狀態會持久化於此，讓伺服器重新啟動後仍可繼續執行。 |
+| `scores` | Mastra 評估系統的評估結果。分數與 metric 會持久化於此，以便長期分析與比較。 |
+| `observability` | 包括 Trace 與 span 的遙測資料。Agent 互動、Tool 呼叫與 LLM 請求會產生 span，這些 span 會彙集為 Trace，以供除錯與效能分析。 |
+| `agents` | 已儲存 Agent 的 Agent 設定。無需部署程式碼，即可在 runtime 定義與更新 Agent。 |
+| `datasets` | 實驗執行所使用的評估 dataset。儲存 dataset 定義、schema 與版本化項目。 |
+| `experiments` | 與 dataset 和 target 連結的實驗執行及各項目實驗結果。 |
+
+:::note
+
+`MastraCompositeStore` 接受上述所有 domain key，但各套件支援的儲存 adapter 不同。你可以為各 domain 混用 adapter，但只能用於這些 adapter 已實作並匯出的 domain。例如，`memory: new MemoryLibSQL(...)` 與 `workflows: new WorkflowsPG(...)` 是有效設定，因為兩個套件都匯出了相應的 domain 類別。
+
+:::
+
+## 使用方式
+
+### 基本組合
+
+直接從各 store 套件匯入 domain 類別，再加以組合：
+
+```typescript title="src/mastra/index.ts"
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { WorkflowsPG, ScoresPG } from '@mastra/pg'
+import { MemoryLibSQL } from '@mastra/libsql'
+import { Mastra } from '@mastra/core'
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite',
+    domains: {
+      memory: new MemoryLibSQL({ url: 'file:./local.db' }),
+      workflows: new WorkflowsPG({ connectionString: process.env.DATABASE_URL }),
+      scores: new ScoresPG({ connectionString: process.env.DATABASE_URL }),
+    },
+  }),
+})
+```
+
+### 搭配預設 storage
+
+使用 `default` 指定 fallback storage，再覆寫特定 domain：
+
+```typescript title="src/mastra/index.ts"
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { PostgresStore } from '@mastra/pg'
+import { MemoryLibSQL } from '@mastra/libsql'
+import { Mastra } from '@mastra/core'
+
+const pgStore = new PostgresStore({
+  id: 'pg',
+  connectionString: process.env.DATABASE_URL,
+})
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite',
+    default: pgStore,
+    domains: {
+      memory: new MemoryLibSQL({ url: 'file:./local.db' }),
+    },
+  }),
+})
+```
+
+### 混用 backend
+
+使用各儲存套件的 domain 類別，將不同 domain 路由至不同 backend。下列範例將記憶體與 Workflow 狀態儲存在 MongoDB，再將可觀測性路由至 ClickHouse：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { ObservabilityStorageClickhouse } from '@mastra/clickhouse'
+import { MemoryStorageMongoDB, WorkflowsStorageMongoDB } from '@mastra/mongodb'
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite',
+    domains: {
+      memory: new MemoryStorageMongoDB({
+        uri: process.env.MONGODB_URI,
+        dbName: 'mastra_memory',
+      }),
+      workflows: new WorkflowsStorageMongoDB({
+        uri: process.env.MONGODB_URI,
+        dbName: 'mastra_workflows',
+      }),
+      observability: new ObservabilityStorageClickhouse({
+        url: process.env.CLICKHOUSE_URL,
+        username: process.env.CLICKHOUSE_USERNAME,
+        password: process.env.CLICKHOUSE_PASSWORD,
+      }),
+    },
+  }),
+})
+```
+
+### 停用 domain
+
+將 domain 設為 `false` 即可停用。已停用的 domain 不會 fallback 至 `default`，因此不會持久化該 domain 的資料：
+
+```typescript title="src/mastra/index.ts"
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { PostgresStore } from '@mastra/pg'
+import { Mastra } from '@mastra/core'
+
+const pgStore = new PostgresStore({
+  id: 'pg',
+  connectionString: process.env.DATABASE_URL,
+})
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite',
+    default: pgStore,
+    domains: {
+      // don't persist traces and spans
+      observability: false,
+    },
+  }),
+})
+```
+
+## 選項
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: '此儲存空間執行個體的唯一識別碼。',
+    isOptional: false,
+  },
+  {
+    name: 'default',
+    type: 'MastraCompositeStore',
+    description: '預設儲存 adapter。未在 `domains` 中明確指定的 domain，會使用此 storage 的 domain 作為 fallback。',
+    isOptional: true,
+  },
+  {
+    name: 'editor',
+    type: 'MastraCompositeStore',
+    description:
+      '用於 Editor 所擁有 domain 的儲存 adapter，包括 Agent、prompt block、scorer、MCP client 與 server、Workspace 和 Skill。優先順序高於預設 storage，但低於明確的 domain 覆寫。',
+    isOptional: true,
+  },
+  {
+    name: 'disableInit',
+    type: 'boolean',
+    description: '設為 true 時，會停用自動初始化。你必須明確呼叫 init()。',
+    isOptional: true,
+  },
+  {
+    name: 'domains',
+    type: 'object',
+    description:
+      '個別 domain 覆寫。每個 domain 可來自不同的儲存 adapter。其優先順序高於 `editor` 與 `default` storage。將 domain 設為 `false` 可將其完全停用；已停用的 domain 不會 fallback 至 `editor` 或 `default`。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'memory',
+            type: 'MemoryStorage',
+            description: 'Thread、訊息與資源的儲存空間。',
+            isOptional: true,
+          },
+          {
+            name: 'workflows',
+            type: 'WorkflowsStorage',
+            description: 'Workflow snapshot 的儲存空間。',
+            isOptional: true,
+          },
+          {
+            name: 'scores',
+            type: 'ScoresStorage',
+            description: '評估分數的儲存空間。',
+            isOptional: true,
+          },
+          {
+            name: 'observability',
+            type: 'ObservabilityStorage',
+            description: 'Trace 與 span 的儲存空間。',
+            isOptional: true,
+          },
+          {
+            name: 'agents',
+            type: 'AgentsStorage',
+            description: '已儲存 Agent 設定的儲存空間。',
+            isOptional: true,
+          },
+          {
+            name: 'datasets',
+            type: 'DatasetsStorage',
+            description: 'Dataset metadata、dataset 項目與 dataset 版本的儲存空間。',
+            isOptional: true,
+          },
+          {
+            name: 'experiments',
+            type: 'ExperimentsStorage',
+            description: '實驗執行與各項目實驗結果的儲存空間。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 初始化
+
+`MastraCompositeStore` 會個別初始化每個已設定的 domain。傳入 Mastra 類別時，系統會自動呼叫 `init()`：
+
+```typescript title="src/mastra/index.ts"
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { MemoryPG, WorkflowsPG, ScoresPG } from '@mastra/pg'
+import { Mastra } from '@mastra/core'
+
+const storage = new MastraCompositeStore({
+  id: 'composite',
+  domains: {
+    memory: new MemoryPG({ connectionString: process.env.DATABASE_URL }),
+    workflows: new WorkflowsPG({ connectionString: process.env.DATABASE_URL }),
+    scores: new ScoresPG({ connectionString: process.env.DATABASE_URL }),
+  },
+})
+
+export const mastra = new Mastra({
+  storage, // init() called automatically
+})
+```
+
+若直接使用 storage，請明確呼叫 `init()`：
+
+```typescript
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { MemoryPG } from '@mastra/pg'
+
+const storage = new MastraCompositeStore({
+  id: 'composite',
+  domains: {
+    memory: new MemoryPG({ connectionString: process.env.DATABASE_URL }),
+  },
+})
+
+await storage.init()
+
+// Access domain-specific stores via getStore()
+const memoryStore = await storage.getStore('memory')
+const thread = await memoryStore?.getThreadById({ threadId: '...' })
+```
+
+## 關閉連線
+
+`close()` 會釋放組成複合儲存空間的各 store 連線：`default` 與 `editor` store，以及任何擁有自己 client 的 domain。即使同一 store 支援多個 domain，也只會關閉一次。傳入 Mastra 類別時，`shutdown()` 會呼叫 `close()`：
+
+```typescript title="src/mastra/index.ts"
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { PostgresStore } from '@mastra/pg'
+import { Mastra } from '@mastra/core'
+
+const pgStore = new PostgresStore({
+  id: 'pg-storage',
+  connectionString: process.env.DATABASE_URL,
+})
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({ id: 'composite', default: pgStore }),
+})
+
+process.on('SIGTERM', async () => {
+  // Releases the Postgres pool, so the process can exit
+  await mastra.shutdown()
+})
+```
+
+若建立 store 只是為了提供某個 domain，就無法透過複合儲存空間存取該 store。請保留其參照並自行關閉：
+
+```typescript title="src/mastra/index.ts"
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { ClickhouseStore } from '@mastra/clickhouse'
+import { PostgresStore } from '@mastra/pg'
+import { Mastra } from '@mastra/core'
+
+const pgStore = new PostgresStore({
+  id: 'pg-storage',
+  connectionString: process.env.DATABASE_URL,
+})
+
+const clickhouseStore = new ClickhouseStore({
+  id: 'clickhouse-storage',
+  url: process.env.CLICKHOUSE_URL,
+  username: process.env.CLICKHOUSE_USERNAME,
+  password: process.env.CLICKHOUSE_PASSWORD,
+})
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite',
+    default: pgStore,
+    domains: { observability: clickhouseStore.stores?.observability },
+  }),
+})
+
+process.on('SIGTERM', async () => {
+  await mastra.shutdown()
+  await clickhouseStore.close()
+})
+```
+
+## 使用情境
+
+### 為不同工作負載使用不同資料庫
+
+開發時使用本機資料庫，同時將正式環境資料保留在受管理的服務中：
+
+```typescript
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { MemoryPG, WorkflowsPG, ScoresPG } from '@mastra/pg'
+import { MemoryLibSQL } from '@mastra/libsql'
+
+const storage = new MastraCompositeStore({
+  id: 'composite',
+  domains: {
+    // Use local SQLite for development, PostgreSQL for production
+    memory:
+      process.env.NODE_ENV === 'development'
+        ? new MemoryLibSQL({ url: 'file:./dev.db' })
+        : new MemoryPG({ connectionString: process.env.DATABASE_URL }),
+    workflows: new WorkflowsPG({ connectionString: process.env.DATABASE_URL }),
+    scores: new ScoresPG({ connectionString: process.env.DATABASE_URL }),
+  },
+})
+```
+
+### 可觀測性的專用儲存空間
+
+在正式環境中，可觀測性資料可能很快就使一般用途資料庫不堪負荷。單次 Agent 互動可能產生數百個 span，高流量應用程式每天可能產生數千個 Trace。
+
+**[ClickHouse](/reference/storage/clickhouse)** 已針對大量、寫入密集的分析工作負載最佳化，因此建議用於正式環境可觀測性。請使用複合儲存空間將可觀測性路由至 ClickHouse，同時將其他資料保留在主要資料庫中：
+
+```typescript
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { MemoryPG, WorkflowsPG, ScoresPG } from '@mastra/pg'
+import { ObservabilityStorageClickhouseVNext } from '@mastra/clickhouse'
+
+const storage = new MastraCompositeStore({
+  id: 'composite',
+  domains: {
+    memory: new MemoryPG({ connectionString: process.env.DATABASE_URL }),
+    workflows: new WorkflowsPG({ connectionString: process.env.DATABASE_URL }),
+    scores: new ScoresPG({ connectionString: process.env.DATABASE_URL }),
+    observability: new ObservabilityStorageClickhouseVNext({
+      url: process.env.CLICKHOUSE_URL,
+      username: process.env.CLICKHOUSE_USERNAME,
+      password: process.env.CLICKHOUSE_PASSWORD,
+    }),
+  },
+})
+```
+
+:::note
+
+`ObservabilityStorageClickhouseVNext` 是目前的 observability domain 實作。系統也會匯出舊版 `ObservabilityStorageClickhouse` 類別，並繼續支援尚未遷移的專案。詳情請參閱 [ClickHouse 儲存空間參考資料](/reference/storage/clickhouse)。
+
+:::
+
+### 用於多 replica cluster 的複寫 ClickHouse
+
+對於具有多個 replica 的自主管理 ClickHouse cluster，請設定 `replication`，讓 Mastra 產生 `ReplicatedMergeTree` engine，並將 `ON CLUSTER` 套用至其 DDL：
+
+```typescript
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { MemoryPG, WorkflowsPG, ScoresPG } from '@mastra/pg'
+import { ObservabilityStorageClickhouseVNext } from '@mastra/clickhouse'
+
+const storage = new MastraCompositeStore({
+  id: 'composite',
+  domains: {
+    memory: new MemoryPG({ connectionString: process.env.DATABASE_URL }),
+    workflows: new WorkflowsPG({ connectionString: process.env.DATABASE_URL }),
+    scores: new ScoresPG({ connectionString: process.env.DATABASE_URL }),
+    observability: new ObservabilityStorageClickhouseVNext({
+      url: process.env.CLICKHOUSE_URL,
+      username: process.env.CLICKHOUSE_USERNAME,
+      password: process.env.CLICKHOUSE_PASSWORD,
+      replication: {
+        cluster: 'production_cluster',
+        // Optional (defaults shown):
+        // zookeeperPath: '/clickhouse/tables/{shard}/{database}/{table}',
+        // replicaName: '{replica}',
+      },
+    }),
+  },
+})
+```
+
+請勿在 ClickHouse Cloud 上設定 `replication`。Cloud 會在 server 端將 `MergeTree` 改寫為 `SharedMergeTree`。如需完整設定結構與 operator 注意事項，請參閱 [ClickHouse 儲存空間參考資料](/reference/storage/clickhouse)。
+
+:::info
+
+使用不支援可觀測性的儲存 Provider（例如 Convex、DynamoDB 或 Cloudflare）時，也必須採用此方式。如需受支援 Provider 的完整清單，請參閱 [MastraStorageExporter 說明文件](/docs/observability/integrations/exporters/mastra-storage#storage-provider-support)。
+
+:::

@@ -1,0 +1,221 @@
+---
+title: "ガイド：コードレビューボットの構築"
+description: Workspace Skill を使用してコーディング規約を適用し、一貫した PR フィードバックを提供する自動コードレビューボットを構築します。
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# コードレビューボットを構築する
+
+このガイドでは、Workspace Skill を使用して Pull Request を自動的にレビューするコードレビューボットを構築します。このボットは Skill ファイルからコーディング規約を読み込み、構造化されたフィードバックを提供します。Skill ディレクトリを備えた Workspace を作成し、レビュー手順とリファレンスファイルを含む [Agent Skill](https://agentskills.io) を定義します。その後、Skill を自動レビューを行う Agent に接続します。
+
+## 前提条件
+
+- Node.js `v22.13.0` 以降がインストールされていること
+- サポートされている[モデル Provider](/models) の API キー
+- 既存の Mastra プロジェクト（新しいプロジェクトをセットアップするには、[インストールガイド](/guides/getting-started/quickstart)に従ってください）
+
+## Workspace を作成する
+
+`src/mastra/index.ts` ファイルで、[`Workspace`](/reference/workspace/workspace-class) クラスと [`LocalFilesystem`](/reference/workspace/local-filesystem) クラスを import します。`Workspace` インスタンスでは、`skills` オプションに Skill ディレクトリを指定します。`skills` ディレクトリは、Filesystem の `basePath` 内に配置されます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+// highlight-start
+import { resolve } from 'node:path'
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+// highlight-end
+
+// highlight-start
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({
+    basePath: resolve(import.meta.dirname, '../../workspace'),
+  }),
+  skills: ['skills'],
+})
+// highlight-end
+
+export const mastra = new Mastra({
+  // highlight-next-line
+  workspace,
+})
+```
+
+プロジェクトのルートに、`workspace` という新しいフォルダーを作成します。その中に `skills` フォルダーを作成します。次の手順では、ここにコード規約の Skill を定義します。
+
+## コード規約の Skill を作成する
+
+Skill は、Agent への指示を含む `SKILL.md` ファイルを格納した構造化ディレクトリです。コード規約の Skill では、レビュープロセスを定義し、スタイルガイドを参照します。
+
+`workspace/skills` 内に `code-standards` という新しいフォルダーを作成します。`SKILL.md` というファイルを作成し、レビュー手順を追加します。
+
+```markdown title="workspace/skills/code-standards/SKILL.md"
+---
+name: code-standards
+description: Automated code review standards and checks
+---
+
+# Code Review Standards
+
+Review code systematically using these steps:
+
+1. **Critical Issues**: Security vulnerabilities, memory leaks, logic bugs, missing error handling
+2. **Code Quality**: Functions over 50 lines, code duplication, confusing names, missing types
+3. **Style Guide**: Check references/style-guide.md for naming and organization
+4. **Linting**: Flag common issues like use of `var`, leftover `console.log` statements, and `debugger` statements
+
+Provide feedback in this format:
+
+**Summary**: One sentence overview
+
+**Critical Issues**: List with line numbers
+
+**Suggestions**: Improvements that would help
+
+**Positive Notes**: What the code does well
+```
+
+`workspace/skills/code-standards` 内に、Skill のリファレンス資料を格納する `references` フォルダーを作成します。プロジェクトのコーディング規約をまとめたスタイルガイドを、`style-guide.md` というファイル名で作成します。
+
+````markdown title="workspace/skills/code-standards/references/style-guide.md"
+# Style Guide
+
+## Naming
+
+- Variables/Functions: `camelCase`
+- Constants: `UPPER_SNAKE_CASE`
+- Files: `kebab-case.ts`
+- Booleans: Start with `is`, `has`, `should`
+
+## Code organization
+
+```typescript
+// 1. Imports
+import { foo } from 'bar'
+
+// 2. Constants
+const MAX_SIZE = 100
+
+// 3. Types
+interface User {
+  id: string
+}
+
+// 4. Functions
+function doSomething() {}
+
+// 5. Exports
+export { doSomething }
+```
+
+## Error handling
+
+Always handle errors explicitly - never silently catch.
+
+## Comments
+
+Write "why" not "what".
+````
+
+## レビュー Agent を作成する
+
+次に、code-standards Skill を使用するコードレビューボット Agent を作成します。新しいファイル `src/mastra/agents/code-reviewer.ts` を作成し、Agent を定義します。
+
+```typescript title="src/mastra/agents/code-reviewer.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const codeReviewer = new Agent({
+  id: 'code-reviewer',
+  name: 'Code Review Bot',
+  instructions: `You are an automated code reviewer.
+
+When asked to review code:
+1. Activate the 'code-standards' skill
+2. Follow the review process from the skill
+3. Check against the style guide in skill references
+4. Be constructive and specific with line numbers`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+`src/mastra/index.ts` 内で Agent を import し、`Mastra` インスタンスに登録します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { resolve } from 'node:path'
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+// highlight-next-line
+import { codeReviewer } from './agents/code-reviewer'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({
+    basePath: resolve(import.meta.dirname, '../../workspace'),
+  }),
+  skills: ['skills'],
+})
+
+export const mastra = new Mastra({
+  workspace,
+  // highlight-next-line
+  agents: { codeReviewer },
+})
+```
+
+## ボットをテストする
+
+[Studio](/docs/studio/overview) を起動し、コードレビューボットと対話して動作を確認します。
+
+```bash npm2yarn
+npm run dev
+```
+
+[localhost:4111](http://localhost:4111) を開き、コードレビュー Agent に移動します。
+
+チャット入力欄に、次のようなレビュー対象のコードスニペットを入力します。
+
+```text
+Review this code:
+
+function getData(id) {
+  var result = fetch('/api/data/' + id);
+  console.log(result);
+  return result;
+}
+```
+
+ボットは `code-standards` Skill を有効化し、構造化されたフィードバックを提供します。Agent のレスポンスは非決定的なため、出力は異なる場合がありますが、次のような内容が表示されます。
+
+```md
+**Summary**: Function has several issues with variable declaration,
+debugging statements, and missing error handling.
+
+**Critical Issues**:
+
+- Missing error handling for fetch (line 2)
+- No async/await for asynchronous operation (line 2)
+
+**Suggestions**:
+
+- Use const instead of var (line 2)
+- Remove console.log before committing (line 3)
+- Add TypeScript type for id parameter
+- Use template literals instead of concatenation
+
+**Positive Notes**:
+
+- Function name is clear and descriptive
+```
+
+## 次のステップ
+
+このボットは、次のように拡張できます。
+
+- 言語やフレームワークごとの Skill を追加する
+- セキュリティチェックやパフォーマンスレビュー用の Skill を作成する
+- GitHub Actions と統合し、PR を自動レビューする
+- インラインフィードバックを残す PR コメントボットを構築する
+
+詳細：
+
+- [Agent Skills の仕様](https://agentskills.io)

@@ -1,0 +1,128 @@
+---
+title: "Subagents | 檔案式 Agent"
+description: 在檔案式 Agent 的 subagents/ 下宣告專門處理特定工作的子 Agent。
+packages:
+  - "@mastra/core"
+---
+
+# Subagents
+
+檔案式 Agent 可宣告 **subagents**，即由其委派工作的專門子 Agent。父模型會將每個 subagent 視為以 subagent 目錄命名的委派 Tool，並呼叫該 Tool 以轉交工作。Subagent 的結果會傳回父對話。
+
+本頁說明檔案式慣例。如需了解更廣泛的委派模式、hooks、memory 隔離、Tool 審批傳播及評分，請參閱 [Supervisor agents](/docs/capabilities/subagents)。
+
+## 快速開始
+
+在 `subagents/` 下為每個 subagent 宣告一個目錄：
+
+```text title="Subagent layout"
+src/mastra/agents/
+└── supervisor/
+    ├── config.ts
+    ├── instructions.md
+    └── subagents/
+        └── researcher/
+            ├── config.ts
+            ├── instructions.md
+            └── tools/
+                └── search.ts
+```
+
+Mastra 會將 `researcher` 組裝成獨立 Agent，並將其連接到 supervisor 的 `agents` map。父模型可使用產生的 `researcher` 委派 Tool 將工作委派給它。
+
+Subagent 的 `config.ts` 必須設定非空白的 `description`。父模型會在決定是否委派時讀取此內容。
+
+```typescript title="src/mastra/agents/supervisor/subagents/researcher/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  description: 'Researches a topic and returns cited findings.',
+})
+```
+
+## 模型如何委派工作
+
+Subagent 的 `description` 是供父模型使用的路由文字。請像撰寫 [Tool description](/reference/file-based-agents/tools#tool-options) 一樣撰寫：說明 subagent 的工作，以及何時應將工作委派給它。
+
+若探索到的 subagent 沒有提供非空白 description，建置便會失敗。
+
+## 隔離
+
+Subagents 彼此隔離。Subagent 不會繼承父 Agent 的 Tools、Skills、Workspace、memory、processors 或 subagents。每個子 Agent 都是具有自己目錄的獨立 Agent。
+
+如多個 Agent 應共用相同相依項目，請在程式碼中定義該項目，並透過每個 Agent 的 config 指派。
+
+## 巢狀結構
+
+Subagents 可宣告自己的 `subagents/` 目錄，最多可在最上層 Agent 之下巢狀三層。更深層的 `subagents/` 目錄會被忽略並記錄警告。
+
+```text title="Nested subagents"
+src/mastra/agents/
+└── supervisor/            # depth 0
+    └── subagents/
+        └── researcher/    # depth 1
+            └── subagents/
+                └── summarizer/ # depth 2
+```
+
+## 命名規則
+
+- Subagent id 如與父 Agent 的其中一個 Tool key 衝突，會導致建置錯誤。
+- 同一父 Agent 下出現重複的 subagent id，會導致建置錯誤。
+- 如 subagent id 亦存在於父 Agent 的 `config.agents`，系統會優先採用 `config.agents` 項目，並記錄警告。
+- 如 `config.agents` 是函式，探索到的 subagents 會被忽略並記錄警告，因為無法靜態合併它們。
+
+## 範例
+
+這個 supervisor 會協調研究與寫作流程。`researcher` subagent 擁有搜尋 Tools，而 `writer` subagent 擁有用於草擬檔案的 Workspace。
+
+```text title="Research supervisor"
+src/mastra/agents/
+└── research-supervisor/
+    ├── config.ts
+    ├── instructions.md
+    └── subagents/
+        ├── researcher/
+        │   ├── config.ts
+        │   ├── instructions.md
+        │   └── tools/
+        │       └── search_web.ts
+        └── writer/
+            ├── config.ts
+            ├── instructions.md
+            └── workspace/
+                └── draft-template.md
+```
+
+```typescript title="src/mastra/agents/research-supervisor/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+```markdown title="src/mastra/agents/research-supervisor/instructions.md"
+You coordinate research and writing.
+
+Delegate fact gathering to `researcher`. Delegate final drafting to `writer`.
+```
+
+```typescript title="src/mastra/agents/research-supervisor/subagents/researcher/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  description: 'Use to gather facts, sources, and concise research notes for a topic.',
+})
+```
+
+```typescript title="src/mastra/agents/research-supervisor/subagents/writer/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  description: 'Use to turn research notes into a structured draft.',
+})
+```

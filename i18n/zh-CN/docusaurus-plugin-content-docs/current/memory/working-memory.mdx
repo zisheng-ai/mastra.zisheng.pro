@@ -1,0 +1,447 @@
+---
+title: "Working Memory | Memory"
+description: "了解如何在 Mastra 中配置 Working Memory，以存储持久化的用户数据和偏好。"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+  - "@mastra/mongodb"
+  - "@mastra/oracledb"
+  - "@mastra/pg"
+  - "@mastra/upstash"
+---
+
+# Working Memory
+
+[消息历史](/docs/memory/message-history)和 [Semantic Recall](./semantic-recall) 可帮助 Agent 记住对话，而 Working Memory 则让它们可以跨多次交互维护有关用户的持久信息。
+
+Working Memory 是 Agent 的活动便笺：它会随时保留与用户或任务有关的关键信息。在对话期间，它可以记住用户的姓名、偏好或其他重要细节。
+
+这适合维护始终相关、应当始终可供 Agent 使用的持续状态。
+
+如果使用 [Observational Memory](/docs/memory/observational-memory)，`observationalMemory.observation.manageWorkingMemory` 可以让 OM 为 Agent 更新 Working Memory。
+
+:::tip[📹 观看视频]
+
+观看 [Mastra Working Memory](https://www.youtube.com/watch?v=UMy_JHLf1n8\&pp=ygUVbWFzdHJhIHdvcmtpbmcgbWVtb3J5)，了解 Agent 如何跨多次交互持续保留用户上下文。
+
+:::
+
+Working Memory 可以在两种不同的作用域中持久化：
+
+- **Resource 作用域**（默认）：Memory 会在同一用户的所有对话 Thread 间持久化
+- **Thread 作用域**：每个对话 Thread 的 Memory 相互隔离
+
+\*\*要求：\*\*切换作用域后，Agent 将无法看到另一个作用域中的 Memory——Thread 作用域 Memory 与 Resource 作用域 Memory 完全分离。
+
+## 快速开始
+
+下面是为 Agent 设置 Working Memory 的最小示例：
+
+```typescript {11-15}
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+
+// Create agent with working memory enabled
+const agent = new Agent({
+  id: 'personal-assistant',
+  name: 'PersonalAssistant',
+  instructions: 'You are a helpful personal assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    options: {
+      workingMemory: {
+        enabled: true,
+      },
+    },
+  }),
+})
+```
+
+## 工作原理
+
+Working Memory 是一段 Markdown 文本，Agent 可以不断更新它，以存储持续相关的信息。
+
+## Memory 持久化作用域
+
+Working Memory 可以在两种不同的作用域中运行，你可以选择 Memory 如何跨对话持久化：
+
+### Resource 作用域 Memory（默认）
+
+默认情况下，Working Memory 会在同一用户（resourceId）的所有对话 Thread 间持久化，从而实现持久化的用户 Memory：
+
+```typescript
+const memory = new Memory({
+  storage,
+  options: {
+    workingMemory: {
+      enabled: true,
+      scope: 'resource', // Memory persists across all user threads
+      template: `# User Profile
+- **Name**:
+- **Location**:
+- **Interests**:
+- **Preferences**:
+- **Long-term Goals**:
+`,
+    },
+  },
+})
+```
+
+**使用场景：**
+
+- 记住用户偏好的个人助手
+- 维护客户上下文的客服机器人
+- 跟踪学生进度的教育应用
+
+### 与 Agent 一起使用
+
+使用 Resource 作用域 Memory 时，请确保在 Memory 选项中传入 `resource` 参数：
+
+```typescript
+// Resource-scoped memory requires resource
+const response = await agent.generate('Hello!', {
+  memory: {
+    thread: 'conversation-123',
+    resource: 'user-alice-456', // Same user across different threads
+  },
+})
+```
+
+### Thread 作用域 Memory
+
+Thread 作用域 Memory 会将 Working Memory 隔离到各个对话 Thread。每个 Thread 都维护自己独立的 Memory：
+
+```typescript
+const memory = new Memory({
+  storage,
+  options: {
+    workingMemory: {
+      enabled: true,
+      scope: 'thread', // Memory is isolated per thread
+      template: `# User Profile
+- **Name**:
+- **Interests**:
+- **Current Goal**:
+`,
+    },
+  },
+})
+```
+
+**使用场景：**
+
+- 围绕不同主题进行的不同对话
+- 临时或特定于会话的信息
+- 每个 Thread 都需要 Working Memory，但各 Thread 都是临时且彼此无关的 Workflow
+
+## Storage Adapter 支持
+
+Resource 作用域 Working Memory 需要支持 `mastra_resources` 表的特定 Storage Adapter：
+
+### 支持的 Storage Adapter
+
+- **libSQL**（`@mastra/libsql`）
+- **PostgreSQL**（`@mastra/pg`）
+- **OracleDB**（`@mastra/oracledb`）
+- **Upstash**（`@mastra/upstash`）
+- **MongoDB**（`@mastra/mongodb`）
+
+## 自定义模板
+
+模板会引导 Agent 决定在 Working Memory 中跟踪和更新哪些信息。未提供模板时，Mastra 会使用默认模板。请针对 Agent 的使用场景定义自定义模板，使其记住最相关的信息。对于多个用户共享的 Thread，请参阅[多用户 Thread](./multi-user-threads)。
+
+以下是一个自定义模板示例。在该示例中，只要用户发送的消息包含姓名、位置、时区等任一信息，Agent 就会立即存储它：
+
+```typescript {5-28}
+const memory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: `
+# User Profile
+
+## Personal info
+
+- Name:
+- Location:
+- Timezone:
+
+## Preferences
+
+- Communication Style: [e.g., Formal, Casual]
+- Project Goal:
+- Key Deadlines:
+  - [Deadline 1]: [Date]
+  - [Deadline 2]: [Date]
+
+## Session state
+
+- Last Task Discussed:
+- Open Questions:
+  - [Question 1]
+  - [Question 2]
+`,
+    },
+  },
+})
+```
+
+## 设计有效的模板
+
+结构良好的模板可以让信息直观易懂，便于 Agent 解析和更新。请将模板视为一个需要助手持续维护的简短表单。
+
+- \*\*使用简短且聚焦的标签。\*\*避免段落或过长的标题。保持标签简短（例如 `## Personal Info` 或 `- Name:`），这样更新内容更易读，也不容易被截断。
+- \*\*保持大小写一致。\*\*大小写不一致（`Timezone:` 与 `timezone:`）会导致更新杂乱。标题和项目符号标签应统一使用 Title Case 或小写。
+- \*\*尽量减少占位文本。\*\*使用 `[e.g., Formal]` 或 `[Date]` 等提示，帮助 LLM 填写正确位置。
+- \*\*缩写非常长的值。\*\*如果只需要简短形式，请加入类似 `- Name: [First name or nickname]` 或 `- Address (short):` 的指导，而不是要求完整的法律文本。
+- \*\*在 `instructions` 中说明更新规则。\*\*你可以直接在 Agent 的 `instructions` 字段中说明如何以及何时填写或清除模板的各个部分。
+
+### 其他模板样式
+
+如果只需要少量条目，可以使用更短的单一区块：
+
+```typescript
+const basicMemory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: `User Facts:\n- Name:\n- Favorite Color:\n- Current Topic:`,
+    },
+  },
+})
+```
+
+如果更喜欢叙述风格，也可以使用简短段落格式存储关键事实：
+
+```typescript
+const paragraphMemory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: `Important Details:\n\nKeep a short paragraph capturing the user's important facts (name, main goal, current task).`,
+    },
+  },
+})
+```
+
+## 结构化 Working Memory
+
+Working Memory 还可以使用结构化 Schema 定义，而不是 Markdown 模板。你可以通过 [Standard JSON Schema](https://standardschema.dev/json-schema)（[Zod](https://zod.dev/)、[Valibot](https://valibot.dev/)、[ArkType](https://arktype.io/) 等）指定需要跟踪的确切字段和类型。使用 Schema 时，Agent 会以与该 Schema 匹配的 JSON 对象查看和更新 Working Memory。
+
+\*\*要求：\*\*必须指定 `template` 或 `schema`，但不能同时指定两者。
+
+### 示例：基于 Schema 的 Working Memory
+
+```typescript
+import { z } from 'zod'
+import { Memory } from '@mastra/memory'
+
+const userProfileSchema = z.object({
+  name: z.string().optional(),
+  location: z.string().optional(),
+  timezone: z.string().optional(),
+  preferences: z
+    .object({
+      communicationStyle: z.string().optional(),
+      projectGoal: z.string().optional(),
+      deadlines: z.array(z.string()).optional(),
+    })
+    .optional(),
+})
+
+const memory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      schema: userProfileSchema,
+      // template: ... (do not set)
+    },
+  },
+})
+```
+
+提供 Schema 后，Agent 会以 JSON 对象形式接收 Working Memory。例如：
+
+```json
+{
+  "name": "Sam",
+  "location": "Berlin",
+  "timezone": "CET",
+  "preferences": {
+    "communicationStyle": "Formal",
+    "projectGoal": "Launch MVP",
+    "deadlines": ["2025-07-01"]
+  }
+}
+```
+
+### 基于 Schema 的 Memory 合并语义
+
+基于 Schema 的 Working Memory 使用**合并语义**，也就是说 Agent 只需包含希望添加或更新的字段。现有字段会自动保留。
+
+- \*\*对象字段会深度合并：\*\*只更新提供的字段，其他字段保持不变
+- \*\*将字段设为 `null` 即可删除：\*\*这会从 Memory 中显式移除该字段
+- \*\*数组会被完全替换：\*\*提供数组字段后，它会替换现有数组（不会逐元素合并数组）
+
+## 在模板与 Schema 之间选择
+
+- 如果希望 Agent 将 Memory 维护为用户资料或便笺等自由格式的文本块，请使用 **模板**（Markdown）。模板采用**替换语义**：Agent 每次更新都必须提供完整的 Memory 内容。
+- 如果需要可以验证并以 JSON 形式通过编程方式访问的结构化、类型安全数据，请使用 **Schema**。`workingMemory.schema` 字段接受任何与 `PublicSchema` 兼容的 Schema（包括 Zod v3、Zod v4、JSON Schema 或已符合标准的 Schema）。Schema 采用**合并语义**：Agent 只需提供要更新的字段，现有字段会保留。
+- 每次只能启用一种模式：不支持同时设置 `template` 和 `schema`。
+
+## 示例：多步保留
+
+以下简化示例展示 `User Profile` 模板如何在一段简短的用户对话中更新：
+
+```nohighlight
+# User Profile
+
+## Personal info
+
+- Name:
+- Location:
+- Timezone:
+
+--- After user says "My name is **Sam** and I'm from **Berlin**" ---
+
+# User Profile
+- Name: Sam
+- Location: Berlin
+- Timezone:
+
+--- After user adds "By the way I'm normally in **CET**" ---
+
+# User Profile
+- Name: Sam
+- Location: Berlin
+- Timezone: CET
+```
+
+由于这些信息已存入 Working Memory，Agent 在后续响应中可以直接提及 `Sam` 或 `Berlin`，无需再次询问。
+
+如果 Agent 没有按预期正确更新 Working Memory，可以在 Agent 的 `instructions` 设置中添加系统指令，说明应\_如何\_以及\_何时\_使用该模板。
+
+## 设置初始 Working Memory
+
+Agent 通常通过 `updateWorkingMemory` Tool 更新 Working Memory；此外，你也可以在创建或更新 Thread 时以编程方式设置初始 Working Memory。如果希望 Agent 能使用姓名、偏好或其他用户数据，而无需每次请求都传入这些数据，此功能很有用。
+
+### 通过 Thread 元数据设置 Working Memory
+
+创建 Thread 时，可以通过元数据的 `workingMemory` 键提供初始 Working Memory：
+
+```typescript title="src/app/medical-consultation.ts"
+// Create a thread with initial working memory
+const thread = await memory.createThread({
+  threadId: 'thread-123',
+  resourceId: 'user-456',
+  title: 'Medical Consultation',
+  metadata: {
+    workingMemory: `# Patient Profile
+- Name: John Doe
+- Blood Type: O+
+- Allergies: Penicillin
+- Current Medications: None
+- Medical History: Hypertension (controlled)
+`,
+  },
+})
+
+// The agent will now have access to this information in all messages
+await agent.generate("What's my blood type?", {
+  memory: {
+    thread: thread.id,
+    resource: 'user-456',
+  },
+})
+// Response: "Your blood type is O+."
+```
+
+### 以编程方式更新 Working Memory
+
+你也可以更新现有 Thread 的 Working Memory：
+
+```typescript title="src/app/medical-consultation.ts"
+// Update thread metadata to add/modify working memory
+await memory.updateThread({
+  id: 'thread-123',
+  title: thread.title,
+  metadata: {
+    ...thread.metadata,
+    workingMemory: `# Patient Profile
+- Name: John Doe
+- Blood Type: O+
+- Allergies: Penicillin, Ibuprofen  // Updated
+- Current Medications: Lisinopril 10mg daily  // Added
+- Medical History: Hypertension (controlled)
+`,
+  },
+})
+```
+
+### 直接更新 Memory
+
+也可以直接使用 `updateWorkingMemory` 方法：
+
+```typescript title="src/app/medical-consultation.ts"
+await memory.updateWorkingMemory({
+  threadId: 'thread-123',
+  resourceId: 'user-456', // Required for resource-scoped memory
+  workingMemory: 'Updated memory content...',
+})
+```
+
+## 只读 Working Memory
+
+在某些场景中，你可能希望 Agent 能访问 Working Memory 数据，但不能修改它。这适用于：
+
+- 需要上下文但不应更新用户资料的**路由 Agent**
+- 多 Agent 系统中应当引用而非拥有 Memory 的**子 Agent**
+
+要启用只读模式，请在 Memory 选项中设置 `readOnly: true`：
+
+```typescript
+const response = await agent.generate('What do you know about me?', {
+  memory: {
+    thread: 'conversation-123',
+    resource: 'user-alice-456',
+    options: {
+      readOnly: true, // Working memory is provided but cannot be updated
+    },
+  },
+})
+```
+
+## 选择启用状态信号（实验性）
+
+默认情况下，Working Memory 会作为系统消息的一部分传给模型。设置 `useStateSignals: true` 后，可以改为通过[状态信号](/docs/long-running-agents/signals)传递：
+
+```typescript
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'mastra-storage', url: 'file:./mastra.db' }),
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: '# User\n- name:\n- location:',
+      useStateSignals: true, // experimental: deliver as state signal
+    },
+  },
+})
+```
+
+变化如下：
+
+- \*\*Storage 完全相同。\*\*读取和写入的仍是相同的 Resource/Thread `workingMemory` 字段。
+- \*\*Tool 结构相同，但以新名称公开。\*\*写入仍通过同一个底层 Tool；在此路径中，它注册为 `setWorkingMemory`（而非 `updateWorkingMemory`）。重命名可以防止旧版剥离筛选器移除 Tool 调用部分，使其作为正常审计记录持久化，并让模型下一步自动获取新值。
+- **只改变传递方式。**`Memory` 不再将其合并到系统提示词，而会自动附加一个 `WorkingMemoryStateProcessor`，将当前 Working Memory 作为 `stateId: 'working-memory'` 的 `state` 信号发出。
+
+你会继承标准状态信号的优势：Thread 作用域跟踪元数据；通过 `cacheKey` 去重，使相同快照只发出一次；以及在旧快照移出窗口后通过 `contextWindow.hasSnapshot` 重新注入。
+
+默认值（`useStateSignals: false`）会保持现有系统消息行为不变。模板 Working Memory 的 `version: 'vnext'` 不支持 `useStateSignals`。
+
+## 示例
+
+- [使用模板的 Working Memory](https://github.com/mastra-ai/mastra/tree/main/examples/memory-with-template)
+- [使用 Schema 的 Working Memory](https://github.com/mastra-ai/mastra/tree/main/examples/memory-with-schema)
+- [每个 Resource 独立的 Working Memory](https://github.com/mastra-ai/mastra/tree/main/examples/memory-per-resource-example)：展示 Resource 作用域 Memory 持久化的完整示例

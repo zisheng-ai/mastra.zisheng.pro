@@ -1,0 +1,225 @@
+---
+title: "Okta | 身份驗證"
+description: 使用 Okta 的 SSO 登入及以群組為基礎的 RBAC，驗證 Mastra 伺服器及 Studio。
+packages:
+  - "@mastra/auth-okta"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Okta
+
+`@mastra/auth-okta` 套件使用 Okta 為 Mastra 提供身份驗證及以角色為基礎的存取控制。它支援使用加密 session cookie 的 OAuth 2.0 / OIDC 登入流程，並將 Okta 群組對應至 Mastra 權限。
+
+## 先決條件
+
+本指南使用 Okta 身份驗證。請確保你已：
+
+1. 在 [okta.com](https://www.okta.com/) 建立 Okta 帳戶
+1. 在 Okta Admin Console 設定 OAuth application（Web app、Authorization Code grant）
+1. 將 redirect URI 加入 application 的 sign-in redirect URI
+1. 建立 API token（RBAC 必須使用）
+
+請確保已設定環境變數。
+
+```env title=".env"
+OKTA_DOMAIN=dev-123456.okta.com
+OKTA_CLIENT_ID=your-client-id
+OKTA_CLIENT_SECRET=your-client-secret
+OKTA_REDIRECT_URI=http://localhost:4111/api/auth/callback
+OKTA_COOKIE_PASSWORD=a-random-string-at-least-32-characters-long
+OKTA_API_TOKEN=your-api-token
+```
+
+:::note
+
+`OKTA_COOKIE_PASSWORD` 用於加密 session cookie。如果省略，系統會使用自動產生的值，而該值不會在伺服器重新啟動後保留。請在生產環境中明確設定此值。
+
+只有使用 `MastraRBACOkta` 將 Okta 群組對應至權限時，才需要 `OKTA_API_TOKEN`。
+
+:::
+
+## 安裝
+
+```bash npm2yarn
+npm install @mastra/auth-okta
+```
+
+## 使用範例
+
+### 使用環境變數的基本用法
+
+設定上述環境變數後，所有 constructor parameter 均為選填：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthOkta } from '@mastra/auth-okta'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthOkta(),
+  },
+})
+```
+
+### 使用 RBAC 進行身份驗證
+
+加入 `MastraRBACOkta`，將 Okta 群組對應至 Mastra 權限：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthOkta, MastraRBACOkta } from '@mastra/auth-okta'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthOkta(),
+    rbac: new MastraRBACOkta({
+      roleMapping: {
+        Admin: ['*'],
+        Engineering: ['agents:*', 'workflows:*', 'tools:*'],
+        Viewer: ['agents:read', 'workflows:read'],
+        _default: [], // users with unmapped groups get no permissions
+      },
+    }),
+  },
+})
+```
+
+### 跨 Provider 用法
+
+使用其他身份驗證 Provider（Auth0、Clerk 等）處理登入，並使用 Okta 處理 RBAC。傳入 `getUserId` function，從其他 Provider 的 user object 解析 Okta user ID：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthAuth0 } from '@mastra/auth-auth0'
+import { MastraRBACOkta } from '@mastra/auth-okta'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthAuth0(),
+    rbac: new MastraRBACOkta({
+      getUserId: user => user.metadata?.oktaUserId || user.email,
+      roleMapping: {
+        Engineering: ['agents:*', 'workflows:*'],
+        Admin: ['*'],
+        _default: [],
+      },
+    }),
+  },
+})
+```
+
+:::note
+
+如要連結不同 Provider 的使用者，請將 Okta user ID 儲存在其他 Provider 的 user metadata 中。Mastra 會使用此 ID 從 Okta 取得群組。
+
+:::
+
+請參閱 [MastraAuthOkta](/reference/auth/okta)，了解所有可用設定選項。
+
+## 角色對應
+
+`roleMapping` 選項會將 Okta 群組名稱對應至 Mastra 權限字串陣列。權限遵循 `resource:action` pattern，並支援 wildcard：
+
+```typescript
+const rbac = new MastraRBACOkta({
+  roleMapping: {
+    // full access to everything
+    Admin: ['*'],
+
+    // full access to agents and workflows
+    Engineering: ['agents:*', 'workflows:*'],
+
+    // read-only access
+    Viewer: ['agents:read', 'workflows:read'],
+
+    // users whose groups don't match any key above
+    _default: [],
+  },
+})
+```
+
+`_default` key 會為 Okta 群組不符合任何其他 key 的使用者指派權限。
+
+## 客戶端設定
+
+啟用身份驗證後，向 Mastra route 發出的請求都需要身份驗證。`MastraAuthOkta` 使用 SSO，因此使用者會透過 Okta 託管的登入頁面驗證身份。登入後，系統會自動設定加密的 session cookie。
+
+### Cookie session（建議）
+
+對於跨來源請求（例如 `:3000` 上的前端呼叫 `:4111` 上的 Mastra），請在 Mastra 伺服器啟用 CORS 憑證：
+
+```typescript title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthOkta(),
+    cors: {
+      origin: 'http://localhost:3000',
+      credentials: true,
+    },
+  },
+})
+```
+
+設定客戶端加入憑證：
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  baseUrl: 'http://localhost:4111',
+  credentials: 'include',
+})
+```
+
+### Bearer token
+
+你亦可將 Okta access token 作為 Bearer token 傳送。系統會根據 Okta 的 JWKS endpoint 驗證 token：
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const createMastraClient = (accessToken: string) => {
+  return new MastraClient({
+    baseUrl: 'http://localhost:4111',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  })
+}
+```
+
+如需更多設定選項，請參閱 [Mastra Client SDK](/docs/server/mastra-client)。
+
+### 發出已驗證請求
+
+<Tabs>
+  <TabItem value="client" label="MastraClient">
+    ```typescript title="src/api/agents.ts"
+    import { mastraClient } from '../lib/mastra-client'
+
+    const agent = mastraClient.getAgent('weatherAgent')
+    const response = await agent.generate('Weather in London')
+    console.log(response)
+    ```
+  </TabItem>
+
+  <TabItem value="curl" label="cURL">
+    ```bash
+    curl -X POST http://localhost:4111/api/agents/weatherAgent/generate \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer <your-okta-access-token>" \
+      -d '{
+        "messages": "Weather in London"
+      }'
+    ```
+  </TabItem>
+</Tabs>
+
+## 疑難排解
+
+- **每個請求均傳回 401**：確認 Okta domain、client ID 及 client secret 正確。檢查 Okta application 中的 redirect URI 是否與 `OKTA_REDIRECT_URI` 相符。
+- **跨來源時沒有傳送 cookie**：在 `MastraClient` 中設定 `credentials: "include"`，並使用前端 origin 及 `credentials: true` 設定 `server.cors`。
+- **重新啟動後 session 遺失**：將 `OKTA_COOKIE_PASSWORD` 設定為穩定的值（至少 32 個字元）。如未設定，系統會使用自動產生並在每次重新啟動時變更的 key。
+- **RBAC 傳回空白權限**：確認已設定 `OKTA_API_TOKEN`，且 token 有權列出使用者群組。檢查 `roleMapping` 中的群組名稱是否與 Okta 群組名稱完全相符。

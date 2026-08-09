@@ -1,0 +1,97 @@
+---
+title: "參考：PrefillErrorHandler | 處理器"
+description: "Mastra PrefillErrorHandler 處理器的文件；此處理器會附加繼續訊息並重試，以處理助理回應預填錯誤。"
+packages:
+  - "@mastra/core"
+---
+
+# PrefillErrorHandler
+
+`PrefillErrorHandler` 是一種**錯誤處理器**，用於處理助理回應預填錯誤。當對話以助理訊息結尾，而模型將其解讀為預填助理回應並因此拒絕請求時，就會發生此錯誤。
+
+偵測到錯誤時，處理器會傳送一個隱藏的 `system-reminder` 訊號，其內容為 `continue`，並指示系統重試。此提醒會保存為訊號中繼資料，因此在重新建構重試內容與原始記錄時仍可使用，但標準的 UI 訊息轉換會將其隱藏。
+
+若希望 Mastra 能從助理預填拒絕中復原，請將此處理器加入 `errorProcessors`（例如 Anthropic 的「assistant message prefill」以及 Qwen/llama.cpp 的「assistant response prefill is incompatible with `enable_thinking`」錯誤）。
+
+## 運作方式
+
+1. LLM API 呼叫失敗，並傳回已知的助理預填拒絕訊息
+1. `PrefillErrorHandler` 檢查這是否為第一次重試
+1. 它會傳送一個隱藏的 `system-reminder` 訊號，其內容為 `continue`
+1. 它會回傳 `{ retry: true }`，指示 LLM 呼叫應以修改後的訊息重試
+
+處理器現在會直接回應 API 拒絕，不再重新檢查對話目前是否以助理訊息結尾。因此，即使上游已轉換結尾訊息的形式，只要 Provider 因預填語意而拒絕請求，處理器仍能妥善處理。
+
+## 使用範例
+
+若 Agent 應在助理預填失敗時重試，請將 `PrefillErrorHandler` 加入 `errorProcessors`：
+
+```typescript title="src/mastra/agents/my-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { PrefillErrorHandler } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_OPUS__',
+  errorProcessors: [new PrefillErrorHandler()],
+})
+```
+
+若需要自訂復原行為，請提供實作 `processAPIError` 方法的自訂錯誤處理器：
+
+```typescript title="src/mastra/agents/custom-error-handling.ts"
+import { Agent } from '@mastra/core/agent'
+import type { Processor } from '@mastra/core/processors'
+
+const customErrorHandler: Processor = {
+  id: 'custom-prefill-error-handler',
+  processAPIError({ error, messageList, retryCount }) {
+    // Your custom logic here
+  },
+}
+
+export const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_OPUS__',
+  errorProcessors: [customErrorHandler],
+})
+```
+
+## 建構函式參數
+
+`PrefillErrorHandler` 不接受任何建構函式參數。
+
+## 屬性
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: "'prefill-error-handler'",
+    description: '處理器識別碼。',
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: "'Prefill Error Handler'",
+    description: '處理器顯示名稱。',
+    isOptional: false,
+  },
+  {
+    name: 'processAPIError',
+    type: '(args: ProcessAPIErrorArgs) => ProcessAPIErrorResult | void',
+    description:
+      '透過傳送隱藏的系統提醒訊號並指示重試，處理已知的助理預填錯誤。只會在第一次重試時觸發。',
+    isOptional: false,
+  },
+]}
+/>
+
+## 相關資源
+
+- [Processor 介面](/reference/processors/processor-interface)
+- [防護機制](/docs/agents/guardrails)

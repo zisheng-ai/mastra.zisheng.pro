@@ -1,0 +1,181 @@
+---
+title: "CopilotKit Generative UI | Frameworks"
+description: "開発者が制御するコンポーネントから Agent が考案する画面まで、Agent の出力を UI としてレンダリングする"
+---
+
+# CopilotKit Generative UI
+
+Generative UI とは、Agent が作成を支援し、ユーザーが操作できるインターフェースです。CopilotKit は、これらのインターフェースを **Generative UI Spectrum** という 1 本の軸で整理します。この軸は、作成者が制御する状態（すべてのピクセルをユーザーが決める）から、Agent が考案する状態（レンダリングされる画面を Agent が所有する）まで続きます。軸上の位置は、予測可能性と対応範囲のトレードオフです。
+
+Spectrum は 3 つの Tier に分かれます。
+
+| Tier | 画面を制御する主体 | プリミティブ |
+| - | - | - |
+| **Controlled** | ユーザーがコンポーネントを作成します。Agent は使用するコンポーネントと渡すデータを選びます。 | Tool 呼び出しのレンダリング、状態のレンダリング、Reasoning、Tool としてのコンポーネント |
+| **Declarative** | Agent が構造化された仕様を送出します。フロントエンドは登録済みのカタログから UI を構成します。 | A2UI（固定 Schema と柔軟なバリアント） |
+| **Open-ended** | UI は別の場所（MCP サーバー）で考案され、Sandbox 内で実行されます。 | MCP Apps |
+
+各 Tier は、`registerCopilotKit()` を介して公開された Mastra Agent（[CopilotKit の概要](/guides/build-your-ui/copilotkit/overview)を参照）と、フロントエンド上の対応する CopilotKit フックで構成されます。コンセプト全体については、CopilotKit の [Generative UI Spectrum](https://www.copilotkit.ai/generative-ui-spectrum) と [Generative UI の概要](https://docs.copilotkit.ai/concepts/generative-ui-overview)を参照してください。
+
+:::tip
+
+Mastra の [UI Dojo](https://ui-dojo.mastra.ai/) には、動作する CopilotKit の例があります。`src/pages/copilot-kit` 以下のソースを参照してください。
+
+:::
+
+## Controlled
+
+固定された一連のコンポーネントを用意します。Agent はレンダリングするコンポーネントを選び、そのデータを渡します。この予測可能でブランドを損なわない方法は、トラフィックの多い画面に適しています。Controlled プリミティブでは、`@copilotkit/react-core/v2` からインポートする CopilotKit v2 API を使用します。
+
+### Tool 呼び出しのレンダリング
+
+Agent の Tool 呼び出しを React コンポーネントとしてレンダリングします。通常どおり Mastra サーバーに Agent と Tool を定義します。
+
+```typescript title="src/mastra/agents/weather-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { weatherTool } from '../tools/weather-tool'
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: 'Use the weatherTool to fetch current weather data.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { weatherTool },
+})
+```
+
+フロントエンドでは、`useRenderTool` を使って Tool 名に対応する Renderer を登録します。これはレンダリング専用で、Tool は実行しません。`render` 関数は Tool 呼び出しの `status` と、Agent が返した後の `result` を受け取ります。
+
+```tsx title="app/page.tsx"
+import { z } from 'zod'
+import { CopilotChat } from '@copilotkit/react-ui'
+import { CopilotKit, useRenderTool } from '@copilotkit/react-core/v2'
+import { Weather } from '@/components/weather'
+
+function Chat() {
+  useRenderTool(
+    {
+      name: 'weatherTool',
+      parameters: z.object({ location: z.string() }),
+      render: ({ status, result }) => {
+        if (status !== 'complete') {
+          return <div>Retrieving weather...</div>
+        }
+        return <Weather {...result} />
+      },
+    },
+    [],
+  )
+
+  return <CopilotChat labels={{ title: 'Weather Assistant' }} />
+}
+
+export default function Page() {
+  return (
+    <CopilotKit runtimeUrl="http://localhost:4111/copilotkit" agent="weatherAgent">
+      <Chat />
+    </CopilotKit>
+  )
+}
+```
+
+Mastra は Tool 呼び出しの引数を増分ストリーミングするため、引数が届くたびに `render` 関数が繰り返し呼び出されます。これにより、Agent の動作中に UI を段階的に描画できます。
+
+### Tool としてのコンポーネント
+
+React コンポーネントを登録し、Agent が Tool として呼び出せるようにします。CopilotKit は型付きの Props（Zod Schema で定義）を使って、コンポーネントをインラインでレンダリングします。
+
+```tsx title="app/page.tsx"
+import { z } from 'zod'
+import { useComponent } from '@copilotkit/react-core/v2'
+
+const schema = z.object({ text: z.string() })
+
+function Callout({ text }: z.infer<typeof schema>) {
+  return <div className="callout">{text}</div>
+}
+
+function Chat() {
+  useComponent({ name: 'callout', render: Callout, parameters: schema }, [])
+  return <CopilotChat labels={{ title: 'Assistant' }} />
+}
+```
+
+Agent は他の Tool と同じように `callout` を呼び出し、CopilotKit は渡された Props で `Callout` をレンダリングします。
+
+### 状態のレンダリング
+
+Agent の状態から UI をレンダリングし、ストリーミングに合わせて再レンダリングします。Mastra では Agent の状態は Agent の作業メモリであり、変化に応じてクライアントへストリーミングされます。`useAgent` で読み取ります。`agent.state` はリアクティブなので、コンポーネントは自動的に更新されます。
+
+```tsx title="app/page.tsx"
+import { useAgent } from '@copilotkit/react-core/v2'
+
+function TaskBoard() {
+  const { agent } = useAgent()
+  const tasks = (agent.state.tasks as any[]) ?? []
+
+  return (
+    <ul>
+      {tasks.map((task, i) => (
+        <li key={i}>
+          {task.title}: {task.status}
+        </li>
+      ))}
+    </ul>
+  )
+}
+```
+
+### Reasoning
+
+Reasoning は設定不要です。Mastra Agent が Reasoning 対応モデルを実行すると、`CopilotChat` はモデルの思考を専用のメッセージタイプとしてインライン表示します。追加のコードは必要ありません。スタイルを変更するには、独自のコンポーネントを `CopilotChat` の `reasoningMessage` Slot に渡します。詳しくは CopilotKit の [Generative UI ガイド](https://docs.copilotkit.ai/)を参照してください。
+
+## Declarative
+
+Tool ごとに固定コンポーネントを用意する代わりに、型付きの構成要素のカタログを登録し、Agent がリクエストごとに UI ツリーを組み立てます。CopilotKit ではこれを **A2UI**（Agent-to-UI）と呼び、固定 Schema と柔軟なバリアントがあります。ピクセル単位の完成度より対応範囲が重要な、多様な二次的操作に適しています。
+
+最も簡単な方法は、カタログを `<CopilotKit>` Provider に渡すことです。この 1 つの Prop で A2UI のレンダリングが有効になり、Agent に A2UI Tool が注入されるため、バックエンドを変更する必要はありません。
+
+```tsx title="app/page.tsx"
+import { CopilotKit } from '@copilotkit/react-core/v2'
+import { myCatalog } from './a2ui-catalog'
+
+export default function Page() {
+  return (
+    <CopilotKit
+      runtimeUrl="http://localhost:4111/copilotkit"
+      agent="weatherAgent"
+      a2ui={{ catalog: myCatalog }}
+    >
+      {/* your app */}
+    </CopilotKit>
+  )
+}
+```
+
+カタログはプリミティブ（Schema）と Renderer（各プリミティブの表示方法）を定義します。固定 Schema バリアントでは、コンポーネントは事前に作成され、Agent の Tool はデータだけを渡します。柔軟なバリアントでは、Agent がツリーをより自由に構成できます。CopilotKit の [A2UI ドキュメント](https://docs.copilotkit.ai/a2a/generative-ui/a2ui)を参照してください。
+
+## Open-ended
+
+Spectrum の端では、Agent が画面全体を所有します。UI は別の場所で考案され、アプリ内の Sandbox で実行されます。CopilotKit は **MCP Apps** を通じてこれをサポートし、MCP サーバーがアプリケーション内でレンダリングされる UI を提供します。この Tier は決定性と引き換えに新規性を得る、Spectrum 上で最も実験的な領域です。
+
+最も簡単な方法では、フロントエンドを変更しません。既存の `<CopilotKit>` Provider だけで十分です。バックエンドでは、`mcpApps` オプションを使って `registerCopilotKit()` に 1 つ以上の MCP サーバーを指定します。このオプションは CopilotKit Runtime に転送されます。
+
+```typescript title="src/mastra/index.ts"
+registerCopilotKit({
+  path: '/copilotkit',
+  resourceId: 'weatherAgent',
+  mcpApps: {
+    servers: [{ type: 'http', url: 'http://localhost:3108/mcp', serverId: 'my-server' }],
+  },
+})
+```
+
+Agent が MCP App Tool を呼び出すと、CopilotKit は追加のフロントエンドコードなしでその Tool の UI を取得し、チャット内にレンダリングします。CopilotKit の [MCP Apps ドキュメント](https://docs.copilotkit.ai/agno/generative-ui/mcp-apps)を参照してください。
+
+## アプリの制御と対話性
+
+一部の機能は Spectrum 上ではなく、その隣に位置します。Agent の出力をレンダリングするのではなく、アプリを制御したり Run を中断したりする機能です。どちらも[はじめに](/guides/build-your-ui/copilotkit/overview#app-control-and-interactivity)で説明しています。
+
+- **Frontend Tool**（`useFrontendTool`）：Agent がアプリケーションを操作できるようにします。共有状態や Agent Context と並ぶ、CopilotKit の独立した [App Control](https://docs.copilotkit.ai/) コンセプトの一部です。
+- **Human-in-the-loop**：Run を一時停止し、ユーザーの承認または編集を待ちます。バックエンド側については Mastra の [Agent 承認](/docs/agents/agent-approval)、フロントエンド側については CopilotKit の [`useHumanInTheLoop`](https://docs.copilotkit.ai/reference/hooks/useHumanInTheLoop) を参照してください。

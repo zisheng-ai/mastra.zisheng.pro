@@ -1,0 +1,174 @@
+---
+title: "参考：summarizeConversation() | Memory"
+description: "Mastra 独立函数 `summarizeConversation()` 的参考文档。该函数汇总传入的消息，并从中提取结构化值。"
+packages:
+  - "@mastra/memory"
+---
+
+# summarizeConversation()
+
+独立的 `summarizeConversation()` 函数可一次性汇总对话。它使用支持 [Observational Memory](/reference/memory/observational-memory) 的同一套 Observer 机制提炼传入的消息，无需将 Observational Memory 附加到 Agent，也不会读取或写入存储。
+
+任何内容都不会写回 memory。摘要和提取的值会返回给你（也会传给每个 extractor 的 `onExtracted` hook），因此你可以自行决定它们的去向，例如自己的数据库。
+
+当你已持有消息并希望明确控制汇总内容时，请使用此函数。对于通过 ID 标识的已存储 thread，请使用 [`Memory.summarizeThread()`](/reference/memory/summarizeThread)，它会为你加载消息。
+
+## 使用示例
+
+```typescript
+import { summarizeConversation } from '@mastra/memory'
+
+const result = await summarizeConversation({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  messages,
+  instructions: 'Summarize this voicemail call for the business owner.',
+})
+```
+
+## 参数
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'string | LanguageModel | DynamicModel',
+    description: "执行汇总的模型，例如 `'__GATEWAY_OPENAI_MODEL_MINI__'` 这样的 router 字符串。",
+    isOptional: false,
+  },
+  {
+    name: 'messages',
+    type: 'MastraDBMessage[]',
+    description:
+      '要汇总的对话。为空时，函数不会调用模型，而是返回空结果。',
+    isOptional: false,
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description:
+      '附加到 summarizer system prompt 的额外指导，例如应关注的内容或摘要的目标读者。',
+    isOptional: true,
+  },
+  {
+    name: 'extract',
+    type: 'Extractor[]',
+    description:
+      '要在对话上运行的 Extractor。带 Zod schema 的 Extractor 会通过后续结构化输出调用运行；不带 schema 的 Extractor 会以内联方式提取。每个 Extractor 的 `onExtracted` hook 都会收到提取的值。',
+    isOptional: true,
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    description:
+      '对话所属的 thread。默认为在 `messages` 中找到的第一个 `threadId`。该值会传给 Extractor 上下文。',
+    isOptional: true,
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    description:
+      '对话所属的 resource（用户）。默认为在 `messages` 中找到的第一个 `resourceId`。该值会传给 Extractor 上下文。',
+    isOptional: true,
+  },
+  {
+    name: 'memory',
+    type: 'Memory',
+    description:
+      '转发给 Extractor 上下文的 Memory 实例。通过 `Memory.summarizeThread()` 调用时会自动设置。',
+    isOptional: true,
+  },
+  {
+    name: 'mastra',
+    type: 'Mastra',
+    description:
+      '用于解析自定义 gateway 模型的 Mastra 实例。通过 `Memory.summarizeThread()` 调用时会自动设置。',
+    isOptional: true,
+  },
+  {
+    name: 'requestContext',
+    type: 'RequestContext',
+    description: '转发给 summarizer 模型和 Extractor hook 的请求上下文。',
+    isOptional: true,
+  },
+  {
+    name: 'abortSignal',
+    type: 'AbortSignal',
+    description: '用于取消汇总调用的信号。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 返回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'summary',
+    type: 'string',
+    description: '从对话中提炼出的观察结果，以信息密集的项目符号形式呈现。',
+  },
+  {
+    name: 'extracted',
+    type: 'Record<string, unknown>',
+    description: '`extract` 中的 Extractor 生成的值，以 Extractor slug 为键。',
+  },
+  {
+    name: 'extractionFailures',
+    type: '{ slug: string; error: string }[]',
+    description:
+      '未能生成有效值的 Extractor 及失败原因。仅在至少一个 Extractor 失败时存在。',
+  },
+  {
+    name: 'usage',
+    type: '{ inputTokens?: number; outputTokens?: number; totalTokens?: number }',
+    description: '汇总调用的 token 用量。',
+  },
+]}
+/>
+
+## 扩展使用示例
+
+以下示例汇总应用已持有消息中的进行中语音会话，并提取一条结构化记录：
+
+```typescript title="src/session-summary.ts"
+import { summarizeConversation, Extractor } from '@mastra/memory'
+import type { MastraDBMessage } from '@mastra/core/agent'
+import { z } from 'zod'
+import { sessionRecords } from './db'
+
+const sessionSummary = new Extractor({
+  name: 'session-summary',
+  instructions: 'Return a concise summary of the session.',
+  schema: z.object({
+    summary: z.string(),
+    sentiment: z.enum(['positive', 'neutral', 'negative']),
+    followUps: z.array(z.string()),
+  }),
+  metadataKeyPath: false, // don't persist into memory metadata — the hook owns storage
+  onExtracted: async ({ current, threadId }) => {
+    await sessionRecords.upsert({ sessionId: threadId, record: current })
+  },
+})
+
+export async function onSessionEnd(messages: MastraDBMessage[]) {
+  const { summary, extracted, extractionFailures } = await summarizeConversation({
+    model: '__GATEWAY_OPENAI_MODEL_MINI__',
+    messages,
+    instructions: 'Summarize this support session for the account manager.',
+    extract: [sessionSummary],
+  })
+
+  if (extractionFailures?.length) {
+    console.warn('Some extractors failed', extractionFailures)
+  }
+
+  return { summary, extracted }
+}
+```
+
+### 相关
+
+- [.summarizeThread()](/reference/memory/summarizeThread)
+- [Memory Class 参考文档](/reference/memory/memory-class)
+- [Observational Memory](/reference/memory/observational-memory)

@@ -1,0 +1,345 @@
+---
+title: "リファレンス：RegexFilterProcessor | Processors"
+description: "Agent メッセージ内のパターン一致をブロック、墨消し、または警告する、コストゼロの正規表現ベースコンテンツフィルター RegexFilterProcessor の API リファレンス。"
+packages:
+  - "@mastra/core"
+---
+
+# RegexFilterProcessor
+
+`RegexFilterProcessor` は、コストゼロの正規表現パターンマッチングを適用し、Agent メッセージ内のコンテンツをフィルタリング、墨消し、またはブロックします。LLM 呼び出しは行われません。すべての検出は正規表現に基づきます。
+
+一般的なパターン（PII、シークレット、URL）に対応する組み込みプリセットと、カスタム正規表現ルールをサポートします。入力、出力、または両方のフェーズに適用できます。
+
+## 使用例
+
+入力メッセージ内の PII をブロックします。
+
+```typescript
+import { RegexFilterProcessor } from '@mastra/core/processors'
+
+const filter = new RegexFilterProcessor({
+  presets: ['pii'],
+  strategy: 'block',
+  phase: 'input',
+})
+```
+
+出力内のシークレットを墨消しします。
+
+```typescript
+import { RegexFilterProcessor } from '@mastra/core/processors'
+
+const filter = new RegexFilterProcessor({
+  presets: ['secrets'],
+  strategy: 'redact',
+  phase: 'output',
+})
+```
+
+カスタムルール：
+
+```typescript
+import { RegexFilterProcessor } from '@mastra/core/processors'
+
+const filter = new RegexFilterProcessor({
+  rules: [{ name: 'internal-id', pattern: /INTERNAL-\d{6}/g, replacement: '[INTERNAL_ID]' }],
+  strategy: 'redact',
+})
+```
+
+長いカスタム一致（固定長のシークレットや、終了区切り文字が届いた時点で初めて一致する値など）には、ストリーミングの持ち越しウィンドウを広げます。
+
+```typescript
+import { RegexFilterProcessor } from '@mastra/core/processors'
+
+const filter = new RegexFilterProcessor({
+  rules: [
+    {
+      name: 'armored-key',
+      pattern: /-----BEGIN KEY-----[A-Z]+-----END KEY-----/g,
+      replacement: '[KEY]',
+    },
+  ],
+  strategy: 'redact',
+  streamCarryoverSize: 256,
+})
+```
+
+Agent に設定します。
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { RegexFilterProcessor } from '@mastra/core/processors'
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  model: '__GATEWAY_OPENAI_MODEL_NANO__',
+  inputProcessors: [
+    new RegexFilterProcessor({
+      presets: ['pii', 'secrets'],
+      strategy: 'block',
+    }),
+  ],
+})
+```
+
+## コンストラクターパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'rules',
+    type: 'RegexRule[]',
+    description:
+      '適用するカスタム正規表現ルール。各ルールには名前、正規表現パターン、任意の置換文字列があります。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'RegexRule',
+        parameters: [
+          {
+            name: 'name',
+            type: 'string',
+            description: 'ルールの表示名（一致レポートとエラーメッセージで使用）。',
+            isOptional: false,
+          },
+          {
+            name: 'pattern',
+            type: 'RegExp',
+            description: '照合する正規表現パターン。',
+            isOptional: false,
+          },
+          {
+            name: 'replacement',
+            type: 'string',
+            description: "redact 方法で使用する置換文字列。デフォルトは '[REDACTED]' です。",
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'presets',
+    type: "('pii' | 'secrets' | 'urls')[]",
+    description:
+      "組み込みプリセットのカテゴリー。'pii' はメールアドレス、電話番号、SSN、クレジットカード番号、'secrets' は API キー、Bearer トークン、AWS キー、'urls' は HTTP/HTTPS URL に一致します。",
+    isOptional: true,
+  },
+  {
+    name: 'strategy',
+    type: "'block' | 'redact' | 'warn'",
+    description:
+      "パターン一致が見つかった場合の処理方法。'block' は TripWire エラーで中止、'redact' は一致したコンテンツを置換テキストに置き換え、'warn' は警告をログに記録しますがコンテンツを変更せず通過させます。",
+    isOptional: true,
+    defaultValue: "'block'",
+  },
+  {
+    name: 'phase',
+    type: "'input' | 'output' | 'all'",
+    description:
+      "フィルターを適用するフェーズ。'input' は入力メッセージ、'output' は出力ストリームと結果、'all' は両方をフィルタリングします。",
+    isOptional: true,
+    defaultValue: "'all'",
+  },
+  {
+    name: 'includeRedactedValues',
+    type: 'boolean',
+    description:
+      '各レポートエントリに墨消しされたテキストを含めます。これらの値は Processor が削除する対象データであるため、デフォルトでは無効です。',
+    isOptional: true,
+    defaultValue: 'false',
+  },
+  {
+    name: 'streamCarryoverSize',
+    type: 'number',
+    description:
+      'チャンク境界をまたぐ一致をまとめて墨消しできるよう、ストリーミングの redact 処理がチャンク間で保持する末尾の文字数。デフォルト値には、すべての組み込みプリセットに十分な余裕があります。固定長のシークレットや終了区切り文字を持つ値など、完結するまでルールから一致を認識できず、その一致がウィンドウより長くなる可能性があるカスタムルールでは、この値を増やしてください。',
+    isOptional: true,
+    defaultValue: '128',
+  },
+]}/>
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: "'regex-filter'",
+    description: 'Processor の識別子。',
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: "'Regex Filter'",
+    description: 'Processor の表示名。',
+    isOptional: false,
+  },
+  {
+    name: 'processInput',
+    type: '(args: ProcessInputArgs) => ProcessInputResult',
+    description:
+      '入力メッセージを設定済みのすべてのルールと照合します。strategy に応じて、ブロック、墨消し、または警告します。phase が output の場合はスキップされます。',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputStream',
+    type: '(args: ProcessOutputStreamArgs) => Promise<ChunkType | null | undefined>',
+    description: 'ストリーミングの text-delta チャンクを設定済みのすべてのルールと照合します。phase が input の場合はスキップされます。',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputResult',
+    type: '(args: ProcessOutputResultArgs) => ProcessorMessageResult',
+    description:
+      '出力メッセージを設定済みのすべてのルールと照合します。strategy に応じて、ブロック、墨消し、または警告します。phase が input の場合はスキップされます。',
+    isOptional: false,
+  },
+]}/>
+
+## エラー動作
+
+`block` 方法が有効な場合（デフォルト）、`RegexFilterProcessor` はいずれかのパターンが一致すると、`retry: false` の `TripWire` エラーをスローします。TripWire のメタデータには次が含まれます。
+
+- `processorId`：`'regex-filter'`
+- `matches`：`rule`、`match`（`'[REDACTED_MATCH]'` に墨消し）、`index` を持つ一致オブジェクトの配列
+- `strategy`：`'block'`
+
+## 組み込みプリセット
+
+| プリセット | パターン | デフォルトの置換 |
+| - | - | - |
+| `pii` | メールアドレス、電話番号、SSN、クレジットカード番号 | `[EMAIL]`、`[PHONE]`、`[SSN]`、`[CREDIT_CARD]` |
+| `secrets` | API キー、Bearer トークン、AWS アクセスキー | `[API_KEY]`、`[BEARER_TOKEN]`、`[AWS_KEY]` |
+| `urls` | HTTP/HTTPS URL | `[URL]` |
+
+## 墨消しの動作
+
+各ルールは個別に照合されるため、2つのルールが重複するテキストに一致する場合があります。たとえば、区切り文字なしで記述されたカード番号は `phone` と `credit-card` の両方に一致します。重複する一致は1つの領域にまとめられ、最長の一致の置換値を使用して一度だけ置き換えられます。
+
+```typescript
+const filter = new RegexFilterProcessor({
+  presets: ['pii'],
+  strategy: 'redact',
+})
+
+// "Charge 4111111111111111 today" becomes "Charge [CREDIT_CARD] today"
+```
+
+置換文字列では、`$1` または `$&` でキャプチャグループを参照できます。これらの参照が解決されるのは、パターンが一致したテキスト単体にも一致する、単一の一致の場合です。結合された領域の場合や、後読みまたは先読みで周囲に固定されたルールの場合、置換文字列はそのまま挿入されます。どちらの場合も領域は墨消しされます。
+
+## 墨消しのレポート
+
+`redact` 方法はテキストをその場で書き換えるため、後続処理からは変更内容を判別できません。記録するには `onViolation` を設定します。Processor は、墨消しされたメッセージ、メッセージ part、またはストリームチャンクごとに1回呼び出します。オフセットはそのテキスト片を基準とします。非同期コールバックは完了まで待機されます。監査先が利用できない場合でもリクエストが失敗しないよう、エラーは捕捉されます。
+
+```typescript
+import { RegexFilterProcessor, type RegexRedactionDetail } from '@mastra/core/processors'
+
+const filter = new RegexFilterProcessor({
+  presets: ['pii'],
+  strategy: 'redact',
+})
+
+filter.onViolation = async ({ detail }) => {
+  const redaction = detail as RegexRedactionDetail
+
+  for (const entry of redaction.redactions) {
+    await auditLog.write({
+      phase: redaction.phase,
+      messageId: redaction.messageId,
+      rule: entry.rule,
+      offset: entry.index,
+      length: entry.length,
+    })
+  }
+}
+```
+
+一致を含む各チャンクで実行される `processOutputStream` 内も含め、コールバックの完了を待機します。低速な監査先がストリーミングレスポンスを停止させないよう、コールバックは高速に保つか、処理をキューへ渡してください。コールバックを設定しない場合、`redact` 処理は同期のままです。
+
+`block` 方法も同じコールバックを通じてレポートします。この場合、Processor runner が `TripWire` を捕捉したときにコールバックを呼び出すため、`detail` には以下の形式ではなく、[エラー動作](#error-behavior)で説明した Tripwire メタデータが入ります。
+
+墨消しの `detail` は `RegexRedactionDetail` です。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'strategy',
+    type: "'redact'",
+    description: '墨消しレポートと block 方法のペイロードを区別します。',
+    isOptional: false,
+  },
+  {
+    name: 'phase',
+    type: "'processInput' | 'processOutputStream' | 'processOutputResult'",
+    description: '墨消しを適用した Processor メソッド。',
+    isOptional: false,
+  },
+  {
+    name: 'messageId',
+    type: 'string',
+    description: 'テキストの取得元メッセージの ID。ストリームチャンクにはありません。',
+    isOptional: true,
+  },
+  {
+    name: 'partIndex',
+    type: 'number',
+    description:
+      'テキスト以外の part も含むメッセージの parts 配列内で、墨消しされた part のインデックス。文字列コンテンツとストリームチャンクにはありません。',
+    isOptional: true,
+  },
+  {
+    name: 'redactions',
+    type: 'RegexRedaction[]',
+    description: 'テキスト内の出現順に並んだ墨消し。',
+    isOptional: false,
+    properties: [
+      {
+        type: 'RegexRedaction',
+        parameters: [
+          {
+            name: 'rule',
+            type: 'string',
+            description: '置換値が使用されたルールの名前。',
+            isOptional: false,
+          },
+          {
+            name: 'index',
+            type: 'number',
+            description: 'テキスト内の墨消し範囲の開始オフセット。',
+            isOptional: false,
+          },
+          {
+            name: 'length',
+            type: 'number',
+            description: '墨消し範囲の長さ。',
+            isOptional: false,
+          },
+          {
+            name: 'replacement',
+            type: 'string',
+            description: '範囲を置き換えたテキスト。',
+            isOptional: false,
+          },
+          {
+            name: 'overlappingRules',
+            type: 'string[]',
+            description: 'この範囲に一致したすべてのルール名。複数の一致が重複した場合のみ設定されます。',
+            isOptional: true,
+          },
+          {
+            name: 'value',
+            type: 'string',
+            description: '墨消しされたテキスト。includeRedactedValues が有効な場合のみ設定されます。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}/>
+
+デフォルトでは値を含めません。保護対象データを監査証跡へコピーすると、縮小するために導入した露出範囲を逆に広げることになります。`includeRedactedValues` は、保存先が元のデータと同等に保護されている場合に限り設定してください。同じ理由から、`block` 方法も一致したテキストを `TripWire` メタデータに含めません。

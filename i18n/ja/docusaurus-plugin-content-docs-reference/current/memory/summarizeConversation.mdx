@@ -1,0 +1,174 @@
+---
+title: "リファレンス：summarizeConversation() | Memory"
+description: "渡したメッセージを要約し、そこから構造化された値を抽出する Mastra のスタンドアロン `summarizeConversation()` 関数のドキュメントです。"
+packages:
+  - "@mastra/memory"
+---
+
+# summarizeConversation()
+
+スタンドアロンの `summarizeConversation()` 関数は、会話を一度の呼び出しで要約します。渡したメッセージを、[Observational Memory](/reference/memory/observational-memory) を支えるものと同じ Observer の仕組みで要約します。Agent に Observational Memory を関連付ける必要はなく、ストレージの読み書きも行いません。
+
+Memory には何も書き戻されません。要約と抽出された値は、呼び出し元（および各 Extractor の `onExtracted` Hook）へ返されるため、独自のデータベースなど、保存先を自分で決められます。
+
+メッセージがすでに手元にあり、要約対象を明示的に制御したい場合に使います。ID で識別される保存済みスレッドには、メッセージを自動的に読み込む [`Memory.summarizeThread()`](/reference/memory/summarizeThread) を使ってください。
+
+## 使用例
+
+```typescript
+import { summarizeConversation } from '@mastra/memory'
+
+const result = await summarizeConversation({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  messages,
+  instructions: 'Summarize this voicemail call for the business owner.',
+})
+```
+
+## パラメータ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'string | LanguageModel | DynamicModel',
+    description: "要約を実行するモデル。`'__GATEWAY_OPENAI_MODEL_MINI__'` のようなルーター文字列などを指定します。",
+    isOptional: false,
+  },
+  {
+    name: 'messages',
+    type: 'MastraDBMessage[]',
+    description:
+      '要約する会話。空の場合、モデルを呼び出さずに空の結果を返します。',
+    isOptional: false,
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description:
+      '要約対象の重点や要約の対象読者など、Summarizer のシステムプロンプトに追加する指示。',
+    isOptional: true,
+  },
+  {
+    name: 'extract',
+    type: 'Extractor[]',
+    description:
+      '会話に対して実行する Extractor。Zod スキーマを持つ Extractor は、後続の構造化出力呼び出しとして実行されます。スキーマのない Extractor はインラインで抽出されます。各 Extractor の `onExtracted` Hook は、抽出された値を受け取って実行されます。',
+    isOptional: true,
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    description:
+      '会話が属するスレッド。デフォルトでは、`messages` で最初に見つかった `threadId` を使います。Extractor の Context に渡されます。',
+    isOptional: true,
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    description:
+      '会話が属するリソース（ユーザー）。デフォルトでは、`messages` で最初に見つかった `resourceId` を使います。Extractor の Context に渡されます。',
+    isOptional: true,
+  },
+  {
+    name: 'memory',
+    type: 'Memory',
+    description:
+      'Extractor の Context に転送する Memory インスタンス。`Memory.summarizeThread()` 経由で呼び出す場合は自動的に設定されます。',
+    isOptional: true,
+  },
+  {
+    name: 'mastra',
+    type: 'Mastra',
+    description:
+      'カスタム Gateway モデルの解決に使う Mastra インスタンス。`Memory.summarizeThread()` 経由で呼び出す場合は自動的に設定されます。',
+    isOptional: true,
+  },
+  {
+    name: 'requestContext',
+    type: 'RequestContext',
+    description: 'Summarizer モデルと Extractor Hook に転送する Request Context。',
+    isOptional: true,
+  },
+  {
+    name: 'abortSignal',
+    type: 'AbortSignal',
+    description: '要約呼び出しをキャンセルするための Signal。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'summary',
+    type: 'string',
+    description: '会話から抽出・集約された観察結果。情報量の多い箇条書き形式で返されます。',
+  },
+  {
+    name: 'extracted',
+    type: 'Record<string, unknown>',
+    description: '`extract` の Extractor が生成した値。Extractor の slug をキーとします。',
+  },
+  {
+    name: 'extractionFailures',
+    type: '{ slug: string; error: string }[]',
+    description:
+      '有効な値を生成できなかった Extractor とその理由。1 つ以上の Extractor が失敗した場合にのみ存在します。',
+  },
+  {
+    name: 'usage',
+    type: '{ inputTokens?: number; outputTokens?: number; totalTokens?: number }',
+    description: '要約呼び出しの Token 使用量。',
+  },
+]}
+/>
+
+## 詳細な使用例
+
+次の例では、アプリケーションがすでに保持しているメッセージから進行中の音声セッションを要約し、構造化レコードを抽出します。
+
+```typescript title="src/session-summary.ts"
+import { summarizeConversation, Extractor } from '@mastra/memory'
+import type { MastraDBMessage } from '@mastra/core/agent'
+import { z } from 'zod'
+import { sessionRecords } from './db'
+
+const sessionSummary = new Extractor({
+  name: 'session-summary',
+  instructions: 'Return a concise summary of the session.',
+  schema: z.object({
+    summary: z.string(),
+    sentiment: z.enum(['positive', 'neutral', 'negative']),
+    followUps: z.array(z.string()),
+  }),
+  metadataKeyPath: false, // don't persist into memory metadata — the hook owns storage
+  onExtracted: async ({ current, threadId }) => {
+    await sessionRecords.upsert({ sessionId: threadId, record: current })
+  },
+})
+
+export async function onSessionEnd(messages: MastraDBMessage[]) {
+  const { summary, extracted, extractionFailures } = await summarizeConversation({
+    model: '__GATEWAY_OPENAI_MODEL_MINI__',
+    messages,
+    instructions: 'Summarize this support session for the account manager.',
+    extract: [sessionSummary],
+  })
+
+  if (extractionFailures?.length) {
+    console.warn('Some extractors failed', extractionFailures)
+  }
+
+  return { summary, extracted }
+}
+```
+
+### 関連項目
+
+- [.summarizeThread()](/reference/memory/summarizeThread)
+- [Memory クラスのリファレンス](/reference/memory/memory-class)
+- [Observational Memory](/reference/memory/observational-memory)

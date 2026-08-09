@@ -1,0 +1,349 @@
+---
+title: "A2A | Agent"
+description: "Agent-to-Agent プロトコルを介してリモート Mastra Agent を公開し、呼び出します。"
+packages:
+  - "@mastra/client-js"
+  - "@mastra/core"
+  - "@mastra/server"
+---
+
+# A2A (Agent-to-Agent)
+
+Mastra は、クロスプラットフォームのマルチ Agent システム向けに [Agent-to-Agent（A2A）プロトコル](https://a2a-protocol.org/latest/)のバージョン 0.3.0 をサポートしています。A2A を使用すると、Mastra Agent をリモート Agent として公開したり、リモート A2A Agent を Mastra の Subagent として利用したり、JavaScript クライアント SDK から A2A エンドポイントを呼び出したりできます。
+
+A2A は、ネットワーク、フレームワーク、ベンダー、言語の境界を越えて Agent に処理を委任するためのオープンプロトコルです。リモート Agent は自身の Tool、プロンプト、Memory、Workflow、インフラを非公開にしたまま、他のシステムが検出して呼び出せるプロトコルエンドポイントを公開します。
+
+## A2A を使用する場面
+
+- 親 Agent から専門的なリモート Agent に処理を委任する場合。
+- リモート Agent を別のサービス、チーム、ベンダー、ランタイムが所有している場合。
+- バックエンド、ブラウザアプリ、その他の A2A 対応システムから Mastra Agent にプログラムでアクセスする場合。
+- 長時間実行されるリモート処理で、タスク ID、ステータス更新、Artifact、キャンセル、再購読、プッシュ通知が必要な場合。
+
+## A2A の仕組み
+
+A2A は Agent Card を使用して Agent を検出します。Agent Card は well-known URL から配信される JSON ドキュメントで、リモート Agent の説明と A2A JSON-RPC リクエストを受け付ける実行 URL が含まれます。
+
+Mastra Server のデフォルト `apiPrefix` である `/api` を使用する場合、`weather-agent` として登録された Agent は次を公開します。
+
+- Agent Card：`/api/.well-known/weather-agent/agent-card.json`
+- 実行エンドポイント：`/api/a2a/weather-agent`
+
+Agent Card には、Agent 名、説明、エンドポイント URL、Provider、Capabilities、セキュリティメタデータ、Skill などのフィールドが含まれます。
+
+```json title="agent-card.json"
+{
+  "protocolVersion": "0.3.0",
+  "name": "Weather Agent",
+  "description": "Provides weather information.",
+  "url": "https://agent.example.com/api/a2a/weather-agent",
+  "version": "1.0",
+  "provider": {
+    "organization": "Acme",
+    "url": "https://acme.example.com"
+  },
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": true,
+    "stateTransitionHistory": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [
+    {
+      "id": "weather",
+      "name": "weather",
+      "description": "Gets weather conditions for a location.",
+      "tags": ["tool"]
+    }
+  ]
+}
+```
+
+A2A は処理をメッセージとタスクで表現します。メッセージはテキスト、ファイル、構造化データのパートを運びます。
+
+タスクは ID とライフサイクル状態を持つステートフルな処理単位です。クライアントは長時間実行される処理を追跡して後続ターンを送信できるほか、処理のキャンセルや切断後の再購読もできます。
+
+## プロトコルバージョン
+
+Mastra は同じ Agent Card と実行 URL で A2A Protocol v0.3 と v1.0 をサポートします。`A2A-Version` リクエストヘッダーで wire protocol を選択します。
+
+- 未指定、空、または `0.3`：既存の v0.3 API を使用します。
+- `1.0`：v1.0 API を使用します。
+- その他の値：`VersionNotSupported` プロトコルエラーを返します。
+
+既存の `A2AAgent` と `MastraClient.getA2A()` の統合は引き続き v0.3 を使用します。v1.0 リクエストには `MastraClient.getA2AV1()` を使用します。v1 クライアントは `A2A-Version: 1.0` を自動送信し、`tasks/list` 操作を追加します。
+
+v1.0 のプロトコル型と Codec は `@mastra/core/a2a/v1` から import します。既存の `@mastra/core/a2a/client` export は v0.3 のままです。
+
+## はじめに
+
+Mastra で A2A を使用する一般的な方法は2つあります。
+
+- `A2AAgent` でリモート A2A Agent を Mastra の Subagent として利用する。
+- `MastraClient.getA2A()` で Mastra の A2A エンドポイントにリクエストを送信する。
+
+別の Mastra Agent からリモート Agent に処理を委任する場合は `A2AAgent` を使用します。アプリケーションコードから A2A 対応 Mastra エンドポイントを直接呼び出す場合は、クライアント SDK を使用します。
+
+## A2A Agent を Subagent として利用する
+
+`A2AAgent` でリモート A2A Agent をラップし、[Supervisor Agent](/docs/capabilities/subagents) パターンで親 Agent に追加します。リモートサーバーが複数の Agent をホストする場合や、独自の well-known パスを使用する場合は、Agent Card の URL を明示的に渡します。
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { A2AAgent } from '@mastra/core/a2a'
+
+const remoteWeatherAgent = new A2AAgent({
+  url: 'https://weather.example.com/api/.well-known/weather-agent/agent-card.json',
+  headers: {
+    Authorization: `Bearer ${process.env.WEATHER_AGENT_TOKEN}`,
+  },
+})
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support Agent',
+  instructions: 'Answer user questions and delegate weather questions when needed.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  agents: {
+    remoteWeatherAgent,
+  },
+})
+```
+
+`url` がドメインを指す場合、`A2AAgent` は `/.well-known/agent-card.json` から Agent Card を取得します。この検出パスに従う単一 Agent サーバーではドメイン URL を使用します。複数 Agent サーバーでは、`https://agent.example.com/api/.well-known/weather-agent/agent-card.json` のような完全な Card URL を渡します。
+
+実行中、`A2AAgent` は次の処理を行います。
+
+- リモート Agent Card を取得してキャッシュします。
+- Card から実行 URL と Capabilities を読み取ります。
+- 非ストリーミング実行では `message/send`、ストリーミング対応時は `message/stream` を呼び出します。
+- リモートのメッセージ、タスク、Artifact、ステータス更新を Mastra Subagent の結果に変換します。
+- リモートタスクに追加入力または再購読が必要な場合、`resumeGenerate()` と `resumeStream()` をサポートします。
+
+リモート Card がストリーミング対応を示していない場合、`A2AAgent.stream()` は非ストリーミングの生成処理にフォールバックし、バッファリングされたストリーム結果を返します。
+
+## クライアント SDK でリクエストを送信する
+
+アプリケーションコードから A2A 対応 Mastra Agent を呼び出すには、`MastraClient.getA2A()` を使用します。サーバーのオリジンを `baseUrl` に設定し、サーバーがデフォルトの `apiPrefix` である `/api` を使用しない場合は prefix も設定します。
+
+```typescript title="src/a2a-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+const client = new MastraClient({
+  baseUrl: 'https://agent.example.com',
+  headers: {
+    Authorization: `Bearer ${process.env.AGENT_API_TOKEN}`,
+  },
+})
+
+const a2a = client.getA2A('weather-agent')
+const card = await a2a.getAgentCard()
+
+console.log(card.name, card.capabilities)
+```
+
+`sendMessageStream()` を使用すると、メッセージを送信し、Server-Sent Events（SSE）経由でタスクのステータスと Artifact の更新を受信できます。
+
+```typescript title="src/a2a-client.ts"
+const stream = a2a.sendMessageStream({
+  message: {
+    kind: 'message',
+    role: 'user',
+    messageId: crypto.randomUUID(),
+    parts: [{ kind: 'text', text: "What's the weather in Prague?" }],
+  },
+})
+
+for await (const event of stream) {
+  if (event.kind === 'artifact-update') {
+    console.log(event.artifact.parts)
+  }
+}
+```
+
+タスクの実行中にストリームが切断された場合は、`resubscribeTask()` を使用して進行中のタスクのリアルタイム更新を受信します。
+
+```typescript title="src/a2a-client.ts"
+const updates = a2a.resubscribeTask({
+  id: 'task-123',
+})
+
+for await (const event of updates) {
+  console.log(event)
+}
+```
+
+### v1.0 クライアントを使用する
+
+`getA2AV1()` を使用して A2A v1.0 wire protocol を選択します。プロトコルパッケージには、JSON 形式の入力から v1 リクエスト値を作成する Codec が用意されています。
+
+```typescript title="src/a2a-v1-client.ts"
+import { ListTasksRequest } from '@mastra/core/a2a/v1'
+import { MastraClient } from '@mastra/client-js'
+
+const client = new MastraClient({
+  baseUrl: 'https://agent.example.com',
+})
+
+const a2a = client.getA2AV1('weather-agent')
+const response = await a2a.listTasks(
+  ListTasksRequest.fromJSON({
+    contextId: 'customer-support',
+    pageSize: 20,
+  }),
+)
+
+for (const task of response.tasks) {
+  console.log(task.id, task.status)
+}
+```
+
+v1.0 クライアントは `getAgentCard()`、`sendMessage()`、`sendMessageStream()`、`getTask()`、`listTasks()`、`cancelTask()`、`resubscribeTask()` をサポートします。
+
+## Subagent 呼び出しを設定する
+
+`A2AAgent` は、認証が必要な環境や制約のある環境向けのリクエストオプションを受け付けます。
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { A2AAgent } from '@mastra/core/a2a'
+
+const remoteWeatherAgent = new A2AAgent({
+  url: 'https://weather.example.com/api/.well-known/weather-agent/agent-card.json',
+  headers: {
+    Authorization: `Bearer ${process.env.WEATHER_AGENT_TOKEN}`,
+  },
+  retries: 2,
+  backoffMs: 250,
+  maxBackoffMs: 1000,
+  timeoutMs: 30_000,
+})
+```
+
+ランタイムで独自の fetch 動作やリクエストのキャンセルが必要な場合は、`credentials`、`fetch`、`abortSignal` も渡せます。
+
+## Human-in-the-loop
+
+A2A は Human-in-the-loop（HITL）の処理を `input-required` タスク状態で表現します。入力待ちでタスクが一時停止すると、クライアントは同じ `taskId` で後続メッセージを送信して不足する入力を提供し、サーバーがタスクを再開します。
+
+Mastra は Agent の一時停止モデルとこの状態を双方向にマッピングします。
+
+- **サーバーとして**：公開した Agent が一時停止すると、タスクは `input-required` に遷移します。[Tool の承認](/docs/agents/agent-approval)や `suspend()` を呼び出す Tool による一時停止も含まれます。タスクのステータスメッセージには、テキストプロンプトと、構造化された `suspendPayload` および `resumeSchema` を含むデータパートが入ります。後続の `message/send` または `message/stream` リクエストに同じ `taskId` を指定すると、提供された入力で一時停止中の実行を再開します。
+- **クライアントとして**：リモートタスクが `input-required` または `auth-required` に達すると、`A2AAgent` は `finishReason: 'suspended'` と `suspendPayload` を含む一時停止結果を返します。`resumeGenerate()` または `resumeStream()` を呼び出すと、元の `taskId` で入力または認証情報をリモートタスクに返します。
+
+```typescript title="src/a2a-hitl.ts"
+import { A2AAgent } from '@mastra/core/a2a'
+
+const agent = new A2AAgent({
+  url: 'https://agent.example.com/api/.well-known/booking-agent/agent-card.json',
+})
+
+const result = await agent.generate('Book a flight to Paris', { runId: 'run-1' })
+
+if (result.finishReason === 'suspended') {
+  // Inspect result.suspendPayload, collect input from a human,
+  // then resume the remote task.
+  const resumed = await agent.resumeGenerate({ approved: true }, { runId: 'run-1' })
+  console.log(resumed.text)
+}
+```
+
+`input-required` タスクへの後続メッセージでは、再開データを構造化データパートとして、またはテキストパート内の JSON やプレーンテキストとして送信できます。
+
+再開した実行で追加入力が必要になると、タスクは `input-required` に戻り、このフローを繰り返します。一時停止した実行を再開するには、リクエストをまたいで状態を復元できるよう Mastra Server に Storage を設定する必要があります。
+
+:::note
+A2A のタスクレコードはインメモリストアに保持されるため、一時停止したタスクを再開できるのは、そのタスクを停止した同じサーバープロセスだけです。サーバーを再起動した場合や、sticky routing なしで水平スケーリングした環境ではタスクレコードが失われ、後続メッセージは task-not-found エラーになります。
+:::
+
+## プッシュ通知
+
+Mastra は、`capabilities.pushNotifications` を公開するリモート Agent の A2A プッシュ通知をサポートします。クライアントがストリームを維持できない場合や、長時間実行されるタスクから最初のリクエスト終了後にコールバック URL へ更新を送る場合に使用します。
+
+クライアントはタスク ID を取得した後、そのタスクのコールバック URL を登録できます。
+
+```typescript title="src/a2a-client.ts"
+await a2a.setTaskPushNotificationConfig({
+  taskId: 'task-123',
+  pushNotificationConfig: {
+    url: 'https://app.example.com/a2a/tasks',
+    token: process.env.A2A_WEBHOOK_TOKEN,
+  },
+})
+```
+
+タスクが `completed`、`failed`、`canceled`、`rejected`、`input-required`、`auth-required` のいずれかに達すると、Mastra Server は現在のタスクスナップショットを登録済みコールバックに送信します。プッシュ通知の配信はベストエフォートです。コールバック URL を保護し、通知 Token を検証し、内部ネットワークの宛先をプッシュ通知先として公開しないでください。
+
+プッシュ通知の設定はメモリに保存されるため、サーバーの再起動後に再登録する必要があります。
+
+## Agent Card に署名して検証する
+
+Mastra は署名付き A2A Agent Card をサポートしており、検出した Card が信頼できる発行元から届き、転送中に変更されていないことをクライアントが検証できます。リモート Agent を公開する Mastra Server で署名を設定します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+
+export const mastra = new Mastra({
+  server: {
+    a2a: {
+      agentCardSigning: {
+        privateKey: process.env.A2A_AGENT_CARD_PRIVATE_KEY!,
+        protectedHeader: {
+          alg: 'ES256',
+          kid: 'agent-card-key',
+        },
+      },
+    },
+  },
+})
+```
+
+署名を設定すると、Mastra は Agent Card に `signatures` 配列を含めます。クライアント側の検証はオプトインで、署名のない Card はそのまま返されます。
+
+`MastraClient.getA2A()` で署名付き Card を検証します。
+
+```typescript title="src/a2a-client.ts"
+const card = await a2a.getAgentCard({
+  verifySignature: {
+    algorithms: ['ES256'],
+    keyProvider: async ({ kid, jku }) => {
+      return fetchTrustedPublicJwk({ kid, jku })
+    },
+  },
+})
+
+if (!card.signatures?.length) {
+  throw new Error('Expected a signed A2A agent card.')
+}
+```
+
+リモート Agent を呼び出す前に信頼できる鍵を必須とする場合は、クライアント側の署名検証を使用します。
+
+## Subagent の Card を検証する
+
+親 Agent が処理を委任する前にリモート Agent を検証する必要がある場合は、`verifyAgentCard` を使用します。検証 Hook は、取得した Agent Card と、取得元および取得時点に関するコンテキストを受け取ります。
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { A2AAgent } from '@mastra/core/a2a'
+
+const remoteWeatherAgent = new A2AAgent({
+  url: 'https://weather.example.com/api/.well-known/weather-agent/agent-card.json',
+  verifyAgentCard: {
+    verify: async (card, context) => {
+      if (card.provider?.organization !== 'Weather Inc') {
+        throw new Error(`Unexpected provider for ${context.cardUrl}`)
+      }
+    },
+  },
+})
+```
+
+親 Agent がリモート Agent に処理を委任する前に、この Hook を使用して、想定する Provider やエンドポイント、証明書に紐づく ID、署名付き Card、その他の信頼要件を適用します。
+
+## 関連項目
+
+- [Agent リファレンス](/reference/agents/agent)
+- [JavaScript クライアント Agent リファレンス](/reference/client-js/agents)
+- [A2A のコアコンセプト](https://a2a-protocol.org/latest/topics/key-concepts/)
+- [A2A 検出ガイド](https://a2a-protocol.org/latest/topics/agent-discovery/)
+- 📹 [Mastra による Agent-to-Agent ワークショップ](https://www.youtube.com/watch?v=LQDzyNGm-aw)

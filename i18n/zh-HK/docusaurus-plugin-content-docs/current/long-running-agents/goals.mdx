@@ -1,0 +1,128 @@
+---
+title: "目標 | 長時間運行的 Agent"
+description: 了解如何為 Agent 設定持久目標，並在執行迴圈中判定是否達成，讓 Agent 持續工作直至完成目標或耗盡執行預算。
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+---
+
+# 目標
+
+**加入版本：** `@mastra/core@1.42.0`
+
+:::experimental
+
+Goals 功能目前處於 beta 階段；在脫離 beta 前，小版本更新可能包含破壞性變更。
+
+:::
+
+目標是持久且限定於 thread 的目的：它是一項常設指示，Agent 會在多次迴圈迭代中持續朝它工作，直至判定模型認為目標已達成，或執行預算用盡。
+
+目標會持久保存於 thread 狀態，因此可在重新載入後保留，並會在迴圈內評估；即使新訊息在已經運行的 turn 中途抵達亦然。
+
+Goals 建基於與 [`isTaskComplete`](/docs/capabilities/subagents) 相同的機制：以 LLM 作為判定器，在每次迭代為 Agent 輸出評分並控制迴圈。不同之處在於目標是**持久的**（儲存於 thread 狀態，而非每次呼叫時傳入），並透過 `Agent` 方法設定及更新，而不是使用每次 `stream()` 的選項。
+
+## 何時使用目標
+
+如你希望 Agent 在多次迭代及訊息之間持續朝單一目的工作，而無須每次呼叫都重新提供成功準則，便可使用目標：
+
+- Agent 應持續追求，直至判定器認為已完成的常設目的。
+- 應在執行中途收到訊息後繼續的工作（傳送至運行中執行的訊息，仍會按目標判定）。
+- 必須在重新載入 thread 或程序重新啟動後保留的目的。
+
+如只需在單次 `stream()` 呼叫中進行一次性完成檢查，請改用 [`isTaskComplete`](/docs/capabilities/subagents)。
+
+## 快速開始
+
+Goals 需要已設定的[儲存空間](/docs/storage/overview)後端，以及由 memory 支援的 thread。將 `goal` 設定加入 Agent；目標必須有判定模型才會發揮作用，然後為 thread 設定目的：
+
+```typescript title="src/mastra/agents/worker.ts" {8-11}
+import { Agent } from '@mastra/core/agent'
+
+const worker = new Agent({
+  id: 'worker',
+  name: 'worker',
+  instructions: 'You complete software tasks end to end.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory,
+  goal: {
+    judge: '__GATEWAY_OPENAI_MODEL_MINI__',
+    maxRuns: 50,
+  },
+})
+
+// Set the durable objective for a thread.
+await worker.setObjective('Add and test a /health endpoint', {
+  threadId,
+  resourceId,
+})
+
+// The objective is judged each iteration until it's complete or maxRuns is hit.
+const stream = await worker.stream('Start working on the goal', {
+  memory: { thread: threadId, resource: resourceId },
+})
+```
+
+`goal` 設定會自動註冊 state-signal projection，因此模型無須額外設定，便總能在上下文中以 `<current-objective>` 看見目前目的。
+
+## 目標步驟的運作方式
+
+目標步驟在 Agent 執行迴圈內、緊接 `isTaskComplete` 後運行。遇到真正的候選答案時，它會按目的為對話評分並控制迴圈：
+
+- **未達成，仍有預算** → 迴圈繼續。系統會注入每次評估的意見，讓 Agent 繼續迭代。
+- **已達成** → 迴圈停止，目的標記為 `done`。
+- **預算耗盡** (`runsUsed >= maxRuns`) → 迴圈停止，目的標記為 `paused`。提高 `maxRuns`，然後恢復目的以繼續。
+
+與 `isTaskComplete` 的控制方式相同，對於背景任務、Tool 迴圈中途及僅限 working-memory 的迭代，此步驟不會執行任何操作。
+
+**判定模型是啟用開關。** 如無法解析任何判定器（既沒有每個目的的覆寫值，也沒有 Agent 的 `goal.judge`），目標步驟不會評分或消耗預算，亦不會發出 `goal` chunk。
+
+有效設定按以下次序解析：每個目的記錄的值 → Agent `goal` 設定 → 內置預設值（`maxRuns` 為 `50`，以及預設判定提示）。
+
+此步驟預設使用內置的 LLM 判定評分器，達成目的時傳回 `1`，否則傳回 `0`。透過 `goal.scorer` 提供自訂評分器，即可自訂判定方式。
+
+```typescript title="src/mastra/agents/worker.ts"
+const worker = new Agent({
+  id: 'worker',
+  name: 'worker',
+  instructions: 'You complete software tasks end to end.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory,
+  goal: {
+    // A resolver function lets you inject provider credentials and read the
+    // current judge selection at runtime; returning `undefined` keeps the
+    // goal step a no-op.
+    judge: ({ requestContext }) => resolveJudgeModel(requestContext),
+    maxRuns: 30,
+    prompt: 'Only mark the goal complete when tests pass.',
+  },
+})
+```
+
+每次評估都會發出具型別的 `goal` stream chunk（`GoalEvaluationPayload`：`objective`、`iteration`、`maxRuns`、`passed`、`status`、`results`、`reason`、`duration`、`timedOut`、`maxRunsReached`、`suppressFeedback`），讓 UI 可以在執行期間顯示目標進度。
+
+## 管理目的
+
+使用 `Agent` 方法控制 thread 的目的。如執行並非由 memory 支援，所有方法都不會執行任何操作（它們需要儲存空間及 `threadId`）：
+
+```typescript title="src/mastra/objective.ts"
+// Read the current objective record.
+const record = await worker.getObjective({ threadId })
+
+// Update options on the active objective (only provided fields are written;
+// unset fields fall back to the agent's `goal` config).
+await worker.updateObjectiveOptions({ threadId, maxRuns: 100 })
+
+// Drop the objective.
+await worker.clearObjective({ threadId })
+```
+
+目的記錄包含可選的 `activeDurationMs` 值，供使用者介面顯示實際追求目標的時間。Agent 朝作用中目的運行時，Mastra 會增加此值，並在執行結束或等待 Tool 核准時設定檢查點。缺少此值代表零，而持續時間量度的是 Agent 執行時間，不是目標自建立以來的實際時間。
+
+由 `setObjective`／`updateObjectiveOptions` 寫入的每個目的值，優先於 Agent 的 `goal` 設定，而此優先次序會記錄於 thread 狀態。完整的 goal chunk 結構請參閱 [ChunkType 參考中的 `GoalEvaluationPayload`](/reference/streaming/ChunkType)。
+
+## 相關內容
+
+- [Supervisor Agent](/docs/capabilities/subagents)：`isTaskComplete` 及 rubric 評分器
+- [Signal Provider](/docs/long-running-agents/signal-providers)：如何將目的投射至上下文
+- [Memory 儲存空間](/docs/storage/overview)：Goals 所需的儲存後端

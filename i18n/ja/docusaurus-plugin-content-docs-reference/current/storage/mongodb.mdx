@@ -1,0 +1,304 @@
+---
+title: "リファレンス：MongoDB ストレージ | ストレージ"
+description: Mastra の MongoDB ストレージ実装に関するドキュメントです。
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+  - "@mastra/mongodb"
+---
+
+# MongoDB ストレージ
+
+MongoDB ストレージ実装は、MongoDB データベースを使用し、ドキュメントストレージとベクトル操作の両方に対応する大容量ストレージソリューションを提供します。
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/mongodb@latest
+```
+
+## 使用方法
+
+Atlas Search を有効にした [MongoDB Atlas Local（Docker 経由）](https://www.mongodb.com/docs/atlas/cli/current/atlas-cli-deploy-docker/)または [MongoDB Atlas Cloud](https://www.mongodb.com/docs/atlas/cli/current/atlas-cli-getting-started/) のインスタンスを用意してください。MongoDB 7.0 以降を推奨します。
+
+```typescript
+import { MongoDBStore } from '@mastra/mongodb'
+
+const storage = new MongoDBStore({
+  id: 'mongodb-storage',
+  uri: process.env.MONGODB_URI,
+  dbName: process.env.MONGODB_DB_NAME,
+})
+```
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'このストレージインスタンスの一意な識別子。',
+    isOptional: false,
+  },
+  {
+    name: 'uri',
+    type: 'string',
+    description: 'MongoDB 接続文字列（例：mongodb+srv://user:password@cluster.mongodb.net）',
+    isOptional: false,
+  },
+  {
+    name: 'url',
+    type: 'string',
+    description: '非推奨です。代わりに `uri` を使用してください。MongoDB 接続文字列（後方互換性のためにサポートされています）。',
+    isOptional: true,
+  },
+  {
+    name: 'dbName',
+    type: 'string',
+    description: 'ストレージで使用するデータベース名。',
+    isOptional: false,
+  },
+  {
+    name: 'options',
+    type: 'MongoClientOptions',
+    description:
+      '高度な設定（SSL、接続プールなど）に使用する MongoDB クライアントオプション。[接続オプション](https://www.mongodb.com/docs/drivers/node/current/fundamentals/connection/connection-options/)を参照してください。',
+    isOptional: true,
+  },
+  {
+    name: 'disableInit',
+    type: 'boolean',
+    description:
+      'true の場合、自動初期化（コレクション作成）を無効にします。マイグレーションを明示的に実行する CI/CD パイプラインに便利です。この値が true の場合は、storage.init() を手動で呼び出す必要があります。',
+    isOptional: true,
+  },
+  {
+    name: 'skipDefaultIndexes',
+    type: 'boolean',
+    description:
+      'true の場合、初期化時にデフォルトインデックスを作成しません。インデックスを個別に管理する場合や、カスタムインデックスのみを使用する場合に便利です。',
+    isOptional: true,
+  },
+  {
+    name: 'indexes',
+    type: 'MongoDBIndexConfig[]',
+    description:
+      '初期化時に作成するカスタムインデックス。各インデックスには、コレクション、キー、任意のインデックスオプションを指定する必要があります。[インデックス](https://www.mongodb.com/docs/manual/indexes/)を参照してください。',
+    isOptional: true,
+  },
+  {
+    name: 'connectorHandler',
+    type: 'ConnectorHandler',
+    description:
+      '高度な接続管理に使用するカスタム接続ハンドラー。uri/dbName を直接指定する代替手段です。',
+    isOptional: true,
+  },
+]}
+/>
+
+:::note[非推奨のお知らせ]
+`url` パラメーターは非推奨ですが、後方互換性のため引き続きサポートされています。新しいコードではすべて `uri` を使用してください。
+:::
+
+## コンストラクターの例
+
+`MongoDBStore` は次の方法でインスタンス化できます。
+
+```ts
+import { MongoDBStore } from '@mastra/mongodb'
+
+// Basic connection without custom options
+const store1 = new MongoDBStore({
+  id: 'mongodb-storage-01',
+  uri: 'mongodb+srv://user:password@cluster.mongodb.net',
+  dbName: 'mastra_storage',
+})
+
+// Using connection string with options
+const store2 = new MongoDBStore({
+  id: 'mongodb-storage-02',
+  uri: 'mongodb+srv://user:password@cluster.mongodb.net',
+  dbName: 'mastra_storage',
+  options: {
+    retryWrites: true,
+    maxPoolSize: 10,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+  },
+})
+
+// With custom indexes
+const store3 = new MongoDBStore({
+  id: 'mongodb-storage-03',
+  uri: 'mongodb+srv://user:password@cluster.mongodb.net',
+  dbName: 'mastra_storage',
+  indexes: [
+    { collection: 'mastra_threads', keys: { 'metadata.type': 1 } },
+    { collection: 'mastra_messages', keys: { 'metadata.status': 1 }, options: { sparse: true } },
+  ],
+})
+
+// For CI/CD with explicit initialization
+const store4 = new MongoDBStore({
+  id: 'mongodb-storage-04',
+  uri: 'mongodb+srv://user:password@cluster.mongodb.net',
+  dbName: 'mastra_storage',
+  disableInit: true, // Disable auto-init
+})
+await store4.init() // Call init explicitly
+```
+
+## 補足
+
+### コレクション管理
+
+ストレージ実装は、コレクションの作成と管理を自動的に処理します。次のコレクションが作成されます。
+
+- `mastra_workflow_snapshot`：Workflow の状態と実行データを保存します
+- `mastra_evals`：評価結果とメタデータを保存します
+- `mastra_threads`：会話スレッドを保存します
+- `mastra_messages`：個々のメッセージを保存します
+- `mastra_traces`：テレメトリとトレースデータを保存します
+- `mastra_scorers`：スコアリングと評価データを保存します
+- `mastra_resources`：リソースのワーキングメモリデータを保存します
+- `mastra_notifications`：通知受信ボックスのレコードと配信メタデータを保存します
+
+`MongoDBStore` は、`getStore('notifications')` を通じて通知ストレージを提供します。
+
+### 初期化
+
+ストレージを Mastra クラスに渡すと、ストレージ操作の前に `init()` が自動的に呼び出されます。
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { MongoDBStore } from '@mastra/mongodb'
+
+const storage = new MongoDBStore({
+  id: 'mongodb-storage',
+  uri: process.env.MONGODB_URI,
+  dbName: process.env.MONGODB_DB_NAME,
+})
+
+const mastra = new Mastra({
+  storage, // init() is called automatically
+})
+```
+
+Mastra を介さずにストレージを直接使用する場合は、コレクションを作成するために `init()` を明示的に呼び出す必要があります。
+
+```typescript
+import { MongoDBStore } from '@mastra/mongodb'
+
+const storage = new MongoDBStore({
+  id: 'mongodb-storage',
+  uri: process.env.MONGODB_URI,
+  dbName: process.env.MONGODB_DB_NAME,
+})
+
+// Required when using storage directly
+await storage.init()
+
+// Access domain-specific stores via getStore()
+const memoryStore = await storage.getStore('memory')
+const thread = await memoryStore?.getThreadById({ threadId: '...' })
+```
+
+:::warning
+`init()` を呼び出さないとコレクションが作成されず、ストレージ操作が通知なく失敗するか、エラーがスローされます。
+:::
+
+### 接続管理
+
+`close()` メソッドは MongoDB クライアント接続を閉じます。アプリケーションを終了するときに呼び出してください。
+
+```typescript
+import { MongoDBStore } from '@mastra/mongodb'
+
+const storage = new MongoDBStore({
+  id: 'mongodb-storage',
+  uri: process.env.MONGODB_URI,
+  dbName: process.env.MONGODB_DB_NAME,
+})
+
+// Use storage...
+
+// Clean up on shutdown
+await storage.close()
+```
+
+## ベクトル検索機能
+
+MongoDB ストレージには、AI アプリケーション向けのベクトル検索機能が組み込まれています。インデックス作成、埋め込みの upsert、類似検索、メタデータフィルタリングなど、ベクトル操作の詳細については、[MongoDB ベクトルリファレンス](/reference/vectors/mongodb)を参照してください。
+
+## 使用例
+
+### Agent にメモリを追加する
+
+Agent に MongoDB メモリを追加するには、`Memory` クラスを使用し、`MongoDBStore` で新しい `storage` キーを作成します。この設定はローカルとリモートの MongoDB インスタンスの両方に対応しています。
+
+```typescript title="src/mastra/agents/example-mongodb-agent.ts"
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+import { MongoDBStore } from '@mastra/mongodb'
+
+export const mongodbAgent = new Agent({
+  id: 'mongodb-agent',
+  name: 'mongodb-agent',
+  instructions:
+    'You are an AI agent with the ability to automatically recall memories from previous interactions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new MongoDBStore({
+      id: 'mongodb-storage',
+      uri: process.env.MONGODB_URI!,
+      dbName: process.env.MONGODB_DB_NAME!,
+    }),
+    options: {
+      generateTitle: true,
+    },
+  }),
+})
+```
+
+### Agent を使用する
+
+`memoryOptions` を使用して、このリクエストで呼び出すメモリの範囲を指定します。`lastMessages: 5` を設定して新しい順に呼び出すメッセージを制限し、`semanticRecall` で最も関連性の高い `topK: 3` 件のメッセージを取得します。さらに、各一致の前後から `messageRange: 2` 件のメッセージをコンテキストとして含めます。
+
+```typescript title="src/test-mongodb-agent.ts"
+import 'dotenv/config'
+
+import { mastra } from './mastra'
+
+const threadId = '123'
+const resourceId = 'user-456'
+
+const agent = mastra.getAgent('mongodbAgent')
+
+const message = await agent.stream('My name is Mastra', {
+  memory: {
+    thread: threadId,
+    resource: resourceId,
+  },
+})
+
+await message.textStream.pipeTo(new WritableStream())
+
+const stream = await agent.stream("What's my name?", {
+  memory: {
+    thread: threadId,
+    resource: resourceId,
+  },
+  memoryOptions: {
+    lastMessages: 5,
+    semanticRecall: {
+      topK: 3,
+      messageRange: 2,
+    },
+  },
+})
+
+for await (const chunk of stream.textStream) {
+  process.stdout.write(chunk)
+}
+```

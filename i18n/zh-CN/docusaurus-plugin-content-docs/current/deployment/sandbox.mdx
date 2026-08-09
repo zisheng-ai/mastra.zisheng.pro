@@ -1,0 +1,342 @@
+---
+title: "部署到 Sandbox | Deployment"
+description: "将 Mastra Server 部署到临时 Workspace Sandbox，并获得可用的公开 URL。"
+packages:
+  - "@mastra/deployer-sandbox"
+---
+
+# 部署到 Sandbox
+
+`@mastra/deployer-sandbox` 会将完整的 Mastra Server（包括 Studio）部署到临时 Workspace Sandbox，并返回可用的公开 URL。由于部署器会跳过依赖项安装，重复部署可以更快完成。
+
+Sandbox 部署适用于：
+
+- Agent 构建的应用：Agent 生成 Mastra 项目并部署，以验证结果。
+- 持续集成（CI）：启动真实 Server 进行检查，然后将其关闭。
+- 即时预览：合并前与团队分享可运行的 Agent。
+- 多租户不可信代码：运行与基础设施隔离的每用户 Mastra 实例。
+
+Sandbox 具有由 Provider 强制执行的运行时上限，并会过期。有关生产环境托管，请参阅[部署概览](/docs/deployment/overview)。
+
+## 支持的 Sandbox
+
+部署器可与任何支持网络连接（公开端口 URL）的 Workspace Sandbox 配合使用：
+
+- [Vercel Sandbox](/reference/workspace/vercel-sandbox)（`@mastra/vercel`）
+- [E2B](/reference/workspace/e2b-sandbox)（`@mastra/e2b`）
+- [Daytona](/reference/workspace/daytona-sandbox)（`@mastra/daytona`）
+
+Provider 作者可以通过在 [`WorkspaceSandbox`](/reference/workspace/sandbox) 上实现可选的 `networking` capability 来添加支持。
+
+## 快速入门
+
+安装部署器和你选择的 Sandbox Provider。此示例使用 Vercel Sandbox：
+
+```bash npm2yarn
+npm install @mastra/deployer-sandbox @mastra/vercel
+```
+
+在 `src/mastra/index.ts` 文件中配置部署器。`sandboxName` 用于标识部署，因此后续使用相同名称的部署会复用现有 Sandbox。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { SandboxDeployer } from '@mastra/deployer-sandbox'
+import { VercelSandbox } from '@mastra/vercel'
+
+export const mastra = new Mastra({
+  deployer: new SandboxDeployer({
+    sandbox: new VercelSandbox({
+      sandboxName: 'my-preview',
+      timeout: 2_400_000, // 40 minutes
+      ports: [4111],
+    }),
+  }),
+})
+```
+
+Vercel 有两项特有要求：
+
+- `timeout` 不能超过套餐允许的最长 Sandbox 生命周期，Pro 套餐为 45 分钟。更高的值会导致部署失败，并从 Vercel API 返回 400。
+- 在 `ports` 中声明 Server 端口。与 E2B 和 Daytona 不同，Vercel 只会公开创建时声明的端口。
+
+使用一个命令完成构建和部署：
+
+```bash
+mastra build
+```
+
+配置 `SandboxDeployer()` 后，`mastra build` 会打包项目并将其部署到 Sandbox。部署过程会打印 API 和 Studio URL，并将 `sandbox-deployment.json` manifest 写入 `.mastra/output`：
+
+```text
+API:    https://<sandbox-id>-4111.vercel.run/api
+Studio: https://<sandbox-id>-4111.vercel.run
+```
+
+当 Sandbox Provider 报告过期时间时，manifest 会包含 `expiresAt`。
+
+如果输入未发生变化，重新部署到同一 Sandbox 会跳过依赖项安装。这些输入包括 `package.json`、打包的 lockfile 和安装命令。
+
+### URL 提供的内容
+
+Studio URL 是不含 `/api` 的 Sandbox 根地址。在浏览器中打开它即可使用 Studio。当部署使用 `studio: false` 运行时，根地址会改为提供 Mastra 欢迎页面。
+
+API URL 只是其下端点的前缀，例如 `/api/agents`。`/api` 本身没有 handler，因此即使 Server 运行正常，在浏览器中打开它也会返回“Not Found”响应。
+
+要检查部署，请直接调用一个端点：
+
+```bash
+curl -s -X POST https://4111-<sandbox-id>.e2b.app/api/agents/weatherAgent/generate \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Weather in London"}]}' | jq -r '.text'
+```
+
+### Provider 凭据
+
+每个 Provider 都使用自己的凭据进行身份验证。请设置要部署到的 Sandbox 所需凭据：
+
+```bash title=".env"
+# E2B
+E2B_API_KEY=
+
+# Daytona
+DAYTONA_API_KEY=
+
+# Vercel
+VERCEL_TOKEN=
+VERCEL_TEAM_ID=
+VERCEL_PROJECT_ID=
+```
+
+每个 Provider 也接受将这些值作为构造函数选项传入。自托管 E2B 和 Daytona 安装使用 `E2B_DOMAIN` 或 `DAYTONA_API_URL`。
+
+与 `mastra dev` 不同，`mastra build` 不会加载 `.env` 文件。部署发生在构建过程内，因此从环境中读取凭据的 Sandbox Provider（例如使用 `E2B_API_KEY` 的 E2B）会看到空值，部署也会因身份验证错误而失败。
+
+向 `src/mastra/index.ts` 添加 `import 'dotenv/config'` 无法解决此问题。为了找到部署器，构建过程只会从入口文件中提取 `deployer` 选项，并通过 tree-shaking 移除其他所有内容，包括该 import。
+
+请在构建运行前将 `.env` 文件加载到 shell 环境中。[`dotenv-cli`](https://www.npmjs.com/package/dotenv-cli) 是一种实现方式：
+
+```bash npm2yarn
+npm install --save-dev dotenv-cli
+```
+
+```json title="package.json"
+{
+  "scripts": {
+    "deploy": "dotenv -e .env -- mastra build"
+  }
+}
+```
+
+然后运行 `npm run deploy`。该脚本根据其用途命名，因为配置 `SandboxDeployer()` 后，`mastra build` 就会执行部署。请将其与普通 `build` 脚本分开，以免托管平台或 CI job 运行 `npm run build` 时意外部署 Sandbox。
+
+在持续集成（CI）中，请改为将凭据导出为 secret。无论采用哪种机制，这些变量都必须存在于 shell 环境中，不能只存在于 `.env` 文件中。
+
+这适用于部署器在本地计算机上需要的凭据。已部署 Server 所需的变量会单独处理：部署器会读取 `.env`、`.env.production` 和 `.env.local`，并将它们注入 Sandbox。请参阅[安全性](#security)。
+
+### 使用 E2B
+
+对于 E2B，`id` 用于标识部署，因此后续使用相同值的部署会重新连接到现有 Sandbox，无论它正在运行还是已暂停。
+
+```typescript title="src/mastra/index.ts"
+import { SandboxDeployer } from '@mastra/deployer-sandbox'
+import { E2BSandbox } from '@mastra/e2b'
+
+const deployer = new SandboxDeployer({
+  sandbox: new E2BSandbox({
+    id: 'my-preview',
+    template: 'base',
+    timeout: 3_600_000, // 1 hour
+  }),
+})
+```
+
+除非需要文件系统挂载，否则请传入 `template: 'base'`；如果不传，Provider 会在首次使用时构建自定义 Filesystem in Userspace（FUSE）模板。E2B 会暂停而不是停止：`stop()` 会为整个虚拟机（VM）创建快照，包括内存和正在运行的进程。当暂停的 Sandbox 唤醒时，Mastra Server 会从离开的位置恢复，不需要像 Vercel 那样重新启动。
+
+### 使用 Daytona
+
+对于 Daytona，`id` 用于标识部署，因此后续使用相同值的部署会重新连接到现有 Sandbox。设置 `public: true`，使预览 URL 无需 token 即可访问。
+
+```typescript title="src/mastra/index.ts"
+import { SandboxDeployer } from '@mastra/deployer-sandbox'
+import { DaytonaSandbox } from '@mastra/daytona'
+
+const deployer = new SandboxDeployer({
+  sandbox: new DaytonaSandbox({
+    id: 'my-preview',
+    public: true,
+    autoStopInterval: 30, // minutes
+  }),
+})
+```
+
+停止 Daytona Sandbox 会持久保存其文件系统，但不会保留运行中的进程，因此唤醒方式与 Vercel 相同：解析器会在 `wake: true` 时重新启动 Server。
+
+Daytona 按目标过滤出站流量。对某些主机的请求可以通过传输层安全协议（TLS）正常连接，而其他主机的请求则会在握手期间被重置，这会在 Agent 或 Tool 中表现为 Node 的通用 `fetch failed`。在调试前，请先从 Sandbox 内部对同一主机运行 `curl`，排除代码问题：
+
+```typescript
+const sandbox = new DaytonaSandbox({ id: 'my-preview' })
+await sandbox.start()
+
+const result = await sandbox.executeCommand('curl -v --max-time 10 https://api.example.com')
+console.info(result.stdout, result.stderr)
+```
+
+如果 TLS 握手期间出现 `Connection reset by peer`，说明问题在于过滤，而非 Agent。请联系 Daytona 支持团队允许该目标。受限 Daytona 层级还会阻止云 Storage 端点，挂载 helper 会通过专用错误报告这一问题。
+
+## 以编程方式部署
+
+`deployToSandbox()` 无需 bundler 即可部署预构建的输出目录。与 `SandboxDeployer()` 不同，除非传入 `studio: true`，否则它不会包含 Studio。请在 CI 或 Agent 代码中使用它：
+
+```typescript
+import { deployToSandbox } from '@mastra/deployer-sandbox'
+import { VercelSandbox } from '@mastra/vercel'
+
+const deployment = await deployToSandbox({
+  sandbox: new VercelSandbox({ sandboxName: 'ci-smoke', ports: [4111] }),
+  dir: '.mastra/output',
+})
+
+console.info(deployment.url) // https://<sandbox-id>-4111.vercel.run
+await deployment.logs() // tail the server log
+await deployment.stop() // stop the sandbox (resumable)
+await deployment.destroy() // permanently delete the sandbox
+```
+
+## 生命周期
+
+### 管理部署
+
+使用从 `@mastra/deployer-sandbox/client` 导出的仅限 Server 使用的 `getDeployment()` 来检索现有部署。它通过 Provider 特有的配置来识别 Sandbox，例如 Vercel `sandboxName` 或 E2B、Daytona `id`。查找并不与创建部署的进程绑定，因此可以从其他 Server 端服务或 CI 中使用。
+
+```typescript title="scripts/stop.ts"
+import { getDeployment } from '@mastra/deployer-sandbox/client'
+import { VercelSandbox } from '@mastra/vercel'
+
+const deployment = await getDeployment({
+  sandbox: new VercelSandbox({ sandboxName: 'my-preview', ports: [4111] }),
+  port: 4111,
+})
+
+console.info(deployment.status, deployment.url)
+await deployment.logs() // tail the server log
+await deployment.stop() // stop the sandbox (resumable)
+await deployment.destroy() // permanently delete the sandbox
+```
+
+传入 `wake: true` 可在返回前恢复已停止的 Sandbox。只有恢复后 Server 未处于健康状态时，才会重新启动。也可以使用 Provider 工具，例如 `vercel sandbox ls`、`vercel sandbox stop` 和 `vercel sandbox rm`。
+
+### 过期与 URL
+
+Sandbox 会根据 Provider 的运行时限制过期。当 Provider 报告过期时间时，部署日志会将其记录下来，`deployment.expiresAt` 则会以编程方式公开该时间。
+
+Sandbox 停止和恢复时，其 URL 可能发生变化。请将 URL 视为接线细节，并将 Sandbox 身份（例如 `sandboxName`）视为稳定标识。下面的路由层级用于处理 URL 轮换。
+
+## 路由层级
+
+### 第 1 层：直接 URL
+
+在开发、演示和 CI 中直接使用打印的 URL，因为这些场景可以接受每次部署使用新的 URL。
+
+### 第 2 层：在运行时解析
+
+`getDeployment()` 会在运行时解析当前 URL，因此使用者绝不会持有过期 URL。任何知道 Sandbox 名称的 Server 都可以进行解析，包括与 Mastra 项目属于不同代码库的 Server：
+
+```typescript title="app/api/agent-url/route.ts"
+import { getDeployment } from '@mastra/deployer-sandbox/client'
+import { VercelSandbox } from '@mastra/vercel'
+
+const deployment = await getDeployment({
+  sandbox: new VercelSandbox({ sandboxName: 'my-preview', ports: [4111] }),
+  wake: true,
+})
+
+console.info(deployment.url, deployment.status)
+```
+
+使用 `wake: false`（默认值）时，不会启动 Sandbox，你会获得 `{ url, status }` 并自行处理。解析 URL、`stop()` 和 `destroy()` 会按名称连接到现有 Sandbox，而不恢复它，因此对已停止 Sandbox 执行生命周期操作不会唤醒它或开始计费。使用 `wake: true` 时，Sandbox 会恢复；如果 Server 没有响应，则会重新启动。是否需要重新启动取决于 Provider：Vercel 和 Daytona 会恢复文件系统，但不恢复运行中的进程；E2B 则会恢复包含 Server 进程的整个 VM。
+
+:::warning
+
+`@mastra/deployer-sandbox/client` 仅限 Server 使用。解析 Sandbox 会使用绝不能传到浏览器的 Provider 凭据。如果在浏览器上下文中导入，该模块会抛出异常。
+
+:::
+
+### 第 3 层：面向最终用户的稳定 URL
+
+为最终用户提供你自己域名下的稳定 URL，并在 Server 端转发到 Sandbox，可使用 route handler proxy 或 Edge Config alias。
+
+下面的示例展示 Vercel 与 Next.js 设置，但这一概念适用于任何能够转发请求的 Server 端框架或 Provider。
+
+- **Route handler proxy。** `createSandboxHandler()` 会缓存 Sandbox URL，并在连接级失败后重新解析，从而涵盖 URL 轮换和冷唤醒：
+
+  ```typescript title="app/api/[...path]/route.ts"
+  import { createSandboxHandler, getDeployment } from '@mastra/deployer-sandbox/client'
+  import { VercelSandbox } from '@mastra/vercel'
+
+  const handler = createSandboxHandler({
+    resolve: async () => {
+      const deployment = await getDeployment({
+        sandbox: new VercelSandbox({ sandboxName: 'my-preview', ports: [4111] }),
+        wake: true,
+      })
+      return deployment.url!
+    },
+  })
+
+  export { handler as GET, handler as POST }
+  ```
+
+- **Edge Config alias。** 在部署器上设置 `alias` 选项，使 [Vercel Edge Config](https://vercel.com/docs/edge-config) 条目在每次部署时都指向当前 URL：
+
+  ```typescript title="src/mastra/index.ts"
+  const deployer = new SandboxDeployer({
+    sandbox: new VercelSandbox({ sandboxName: 'my-preview', ports: [4111] }),
+    alias: { edgeConfigId: 'ecfg_...', key: 'my-preview', token: process.env.VERCEL_TOKEN! },
+  })
+  ```
+
+  然后使用 `createSandboxProxy()` 在 Next.js middleware 中重写请求：
+
+  ```typescript title="middleware.ts"
+  import { createSandboxProxy } from '@mastra/deployer-sandbox/client'
+
+  export const middleware = createSandboxProxy({ key: 'my-preview' })
+  export const config = { matcher: '/api/:path*' }
+  ```
+
+## CI 示例
+
+在每个 pull request 上部署预览：
+
+```yaml title=".github/workflows/preview.yml"
+name: Sandbox preview
+on: pull_request
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npx mastra build
+      - run: curl --fail "$(jq -r .url .mastra/output/sandbox-deployment.json)/api"
+```
+
+## 安全性
+
+- Sandbox URL 是公开的。任何拥有此 URL 的人都可以访问 Mastra Server，包括 Studio。除一次性预览外，任何场景都应启用 [Server 身份验证](/docs/server/auth)。
+- `.env` 文件中的环境变量会注入远程 Sandbox VM，以便 Server 运行。发生此情况时，部署日志会显示警告。不要部署你不愿放在共享预览 Server 上的 secret。
+- 要限制第 3 层流量的访问，请向 `createSandboxHandler()` 或 `createSandboxProxy()` 传入 `secret`。helper 会将其作为 `x-mastra-sandbox-secret` header 附加到转发请求。配置 [Server 身份验证](/docs/server/auth)以要求该 header，这样直接访问 Sandbox URL 的请求会被拒绝，而通过你域名的流量可以正常访问。
+
+## 相关内容
+
+- [部署概览](/docs/deployment/overview)
+- [Server 身份验证](/docs/server/auth)
+- [`WorkspaceSandbox` Reference](/reference/workspace/sandbox)

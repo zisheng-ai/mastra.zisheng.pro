@@ -1,0 +1,290 @@
+---
+title: "React + Vite | フレームワーク"
+description: Mastra を React および Vite と統合するためのステップ別ガイドです。
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# React + Vite プロジェクトに Mastra を統合する
+
+このガイドでは、Mastra を使用して Tool を呼び出す AI Agent を構築し、Mastra のスタンドアロンサーバーから Agent を直接呼び出すことで React に接続します。
+
+[AI SDK UI](https://ai-sdk.dev/docs/ai-sdk-ui/overview) と [AI Elements](https://ai-sdk.dev/elements) を使用して、美しくインタラクティブなチャット体験を作成します。
+
+## 始める前に
+
+- サポートされている[モデル Provider](/models) の API キーが必要です。特に希望がなければ、[OpenAI](/models/providers/openai) を使用してください。
+- Node.js `v22.13.0` 以降をインストールしてください
+
+## 新しい React + Vite アプリを作成する（任意）
+
+Tailwind を使用する React + Vite アプリがすでにある場合は、次の手順に進んでください。
+
+### プロジェクトをスキャフォールドする
+
+次のコマンドを実行して、[新しい React + Vite アプリを作成](https://vite.dev/guide/#scaffolding-your-first-vite-project)します。
+
+```bash npm2yarn
+npm create vite@latest mastra-react -- --template react-ts
+```
+
+これにより `mastra-react` というプロジェクトが作成されますが、任意の名前に置き換えられます。
+
+プロジェクトディレクトリに移動します。
+
+```bash
+cd mastra-react
+```
+
+### Tailwind
+
+次に、Tailwind をインストールします。
+
+```bash npm2yarn
+npm install tailwindcss @tailwindcss/vite
+```
+
+Vite プラグインを設定します。
+
+```typescript title="vite.config.ts" {3-4,7-12}
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import path from 'path'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
+})
+```
+
+`src/index.css` の内容をすべて次に置き換えます。
+
+```css title="src/index.css"
+@import 'tailwindcss';
+```
+
+次の `compilerOptions` を `tsconfig.json` に追加します。
+
+```jsonc title="tsconfig.json"
+{
+  // ...
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+    },
+  },
+}
+```
+
+パスを解決できるように `tsconfig.app.json` を編集します。
+
+```jsonc title="tsconfig.app.json"
+{
+  "compilerOptions": {
+    // ...
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+    },
+    // ...
+  },
+}
+```
+
+## Mastra を初期化する
+
+[`mastra init`](/reference/cli/mastra#mastra-init) を実行します。プロンプトが表示されたら、Provider（OpenAI など）を選択してキーを入力します。
+
+```bash npm2yarn
+npx mastra@latest init
+```
+
+これにより、天気 Agent のサンプルと次のファイルを含む `src/mastra` フォルダーが作成されます。
+
+- `index.ts` - Memory を含む Mastra の設定
+- `tools/weather-tool.ts` - 指定した場所の天気を取得する Tool
+- `agents/weather-agent.ts`- Tool を使用するプロンプトを備えた天気 Agent
+
+次の手順では、チャット UI から `weather-agent.ts` を呼び出します。
+
+## AI SDK UI と AI Elements をインストールする
+
+AI SDK UI と Mastra アダプターをインストールします。
+
+```bash npm2yarn
+npm install @mastra/ai-sdk@latest @ai-sdk/react ai
+```
+
+次に、AI Elements を初期化します。プロンプトが表示されたら、デフォルトのオプションを選択してください。
+
+```bash npm2yarn
+npx ai-elements@latest
+```
+
+これにより、AI Elements の UI コンポーネントライブラリ全体が `@/components/ai-elements` フォルダーにダウンロードされます。
+
+## チャットルートを作成する
+
+`src/mastra/index.ts` を開き、設定に [⁠chatRoute()](/reference/ai-sdk/chat-route) を追加します。これにより、React フロントエンドから AI SDK 互換のチャットレスポンスを取得できる API ルートが作成され、次の手順で ⁠useChat() と組み合わせて使用できます。
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+// Existing imports...
+import { chatRoute } from '@mastra/ai-sdk'
+
+export const mastra = new Mastra({
+  // Existing config...
+  server: {
+    apiRoutes: [
+      chatRoute({
+        path: '/chat/:agentId',
+      }),
+    ],
+  },
+})
+```
+
+## チャット UI を追加する
+
+`src/App.tsx` ファイルを置き換えて、チャットインターフェースを作成します。
+
+```tsx title="src/App.tsx"
+import * as React from 'react'
+import { DefaultChatTransport, type ToolUIPart } from 'ai'
+import { useChat } from '@ai-sdk/react'
+
+import {
+  PromptInput,
+  PromptInputBody,
+  PromptInputTextarea,
+} from '@/components/ai-elements/prompt-input'
+
+import {
+  Conversation,
+  ConversationContent,
+  ConversationScrollButton,
+} from '@/components/ai-elements/conversation'
+
+import { Message, MessageContent, MessageResponse } from '@/components/ai-elements/message'
+
+import { Tool, ToolHeader, ToolContent, ToolInput, ToolOutput } from '@/components/ai-elements/tool'
+
+export default function App() {
+  const [input, setInput] = React.useState<string>('')
+
+  const { messages, sendMessage, status } = useChat({
+    transport: new DefaultChatTransport({
+      api: 'http://localhost:4111/chat/weather-agent',
+    }),
+  })
+
+  const handleSubmit = async () => {
+    if (!input.trim()) return
+
+    sendMessage({ text: input })
+    setInput('')
+  }
+
+  return (
+    <div className="relative mx-auto size-full h-screen max-w-4xl p-6">
+      <div className="flex h-full flex-col">
+        <Conversation className="h-full">
+          <ConversationContent>
+            {messages.map(message => (
+              <div key={message.id}>
+                {message.parts?.map((part, i) => {
+                  if (part.type === 'text') {
+                    return (
+                      <Message key={`${message.id}-${i}`} from={message.role}>
+                        <MessageContent>
+                          <MessageResponse>{part.text}</MessageResponse>
+                        </MessageContent>
+                      </Message>
+                    )
+                  }
+
+                  if (part.type?.startsWith('tool-')) {
+                    return (
+                      <Tool key={`${message.id}-${i}`}>
+                        <ToolHeader
+                          type={(part as ToolUIPart).type}
+                          state={(part as ToolUIPart).state || 'output-available'}
+                          className="cursor-pointer"
+                        />
+                        <ToolContent>
+                          <ToolInput input={(part as ToolUIPart).input || {}} />
+                          <ToolOutput
+                            output={(part as ToolUIPart).output}
+                            errorText={(part as ToolUIPart).errorText}
+                          />
+                        </ToolContent>
+                      </Tool>
+                    )
+                  }
+
+                  return null
+                })}
+              </div>
+            ))}
+            <ConversationScrollButton />
+          </ConversationContent>
+        </Conversation>
+        <PromptInput onSubmit={handleSubmit} className="mt-20">
+          <PromptInputBody>
+            <PromptInputTextarea
+              onChange={e => setInput(e.target.value)}
+              className="md:leading-10"
+              value={input}
+              placeholder="Ask about the weather..."
+              disabled={status !== 'ready'}
+            />
+          </PromptInputBody>
+        </PromptInput>
+      </div>
+    </div>
+  )
+}
+```
+
+このコンポーネントは [`useChat()`](https://ai-sdk.dev/docs/reference/ai-sdk-ui/use-chat) を `chat/weather-agent` エンドポイントに接続し、そこへプロンプトを送信して、レスポンスをチャンク単位でストリーミングします。
+
+レスポンスのテキストは [`<MessageResponse>`](https://ai-sdk.dev/elements/components/message#messageresponse-) コンポーネントでレンダリングされ、Tool の呼び出しは [`<Tool>`](https://ai-sdk.dev/elements/components/tool) コンポーネントで表示されます。
+
+## Agent をテストする
+
+チャットインターフェースで Agent をテストするには、Mastra サーバーと Vite 開発サーバーの両方を実行します。
+
+1. Mastra 開発サーバーを起動します。
+
+   ```bash npm2yarn
+   npx mastra dev
+   ```
+1. 別のターミナルウィンドウで Vite 開発サーバーを起動します。
+
+   ```bash npm2yarn
+   npm run dev
+   ```
+1. [http://localhost:5173](http://localhost:5173) でアプリケーションを開きます
+1. 天気について質問してみます。API キーが正しく設定されていれば、レスポンスが返されます
+
+## 次のステップ
+
+React で Mastra Agent を構築できました！🎉
+
+ここから、独自の Tool やロジックを追加してプロジェクトを拡張できます。
+
+- [Agent](/docs/agents/overview) について詳しく学ぶ
+- Agent に独自の [Tool](/docs/agents/using-tools) を追加する
+- Agent に人間のような [Memory](/docs/memory/overview) を追加する
+
+準備ができたら、Mastra と AI SDK UI および React の統合方法や、Agent を任意の場所へデプロイする方法について詳しく学びましょう。
+
+- Mastra を [AI SDK UI](/guides/build-your-ui/ai-sdk-ui) と統合する
+- Agent を[任意の場所](/docs/deployment/overview)にデプロイする

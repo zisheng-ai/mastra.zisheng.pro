@@ -1,0 +1,385 @@
+---
+title: "AgentController | Harness"
+description: "使用隔离 Session、持久化线程、模式、批准、子 Agent 和 Channel 构建交互式 Agent 应用。"
+packages:
+  - "@mastra/core"
+---
+
+# AgentController
+
+:::experimental
+
+[`AgentController`](/reference/agent-controller/agent-controller-class) 功能处于 beta 阶段。在结束 beta 状态之前，次版本中可能会包含破坏性更改。
+
+:::
+
+`AgentController` 是交互式 Agent 应用的共享运行时宿主。它协调模式、模型、存储、Workspace、Tool 批准、子 Agent 和 Channel。每个用户或活动任务都通过隔离的 [`Session`](/reference/agent-controller/session) 工作。
+
+[Mastra Code](https://code.mastra.ai) 是 AgentController 的旗舰实现。它是一个基于终端的编程 Agent，支持多模型、持久化对话和先规划后执行的 Workflow。请阅读[构建编程 Agent](/guides/guide/coding-agent)，获取分步指南。
+
+## 何时使用 AgentController
+
+当应用需要以下能力时，请使用 AgentController：
+
+- 多个 Agent 模式共享一个对话线程（例如规划 → 构建 → 审查）
+- UI 与 Agent 循环之间的控制层（模型切换、状态持久化、线程管理）
+- 用于人机协同把关的 Tool 批准流程和权限策略
+- 编排子 Agent，将聚焦的子任务委派给 Tool 受限的 Agent
+- 跨重启保留持久化线程和选定的线程设置，同时为每个 Session 隔离实时状态
+
+你可以基于公开完整 Agent 循环、Tool 和 Memory 的 [Agent 类](/docs/agents/overview)自行组装所有这些功能。AgentController 为持续 Session 提供一套明确的默认设置，让 Agent 作为协作者工作，而不是一次性端点。需要完全控制或请求-响应调用时，请直接使用 Agent 类。希望使用协作式 Session 模型而不自行构建周边运行时时，请使用 AgentController。
+
+## 快速开始
+
+创建后端 [`Agent`](/reference/agents/agent)、存储和 [`Workspace`](/reference/workspace/workspace-class)。调用一次 [`controller.init()`](/reference/agent-controller/agent-controller-class#init)，然后使用 [`controller.createSession()`](/reference/agent-controller/agent-controller-class#createsessionoptions) 创建 Session。使用 [`session.subscribe()`](/reference/agent-controller/session#subscribelistener) 订阅事件，并使用 [`session.sendMessage()`](/reference/agent-controller/session#sendmessage-content-files-requestcontext-) 发送任务：
+
+```typescript title="src/mastra/agent-controller.ts"
+import { Agent } from '@mastra/core/agent'
+import { AgentController } from '@mastra/core/agent-controller'
+import { LocalFilesystem, Workspace } from '@mastra/core/workspace'
+import { LibSQLStore } from '@mastra/libsql'
+
+const agent = new Agent({
+  id: 'assistant',
+  name: 'Assistant',
+  instructions: 'Help the user plan and complete tasks.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const controller = new AgentController({
+  id: 'assistant-controller',
+  agent,
+  storage: new LibSQLStore({
+    id: 'agent-controller-storage',
+    url: 'file:./mastra.db',
+  }),
+  workspace: new Workspace({
+    id: 'assistant-workspace',
+    filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  }),
+  modes: [
+    {
+      id: 'plan',
+      name: 'Plan',
+      metadata: { default: true },
+      instructions: 'Reason about the task before making changes.',
+    },
+    {
+      id: 'build',
+      name: 'Build',
+      instructions: 'Implement the approved plan.',
+    },
+  ],
+})
+
+await controller.init()
+
+const session = await controller.createSession({
+  resourceId: 'user-123',
+})
+
+const unsubscribe = session.subscribe(event => {
+  if (event.type === 'message_update') {
+    console.log(event.message)
+  }
+})
+
+await session.sendMessage({ content: 'Plan a small TypeScript CLI.' })
+unsubscribe()
+```
+
+为多个 Session 使用同一个 Controller。不要在 Controller 上存储当前 Session，也不要通过 Controller 级消息方法路由任务。
+
+## 理解运行时模型
+
+Controller、Session 和线程具有不同的生命周期：
+
+- **Controller**：配置和运行时服务的共享宿主。初始化一次并复用。
+- **Session**：面向一个用户、任务或并发工作作用域的隔离实时运行时。它拥有当前模式、模型、状态、事件总线、运行状态、授权和当前线程绑定。
+- **Thread**：包含消息和线程设置的已存储对话。配置存储后，线程可在 Controller 和进程重新创建后继续保留。
+
+Session 是实时状态。任意 [`session.state`](/reference/agent-controller/session#state)、权限授权、待处理批准和活动运行不会在进程重新创建后自动保留。线程消息和选定的线程设置（包括模式和各模式的模型选择）可以通过存储持久化。
+
+## Session 和线程
+
+`createSession()` 根据 `resourceId` 和可选的 `scope` 获取或创建 Session：
+
+```typescript
+const webSession = await controller.createSession({
+  resourceId: 'user-123',
+  scope: 'web',
+})
+
+const sameWebSession = await controller.createSession({
+  resourceId: 'user-123',
+  scope: 'web',
+})
+
+const workerSession = await controller.createSession({
+  resourceId: 'user-123',
+  scope: 'background-worker',
+})
+
+console.log(webSession === sameWebSession) // true
+console.log(webSession === workerSession) // false
+```
+
+不同作用域的 Session 拥有各自的事件总线、运行循环、状态、模式和模型选择，以及当前线程绑定。它们存储的线程仍属于共享的 `resourceId`。
+
+当宿主必须将 Session 绑定到指定线程时，请传入 `threadId`。Controller 会切换到现有线程；如果线程不存在，则使用该 ID 创建线程。`createSession()` 返回缓存 Session 时也适用此行为：
+
+```typescript
+const session = await controller.createSession({
+  resourceId: 'user-123',
+  scope: 'web',
+  threadId: 'support-ticket-42',
+})
+```
+
+使用 [`session.thread.create()`](/reference/agent-controller/session#sessionthreadcreate-title-id-) 和 [`session.thread.switch()`](/reference/agent-controller/session#sessionthreadswitch-threadid-emitevent-)，让一个实时 Session 在不同对话之间切换。
+
+## 切换模式和模型
+
+模式会更改共享后端 Agent 使用的指令和 Tool，而不替换 Session 或线程。在 Controller 上配置模式专用 Tool 和可见性：
+
+```typescript
+const modes = [
+  {
+    id: 'plan',
+    name: 'Plan',
+    metadata: { default: true },
+    instructions: 'Investigate the task and propose a plan.',
+    additionalTools: { searchDocs },
+    availableTools: ['searchDocs', 'submit_plan'],
+    transitionsTo: 'build',
+  },
+  {
+    id: 'build',
+    name: 'Build',
+    instructions: 'Implement the approved plan.',
+  },
+]
+```
+
+`tools` 和 `additionalTools` 是互斥的输入，用于添加模式专用 Tool。当 Controller 拥有共享后端 Agent 时，任一输入都会将这些 Tool 叠加到 Agent 的 Tool 上。使用 `availableTools` 限制某个模式最终公开的 Tool 名称。权限拒绝的优先级仍高于此允许列表。
+
+使用 [`session.mode.switch()`](/reference/agent-controller/session#sessionmodeswitch-modeid-) 切换实时 Session。使用 [`session.mode.get()`](/reference/agent-controller/session#sessionmodeget) 或 [`session.mode.resolve()`](/reference/agent-controller/session#sessionmoderesolve) 读取当前模式：
+
+```typescript
+await session.mode.switch({ modeId: 'build' })
+
+console.log(session.mode.get()) // "build"
+console.log(session.mode.resolve().instructions)
+```
+
+使用 [`session.model.switch()`](/reference/agent-controller/session#sessionmodelswitch-modelid-scope-modeid-) 独立切换模型，然后使用 [`session.model.get()`](/reference/agent-controller/session#sessionmodelget) 读取当前选择。线程作用域的选择按模式存储，并在 Session 返回该模式时恢复：
+
+```typescript
+await session.model.switch({
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+  scope: 'thread',
+})
+
+console.log(session.model.get())
+```
+
+对于不应写入线程设置的内存中选择，请使用 `scope: 'global'`。
+
+## 管理线程和状态
+
+使用 [`session.thread.list()`](/reference/agent-controller/session#sessionthreadlistoptions) 列出已存储的对话：
+
+```typescript
+const thread = await session.thread.create({ title: 'Release planning' })
+const threads = await session.thread.list()
+
+await session.thread.switch({ threadId: thread.id })
+console.log(threads.length)
+```
+
+使用 `session.state` 保存与 Session 关联的结构化实时状态。使用 [`session.state.get()`](/reference/agent-controller/session#sessionstateget) 读取，并使用 [`session.state.set()`](/reference/agent-controller/session#sessionstatesetupdates) 写入更新。需要验证和默认值时，请在 Controller 上定义 `stateSchema` 和 `initialState`：
+
+```typescript
+console.log(session.state.get())
+
+await session.state.set({ activeProject: 'docs-site' })
+```
+
+`session.state.get()` 返回快照。`set()` 会验证更新并将其合并到 Session 状态中。除非宿主显式持久化并恢复，否则请将此状态视为实时 Session 数据。
+
+## 批准 Tool 并恢复暂停
+
+权限策略决定允许、拒绝 Tool，还是将其发送到 UI 请求批准。使用 Controller 上的 `toolCategoryResolver` 将自定义 Tool 映射到类别：
+
+```typescript
+const controller = new AgentController({
+  toolCategoryResolver: toolName => {
+    if (toolName === 'delete_project') return 'execute'
+    return null
+  },
+})
+```
+
+使用 [`session.permissions.setForCategory()`](/reference/agent-controller/session#sessionpermissionssetforcategory-category-policy-) 配置类别策略，并使用 [`session.permissions.setForTool()`](/reference/agent-controller/session#sessionpermissionssetfortool-toolname-policy-) 配置 Tool 策略：
+
+```typescript
+await session.permissions.setForCategory({
+  category: 'execute',
+  policy: 'ask',
+})
+
+await session.permissions.setForTool({
+  toolName: 'delete_project',
+  policy: 'deny',
+})
+```
+
+当策略解析为 `ask` 时，请订阅批准事件，并使用 [`session.respondToToolApproval()`](/reference/agent-controller/session#respondtotoolapproval-decision-toolcallid-requestcontext-declinecontext-) 返回用户的决定：
+
+```typescript
+session.subscribe(event => {
+  if (event.type === 'tool_approval_required') {
+    session.respondToToolApproval({
+      toolCallId: event.toolCallId,
+      decision: 'approve',
+    })
+  }
+})
+```
+
+`always_allow_category` 决定会在实时 Session 的剩余时间内授权该 Tool 类别。Session 授权并非持久的进程级权限。
+
+[`ask_user`](/reference/tools/ask-user-tool) 和 [`submit_plan`](/reference/tools/submit-plan-tool) 等交互式 Tool 改为使用可恢复的 Tool 暂停。使用 [`session.respondToToolSuspension()`](/reference/agent-controller/session#respondtotoolsuspension-resumedata-toolcallid-requestcontext-) 恢复它们：
+
+```typescript
+session.subscribe(event => {
+  if (event.type === 'tool_suspended' && event.toolName === 'ask_user') {
+    void session.respondToToolSuspension({
+      toolCallId: event.toolCallId,
+      resumeData: 'Use SQLite.',
+    })
+  }
+})
+```
+
+对于 `submit_plan`，使用 `{ action: 'approved' }` 或 `{ action: 'rejected', feedback }` 恢复。已批准的计划可以在运行继续之前切换到 `transitionsTo` 配置的模式。
+
+## 委派给子 Agent
+
+在 Controller 上配置可用的子 Agent 类型。内置 `subagent` Tool 随后可以使用这些定义委派聚焦任务：
+
+```typescript
+const controller = new AgentController({
+  tools: {
+    searchDocs,
+  },
+  subagents: [
+    {
+      id: 'code-reviewer',
+      name: 'Code reviewer',
+      description: 'Review a change for correctness and regressions.',
+      instructions: 'Inspect the change and report actionable findings.',
+      allowedControllerTools: ['searchDocs'],
+      allowedWorkspaceTools: ['view', 'find_files'],
+      defaultModelId: '__GATEWAY_OPENAI_MODEL_MINI__',
+    },
+  ],
+})
+```
+
+常规子 Agent 使用已配置的指令和受限 Tool 集启动。当子 Agent 应克隆父线程并使用父 Agent 的指令和 Tool 运行时，请设置 `forked: true`。分叉子 Agent 会保留父级提示词前缀，忽略定义中的指令、Tool、允许列表和默认模型，并要求 Controller 启用 Memory。
+
+使用 [`session.subagents.model.set()`](/reference/agent-controller/session#sessionsubagentsmodelset-modelid-agenttype-) 存储默认子 Agent 模型，或特定 Agent 类型的模型。使用 [`session.subagents.model.get()`](/reference/agent-controller/session#sessionsubagentsmodelget-agenttype-) 读取选择：
+
+```typescript
+await session.subagents.model.set({
+  modelId: '__GATEWAY_OPENAI_MODEL_MINI__',
+})
+
+await session.subagents.model.set({
+  agentType: 'code-reviewer',
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+})
+
+const reviewerModel = session.subagents.model.get({
+  agentType: 'code-reviewer',
+})
+```
+
+这些选择会写入线程设置。Agent 类型的选择优先于 Session 的默认子 Agent 模型。
+
+## 连接聊天 Channel
+
+将 Channel 适配器传入 Controller，并在 [`Mastra`](/reference/core/mastra-class) 实例上注册：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { AgentController } from '@mastra/core/agent-controller'
+import { createSlackAdapter } from '@chat-adapter/slack'
+
+const controller = new AgentController({
+  id: 'support-controller',
+  agent,
+  storage,
+  workspace,
+  modes,
+  channels: {
+    adapters: {
+      slack: createSlackAdapter(),
+    },
+    resolveResourceId: ({ thread, message, defaultResourceId }) => {
+      if (thread.isDM) return message.author.userId
+      return defaultResourceId
+    },
+    onSessionStart: async ({ session, thread }) => {
+      const plan = await billing.planFor(thread.resourceId)
+      await session.model.switch({ modelId: plan.modelId })
+    },
+  },
+})
+
+export const mastra = new Mastra({
+  agentControllers: { controller },
+  storage,
+})
+```
+
+将每个平台的 webhook 指向 Controller 专用路由：
+
+```text
+/api/agent-controllers/<CONTROLLER_ID>/channels/<PLATFORM>/webhook
+```
+
+每个外部聊天线程都映射到一个 Controller Session 和 Mastra 线程。默认情况下，新 Session 使用由适配器聊天线程 ID 派生的资源 ID，并带有 `channel:` 前缀。使用 `resolveResourceId` 将私信映射到现有应用用户，或选择其他 Memory 所有者。该回调只影响新线程；现有线程会保留已存储的资源 ID。
+
+Channel Session 由 Controller 创建，而不是由你的代码创建，因此应在 `onSessionStart` 中配置。每个 Session 运行一次，时间在 Session 绑定到映射线程之后、处理第一条消息之前。使用它应用模型、Memory 设置或 Channel Session 原本会缺失的 Session 状态。同一线程中的后续消息会复用 Session，不会再次调用。错误会被记录并吞掉，因此无法配置的 Session 仍会回复消息。
+
+Controller Channel Session 和自动批准状态保存在内存中，因此请使用长时间运行的服务器。待处理批准和实时 Session 状态不会在进程重启后保留。无法渲染批准控件的适配器会自动运行 Tool，不显示批准提示，以免运行一直处于暂停状态。
+
+有关适配器设置和平台专用 webhook 配置，请参阅 [Channel](/docs/capabilities/channels/overview)。
+
+## 连接 UI
+
+订阅 Session 事件以获取增量更新。当 UI 需要完整的渲染快照时，使用 [`session.displayState.get()`](/reference/agent-controller/session#sessiondisplaystateget) 读取归约后的显示状态：
+
+```typescript
+const unsubscribe = session.subscribe(event => {
+  if (event.type === 'display_state_changed') {
+    render(event.displayState)
+  }
+})
+
+render(session.displayState.get())
+
+// Call when the UI disconnects.
+unsubscribe()
+```
+
+订阅按 Session 隔离。同一 Controller 上其他 Session 的事件不会传递给此监听器。有关完整 TUI 示例，请阅读[构建编程 Agent](/guides/guide/coding-agent)指南。
+
+## 相关内容
+
+- [Agent](/docs/agents/overview)
+- [Workspace](/docs/workspace/overview)
+- [观察 Memory](/docs/memory/observational-memory)
+- [Channel](/docs/capabilities/channels/overview)

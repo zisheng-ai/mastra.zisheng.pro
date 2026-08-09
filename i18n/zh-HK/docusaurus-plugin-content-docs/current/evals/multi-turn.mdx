@@ -1,0 +1,183 @@
+---
+title: "多輪 Evals | Evals"
+description: "透過在共用 thread 上依序傳送輸入，評估 Agent 在多輪對話中的行為。"
+packages:
+  - "@mastra/core"
+---
+
+# 多輪 Evals
+
+多輪 Evals 會測試 Agent 在整段對話中的行為。你不再提供單一 `input`，而是提供 `inputs` 陣列。每個項目都會在同一個 thread 上依序傳送給 Agent，而 scorer 則會看到所有輪次累積而成的輸出。
+
+## 何時使用多輪 Evals
+
+- Agent 使用記憶，並且必須記起較早輪次的上下文
+- Agent 處理依賴先前回應的跟進問題
+- 你需要驗證整段對話中的 Tool 呼叫次序
+- Agent 執行多步驟 Workflow（搜尋、確認、執行）
+
+## 快速開始
+
+```typescript title="src/evals/conversation-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { weatherAgent } from '../agents'
+
+const result = await runEvals({
+  data: [
+    {
+      inputs: [
+        'What is the weather in Brooklyn?',
+        'What about tomorrow?',
+        'Compare the two forecasts.',
+      ],
+    },
+  ],
+  target: weatherAgent,
+  scorers: [checks.calledTool('get_weather', { times: 2 }), checks.includes('Brooklyn')],
+})
+```
+
+每一輪都會使用相同的 thread ID 執行 `agent.generate()`，因此 Agent 可以看到完整的對話記錄。Scorer 會收到所有輪次累積而成的輸出訊息。
+
+## 跨輪次記憶必須使用記憶功能
+
+多輪記憶取決於 Agent 是否已**設定 memory store**。共用 thread ID 讓每一輪都可以看到先前的輪次，但只有在 Agent 設有記憶功能時，thread 才會保留記錄。如果 Agent 未設定記憶功能，各輪次仍會依序執行，輸出亦會繼續累積以供評分，但 Agent 不會記得先前的輪次（每個輸入都會獨立執行）。`runEvals` 會在你對沒有記憶功能的 Agent 使用 `inputs` 時記錄警告。
+
+`runEvals` 會代你管理對話識別資料：它會產生共用的 `threadId`，並注入 `resourceId`（Mastra 記憶會按 resource + thread 劃分訊息範圍，因此兩者缺一不可，Agent 才能記起內容）。預設情況下，resource 會從所產生的 thread 衍生，讓每段對話互相隔離。如要固定使用特定 resource，例如重用現有使用者的記憶，請傳入 `targetOptions.memory.resource`；thread 仍由 `runEvals` 管理，因此你不需要提供 thread：
+
+```typescript
+await runEvals({
+  target: weatherAgent,
+  data: [{ inputs: ['What is the weather in Brooklyn?', 'What about tomorrow?'] }],
+  scorers: [checks.similarity('weather forecast')],
+  targetOptions: { memory: { resource: 'user-42' } },
+})
+```
+
+有關設定 memory store 的方法，請參閱 [Memory](/docs/memory/overview)。
+
+## 運作方式
+
+當資料項目包含 `inputs` 陣列時，`runEvals` 會：
+
+1. 為對話建立新的 thread（獨有的 `threadId`）和 resource（保留呼叫者提供的 `targetOptions.memory.resource`）
+1. 在該 thread 上透過 `agent.generate()` 依序傳送每個輸入
+1. 累積所有輪次的輸出訊息
+1. 將完整的累積輸出傳給 scorer 評估
+
+Scorer 會看到完整的對話輸出，包括每一輪的內容。
+
+## 評分語義
+
+為多輪項目編寫 scorer 時，以下細節非常重要：
+
+- **`run.output` 是每一輪的累積輸出。** 以輸出為依據的 scorer，例如 `checks.includes`、`checks.calledTool`、`checks.similarity` 及同類 scorer，會評估整段對話。例如，`checks.calledTool('get_weather', { times: 2 })` 會計算所有輪次的呼叫次數。
+- **`run.input` 只是第一輪的輸入。** 比較輸入和輸出的 scorer（忠實度、答案相關性，以及其他以輸入為依據的 LLM scorer）只會看到第一則使用者訊息，而非完整對話。多輪評估應優先使用以輸出為依據的檢查，或建立直接讀取累積 `run.output` 的 scorer。
+
+## 使用 `turns` 逐輪斷言
+
+`inputs` 形式會將**累積**輸出視為整體評分，即為所有輪次的輸出給出單一分數。這可能會掩蓋個別輪次的問題：即使跟進輪次失效，只要_任何_一輪提到 Brooklyn，`checks.includes('Brooklyn')` 這類以輸出為依據的檢查仍會通過。
+
+如需斷言**特定輪次**是否正確執行，請改用 `turns`。每一輪都是一個物件，包含本身的 `input`，以及可選的 `gates`／`scorers`，而這些項目**只會評估該輪次**的輸入和輸出：
+
+```typescript title="src/evals/per-turn-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { weatherAgent } from '../agents'
+
+const result = await runEvals({
+  data: [
+    {
+      turns: [
+        {
+          input: 'What is the weather in Brooklyn?',
+          gates: [checks.calledTool('get_weather')],
+        },
+        {
+          // The follow-up must call the tool again — it can't be satisfied
+          // by the first turn's tool call.
+          input: 'What about tomorrow?',
+          gates: [checks.calledTool('get_weather')],
+          scorers: [{ scorer: checks.similarity('tomorrow forecast'), threshold: 0.5 }],
+        },
+      ],
+    },
+  ],
+  target: weatherAgent,
+})
+
+result.verdict // 'passed' | 'scored' | 'failed'
+result.turnResults // per-turn gate/threshold/scorer outcomes
+```
+
+語義：
+
+- 逐輪 gate 或 scorer **只會看到該輪次的** `run.input` 和 `run.output`，絕不會看到累積對話。這解決了 `inputs` 的兩個盲點：錯誤的輪次無法令檢查通過，而每一輪的 `run.input` 亦會正確無誤。
+- 每輪結果會納入 [verdict](/docs/evals/gates-and-verdicts)：如任何一輪未能通過 gate，verdict 會變為 `failed`。如未達到某輪的 threshold（而 gate 均已通過），則會變為 `scored`。
+- `result.turnResults[i]` 會報告每一輪的 `gateResults`、`thresholdResults` 和 `scores`，因此可以從失敗結果精確找出相關輪次。若有多段對話，則會按輪次索引計算 turn result 的平均值。
+- 沒有 `gates` 或 `scorers` 的輪次仍會推進對話。
+- 頂層 `scorers`／`gates` 仍會以累積輸出為整體執行，因此你可以結合「此輪必須呼叫 Tool」與「答案提到 Brooklyn」兩項要求。
+- 當 Agent 已設定儲存空間，每一項逐輪 scorer／gate 結果都會像頂層分數一樣保留，讓逐輪結果顯示於你的分數儲存空間中。每項已儲存的逐輪分數都會標上其輪次索引（`metadata.turnIndex`）、共用對話的 `threadId`，並連結至該輪本身的 Trace span。
+
+如果整段對話只需要一個整體分數，請使用 `inputs`。如果正確與否取決於個別輪次，請使用 `turns`。同一個資料項目中的 `turns` 不能與 `input` 或 `inputs` 一併使用。
+
+## 與 gate 和 threshold 配合使用
+
+多輪資料項目可配合 [gate 和 verdict](/docs/evals/gates-and-verdicts) 使用。請使用以輸出為依據的 scorer，讓 gate 判斷反映完整對話：
+
+```typescript title="src/evals/memory-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+
+const result = await runEvals({
+  data: [
+    {
+      inputs: ['My favorite city is Brooklyn.', 'What is the weather in my favorite city?'],
+    },
+  ],
+  target: weatherAgent,
+  gates: [checks.calledTool('get_weather')],
+  scorers: [{ scorer: checks.similarity('Brooklyn weather forecast'), threshold: 0.5 }],
+})
+
+result.verdict // 'passed' | 'scored' | 'failed'
+```
+
+## 混合單輪與多輪評估
+
+單次 `runEvals` 呼叫可以同時包含單輪和多輪資料項目：
+
+```typescript title="src/evals/mixed-eval.ts"
+const result = await runEvals({
+  data: [
+    { input: 'What is the weather in Brooklyn?' },
+    {
+      inputs: ['My favorite city is Brooklyn.', 'What is the weather in my favorite city?'],
+    },
+  ],
+  target: weatherAgent,
+  scorers: [checks.includes('Brooklyn')],
+})
+```
+
+單輪項目會如常使用 `input`。多輪項目則使用 `inputs`，並可完全省略 `input`。
+
+## 驗證
+
+`runEvals` 會拋出 `MastraError`，條件是有 `inputs` 但其內容為空：
+
+```typescript
+// Throws: 'inputs' must be a non-empty array
+await runEvals({
+  data: [{ inputs: [] }],
+  target: myAgent,
+  scorers: [myScorer],
+})
+```
+
+## 相關內容
+
+- [`runEvals()` 參考資料](/reference/evals/run-evals)：`runEvals` 參數與回傳值的完整 API 說明
+- [Gate 和 verdict](/docs/evals/gates-and-verdicts)：強制執行硬性要求和品質 threshold
+- [Quick Checks](/docs/evals/quick-checks)：無需 LLM、可組合的微型 scorer

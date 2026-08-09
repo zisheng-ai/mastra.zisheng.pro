@@ -1,0 +1,663 @@
+---
+title: "參考：Prompt alignment scorer | Evals"
+description: Mastra Prompt Alignment Scorer 的文件。透過多維度分析，評估 Agent 回應與使用者 prompt 的意圖、要求、完整程度及合適程度有多吻合。
+packages:
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Prompt alignment scorer
+
+`createPromptAlignmentScorerLLM()` 函式會建立一個 scorer，從意圖理解、要求達成、回應完整程度及格式合適程度等方面，評估 Agent 回應與使用者 prompt 有多吻合。
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description: '用於評估 prompt 與回應吻合程度的語言模型',
+    required: true,
+  },
+  {
+    name: 'options',
+    type: 'PromptAlignmentOptions',
+    description: 'scorer 的設定選項',
+    required: false,
+    children: [
+      {
+        name: 'scale',
+        type: 'number',
+        description: '最終分數所乘的比例系數（預設值：1）',
+        required: false,
+      },
+      {
+        name: 'evaluationMode',
+        type: "'user' | 'system' | 'both'",
+        description:
+          "評估模式——'user' 只評估與使用者 prompt 的吻合程度，'system' 只評估系統遵從程度，'both' 則以加權評分同時評估兩者（預設值：'both'）",
+        required: false,
+      },
+    ],
+  },
+]}
+/>
+
+## `.run()` 回傳值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'score',
+    type: 'number',
+    description: '介乎 0 與 scale 之間的多維度吻合分數（預設為 0–1）',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description: '易於理解的 prompt alignment 評估說明，並附詳細細項',
+  },
+]}
+/>
+
+`.run()` 會回傳以下結構的結果：
+
+```typescript prettier:false
+{
+  runId: string,
+  score: number,
+  reason: string,
+  analyzeStepResult: {
+    intentAlignment: {
+      score: number,
+      primaryIntent: string,
+      isAddressed: boolean,
+      reasoning: string
+    },
+    requirementsFulfillment: {
+      requirements: Array<{
+        requirement: string,
+        isFulfilled: boolean,
+        reasoning: string
+      }>,
+      overallScore: number
+    },
+    completeness: {
+      score: number,
+      missingElements: string[],
+      reasoning: string
+    },
+    responseAppropriateness: {
+      score: number,
+      formatAlignment: boolean,
+      toneAlignment: boolean,
+      reasoning: string
+    },
+    overallAssessment: string
+  }
+}
+```
+
+## 評分詳情
+
+### Scorer 設定
+
+你可以調整 scale 參數及評估模式，按評分需要自訂 Prompt Alignment Scorer。
+
+```typescript
+const scorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    scale: 10, // Score from 0-10 instead of 0-1
+    evaluationMode: 'both', // 'user', 'system', or 'both' (default)
+  },
+})
+```
+
+### 多維度分析
+
+Prompt Alignment 會從四個主要維度評估回應，並按評估模式採用相應的加權評分：
+
+#### User 模式（`'user'`）
+
+只評估與使用者 prompt 的吻合程度：
+
+1. **意圖吻合**（權重 40%）：回應有否處理使用者的核心要求
+1. **要求達成**（權重 30%）：是否符合使用者的所有要求
+1. **完整程度**（權重 20%）：回應是否具備使用者所需的詳細內容
+1. **回應合適程度**（權重 10%）：格式及語氣是否符合使用者期望
+
+#### System 模式（`'system'`）
+
+只評估對系統指引的遵從程度：
+
+1. **意圖吻合**（權重 35%）：回應是否遵循系統的行為指引
+1. **要求達成**（權重 35%）：是否遵守所有系統限制
+1. **完整程度**（權重 15%）：回應是否遵循所有系統規則
+1. **回應合適程度**（權重 15%）：格式及語氣是否符合系統規格
+
+#### Both 模式（`'both'`——預設）
+
+結合評估使用者及系統兩方面的吻合程度：
+
+- **使用者吻合程度**：佔最終分數 70%（採用 User 模式權重）
+- **系統遵從程度**：佔最終分數 30%（採用 System 模式權重）
+- 平衡評估使用者滿意度及系統遵從程度
+
+### 評分公式
+
+**User 模式：**
+
+```
+Weighted Score = (intent_score × 0.4) + (requirements_score × 0.3) +
+                 (completeness_score × 0.2) + (appropriateness_score × 0.1)
+Final Score = Weighted Score × scale
+```
+
+**System 模式：**
+
+```
+Weighted Score = (intent_score × 0.35) + (requirements_score × 0.35) +
+                 (completeness_score × 0.15) + (appropriateness_score × 0.15)
+Final Score = Weighted Score × scale
+```
+
+**Both 模式（預設）：**
+
+```
+User Score = (user dimensions with user weights)
+System Score = (system dimensions with system weights)
+Weighted Score = (User Score × 0.7) + (System Score × 0.3)
+Final Score = Weighted Score × scale
+```
+
+**權重分配理據**：
+
+- **User 模式**：為提高使用者滿意度，優先考慮意圖（40%）及要求（30%）
+- **System 模式**：平均衡量行為遵從程度（35%）及限制（35%）
+- **Both 模式**：以 70/30 分配，確保使用者需要為首要考慮，同時維持系統遵從程度
+
+### 分數解讀
+
+- **0.9–1.0** = 所有維度均極為吻合
+- **0.8–0.9** = 非常吻合，只有輕微不足
+- **0.7–0.8** = 整體吻合，但未能滿足部分要求或完整程度不足
+- **0.6–0.7** = 中度吻合，但有明顯不足
+- **0.4–0.6** = 吻合程度欠佳，存在重大問題
+- **0.0–0.4** = 吻合程度極低，回應未能有效處理 prompt
+
+### 各模式的適用情況
+
+**User 模式（`'user'`）**——適用於：
+
+- 評估客戶服務回應能否令使用者滿意
+- 從使用者角度測試內容生成質素
+- 衡量回應處理使用者問題的成效
+- 只著重達成要求，不考慮系統限制
+
+**System 模式（`'system'`）**——適用於：
+
+- 審核 AI 安全及行為指引遵從程度
+- 確保 Agent 遵循品牌用語及語氣要求
+- 驗證是否遵循內容政策及限制
+- 測試系統層級的行為一致性
+
+**Both 模式（`'both'`）**——適用於（預設及建議模式）：
+
+- 全面評估 AI Agent 的表現
+- 平衡使用者滿意度與系統遵從程度
+- 在使用者及系統要求同樣重要的情況下進行正式環境監察
+- 全面評估 prompt 與回應的吻合程度
+
+## 常見使用案例
+
+### 程式碼生成評估
+
+適合評估：
+
+- 程式編寫任務的完成程度
+- 程式碼質素及完整程度
+- 程式編寫要求的遵從程度
+- 格式規格（函式、類別等）
+
+```typescript
+// Example: API endpoint creation
+const codePrompt = 'Create a REST API endpoint with authentication and rate limiting'
+// Scorer evaluates: intent (API creation), requirements (auth + rate limiting),
+// completeness (full implementation), format (code structure)
+```
+
+### 指令遵循評估
+
+適合用於：
+
+- 驗證任務完成情況
+- 多步驟指令遵從程度
+- 檢查要求遵從程度
+- 教育內容評估
+
+```typescript
+// Example: Multi-requirement task
+const taskPrompt =
+  'Write a Python class with initialization, validation, error handling, and documentation'
+// Scorer tracks each requirement individually and provides detailed breakdown
+```
+
+### 內容格式驗證
+
+適合用於：
+
+- 格式規格遵從程度
+- style guide 遵從程度
+- 驗證輸出結構
+- 檢查回應是否合適
+
+```typescript
+// Example: Structured output
+const formatPrompt =
+  'Explain the differences between let and const in JavaScript using bullet points'
+// Scorer evaluates content accuracy AND format compliance
+```
+
+### Agent 回應質素
+
+衡量 AI Agent 遵循使用者指令的成效：
+
+```typescript
+const agent = new Agent({
+  id: 'coding-assistant',
+  name: 'CodingAssistant',
+  instructions: 'You are a helpful coding assistant. Always provide working code examples.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+// Evaluate comprehensive alignment (default)
+const scorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: { evaluationMode: 'both' }, // Evaluates both user intent and system guidelines
+})
+
+// Evaluate just user satisfaction
+const userScorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: { evaluationMode: 'user' }, // Focus only on user request fulfillment
+})
+
+// Evaluate system compliance
+const systemScorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: { evaluationMode: 'system' }, // Check adherence to system instructions
+})
+
+const result = await scorer.run(agentRun)
+```
+
+### Prompt engineering 優化
+
+測試不同 prompt 以改善吻合程度：
+
+```typescript
+const prompts = [
+  'Write a function to calculate factorial',
+  'Create a Python function that calculates factorial with error handling for negative inputs',
+  'Implement a factorial calculator in Python with: input validation, error handling, and docstring',
+]
+
+// Compare alignment scores to find the best prompt
+for (const prompt of prompts) {
+  const result = await scorer.run(createTestRun(prompt, response))
+  console.log(`Prompt alignment: ${result.score}`)
+}
+```
+
+### Multi-Agent 系統評估
+
+比較不同 Agent 或模型：
+
+```typescript prettier:false
+const agents = [agent1, agent2, agent3];
+const testPrompts = [...]; // Array of test prompts
+
+for (const agent of agents) {
+  let totalScore = 0;
+  for (const prompt of testPrompts) {
+    const response = await agent.run(prompt);
+    const evaluation = await scorer.run({ input: prompt, output: response });
+    totalScore += evaluation.score;
+  }
+  console.log(`${agent.name} average alignment: ${totalScore / testPrompts.length}`);
+}
+```
+
+## 範例
+
+### 基本設定
+
+```typescript
+import { createPromptAlignmentScorerLLM } from '@mastra/evals'
+
+const scorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+// Evaluate a code generation task
+const result = await scorer.run({
+  input: [
+    {
+      role: 'user',
+      content: 'Write a Python function to calculate factorial with error handling',
+    },
+  ],
+  output: {
+    role: 'assistant',
+    text: `def factorial(n):
+    if n < 0:
+        raise ValueError("Factorial not defined for negative numbers")
+    if n == 0:
+        return 1
+    return n * factorial(n-1)`,
+  },
+})
+// Result: { score: 0.95, reason: "Excellent alignment - function addresses intent, includes error handling..." }
+```
+
+### 自訂設定範例
+
+```typescript
+// Configure scale and evaluation mode
+const scorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    scale: 10, // Score from 0-10 instead of 0-1
+    evaluationMode: 'both', // 'user', 'system', or 'both' (default)
+  },
+})
+
+// User-only evaluation - focus on user satisfaction
+const userScorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: { evaluationMode: 'user' },
+})
+
+// System-only evaluation - focus on compliance
+const systemScorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: { evaluationMode: 'system' },
+})
+
+const result = await scorer.run(testRun)
+// Result: { score: 8.5, reason: "Score: 8.5 out of 10 - Good alignment with both user intent and system guidelines..." }
+```
+
+### 指定格式評估
+
+```typescript
+// Evaluate bullet point formatting
+const result = await scorer.run({
+  input: [
+    {
+      role: 'user',
+      content: 'List the benefits of TypeScript in bullet points',
+    },
+  ],
+  output: {
+    role: 'assistant',
+    text: 'TypeScript provides static typing, better IDE support, and enhanced code reliability.',
+  },
+})
+// Result: Lower appropriateness score due to format mismatch (paragraph vs bullet points)
+```
+
+### 極為吻合的範例
+
+在此範例中，回應完整處理使用者的 prompt，並符合所有要求。
+
+```typescript title="src/example-excellent-prompt-alignment.ts"
+import { createPromptAlignmentScorerLLM } from '@mastra/evals/scorers/prebuilt'
+
+const scorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const inputMessages = [
+  {
+    role: 'user',
+    content:
+      'Write a Python function to calculate factorial with error handling for negative numbers',
+  },
+]
+
+const outputMessage = {
+  text: `def factorial(n):
+    """Calculate factorial of a number."""
+    if n < 0:
+        raise ValueError("Factorial not defined for negative numbers")
+    if n == 0 or n == 1:
+        return 1
+    return n * factorial(n - 1)`,
+}
+
+const result = await scorer.run({
+  input: inputMessages,
+  output: outputMessage,
+})
+
+console.log(result)
+```
+
+### 極為吻合的輸出
+
+輸出獲得高分，因為它完全切合意圖並符合所有要求，而且採用了合適的格式。
+
+```typescript prettier:false
+{
+  score: 0.95,
+  reason: 'The score is 0.95 because the response perfectly addresses the primary intent of creating a factorial function and fulfills all requirements including Python implementation, error handling for negative numbers, and proper documentation. The code format is appropriate and the implementation is complete.'
+}
+```
+
+### 部分吻合的範例
+
+在此範例中，回應處理了核心意圖，但遺漏部分要求或存在格式問題。
+
+```typescript title="src/example-partial-prompt-alignment.ts"
+import { createPromptAlignmentScorerLLM } from '@mastra/evals/scorers/prebuilt'
+
+const scorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const inputMessages = [
+  {
+    role: 'user',
+    content: 'List the benefits of TypeScript in bullet points',
+  },
+]
+
+const outputMessage = {
+  text: 'TypeScript provides static typing, better IDE support, and enhanced code reliability through compile-time error checking.',
+}
+
+const result = await scorer.run({
+  input: inputMessages,
+  output: outputMessage,
+})
+
+console.log(result)
+```
+
+#### 部分吻合的輸出
+
+輸出的分數較低，因為內容雖然準確，卻未有採用要求的格式（項目符號）。
+
+```typescript prettier:false
+{
+  score: 0.75,
+  reason: 'The score is 0.75 because the response addresses the intent of explaining TypeScript benefits and provides accurate information, but fails to use the requested bullet point format, resulting in lower appropriateness scoring.'
+}
+```
+
+### 吻合程度欠佳的範例
+
+在此範例中，回應未能處理使用者的具體要求。
+
+```typescript title="src/example-poor-prompt-alignment.ts"
+import { createPromptAlignmentScorerLLM } from '@mastra/evals/scorers/prebuilt'
+
+const scorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const inputMessages = [
+  {
+    role: 'user',
+    content:
+      'Write a Python class with initialization, validation, error handling, and documentation',
+  },
+]
+
+const outputMessage = {
+  text: `class Example:
+    def __init__(self, value):
+        self.value = value`,
+}
+
+const result = await scorer.run({
+  input: inputMessages,
+  output: outputMessage,
+})
+
+console.log(result)
+```
+
+### 吻合程度欠佳的輸出
+
+輸出獲得低分，因為它只符合部分要求，欠缺驗證、錯誤處理及文件。
+
+```typescript prettier:false
+{
+  score: 0.35,
+  reason: 'The score is 0.35 because while the response addresses the basic intent of creating a Python class with initialization, it fails to include validation, error handling, and documentation as specifically requested, resulting in incomplete requirement fulfillment.'
+}
+```
+
+### 評估模式範例
+
+#### User 模式——只著重使用者 prompt
+
+評估回應處理使用者要求的成效，並忽略系統指令：
+
+```typescript title="src/example-user-mode.ts"
+const scorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: { evaluationMode: 'user' },
+})
+
+const result = await scorer.run({
+  input: {
+    inputMessages: [
+      {
+        role: 'user',
+        content: 'Explain recursion with an example',
+      },
+    ],
+    systemMessages: [
+      {
+        role: 'system',
+        content: 'Always provide code examples in Python',
+      },
+    ],
+  },
+  output: {
+    text: 'Recursion is when a function calls itself. For example: factorial(5) = 5 * factorial(4)',
+  },
+})
+// Scores high for addressing user request, even without Python code
+```
+
+#### System 模式——只著重系統指引
+
+評估對系統行為指引及限制的遵從程度：
+
+```typescript title="src/example-system-mode.ts"
+const scorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: { evaluationMode: 'system' },
+})
+
+const result = await scorer.run({
+  input: {
+    systemMessages: [
+      {
+        role: 'system',
+        content: 'You are a helpful assistant. Always be polite, concise, and provide examples.',
+      },
+    ],
+    inputMessages: [
+      {
+        role: 'user',
+        content: 'What is machine learning?',
+      },
+    ],
+  },
+  output: {
+    text: 'Machine learning is a subset of AI where computers learn from data. For example, spam filters learn to identify unwanted emails by analyzing patterns in previously marked spam.',
+  },
+})
+// Evaluates politeness, conciseness, and example provision
+```
+
+#### Both 模式——綜合評估（預設）
+
+透過加權評分，同時評估使用者意圖達成程度及系統遵從程度（使用者佔 70%，系統佔 30%）：
+
+```typescript title="src/example-both-mode.ts"
+const scorer = createPromptAlignmentScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: { evaluationMode: 'both' }, // This is the default
+})
+
+const result = await scorer.run({
+  input: {
+    systemMessages: [
+      {
+        role: 'system',
+        content: 'Always provide code examples when explaining programming concepts',
+      },
+    ],
+    inputMessages: [
+      {
+        role: 'user',
+        content: 'Explain how to reverse a string',
+      },
+    ],
+  },
+  output: {
+    text: `To reverse a string, you can iterate through it backwards. Here's an example in Python:
+    
+    def reverse_string(s):
+        return s[::-1]
+    
+    # Usage: reverse_string("hello") returns "olleh"`,
+  },
+})
+// High score for both addressing the user's request AND following system guidelines
+```
+
+## 與其他 scorer 比較
+
+| 項目 | Prompt Alignment | Answer Relevancy | Faithfulness |
+| - | - | - | - |
+| **重點** | 多維度 prompt 遵從程度 | 查詢與回應的相關程度 | 以上下文為依據的程度 |
+| **評估內容** | 意圖、要求、完整程度、格式 | 與查詢在語意上的相似程度 | 與上下文在事實上的一致程度 |
+| **使用案例** | 一般 prompt 遵循 | 資料檢索 | RAG／以上下文為基礎的系統 |
+| **維度** | 4 個加權維度 | 單一相關程度維度 | 單一 Faithfulness 維度 |
+
+## 相關內容
+
+- [Answer Relevancy Scorer](/reference/evals/answer-relevancy)：評估查詢與回應的相關程度
+- [Faithfulness Scorer](/reference/evals/faithfulness)：衡量回應以上下文為依據的程度
+- [Tool Call Accuracy Scorer](/reference/evals/tool-call-accuracy)：評估 Tool 選擇
+- [自訂 Scorer](/docs/evals/custom-scorers)：建立你自己的評估指標

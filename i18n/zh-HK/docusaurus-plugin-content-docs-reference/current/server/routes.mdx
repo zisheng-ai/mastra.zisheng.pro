@@ -1,0 +1,481 @@
+---
+title: "參考：Server route | Server"
+description: "由 Mastra server adapter 註冊的 HTTP route API 參考。"
+packages:
+  - "@mastra/server"
+---
+
+# Server route
+
+呼叫 `server.init()` 時，server adapter 會註冊以下 route。如已設定 `prefix` 選項，所有 route 都會加上該前綴。
+
+## Agents
+
+| Method | 路徑 | 說明 |
+| - | - | - |
+| `GET` | `/api/agents` | 列出所有 Agent |
+| `GET` | `/api/agents/:agentId` | 按 ID 取得 Agent（支援 version query 參數） |
+| `POST` | `/api/agents/:agentId/generate` | 產生 Agent response |
+| `POST` | `/api/agents/:agentId/stream` | 以 stream 傳送 Agent response |
+| `POST` | `/api/agents/:agentId/send-message` | 向運行中或閒置的 thread 傳送使用者訊息 |
+| `POST` | `/api/agents/:agentId/queue-message` | 將使用者訊息排入下一個 thread turn 的佇列 |
+| `POST` | `/api/agents/:agentId/signals` | 向運行中或閒置的 thread 傳送較低層級的訊號 |
+| `POST` | `/api/agents/:agentId/threads/subscribe` | 訂閱 thread stream |
+| `POST` | `/api/agents/:agentId/send-tool-approval` | 核准或拒絕 Tool call，並透過 thread subscription 恢復運行 |
+| `POST` | `/api/agents/:agentId/resume-stream` | 使用自訂資料恢復已暫停的 Agent stream |
+| `GET` | `/api/agents/:agentId/tools` | 列出 Agent Tool |
+| `POST` | `/api/agents/:agentId/tools/:toolId/execute` | 執行 Agent Tool |
+
+### 取得 Agent 的 query 參數
+
+`GET /api/agents/:agentId` 接受可選 query 參數，用以控制將哪個已儲存的設定版本套用為程式碼所定義 Agent 的覆寫設定：
+
+| 參數 | 類型 | 預設值 | 說明 |
+| - | - | - | - |
+| `status` | `'draft' \| 'published'` | `'published'` | 要解析的已儲存版本。`draft` 傳回最新版本，`published` 傳回生效中的版本。 |
+| `versionId` | `string` | 無 | 要解析的指定 version ID。優先於 `status`。 |
+
+```bash
+# Get agent with active published overrides (default)
+GET /api/agents/my-agent
+
+# Get agent with latest draft overrides
+GET /api/agents/my-agent?status=draft
+
+# Get agent with a specific version's overrides
+GET /api/agents/my-agent?versionId=abc123
+```
+
+### Generate request body
+
+```typescript prettier:false
+{
+  messages: CoreMessage[] | string;       // Required
+  instructions?: string;                   // System instructions
+  system?: string;                         // System prompt
+  context?: CoreMessage[];                 // Additional context
+  memory?: { key: string } | boolean;      // Memory config
+  resourceId?: string;                     // Resource identifier
+  threadId?: string;                       // Thread identifier
+  runId?: string;                          // Run identifier
+  maxSteps?: number;                       // Max tool steps
+  activeTools?: string[];                  // Tools to enable
+  toolChoice?: ToolChoice;                 // Tool selection mode
+  requestContext?: Record<string, unknown>; // Request context
+  output?: ZodSchema;                      // Structured output schema
+}
+```
+
+### Generate response
+
+```typescript prettier:false
+{
+  text: string;
+  toolCalls?: ToolCall[];
+  finishReason: string;
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+  };
+}
+```
+
+### Agent 訊息 route
+
+使用 `POST /api/agents/:agentId/send-message` 向運行中的 Agent loop 傳送使用者訊息，或喚醒閒置 thread。當運行中的 run 應先完成，Mastra 才開始後續 run 時，請使用 `POST /api/agents/:agentId/queue-message`。
+
+兩個 route 接受相同的 request body：
+
+```typescript prettier:false
+{
+  message: string | Array<TextPart | FilePart> | {
+    contents: string | Array<TextPart | FilePart>;
+    attributes?: Record<string, JSONValue>;
+    metadata?: Record<string, unknown>;
+    providerOptions?: ProviderMetadata;
+  };
+  runId?: string;
+  resourceId?: string;
+  threadId?: string;
+  ifActive?: {
+    behavior?: 'deliver' | 'persist' | 'discard';
+    attributes?: Record<string, string | number | boolean>;
+  };
+  ifIdle?: {
+    behavior?: 'wake' | 'persist' | 'discard';
+    streamOptions?: Omit<AgentExecutionOptions, 'messages'>;
+    attributes?: Record<string, string | number | boolean>;
+  };
+}
+```
+
+省略 `runId` 時，必須提供 `resourceId` 及 `threadId`。`ifIdle` 只適用於以 thread 為目標的 request，不適用於以 run 為目標的 request。
+
+#### 傳送訊息
+
+```bash
+curl -X POST http://localhost:4111/api/agents/supportAgent/send-message \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "message": {
+      "contents": "Show the shorter version.",
+      "attributes": { "sentFrom": "web" }
+    },
+    "resourceId": "user_123",
+    "threadId": "thread_456"
+  }'
+```
+
+#### 將訊息排入佇列
+
+```bash
+curl -X POST http://localhost:4111/api/agents/supportAgent/queue-message \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "message": "Also check whether the tests need updates.",
+    "resourceId": "user_123",
+    "threadId": "thread_456"
+  }'
+```
+
+兩個 route 都會傳回：
+
+```typescript prettier:false
+{
+  accepted: true;
+  runId: string;
+  signal?: CreatedAgentSignal;
+}
+```
+
+### Subscription Tool 核准 route
+
+當 client 已有運行中的 thread subscription 時，請使用 `POST /api/agents/:agentId/send-tool-approval`。此 route 會恢復 run 並傳回 JSON 確認。恢復後的 stream chunk 會透過 `POST /api/agents/:agentId/threads/subscribe` 傳送。
+
+此 route 接受以下 request body：
+
+```typescript prettier:false
+{
+  resourceId: string;
+  threadId: string;
+  toolCallId: string;
+  approved: boolean;
+  requestContext?: Record<string, unknown>;
+}
+```
+
+此 route 傳回：
+
+```typescript prettier:false
+{
+  accepted: true;
+  runId: string;
+  toolCallId?: string;
+}
+```
+
+## Workflows
+
+| Method | 路徑 | 說明 |
+| - | - | - |
+| `GET` | `/api/workflows` | 列出所有 Workflow |
+| `GET` | `/api/workflows/run-counts` | 取得每個 Workflow 運行中及已暫停的 run 數目 |
+| `GET` | `/api/workflows/:workflowId` | 按 ID 取得 Workflow |
+| `POST` | `/api/workflows/:workflowId/create-run` | 建立新的 Workflow run |
+| `POST` | `/api/workflows/:workflowId/start-async` | 啟動 Workflow 並等待結果 |
+| `POST` | `/api/workflows/:workflowId/stream` | 以 stream 傳送 Workflow 執行結果 |
+| `POST` | `/api/workflows/:workflowId/resume` | 恢復已暫停的 Workflow |
+| `POST` | `/api/workflows/:workflowId/resume-async` | 以非同步方式恢復 |
+| `GET` | `/api/workflows/:workflowId/runs` | 列出 Workflow run |
+| `GET` | `/api/workflows/:workflowId/runs/:runId` | 取得指定 run |
+
+### Run 數目 response
+
+`/api/workflows/run-counts` endpoint 會傳回每個已註冊 Workflow 的 `running` 及 [`suspended`](/docs/workflows/suspend-and-resume) run 數目。Record 使用 Mastra 設定中的 Workflow registry key 作為 key，而 server 可能會快取 response 數秒：
+
+```typescript prettier:false
+{
+  [workflowRegistryKey: string]: {
+    running: number;
+    suspended: number;
+  };
+}
+```
+
+### 動態 Workflow
+
+動態 Workflow 定義（beta）是以 JSON 表示、透過 `workflowDefinitions` storage domain 持久保存，並即時註冊至運行中 instance 的 Workflow。請參閱[動態 Workflow](/docs/workflows/dynamic-workflows)。
+
+| Method | 路徑 | 說明 |
+| - | - | - |
+| `GET` | `/api/stored/workflows` | 列出動態 Workflow 定義，可按 `status` 及 `authorId` 篩選 |
+| `GET` | `/api/stored/workflows/:dynamicWorkflowId` | 按 ID 取得動態 Workflow 定義 |
+| `POST` | `/api/stored/workflows` | Upsert 定義（以及可選 helper `dependencies`）並即時註冊 |
+| `DELETE` | `/api/stored/workflows/:dynamicWorkflowId` | 刪除動態 Workflow 定義，並取消註冊即時 Workflow |
+
+在已啟用驗證的 server 上，讀取 route 需要 `stored-workflows:read` 權限，寫入 route 則需要 `stored-workflows:write`。已註冊的動態 Workflow 會透過上述一般 `/api/workflows/:workflowId` route 執行。
+
+### 建立 run 的 request body
+
+```typescript prettier:false
+{
+  resourceId?: string;     // Associate run with a resource (e.g., user ID)
+  disableScorers?: boolean; // Disable scorers for this run
+}
+```
+
+### `/start-async` 的 request body
+
+```typescript prettier:false
+{
+  resourceId?: string;     // Associate run with a resource (e.g., user ID)
+  inputData?: unknown;
+  initialState?: unknown;
+  requestContext?: Record<string, unknown>;
+  tracingOptions?: {
+    spanName?: string;
+    attributes?: Record<string, unknown>;
+  };
+}
+```
+
+### 以 stream 傳送 Workflow 的 request body
+
+```typescript prettier:false
+{
+  resourceId?: string;     // Associate run with a resource (e.g., user ID)
+  inputData?: unknown;
+  initialState?: unknown;
+  requestContext?: Record<string, unknown>;
+  closeOnSuspend?: boolean;
+}
+```
+
+### 恢復用的 request body
+
+```typescript prettier:false
+{
+  step?: string | string[];
+  resumeData?: unknown;
+  requestContext?: Record<string, unknown>;
+}
+```
+
+## Tools
+
+| Method | 路徑 | 說明 |
+| - | - | - |
+| `GET` | `/api/tools` | 列出所有 Tool |
+| `GET` | `/api/tools/:toolId` | 按 ID 取得 Tool |
+| `POST` | `/api/tools/:toolId/execute` | 執行 Tool |
+
+### 執行 Tool 的 request body
+
+```typescript prettier:false
+{
+  data: unknown;  // Tool input data
+  requestContext?: Record<string, unknown>;
+}
+```
+
+## Memory
+
+| Method | 路徑 | 說明 |
+| - | - | - |
+| `GET` | `/api/memory/threads` | 列出 thread |
+| `GET` | `/api/memory/threads/:threadId` | 取得 thread |
+| `POST` | `/api/memory/threads` | 建立 thread |
+| `DELETE` | `/api/memory/threads/:threadId` | 刪除 thread |
+| `POST` | `/api/memory/threads/:threadId/clone` | 複製 thread |
+| `GET` | `/api/memory/threads/:threadId/messages` | 取得 thread 訊息 |
+| `POST` | `/api/memory/threads/:threadId/messages` | 新增訊息 |
+
+### 建立 thread 的 request body
+
+```typescript prettier:false
+{
+  resourceId: string;
+  title?: string;
+  metadata?: Record<string, unknown>;
+}
+```
+
+### 複製 thread 的 request body
+
+```typescript prettier:false
+{
+  newThreadId?: string;           // Custom ID for cloned thread
+  resourceId?: string;            // Override resource ID
+  title?: string;                 // Custom title for clone
+  metadata?: Record<string, unknown>;  // Additional metadata
+  options?: {
+    messageLimit?: number;        // Max messages to clone
+    messageFilter?: {
+      startDate?: Date;           // Clone messages after this date
+      endDate?: Date;             // Clone messages before this date
+      messageIds?: string[];      // Clone specific messages
+    };
+  };
+}
+```
+
+### 複製 thread 的 response
+
+```typescript prettier:false
+{
+  thread: {
+    id: string;
+    resourceId: string;
+    title: string;
+    createdAt: Date;
+    updatedAt: Date;
+    metadata: {
+      clone: {
+        sourceThreadId: string;
+        clonedAt: Date;
+        lastMessageId?: string;
+      };
+      // ... other metadata
+    };
+  };
+  clonedMessages: MastraDBMessage[];
+}
+```
+
+## Vectors
+
+| Method | 路徑 | 說明 |
+| - | - | - |
+| `POST` | `/api/vectors/:vectorName/upsert` | Upsert vector |
+| `POST` | `/api/vectors/:vectorName/query` | 查詢 vector |
+| `POST` | `/api/vectors/:vectorName/delete` | 刪除 vector |
+
+### Upsert request body
+
+```typescript
+{
+  vectors: Array<{
+    id: string
+    values: number[]
+    metadata?: Record<string, unknown>
+  }>
+}
+```
+
+### Query request body
+
+```typescript prettier:false
+{
+  vector: number[];
+  topK?: number;
+  filter?: Record<string, unknown>;
+  includeMetadata?: boolean;
+}
+```
+
+## MCP
+
+| Method | 路徑 | 說明 |
+| - | - | - |
+| `GET` | `/api/mcp/servers` | 列出 MCP server |
+| `GET` | `/api/mcp/servers/:serverId/tools` | 列出 server Tool |
+| `POST` | `/api/mcp/:serverId` | MCP HTTP transport |
+| `GET` | `/api/mcp/:serverId/sse` | MCP SSE transport |
+
+## Responses API
+
+| Method | 路徑 | 說明 |
+| - | - | - |
+| `POST` | `/api/v1/responses` | 透過 OpenAI 兼容的 Responses API route 建立 response |
+| `GET` | `/api/v1/responses/:responseId` | 擷取已儲存的 response |
+| `DELETE` | `/api/v1/responses/:responseId` | 刪除已儲存的 response |
+
+完整 request 及 response contract 請參閱 [Responses API 參考](/reference/client-js/responses)。
+
+## Conversations API
+
+| Method | 路徑 | 說明 |
+| - | - | - |
+| `POST` | `/api/v1/conversations` | 建立 conversation |
+| `GET` | `/api/v1/conversations/:conversationId` | 擷取 conversation |
+| `DELETE` | `/api/v1/conversations/:conversationId` | 刪除 conversation |
+| `GET` | `/api/v1/conversations/:conversationId/items` | 列出 conversation 的已儲存 item |
+
+完整 request 及 response contract 請參閱 [Conversations API 參考](/reference/client-js/conversations)。
+
+## Logs
+
+| Method | 路徑 | 說明 |
+| - | - | - |
+| `GET` | `/api/logs` | 列出 log |
+| `GET` | `/api/logs/:runId` | 按 run ID 取得 log |
+
+### Query 參數
+
+```typescript prettier:false
+{
+  page?: number;
+  perPage?: number;
+  transportId?: string;
+}
+```
+
+## Telemetry
+
+| Method | 路徑 | 說明 |
+| - | - | - |
+| `GET` | `/api/telemetry/traces` | 列出 Trace |
+| `GET` | `/api/telemetry/traces/:traceId` | 取得 Trace |
+| `GET` | `/api/telemetry/traces/:traceId/spans` | 取得 Trace span |
+
+## 常用 query 參數
+
+### 分頁
+
+大部分清單 endpoint 支援：
+
+```typescript prettier:false
+{
+  page?: number;   // Page number (0-indexed)
+  perPage?: number; // Items per page (default: 10)
+}
+```
+
+### 篩選
+
+Workflow run 支援：
+
+```typescript prettier:false
+{
+  fromDate?: string;  // ISO date string
+  toDate?: string;    // ISO date string
+  status?: string;    // Run status filter
+  resourceId?: string; // Filter by resource
+}
+```
+
+## 錯誤 response
+
+所有 route 都以以下格式傳回錯誤：
+
+```typescript prettier:false
+{
+  error: string;      // Error message
+  details?: unknown;  // Additional details
+}
+```
+
+常見 status code：
+
+| Code | 含義 |
+| - | - |
+| 400 | 錯誤 request——參數無效 |
+| 401 | 未獲授權——缺少 auth 或 auth 無效 |
+| 403 | 禁止存取——權限不足 |
+| 404 | 找不到——資源不存在 |
+| 500 | Server 內部錯誤 |
+
+## 相關內容
+
+- [createRoute()](/reference/server/create-route)：建立自訂 route
+- [Server adapter](/docs/server/server-adapters)：使用 adapter

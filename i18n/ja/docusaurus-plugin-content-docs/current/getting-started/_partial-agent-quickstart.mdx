@@ -1,0 +1,114 @@
+**AI Agent 向け：** Mastra プロジェクトをゼロから構築するよう指示された場合は、次の見出しまでの簡略化された手順に従ってください。Agent と Tool のサンプルコードは要件に合わせて調整します。後の手順で重要となる点として、`model` は `provider/model` 形式の文字列（例：`__GATEWAY_OPENAI_MODEL__`）で定義してください。OpenAI では `openai/<model>` を使用し、`openai:<model>` は使用しないでください。また、Provider オブジェクトをインポートしたり渡したりしないでください。
+
+`package.json` ファイルを作成し、`{ "type": "module" }` を指定します。必要な依存関係をインストールします：`npm install @mastra/core@latest zod@latest typescript@latest @types/node@latest mastra@latest`
+
+tsconfig.json ファイルを作成します。
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "outDir": "dist"
+  },
+  "include": ["src/**/*"]
+}
+```
+
+Agent に Tool を追加する必要がある場合は、新しいファイルを作成し、`import { createTool } from "@mastra/core/tools"` を使用します。単純なオブジェクトとして Tool を定義すると、エラーを出さずに実行に失敗します。Tool は必ず `createTool()` を使い、`id`、`description`、`inputSchema`（zod）、`execute()` を指定して定義してください。`execute()` は 2 つのパラメーターを受け取ります。1 つ目は inputSchema に基づいて検証された入力データ、2 つ目は省略可能な実行コンテキストオブジェクトです。実行コンテキストには `requestContext`、`tracingContext`、`abortSignal` などの実行メタデータが含まれます。
+
+例：
+
+```ts
+// src/mastra/tools/weather-tool.ts
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const weatherTool = createTool({
+  id: 'get-weather',
+  description: 'Get current weather for a location',
+  inputSchema: z.object({
+    location: z.string().describe('City name'),
+  }),
+  outputSchema: z.object({
+    location: z.string(),
+    temperatureCelsius: z.number(),
+    conditions: z.string(),
+  }),
+  execute: async ({ location }) => {
+    return {
+      location,
+      temperatureCelsius: 21,
+      conditions: 'sunny',
+    }
+  },
+})
+```
+
+Agent を作成する必要がある場合は、新しいファイルを作成し、`import { Agent } from "@mastra/core/agent"` を使用します。コンストラクターには `{ id, name, instructions, model }` を渡します。`model` プロパティは Mastra のモデルルーター形式の文字列です。この形式では Provider のインポートは不要です。Mastra のドキュメントに記載がない限り、AI SDK パッケージをインストールしないでください。
+
+モデルを `provider/model` 形式で定義すると、Mastra は Provider に対応する環境変数を自動的に検索します。定義したモデルを使用するには、その Provider の環境変数を設定する必要があります。OpenAI：`OPENAI_API_KEY`、Anthropic：`ANTHROPIC_API_KEY`、Google：`GOOGLE_API_KEY`。たとえば、どの `openai/<model>` にも環境変数 `OPENAI_API_KEY` が必要です。サポートされている Provider と環境変数名の完全な一覧は、[https://mastra.ai/models/environment-variables](https://mastra.ai/models/environment-variables) を参照してください。
+
+既知のモデル ID の一部を次に示します。
+
+- `__GATEWAY_OPENAI_MODEL__`, `__GATEWAY_OPENAI_MODEL_MINI__`
+- `__GATEWAY_ANTHROPIC_MODEL_SONNET__`, `__GATEWAY_ANTHROPIC_MODEL_OPUS__`, `__GATEWAY_ANTHROPIC_MODEL_HAIKU__`
+- `__GATEWAY_GOOGLE_MODEL_FLASH__`
+
+サポートされているモデルの完全な一覧は、[https://mastra.ai/models](https://mastra.ai/models) を参照してください。
+
+Tool をインポートし、tools オブジェクトとして Agent のコンストラクターに渡すことで、Agent に Tool を追加します。
+
+例：
+
+```ts
+// src/mastra/agents/weather-agent.ts
+import { Agent } from '@mastra/core/agent'
+import { weatherTool } from '../tools/weather-tool.ts'
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: `
+      You are a helpful weather assistant that provides accurate weather information.
+
+      Your primary function is to help users get weather details for specific locations. When responding:
+      - Include relevant details like humidity, wind conditions, and precipitation
+      - Keep responses concise but informative
+
+      Use the weatherTool to fetch current weather data.
+`,
+  // Use a string in provider/model format, not provider:model or a provider object.
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { weatherTool },
+})
+```
+
+`src/mastra/index.ts` に Mastra のエントリーポイントを作成し、Agent を登録します。
+
+```ts
+import { Mastra } from '@mastra/core'
+import { weatherAgent } from './agents/weather-agent.ts'
+
+export const mastra = new Mastra({
+  agents: { weatherAgent },
+})
+```
+
+これで Agent を直接実行できます。Mastra インスタンスをインポートし、ID で Agent を取得してから agent.generate() を呼び出します。Node.js 22.18.0 以降では TypeScript ファイルを直接実行できます。ローカルファイルをインポートするときは、必ずファイル拡張子を付けてください。例：
+
+```ts
+// run.mjs
+import { mastra } from './src/mastra/index.ts'
+
+const agent = mastra.getAgentById('weather-agent')
+const response = await agent.generate('Weather in SF')
+console.log(response.text)
+```

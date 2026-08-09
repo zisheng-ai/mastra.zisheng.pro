@@ -1,0 +1,209 @@
+---
+title: "參考：ProviderHistoryCompat | Processors"
+description: "Mastra 中 ProviderHistoryCompat processor 的 API 參考；此 processor 會套用 Provider 專屬的歷史記錄兼容修正。"
+packages:
+  - "@mastra/core"
+---
+
+# ProviderHistoryCompat
+
+`ProviderHistoryCompat` processor 會處理 Provider 專屬的歷史記錄不兼容問題。它可以在呼叫 Provider 前重寫傳出的語言模型 prompt，亦可回應 API 錯誤，以修復後的訊息歷史記錄重試。
+
+當 Agent 可能在不同模型 Provider 之間切換，或跨 Provider 重用訊息歷史記錄時，請使用此 processor。它亦可處理某個 Provider 拒絕另一個 Provider 所產生欄位的情況。
+
+## 使用範例
+
+如要讓 Agent 使用所有內置兼容規則，請將 `ProviderHistoryCompat` 加入 `inputProcessors`：
+
+```typescript title="src/mastra/agents/my-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { ProviderHistoryCompat } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  instructions: 'You are a helpful assistant.',
+  model: 'anthropic/claude-sonnet-4-5',
+  inputProcessors: [new ProviderHistoryCompat()],
+})
+```
+
+Mastra Agent 不會自動加入此 processor。如需要 Provider 歷史記錄兼容規則、API 錯誤的反應式復原、自訂規則或可預測的 processor 執行次序，請明確加入它。
+
+## Constructor 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'opts',
+    type: '{ additionalRules?: CompatRule[] }',
+    description: 'Provider 歷史記錄兼容規則的配置選項。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'Options',
+        parameters: [
+          {
+            name: 'additionalRules',
+            type: 'CompatRule[]',
+            description:
+              '在內置規則之後執行的自訂兼容規則。規則可以重寫傳出的 prompt，或在匹配 API 錯誤後修復已持久保存的訊息。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 屬性
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: "'provider-history-compat'",
+    description: 'Processor 識別符。',
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: "'Provider History Compat'",
+    description: 'Processor 顯示名稱。',
+    isOptional: false,
+  },
+  {
+    name: 'processLLMRequest',
+    type: '(args: ProcessLLMRequestArgs) => ProcessLLMRequestResult',
+    description:
+      '在呼叫 Provider 前的一刻，針對已轉換的 LanguageModelV2Prompt 執行先發兼容規則。返回的 prompt 變更只屬暫時性，不會持久保存至記憶或訊息歷史記錄。',
+    isOptional: false,
+  },
+  {
+    name: 'processAPIError',
+    type: '(args: ProcessAPIErrorArgs) => Promise<ProcessAPIErrorResult | void>',
+    description:
+      '當 Provider 拒絕請求時執行反應式兼容規則。匹配的規則可以修改訊息清單，並在第一次重試時返回 retry: true。',
+    isOptional: false,
+  },
+]}
+/>
+
+## 內置規則
+
+`ProviderHistoryCompat` 包含以下內置兼容規則：
+
+| 規則 | Provider | 執行時機 | 行為 |
+| - | - | - | - |
+| `anthropic-tool-id-format` | Anthropic | 反應式 API 錯誤復原 | 重寫包含 `[a-zA-Z0-9_-]` 以外字元的 Tool 呼叫 ID，然後重試請求。 |
+| `cerebras-strip-reasoning-content` | Cerebras | 先發 prompt 重寫 | 從傳出的 prompt 移除 assistant `reasoning` 部分，避免它們序列化為不受支援的 `reasoning_content` 欄位。 |
+| `anthropic-strip-foreign-reasoning-content` | Anthropic | 先發 prompt 重寫 | 從傳出的 prompt 移除並非源自 Anthropic 的 assistant `reasoning` 部分。源自 Anthropic 的 thinking 歷史記錄則會保留。 |
+
+Mastra 將訊息轉換為模型 prompt 格式後、把 prompt 傳送至 Provider 前，先發規則會透過 `processLLMRequest` 執行。這些重寫只會影響目前的 Provider 呼叫。
+
+Provider 拒絕請求後，反應式規則會透過 `processAPIError` 執行。它們可以更新已持久保存的 `messageList`，並要求重試。
+
+## `CompatRule`
+
+`CompatRule` 定義一項 Provider 歷史記錄兼容修正：
+
+```typescript
+import type { CompatRule } from '@mastra/core/processors'
+
+const removeUnsupportedPromptParts: CompatRule = {
+  name: 'remove-unsupported-prompt-parts',
+  applyToPrompt({ prompt, model }) {
+    // Return a modified LanguageModelV2Prompt, or undefined to leave it unchanged.
+    return undefined
+  },
+}
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'name',
+    type: 'string',
+    description: '供記錄及除錯使用、方便閱讀的規則識別符。',
+    isOptional: false,
+  },
+  {
+    name: 'errorPatterns',
+    type: 'RegExp[]',
+    description:
+      '用於匹配 Provider API 錯誤訊息及回應內容的模式。實作 fix 的反應式規則必須提供此項。',
+    isOptional: true,
+  },
+  {
+    name: 'fix',
+    type: '(messages: MastraDBMessage[]) => boolean',
+    description:
+      '匹配 API 錯誤後修改已持久保存資料庫訊息的反應式修正。如規則已變更訊息且應重試請求，請返回 true。',
+    isOptional: true,
+  },
+  {
+    name: 'applyToPrompt',
+    type: '(args: { prompt: LanguageModelV2Prompt; model: unknown }) => LanguageModelV2Prompt | undefined',
+    description:
+      '為目前 Provider 呼叫重寫傳出 prompt 的先發修正。如無需變更 prompt，請返回 undefined。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 自訂規則
+
+透過 `additionalRules` 傳入自訂規則。自訂規則會在內置規則之後執行：
+
+```typescript title="src/mastra/agents/custom-provider-compat.ts"
+import { Agent } from '@mastra/core/agent'
+import { ProviderHistoryCompat, type CompatRule } from '@mastra/core/processors'
+
+const stripUnsupportedAssistantMetadata: CompatRule = {
+  name: 'strip-unsupported-assistant-metadata',
+  applyToPrompt({ prompt, model }) {
+    if (typeof model !== 'string' || !model.startsWith('example-provider/')) {
+      return undefined
+    }
+
+    let changed = false
+    const nextPrompt = prompt.map(message => {
+      if (message.role !== 'assistant' || typeof message.content === 'string') {
+        return message
+      }
+
+      const nextContent = message.content.map(part => {
+        if (!('providerOptions' in part)) return part
+        changed = true
+        const { providerOptions: _providerOptions, ...rest } = part
+        return rest
+      })
+
+      return { ...message, content: nextContent }
+    })
+
+    return changed ? nextPrompt : undefined
+  },
+}
+
+export const agent = new Agent({
+  id: 'custom-provider-agent',
+  name: 'custom-provider-agent',
+  instructions: 'You are a helpful assistant.',
+  model: 'example-provider/model',
+  inputProcessors: [
+    new ProviderHistoryCompat({
+      additionalRules: [stripUnsupportedAssistantMetadata],
+    }),
+  ],
+})
+```
+
+如 Provider 專屬重寫不應儲存至記憶，請使用 `applyToPrompt`。當 Provider 拒絕已持久保存的訊息歷史記錄，而修復後的歷史記錄應在日後的對話輪次重用，請配合 `errorPatterns` 使用 `fix`。
+
+## 相關內容
+
+- [Processor 介面](/reference/processors/processor-interface)
+- [Processors](/docs/agents/processors)
+- [PrefillErrorHandler](/reference/processors/prefill-error-handler)

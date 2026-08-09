@@ -1,0 +1,250 @@
+---
+title: "參考：上下文精確率評分器 | Evals"
+description: Mastra 上下文精確率評分器的文件。使用平均精確率評估擷取上下文對產生預期輸出的相關性與精確率。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# 上下文精確率評分器
+
+`createContextPrecisionScorer()` 函式會建立一個評分器，用來評估擷取到的上下文片段對產生預期輸出是否相關，以及其排列位置是否恰當。此評分器使用**平均精確率（Mean Average Precision，MAP）**，獎勵將相關上下文排在序列前方的系統。
+
+此評分器特別適合下列使用案例：
+
+## RAG 系統評估
+
+適合在下列 RAG 管線中評估擷取到的上下文：
+
+- 上下文順序會影響模型效能
+- 除了基本相關性之外，還需要衡量擷取品質
+- 較早出現的相關上下文比稍後出現的更有價值
+
+## 上下文視窗最佳化
+
+適合用於最佳化下列情況的上下文選取：
+
+- 上下文視窗有限
+- Token 預算受限
+- 多步驟推理任務
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description: '用於評估上下文相關性的語言模型',
+    required: true,
+  },
+  {
+    name: 'options',
+    type: 'ContextPrecisionMetricOptions',
+    description: '評分器的設定選項',
+    required: true,
+    children: [
+      {
+        name: 'context',
+        type: 'string[]',
+        description: '要評估相關性的上下文片段陣列',
+        required: false,
+      },
+      {
+        name: 'contextExtractor',
+        type: '(input, output) => string[]',
+        description: '從執行輸入與輸出中動態擷取上下文的函式',
+        required: false,
+      },
+      {
+        name: 'scale',
+        type: 'number',
+        description: '乘以最終分數的縮放係數（預設：1）',
+        required: false,
+      },
+    ],
+  },
+]}
+/>
+
+必須提供 `context` 或 `contextExtractor` 其中之一。若兩者皆提供，則以 `contextExtractor` 為優先。
+
+## `.run()` 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'score',
+    type: 'number',
+    description: '介於 0 與 scale 之間的平均精確率分數（預設為 0-1）',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description: '便於閱讀的上下文精確率評估說明',
+  },
+]}
+/>
+
+## 評分詳情
+
+### 平均精確率（MAP）
+
+上下文精確率使用**平均精確率**，同時評估相關性與排列位置：
+
+1. **上下文評估**：將每個上下文片段分類為與產生預期輸出相關或不相關
+1. **精確率計算**：對位置 `i` 的每個相關上下文，精確率 = `relevant_items_so_far / (i + 1)`
+1. **平均精確率**：將所有精確率值相加，再除以相關項目總數
+1. **最終分數**：乘以縮放係數，並四捨五入至小數點後 2 位
+
+### 評分公式
+
+```
+MAP = (Σ Precision@k) / R
+
+Where:
+- Precision@k = (relevant items in positions 1...k) / k
+- R = total number of relevant items
+- Only calculated at positions where relevant items appear
+```
+
+### 分數解讀
+
+- **0.9-1.0**：精確率極佳——所有相關上下文都位於序列前方
+- **0.7-0.8**：精確率良好——大多數相關上下文的位置恰當
+- **0.4-0.6**：精確率中等——相關上下文與不相關內容混雜
+- **0.1-0.3**：精確率不佳——相關上下文很少或位置不佳
+- **0.0**：找不到相關上下文
+
+### 理由分析
+
+reason 欄位會說明：
+
+- 哪些上下文片段判定為相關／不相關
+- 排列位置如何影響 MAP 計算
+- 評估時使用的具體相關性標準
+
+### 最佳化建議
+
+使用結果來：
+
+- **改善擷取**：在排序前濾除不相關的上下文
+- **最佳化排序**：確保相關上下文會優先出現
+- **調整區塊大小**：在上下文細節與相關性精確率之間取得平衡
+- **評估嵌入模型**：測試不同的嵌入模型，以改善擷取結果
+
+### 計算範例
+
+context：`[relevant, irrelevant, relevant, irrelevant]`
+
+- 位置 0：相關 → 精確率 = 1/1 = 1.0
+- 位置 1：略過（不相關）
+- 位置 2：相關 → 精確率 = 2/3 = 0.67
+- 位置 3：略過（不相關）
+
+MAP = (1.0 + 0.67) / 2 = 0.835 ≈ **0.83**
+
+## 評分器設定
+
+### 動態擷取上下文
+
+```typescript
+const scorer = createContextPrecisionScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract context dynamically based on the query
+      const query = input?.inputMessages?.[0]?.content || ''
+
+      // Example: Retrieve from a vector database
+      const searchResults = vectorDB.search(query, { limit: 10 })
+      return searchResults.map(result => result.content)
+    },
+    scale: 1,
+  },
+})
+```
+
+### 大量上下文評估
+
+```typescript
+const scorer = createContextPrecisionScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      // Simulate retrieved documents from vector database
+      'Document 1: Highly relevant content...',
+      'Document 2: Somewhat related content...',
+      'Document 3: Tangentially related...',
+      'Document 4: Not relevant...',
+      'Document 5: Highly relevant content...',
+      // ... up to dozens of context pieces
+    ],
+  },
+})
+```
+
+## 範例
+
+針對不同查詢，評估 RAG 系統擷取上下文的精確率：
+
+```typescript title="src/example-context-precision.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createContextPrecisionScorer } from '@mastra/evals/scorers/prebuilt'
+import { myAgent } from './agent'
+
+const scorer = createContextPrecisionScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract context from agent's retrieved documents
+      return output.metadata?.retrievedContext || []
+    },
+  },
+})
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'How does photosynthesis work in plants?',
+    },
+    {
+      input: 'What are the mental and physical benefits of exercise?',
+    },
+  ],
+  scorers: [scorer],
+  target: myAgent,
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+如需 `runEvals` 的更多詳細資訊，請參閱 [runEvals 參考文件](/reference/evals/run-evals)。
+
+若要將此評分器加入 Agent，請參閱[評分器概觀](/docs/evals/overview#adding-scorers-to-agents)指南。
+
+## 與上下文相關性比較
+
+依需求選擇適合的評分器：
+
+| 使用案例 | 上下文相關性 | 上下文精確率 |
+| - | - | - |
+| **RAG 評估** | 重視使用情況時 | 重視排序時 |
+| **上下文品質** | 細緻的相關程度 | 二元相關性 |
+| **缺漏偵測** | ✓ 識別缺漏 | ✗ 不評估 |
+| **使用情況追蹤** | ✓ 追蹤使用率 | ✗ 不考量 |
+| **位置敏感度** | ✗ 不受位置影響 | ✓ 獎勵前置排列 |
+
+## 相關資源
+
+- [答案相關性評分器](/reference/evals/answer-relevancy)：評估答案是否回應問題
+- [忠實度評分器](/reference/evals/faithfulness)：衡量答案是否以系統上下文為依據
+- [自訂評分器](/docs/evals/custom-scorers)：建立自己的評估指標

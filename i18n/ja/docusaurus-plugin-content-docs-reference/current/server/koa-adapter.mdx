@@ -1,0 +1,194 @@
+---
+title: "リファレンス：Koa アダプター | Server"
+description: "@mastra/koa サーバーアダプターの API リファレンスです。"
+packages:
+  - "@mastra/koa"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Koa アダプター
+
+`@mastra/koa` パッケージは、Mastra を [Koa](https://koajs.com) で実行するためのサーバーアダプターを提供します。アダプターの一般的な概念（コンストラクターオプション、初期化フローなど）については、[サーバーアダプター](/docs/server/server-adapters)を参照してください。
+
+## インストール
+
+Koa アダプターと Koa フレームワークをインストールします。
+
+```bash npm2yarn
+npm install @mastra/koa@latest koa koa-bodyparser
+```
+
+## 使用例
+
+```typescript title="server.ts"
+import Koa from 'koa'
+import bodyParser from 'koa-bodyparser'
+import { MastraServer } from '@mastra/koa'
+import { mastra } from './mastra'
+
+const app = new Koa()
+app.use(bodyParser())
+
+const server = new MastraServer({ app, mastra })
+
+await server.init()
+
+app.listen(3000, () => {
+  console.log('Server running on http://localhost:3000')
+})
+```
+
+## コンストラクターのパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'app',
+    type: 'Koa',
+    description: 'Koa アプリのインスタンス',
+    isOptional: false,
+  },
+  {
+    name: 'mastra',
+    type: 'Mastra',
+    description: 'Mastra のインスタンス',
+    isOptional: false,
+  },
+  {
+    name: 'prefix',
+    type: 'string',
+    description: 'ルートパスのプレフィックス（例：`/api/v2`）',
+    isOptional: true,
+    defaultValue: "''",
+  },
+  {
+    name: 'openapiPath',
+    type: 'string',
+    description: 'OpenAPI 仕様を配信するパス（例：`/openapi.json`）',
+    isOptional: true,
+    defaultValue: "''",
+  },
+  {
+    name: 'bodyLimitOptions',
+    type: 'BodyLimitOptions',
+    typeDescription: '{ maxSize: number, onError: (error: unknown) => unknown }',
+    description: 'リクエストボディのサイズ制限',
+    isOptional: true,
+  },
+  {
+    name: 'streamOptions',
+    type: 'StreamOptions',
+    typeDescription: '{ redact?: boolean }',
+    description:
+      'ストリームの秘匿化設定。true（デフォルト）の場合、クライアントに送信する前にストリームチャンクから機密データ（システムプロンプト、Tool 定義、API キー）を秘匿します。',
+    isOptional: true,
+    defaultValue: '{ redact: true }',
+  },
+  {
+    name: 'customRouteAuthConfig',
+    type: 'Map<string, boolean>',
+    description:
+      'ルートごとの認証オーバーライド。キーは `METHOD:PATH`（例：`GET:/api/health`）です。値が `false` の場合はルートを公開し、`true` の場合は認証を必須にします。',
+    isOptional: true,
+  },
+  {
+    name: 'tools',
+    type: 'ToolsInput',
+    typeDescription: 'Record<string, ToolAction | VercelTool>',
+    description: 'サーバーで利用可能な Tool',
+    isOptional: true,
+  },
+  {
+    name: 'taskStore',
+    type: 'InMemoryTaskStore',
+    description: 'A2A（Agent-to-Agent）操作用のタスクストア',
+    isOptional: true,
+  },
+  {
+    name: 'mcpOptions',
+    type: 'MCPOptions',
+    typeDescription: '{ serverless?: boolean, sessionIdGenerator?: () => string }',
+    description:
+      'MCP トランスポートのオプション。Cloudflare Workers や Vercel Edge などのステートレス環境では `serverless: true` を設定します。',
+    isOptional: true,
+  },
+]}
+/>
+
+## エラー処理
+
+Koa アダプターは、Koa の標準的なエラー処理パターンに従い、ルートハンドラーからのエラーを Koa のミドルウェアチェーンへ伝播します。そのため、通常の Koa エラー処理ミドルウェアを使用できます。
+
+```typescript title="server.ts"
+const app = new Koa()
+app.use(bodyParser())
+
+// Your error middleware catches errors from Mastra route handlers
+app.use(async (ctx, next) => {
+  try {
+    await next()
+  } catch (err) {
+    ctx.status = err.status || 500
+    ctx.body = { error: err.message }
+    // Log, report to Sentry, etc.
+  }
+})
+
+const server = new MastraServer({ app, mastra })
+await server.init()
+```
+
+[`server.onError`](/reference/configuration#serveronerror) フックもサポートされています。設定すると、エラーがミドルウェアに伝播する前に呼び出され、そのレスポンスが直接使用されます。
+
+```typescript title="src/mastra/index.ts"
+const mastra = new Mastra({
+  server: {
+    onError: (err, c) => {
+      console.error('Unhandled error:', err)
+      return c.json({ error: err.message }, 500)
+    },
+  },
+})
+```
+
+`init()` を使用すると、安全策としてグローバルなエラー処理ミドルウェアも登録されます。このミドルウェアに到達したエラーは、Koa の標準規約に従い `ctx.app.emit('error', err, ctx)` を介して発行されます。
+
+## 生のルートの保護
+
+Mastra が管理する認証や `requiresAuth` などのルートメタデータが必要な場合は、[`registerApiRoute()`](/reference/server/register-api-route) を推奨します。アプリに直接マウントする生の Koa ルートでは、`createAuthMiddleware()` を使用します。
+
+```typescript title="server.ts"
+import Koa from 'koa'
+import { createAuthMiddleware, MastraServer } from '@mastra/koa'
+import { mastra } from './mastra'
+
+const app = new Koa()
+const server = new MastraServer({ app, mastra })
+
+await server.init()
+
+app.use(createAuthMiddleware({ mastra }))
+app.use(async ctx => {
+  if (ctx.path !== '/custom/protected') return
+
+  const user = ctx.state.requestContext.get('user')
+  ctx.body = { user }
+})
+```
+
+## 手動初期化
+
+ミドルウェアの順序をカスタマイズするには、`init()` の代わりに各メソッドを個別に呼び出します。詳しくは、[手動初期化](/docs/server/server-adapters#manual-initialization)を参照してください。
+
+## 例
+
+- [Koa アダプター](https://github.com/mastra-ai/mastra/tree/main/examples/server-koa-adapter)：Koa サーバーの基本的なセットアップ
+
+## 関連項目
+
+- [サーバーアダプター](/docs/server/server-adapters)：アダプターに共通する概念
+- [MastraServer リファレンス](/reference/server/mastra-server)：完全な API リファレンス
+- [createRoute() リファレンス](/reference/server/create-route)：型安全なカスタムルートの作成

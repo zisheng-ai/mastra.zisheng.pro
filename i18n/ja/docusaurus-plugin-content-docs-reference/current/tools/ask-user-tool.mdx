@@ -1,0 +1,131 @@
+---
+title: "リファレンス：askUserTool | Tools"
+description: "ユーザーに質問するために Agent の実行を中断し、回答を受け取って再開する組み込み Tool、askUserTool の API リファレンス。"
+packages:
+  - "@mastra/core"
+---
+
+# askUserTool
+
+ユーザーに質問し、その回答を待つ、Agent に依存しない組み込み Tool です。自由入力形式の質問、単一選択形式のプロンプト、複数選択形式のプロンプトをサポートします。
+
+この Tool は、ネイティブの[Tool 中断](/docs/agents/agent-approval#runtime-suspension-with-suspend)プリミティブを介して処理を一時停止します。質問のペイロードを渡して `suspend()` を呼び出すと、Agent は `tool-call-suspended` イベントを発行し、実行状態を永続化します。`agent.resumeStream(answer, { runId })` で実行を再開します。
+
+Agent の実行外（`suspend` が利用できない場合）で実行すると、質問と選択肢を含む読みやすいフォールバック文字列を返します。
+
+## 使用例
+
+Agent の Tool セットに `askUserTool` を追加します。
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { askUserTool } from '@mastra/core/tools'
+
+const agent = new Agent({
+  id: 'assistant',
+  name: 'Assistant',
+  instructions: 'Ask the user for clarification when the request is ambiguous.',
+  model,
+  tools: { askUserTool },
+})
+```
+
+中断を処理して再開します。
+
+```typescript title="src/run.ts"
+const stream = await agent.stream('Summarize my project')
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'tool-call-suspended') {
+    const { question, options, selectionMode } = chunk.payload.suspendPayload
+    // Present the question to the user, collect their answer, then resume:
+    const resumed = await agent.resumeStream('The main repo', { runId: stream.runId })
+    for await (const c of resumed.textStream) process.stdout.write(c)
+  }
+}
+```
+
+複数選択形式のプロンプトでは、文字列の配列を渡して再開します。
+
+```typescript
+await agent.resumeStream(['Add tests', 'Update docs'], { runId: stream.runId })
+```
+
+## 入力スキーマ
+
+モデルは、次のパラメーターを指定してこの Tool を呼び出します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'question',
+    type: 'string',
+    description: 'ユーザーへの質問。空の文字列は指定できません。',
+    isOptional: false,
+  },
+  {
+    name: 'options',
+    type: 'AskUserOption[]',
+    description: 'ユーザー向けの構造化された選択肢。省略すると、自由入力形式のプロンプトになります。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'AskUserOption',
+        parameters: [
+          {
+            name: 'label',
+            type: 'string',
+            description: 'この選択肢に表示する短いテキスト。選択されると、この値がモデルに返されます。',
+          },
+          {
+            name: 'description',
+            type: 'string',
+            description: 'この選択肢の意味を示す説明。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'selectionMode',
+    type: "'single_select' | 'multi_select'",
+    description:
+      "ユーザーが選択できる選択肢の数を制御します。選択肢が指定されている場合のデフォルトは 'single_select' です。options の指定が必要です。",
+    isOptional: true,
+  },
+]}
+/>
+
+## 中断ペイロード
+
+`tool-call-suspended` イベントには、入力と同じ形式の `suspendPayload` が含まれます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'question',
+    type: 'string',
+    description: 'ユーザーに提示される質問。',
+  },
+  {
+    name: 'options',
+    type: 'AskUserOption[]',
+    description: '構造化された選択肢（存在する場合）。',
+    isOptional: true,
+  },
+  {
+    name: 'selectionMode',
+    type: "'single_select' | 'multi_select'",
+    description: '確定した選択モード。自由入力形式のプロンプトでは省略されます。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 再開データ
+
+ユーザーの回答を `agent.resumeStream()` に渡します。
+
+- **自由入力および単一選択：** `string`。
+- **複数選択：** 選択された選択肢のラベルを格納した `string[]`。

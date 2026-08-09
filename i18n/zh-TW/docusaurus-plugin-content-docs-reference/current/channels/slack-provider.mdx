@@ -1,0 +1,369 @@
+---
+title: "參考文件：SlackProvider | Channel Provider"
+description: "SlackProvider 的 API 參考文件。這項受管理的 Slack 整合會建立 Slack app、處理 OAuth，並將訊息路由至 Agent。"
+packages:
+  - "@mastra/slack"
+---
+
+# SlackProvider
+
+`SlackProvider` 是將 Agent 連接至 Slack 的受管理方式。在 `Mastra.channels` 上註冊後，它會透過 Manifest API 佈建 Slack app、執行 OAuth 安裝流程、輪替設定 token，並將 Slack 事件路由至 Agent。若要由 Mastra 負責建立與安裝 app，請使用此方式。若要採用較低階的方式，自行建立 Slack app 並設定 scope 與 webhook，請在 Agent 的 `channels.adapters` 上使用 [`createSlackAdapter`](/docs/capabilities/channels/slack)。
+
+## 使用範例
+
+在 `Mastra` 建構函式上註冊 Provider。refresh token 只能使用一次，並會在啟動時輪替。產生的 access token 會持續儲存至 `Mastra.storage`。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { SlackProvider } from '@mastra/slack'
+
+export const mastra = new Mastra({
+  storage,
+  channels: {
+    slack: new SlackProvider({
+      refreshToken: process.env.SLACK_APP_CONFIG_REFRESH_TOKEN,
+      baseUrl: process.env.MASTRA_BASE_URL,
+    }),
+  },
+})
+```
+
+若建構時無法取得認證（例如透過 Editor UI 輸入，或從 vault 載入），可在建構 Provider 時省略認證，稍後再呼叫 [`configure()`](#configurecredentials)：
+
+```typescript title="src/mastra/index.ts"
+const slack = new SlackProvider()
+
+await slack.configure({
+  refreshToken: process.env.SLACK_APP_CONFIG_REFRESH_TOKEN,
+})
+```
+
+## 建構函式參數
+
+`SlackProviderConfig` 結合 Slack 專屬欄位、Slack adapter 覆寫（`toolDisplay`、`streaming`、`typingStatus`），以及會轉送給每個已連接 Agent 的精選 [`ChannelConfig`](/reference/agents/channels) 選項子集（例如 `handlers`、`inlineMedia` 與 `state`）。所有欄位皆為選填。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'refreshToken',
+    type: 'string',
+    isOptional: true,
+    description:
+      'Slack App Configuration refresh token，用於自動輪替 token。只能使用一次；每次輪替都會傳回一組新的 token。也可以稍後透過 `configure()` 提供。省略時，Provider 會以未設定狀態啟動，必須呼叫 `configure()` 或從 storage 載入 token 後才能建立 app。請在 api.slack.com/apps 的 "Your App Configuration Tokens" 下產生此 token。',
+  },
+  {
+    name: 'token',
+    type: 'string',
+    isOptional: true,
+    description:
+      '用於以程式建立 app 的 Slack App Configuration access token。此欄位為選填，因為 Provider 會在啟動時使用 `refreshToken` 輪替成新的 token。',
+  },
+  {
+    name: 'baseUrl',
+    type: 'string',
+    isOptional: true,
+    description:
+      'webhook 與 OAuth callback 的公開基底 URL。呼叫 `connect()` 建立 app 時必須提供。也可以透過 `setBaseUrl()` 設定，或從 Mastra 伺服器設定自動偵測。本機開發請使用 `cloudflared` 等 tunnel。',
+  },
+  {
+    name: 'encryptionKey',
+    type: 'string',
+    isOptional: true,
+    description:
+      '敏感儲存資料（client secret、signing secret、bot token）的加密金鑰。請使用至少 32 個字元的隨機字串。也可以透過 `MASTRA_ENCRYPTION_KEY` 環境變數設定。省略時，secret 會以純文字儲存（不建議在正式環境使用）。',
+  },
+  {
+    name: 'storage',
+    type: 'ChannelsStorage',
+    isOptional: true,
+    description:
+      'installation 的自訂 storage。預設使用全域 storage 中 Mastra 的 `ChannelsStorage`。如果沒有可用的持久性 storage，則擲回錯誤。',
+  },
+  {
+    name: 'redirectPath',
+    type: 'string',
+    isOptional: true,
+    defaultValue: '"/"',
+    description: '完成 OAuth 後要重新導向的路徑。',
+  },
+  {
+    name: 'onInstall',
+    type: '(installation: SlackInstallation) => Promise<void>',
+    isOptional: true,
+    description: 'Workspace 成功安裝 app 時呼叫。',
+  },
+  {
+    name: 'streaming',
+    type: 'StreamingConfig | false',
+    isOptional: true,
+    defaultValue: 'true',
+    description:
+      '產生 Agent 文字 delta 時，將其串流傳送至 Slack。傳入 `{ updateIntervalMs }` 可自訂張貼及編輯間隔；傳入 `false` 則會將文字緩衝至 step-finish。停用串流會將 `toolDisplay` 限制為靜態模式。',
+  },
+  {
+    name: 'textFormat',
+    type: "'markdown' | 'plain'",
+    isOptional: true,
+    defaultValue: "'markdown'",
+    description:
+      "Agent 最終回覆文字的方言，會轉送給 Slack adapter。`'markdown'`（預設值）會以 markdown 張貼回覆，讓 Slack 原生呈現粗體、連結與表格。`'plain'` 會張貼純文字，供提示 Agent 輸出 Slack mrkdwn 時使用。適用於緩衝回覆（`streaming: false`）與串流 fallback；原生串流一律使用 markdown。",
+  },
+  {
+    name: 'toolDisplay',
+    type: 'ToolDisplay',
+    isOptional: true,
+    defaultValue: "'grouped'",
+    description:
+      "Tool 呼叫在 Slack 中的呈現方式：`'cards'`、`'text'`、`'timeline'`、`'grouped'`、`'hidden'` 或函式。`'hidden'` 會完全隱藏 Tool 呼叫與結果。`'timeline'` 與 `'grouped'` 需要串流。設定 `streaming: false` 時只能使用靜態模式，預設為 `'cards'`。",
+  },
+  {
+    name: 'typingStatus',
+    type: 'boolean | TypingStatusFn',
+    isOptional: true,
+    defaultValue: 'true',
+    description:
+      'Agent 執行工作時顯示輸入中指示器。設為 `false` 可停用；也可以傳入函式，針對每個 stream chunk 傳回自訂狀態文字（傳回 `undefined` 時，該 chunk 會使用預設值）。',
+  },
+  {
+    name: 'waitUntil',
+    type: 'WaitUntilFn',
+    isOptional: true,
+    description:
+      '傳回目前 Slack webhook 要求的 `waitUntil`。若使用 Hono 無法橋接平台 `ExecutionContext` 的 serverless 執行階段（Vercel、AWS Lambda），則必須提供。缺少此值時，叫用會在 200 ack 後凍結，導致執行作業中途終止。請從平台 SDK（例如 `@vercel/functions`）傳入未包裝的 `waitUntil(promise)`。Cloudflare Workers 與 Netlify 使用者通常不需要此選項。',
+  },
+  {
+    name: 'resolveWaitUntil',
+    type: 'WaitUntilResolver',
+    isOptional: true,
+    description:
+      '如果執行階段透過要求公開 `waitUntil`，但 core 預設行為未涵蓋，則從要求的 Hono `Context` 解析此值。解析順序：`waitUntil` → `resolveWaitUntil` → core 預設值。',
+  },
+  {
+    name: 'handlers',
+    type: 'ChannelHandlers',
+    isOptional: true,
+    description:
+      '覆寫內建事件 handler（`onDirectMessage`、`onMention`）。會轉送至透過此 Provider 連接之每個 Agent 的 `AgentChannels`。',
+  },
+  {
+    name: 'inlineMedia',
+    type: "ChannelConfig['inlineMedia']",
+    isOptional: true,
+    description: '要以 inline 方式傳送給模型的媒體類型。',
+  },
+  {
+    name: 'inlineLinks',
+    type: "ChannelConfig['inlineLinks']",
+    isOptional: true,
+    description: '將訊息文字中的 URL 提升為 file part。',
+  },
+  {
+    name: 'threadContext',
+    type: "ChannelConfig['threadContext']",
+    isOptional: true,
+    description: 'Agent 在對話中途加入時，從 Slack 擷取最近的 thread 訊息。',
+  },
+  {
+    name: 'tools',
+    type: "ChannelConfig['tools']",
+    isOptional: true,
+    description:
+      'channel 是否透過 `AgentChannels.getTools()` 公開 channel Tool（`add_reaction`、`remove_reaction`）。這些 Tool 絕不會自動加入 Agent；若要使用，請透過 `tools: { ...channels.getTools() }` 明確傳入。',
+  },
+  {
+    name: 'state',
+    type: "ChannelConfig['state']",
+    isOptional: true,
+    description:
+      '用於訊息去重、鎖定與 subscription 的 state adapter。預設為由 Mastra 執行個體所設定 storage 支援的 `MastraStateAdapter`，因此 subscription 可在重新啟動後持續保留。',
+  },
+  {
+    name: 'chatOptions',
+    type: "ChannelConfig['chatOptions']",
+    isOptional: true,
+    description: '直接傳給 Chat SDK 的其他選項。',
+  },
+  {
+    name: 'logger',
+    type: "SlackAdapterConfig['logger']",
+    isOptional: true,
+    description: '轉送給底層 `SlackAdapter` 的 logger。預設為 adapter 的 `ConsoleLogger`。',
+  },
+]}
+/>
+
+## 方法
+
+### Agent connection
+
+#### `connect(agentId, options?)`
+
+透過 Manifest API 為 Agent 建立新的 Slack app，並傳回包含授權 URL 的 OAuth 結果，供使用者重新導向。必須設定 `baseUrl`。如果 Agent 已有待處理的 installation，則傳回現有授權 URL，而不建立重複的 app。
+
+```typescript
+const result = await slack.connect('support-agent', {
+  name: 'Support Bot',
+})
+
+// Redirect the user to result.authorizationUrl to install the app
+```
+
+傳回：`Promise<ChannelConnectResult>`
+
+```typescript
+interface ChannelConnectResult {
+  type: 'oauth'
+  installationId: string
+  authorizationUrl: string
+}
+```
+
+`SlackConnectOptions` 可序列化，並可為已儲存的 Agent 加以儲存：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'name',
+    type: 'string',
+    isOptional: true,
+    description: 'Slack bot 的顯示名稱。預設先使用 Agent 名稱，再使用 Agent ID。',
+  },
+  {
+    name: 'description',
+    type: 'string',
+    isOptional: true,
+    description: 'Slack 中顯示的 bot 說明。預設為 "{name} - Powered by Mastra"。',
+  },
+  {
+    name: 'iconUrl',
+    type: 'string',
+    isOptional: true,
+    description: '用於 app 圖示的正方形圖片 URL（至少 512x512）。系統會自動下載並上傳至 Slack。',
+  },
+  {
+    name: 'manifest',
+    type: '(defaults: SlackAppManifest) => SlackAppManifest',
+    isOptional: true,
+    description:
+      '將 Slack app manifest 傳送至 Manifest API 前加以自訂。此函式會接收預設 manifest 並傳回最終版本。可用於自訂 scope、其他事件或互動設定。',
+  },
+  {
+    name: 'redirectUrl',
+    type: 'string',
+    isOptional: true,
+    description: '成功完成 OAuth 後要重新導向的 URL。預設為 Provider 的 `redirectPath` 或 `/`。',
+  },
+]}
+/>
+
+#### `disconnect(agentId)`
+
+刪除 Agent 的 app，並從 storage 移除 installation，以中斷 Agent 與 Slack 的連線。
+
+```typescript
+await slack.disconnect('support-agent')
+```
+
+傳回：`Promise<void>`
+
+#### `getInstallation(agentId)`
+
+傳回 Agent 的 Slack installation；若不存在則傳回 `null`。
+
+```typescript
+const installation = await slack.getInstallation('support-agent')
+```
+
+傳回：`Promise<SlackInstallation | null>`
+
+#### `listInstallations()`
+
+列出所有 Slack installation（僅限公開資訊），包括作用中與待處理的項目。
+
+```typescript
+const installations = await slack.listInstallations()
+```
+
+傳回：`Promise<ChannelInstallationInfo[]>`
+
+### 設定
+
+#### `configure(credentials)`
+
+在執行階段提供或清除 Slack App Configuration 認證。若建構時無法取得認證，請使用此方法。傳入 `null` 可清除認證並刪除已儲存的 token。
+
+```typescript
+// Provide credentials (persists to storage immediately)
+await slack.configure({ refreshToken: 'xoxe-1-...' })
+
+// Clear credentials and stored tokens
+await slack.configure(null)
+```
+
+傳回：`Promise<void>`
+
+#### `setBaseUrl(baseUrl)`
+
+設定 webhook 與 OAuth callback 使用的公開基底 URL。若建構時無法得知 URL，且無法從伺服器設定自動偵測，請使用此方法。
+
+```typescript
+slack.setBaseUrl('https://abc123.trycloudflare.com')
+```
+
+#### `initialize()`
+
+為 storage 中每個作用中的 installation 重新建立 `SlackAdapter`，並將 `AgentChannels` 注入對應 Agent，使其在啟動時接收 Slack 事件。不會自動佈建新的 app；請使用 `connect()` 建立。Mastra 會自動呼叫此方法，因此幾乎不必直接呼叫。
+
+```typescript
+await slack.initialize()
+```
+
+傳回：`Promise<void>`
+
+## 預設 manifest
+
+`connect()` 建立 Slack app 時，產生的 manifest 會要求一組預設 bot scope 與 event subscription。可透過 `connect()` 的 `manifest` 選項覆寫。
+
+| 預設 bot scope | 預設 bot 事件 |
+| - | - |
+| `chat:write` | `app_mention` |
+| `chat:write.public` | `message.channels` |
+| `im:write` | `message.groups` |
+| `channels:history` | `message.im` |
+| `channels:read` | `message.mpim` |
+| `groups:history` | |
+| `groups:read` | |
+| `im:history` | |
+| `im:read` | |
+| `mpim:history` | |
+| `mpim:read` | |
+| `app_mentions:read` | |
+| `users:read` | |
+| `reactions:write` | |
+| `files:read` | |
+| `assistant:write` | |
+
+## 存取 Provider
+
+透過有型別的 `channels` getter 存取已註冊的 Provider，並以註冊時使用的 ID 作為 key：
+
+```typescript
+const result = await mastra.channels.slack.connect('support-agent')
+```
+
+若只在執行階段才知道 key，請用字串 ID 查找並傳入具體型別：
+
+```typescript
+const slack = mastra.getChannelProvider<SlackProvider>('slack')
+const result = await slack.connect('support-agent')
+```
+
+## Storage 需求
+
+`SlackProvider` 需要 `Mastra` 上的持久性 storage，以加密並持續儲存 installation 與輪替的設定 token。如果沒有可用的持久性 storage，也未傳入自訂 `storage`，建構函式會擲回錯誤。
+
+## 相關內容
+
+- [ChannelProvider](/reference/channels/channel-provider)：`SlackProvider` 實作的介面
+- [Channels](/docs/capabilities/channels/overview)：概念、平台設定與 `createSlackAdapter` 路徑
+- [Channels 參考文件](/reference/agents/channels)：`Agent` 建構函式上的 `channels` 設定

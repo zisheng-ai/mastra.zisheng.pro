@@ -1,0 +1,148 @@
+---
+title: "リファレンス: libSQLストレージ | ストレージ"
+description: MastraのlibSQLストレージ実装に関するドキュメントです。
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+---
+
+# libSQLストレージ
+
+[libSQL](https://docs.turso.tech/libsql)は、ローカルとリモートの両方へのデプロイに対応する、オープンソースのSQLite互換データベースです。メッセージ履歴、Workflowのスナップショット、トレース、Evalスコアの保存に使用できます。
+
+セマンティックリコールや従来のRAGなどでベクトルを使用する場合は、埋め込みとベクトル検索を扱う[libSQL Vector](/reference/vectors/libsql)を使用してください。
+
+## インストール
+
+ストレージProviderは別パッケージとしてインストールする必要があります。
+
+```bash npm2yarn
+npm install @mastra/libsql@latest
+```
+
+## 使用方法
+
+```typescript
+import { LibSQLStore } from '@mastra/libsql'
+import { Mastra } from '@mastra/core'
+
+const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'libsql-storage',
+    url: 'file:./storage.db',
+  }),
+})
+```
+
+Agent単位のファイルストレージ:
+
+```typescript
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+import { LibSQLStore } from '@mastra/libsql'
+
+export const agent = new Agent({
+  id: 'example-agent',
+  memory: new Memory({
+    storage: new LibSQLStore({
+      id: 'libsql-storage',
+      url: 'file:./agent.db',
+    }),
+  }),
+})
+```
+
+:::warning
+ファイルストレージは、一時ファイルシステムを使用するサーバーレスプラットフォームでは動作しません。サーバーレス環境にデプロイする場合は、[Turso](https://turso.tech)または別のデータベースエンジンを使用してください。
+:::
+
+リモートデータベースを使用する本番環境:
+
+```typescript
+storage: new LibSQLStore({
+  id: 'libsql-storage',
+  url: 'libsql://your-db-name.aws-ap-northeast-1.turso.io',
+  authToken: process.env.TURSO_AUTH_TOKEN,
+})
+```
+
+ローカルでの開発とテストでは、データをメモリに保存できます。
+
+```typescript
+storage: new LibSQLStore({
+  id: 'libsql-storage',
+  url: ':memory:',
+})
+```
+
+:::warning
+インメモリストレージは、プロセスが変わるとリセットされます。開発用途にのみ適しています。
+:::
+
+## オプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'url',
+    type: 'string',
+    description:
+      'データベースURL。インメモリデータベースには`:memory:`、ファイルデータベースには`file:filename.db`、リモートストレージにはlibSQL接続文字列（例: `libsql://your-database.turso.io`）を使用します。',
+    isOptional: false,
+  },
+  {
+    name: 'authToken',
+    type: 'string',
+    description: 'リモートlibSQLデータベースの認証トークン。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 管理対象のテーブル
+
+このストレージ実装は、通知受信ボックスのレコードと配信メタデータ用の`mastra_notifications`を含む、コアストレージテーブルを自動で作成します。
+
+`LibSQLStore`では、`getStore('notifications')`を介して通知ストレージを利用できます。
+
+## 初期化
+
+ストレージをMastraクラスに渡すと、[コアスキーマ](/reference/storage/overview#core-schema)を作成するために`init()`が自動で呼び出されます。
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+
+const storage = new LibSQLStore({
+  id: 'libsql-storage',
+  url: 'file:./storage.db',
+})
+
+const mastra = new Mastra({
+  storage, // init() called automatically
+})
+```
+
+Mastraを介さずにストレージを直接使用する場合は、`init()`を明示的に呼び出します。
+
+```typescript
+import { LibSQLStore } from '@mastra/libsql'
+
+const storage = new LibSQLStore({
+  id: 'libsql-storage',
+  url: 'file:./storage.db',
+})
+
+await storage.init()
+
+// Access domain-specific stores via getStore()
+const memoryStore = await storage.getStore('memory')
+const thread = await memoryStore?.getThreadById({ threadId: '...' })
+```
+
+## Observability
+
+libSQLはObservabilityをサポートしており、ローカル開発に適しています。デバッグ中にすぐ確認できるよう、`realtime`[トレース戦略](/docs/observability/integrations/exporters/mastra-storage#tracing-strategies)を使用してください。
+
+トレース量が多い本番環境では、[PostgreSQL](/reference/storage/postgresql)または[複合ストレージ経由のClickHouse](/reference/storage/composite#specialized-storage-for-observability)の使用を検討してください。

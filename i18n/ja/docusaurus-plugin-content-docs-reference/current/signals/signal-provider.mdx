@@ -1,0 +1,529 @@
+---
+title: "リファレンス: SignalProvider | Signal"
+description: "外部 Source を監視し、Agent Thread にイベントを送出する Signal Provider を構築するための抽象基底クラス、SignalProvider の API リファレンスです。"
+packages:
+  - "@mastra/core"
+---
+
+# SignalProvider
+
+**追加バージョン:** `@mastra/core@1.39.0`
+
+Signal Provider を構築するための抽象基底クラスです。Signal Provider は外部 Source（API、Webhook、Event Stream）を監視し、組み込みの Subscription Registry を通じて Agent Thread に Notification Signal を送出します。
+
+Signal Provider はデフォルトでは Processor ではありません。Agent の実行をインターセプトする必要がある Provider は、`getInputProcessors()` または `getOutputProcessors()` から Processor を返します。Agent から呼び出せる Tool を公開する Provider は、`getTools()` から Tool を返します。
+
+すぐに使用できる Webhook ベースの Provider については、[`WebhookSignalProvider`](/reference/signals/webhook-signal-provider) を参照してください。
+
+## 使用例
+
+30 秒ごとに API を確認する Polling Provider の例です。
+
+```typescript title="src/signals/slack-signals.ts"
+import { SignalProvider } from '@mastra/core/signals'
+import type { SignalSubscription } from '@mastra/core/signals'
+
+class SlackSignals extends SignalProvider<'slack-signals'> {
+  readonly id = 'slack-signals'
+  readonly pollInterval = 30_000
+
+  async poll(subscriptions: SignalSubscription[]) {
+    for (const sub of subscriptions) {
+      const messages = await fetchSlackMessages(sub.externalResourceId)
+      if (messages.length > 0) {
+        await this.notify(
+          {
+            source: 'slack',
+            kind: 'new-messages',
+            summary: `${messages.length} new messages in ${sub.externalResourceId}`,
+          },
+          { threadId: sub.threadId, resourceId: sub.resourceId },
+        )
+      }
+    }
+  }
+}
+```
+
+Agent に登録します。
+
+```typescript title="src/mastra/index.ts"
+import { Agent } from '@mastra/core/agent'
+
+const agent = new Agent({
+  id: 'agent',
+  signals: [new SlackSignals()],
+})
+```
+
+Agent は `connect(this)` を呼び出し、Provider が返すすべての Processor または Tool を登録します。その後、Polling を開始します。
+
+## コンストラクターのパラメーター
+
+`SignalProvider` は抽象クラスです。サブクラスは引数なしで `super()` を呼び出します。
+
+## プロパティ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'TId extends string',
+    description: 'この Provider の一意の識別子。サブクラスでは readonly プロパティとして実装する必要があります。',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: 'Provider の人が読める表示名。',
+    isOptional: true,
+  },
+  {
+    name: 'pollInterval',
+    type: 'number',
+    description:
+      'Polling 間隔（ミリ秒）。設定すると、Framework はこの間隔で `poll()` を呼び出します。Webhook 専用 Provider では `undefined` または `0` のままにします。',
+    isOptional: true,
+  },
+  {
+    name: 'isConnected',
+    type: 'boolean',
+    description:
+      'この Provider が Agent に接続されているかどうか。`connect()` の呼び出し後は `true` を返します。`Agent.__fork()` 中の再接続をスキップするために内部で使用されます。',
+  },
+]}
+/>
+
+## メソッド
+
+### 接続
+
+#### `connect(agent)`
+
+Agent のコンストラクターから呼び出されます。Provider が Agent に Signal を送り返せるよう、双方向リンクを確立します。リンクの確立後に追加のセットアップを実行するにはオーバーライドします。必ず `super.connect(agent)` を呼び出してください。
+
+```typescript prettier:false
+class MySignals extends SignalProvider<'my-signals'> {
+  readonly id = 'my-signals'
+
+  override connect(agent) {
+    super.connect(agent)
+    // additional setup after agent link is established
+  }
+}
+```
+
+#### `__registerMastra(mastra)`
+
+Provider の Agent が Mastra インスタンスに登録されると呼び出されます。ストレージやその他の Mastra Service にアクセスするにはオーバーライドします。必ず `super.__registerMastra(mastra)` を呼び出してください。
+
+```typescript prettier:false
+override __registerMastra(mastra) {
+  super.__registerMastra(mastra)
+  // this.mastra is now available
+}
+```
+
+### Processor と Tool の統合
+
+#### `getInputProcessors()`
+
+この Provider が Agent に登録する必要のある Input Processor を返します。Provider が Agent の入力 Step をインターセプトする場合（たとえば、Context Hint の注入や Tool 呼び出しの検出）にオーバーライドします。
+
+```typescript prettier:false
+getInputProcessors() {
+  return [this]
+}
+```
+
+戻り値: `InputProcessorOrWorkflow[]`
+
+#### `getOutputProcessors()`
+
+この Provider が Agent に登録する必要のある Output Processor を返します。Provider が Agent の出力 Step をインターセプトする場合にオーバーライドします。
+
+```typescript prettier:false
+getOutputProcessors() {
+  return [this]
+}
+```
+
+戻り値: `OutputProcessorOrWorkflow[]`
+
+#### `getTools()`
+
+この Provider が Agent に公開する Tool を返します。購読や購読解除コマンドなど、Agent から呼び出せる Tool を Provider が追加する場合にオーバーライドします。
+
+```typescript prettier:false
+getTools() {
+  return {
+    subscribe_pr: createTool({ /* ... */ }),
+    unsubscribe_pr: createTool({ /* ... */ }),
+  }
+}
+```
+
+戻り値: `Record<string, unknown>`
+
+### Subscription の追跡
+
+#### `subscribe(target, externalResourceId, metadata?)`
+
+Thread で外部 Resource を購読します。これは protected メソッドです。Provider の実装内から呼び出してください。
+
+```typescript prettier:false
+const sub = this.subscribe(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'github:mastra-ai/mastra#123',
+  { pr: 123 },
+)
+```
+
+戻り値: `SignalSubscription`。作成された Subscription、または Metadata が統合された既存の Subscription です。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'target',
+    type: 'SignalProviderTarget',
+    description: '購読する Thread。`threadId` と `resourceId` を含める必要があります。',
+  },
+  {
+    name: 'externalResourceId',
+    type: 'string',
+    description: '外部 Resource の Provider 固有の識別子（たとえば、`"github:owner/repo#123"`）。',
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown>',
+    description:
+      'Subscription とともに保存する追加データ。重複した購読では、既存の Metadata に統合されます。',
+    isOptional: true,
+  },
+]}
+/>
+
+#### `unsubscribe(target, externalResourceId)`
+
+Subscription を削除します。
+
+```typescript prettier:false
+const removed = this.unsubscribe(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'github:mastra-ai/mastra#123',
+)
+```
+
+戻り値: `boolean`。削除した場合は `true`、一致する Subscription が存在しなかった場合は `false` です。
+
+#### `getSubscriptions()`
+
+この Provider のアクティブな Subscription をすべて返します。
+
+```typescript prettier:false
+const allSubs = this.getSubscriptions()
+```
+
+戻り値: `SignalSubscription[]`
+
+#### `getSubscriptionsForResource(externalResourceId)`
+
+特定の外部 Resource に対するすべての Subscription を返します。
+
+```typescript prettier:false
+const subs = this.getSubscriptionsForResource('github:mastra-ai/mastra#123')
+for (const sub of subs) {
+  await this.notify(
+    { source: 'my-provider', kind: 'update', summary: 'Resource updated' },
+    { threadId: sub.threadId, resourceId: sub.resourceId },
+  )
+}
+```
+
+戻り値: `SignalSubscription[]`
+
+#### `getSubscriptionsForThread(target)`
+
+特定の Thread に対するすべての Subscription を返します。
+
+```typescript prettier:false
+const subs = this.getSubscriptionsForThread({
+  threadId: 'thread-1',
+  resourceId: 'user-1',
+})
+```
+
+戻り値: `SignalSubscription[]`
+
+#### `hasSubscription(target, externalResourceId)`
+
+Subscription が存在するか確認します。
+
+```typescript prettier:false
+if (this.hasSubscription(target, 'github:mastra-ai/mastra#123')) {
+  // already subscribed
+}
+```
+
+戻り値: `boolean`
+
+#### `unsubscribeAll(target)`
+
+Thread のすべての Subscription を削除します。
+
+```typescript prettier:false
+const removed = this.unsubscribeAll({
+  threadId: 'thread-1',
+  resourceId: 'user-1',
+})
+```
+
+戻り値: `number`。削除された Subscription の数です。
+
+#### `subscriptionCount`
+
+この Provider のアクティブな Subscription の総数です。
+
+```typescript prettier:false
+if (this.subscriptionCount === 0) {
+  // nothing to poll
+}
+```
+
+戻り値: `number`
+
+### Polling
+
+#### `poll(subscriptions)`
+
+Polling Cycle ごとに、すべてのアクティブな Subscription とともに呼び出されます。外部 Source を確認して通知を送出するにはオーバーライドします。Framework は Polling Cycle の重複を防ぎます。`poll()` の呼び出しに `pollInterval` より長い時間がかかった場合、次の Cycle はスキップされます。
+
+```typescript prettier:false
+async poll(subscriptions: SignalSubscription[]) {
+  for (const sub of subscriptions) {
+    const events = await checkExternalSource(sub.externalResourceId)
+    for (const event of events) {
+      await this.notify(
+        { source: 'my-provider', kind: event.type, summary: event.message },
+        { threadId: sub.threadId, resourceId: sub.resourceId },
+      )
+    }
+  }
+}
+```
+
+#### `startPolling()`
+
+Polling Timer を開始します。`connect()` の後に Agent から呼び出されます。冪等であるため、複数回呼び出しても影響はありません。
+
+```typescript prettier:false
+provider.startPolling()
+```
+
+#### `stopPolling()`
+
+Polling Timer を停止します。
+
+```typescript prettier:false
+provider.stopPolling()
+```
+
+### Webhook
+
+#### `handleWebhook(request)`
+
+受信した Webhook リクエストを処理します。Payload を解析して Subscription と照合し、Notification Signal を送出するにはオーバーライドします。すぐに使用できる実装については、[`WebhookSignalProvider`](/reference/signals/webhook-signal-provider) を参照してください。
+
+Webhook リクエストを検証した後、アプリケーションで定義した HTTP Endpoint からこのメソッドを呼び出してください。
+
+```typescript prettier:false
+async handleWebhook(request) {
+  const payload = request.body as { repo: string, event: string }
+  const subs = this.getSubscriptionsForResource(payload.repo)
+
+  for (const sub of subs) {
+    await this.notify(
+      { source: 'github', kind: payload.event, summary: `Event on ${payload.repo}` },
+      { threadId: sub.threadId, resourceId: sub.resourceId },
+    )
+  }
+
+  return { status: 200, body: { matched: subs.length } }
+}
+```
+
+戻り値: `Promise<{ status?: number; body?: unknown }>`
+
+### ライフサイクル
+
+#### `start()`
+
+`connect()` の後に呼び出され、非同期の初期化を実行します。セットアップに Agent または Mastra インスタンスが必要な場合にオーバーライドします。
+
+```typescript prettier:false
+async start() {
+  await this.loadInitialState()
+}
+```
+
+#### `stop()`
+
+シャットダウン時に呼び出されます。デフォルトの実装では Polling を停止し、すべての Subscription をクリアします。
+
+```typescript prettier:false
+provider.stop()
+```
+
+### 通知
+
+#### `notify(notification, target)`
+
+接続先の Agent に Notification Signal を送信します。これは `agent.sendNotificationSignal()` をラップする protected な便利メソッドです。
+
+```typescript prettier:false
+await this.notify(
+  {
+    source: 'my-provider',
+    kind: 'pr-updated',
+    summary: 'PR #123 was updated',
+    priority: 'high',
+    payload: { prNumber: 123 },
+  },
+  { threadId: 'thread-1', resourceId: 'user-1' },
+)
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'notification',
+    type: 'object',
+    description: '通知 Payload。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'source',
+            type: 'string',
+            description: '通知 Source の識別子。',
+          },
+          {
+            name: 'kind',
+            type: 'string',
+            description: 'イベントの種類（たとえば、`"pr-updated"`、`"new-message"`）。',
+          },
+          {
+            name: 'summary',
+            type: 'string',
+            description: '人が読めるイベントの要約。',
+          },
+          {
+            name: 'priority',
+            type: '"high" | "medium" | "low"',
+            description: '通知の優先度。',
+            isOptional: true,
+          },
+          {
+            name: 'payload',
+            type: 'unknown',
+            description: '通知に添付する任意のデータ。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'target',
+    type: 'SignalProviderTarget',
+    description: '通知先の Thread。`threadId` と `resourceId` を含める必要があります。',
+  },
+]}
+/>
+
+## 型
+
+### `SignalSubscription`
+
+`subscribe()` が返す Subscription オブジェクトです。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'Subscription の一意の識別子。',
+  },
+  {
+    name: 'providerId',
+    type: 'string',
+    description: 'この Subscription を所有する Provider。',
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    description: 'Signal を受信する Thread。',
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    description: 'Thread を所有する Resource。',
+  },
+  {
+    name: 'externalResourceId',
+    type: 'string',
+    description: '外部 Resource の Provider 固有の識別子（たとえば、`"github:owner/repo#123"`）。',
+  },
+  {
+    name: 'subscribedAt',
+    type: 'Date',
+    description: 'Subscription が作成された日時。',
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown>',
+    description: 'Subscription とともに保存される Provider 固有の Metadata。',
+  },
+]}
+/>
+
+### `SignalProviderTarget`
+
+特定の Agent Thread を識別します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'threadId',
+    type: 'string',
+    description: '対象の Thread。',
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    description: 'Thread を所有する Resource。',
+  },
+  {
+    name: 'agentId',
+    type: 'string',
+    description: 'Agent の識別子。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 型ガード
+
+### `isSignalProvider(obj)`
+
+`SignalProvider` インスタンスかどうかを実行時に確認します。
+
+```typescript prettier:false
+import { isSignalProvider } from '@mastra/core/signals'
+
+if (isSignalProvider(obj)) {
+  obj.connect(agent)
+}
+```
+
+戻り値: `boolean`

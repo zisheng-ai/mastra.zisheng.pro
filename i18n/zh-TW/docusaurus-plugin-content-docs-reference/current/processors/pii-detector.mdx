@@ -1,0 +1,209 @@
+---
+title: "參考：PIIDetector | 處理器"
+description: "Mastra PIIDetector 的文件；此處理器會偵測並遮蔽 AI 回應中的個人識別資訊（PII）。"
+packages:
+  - "@mastra/core"
+---
+
+# PIIDetector
+
+`PIIDetector` 是一種**混合式處理器**，可同時用於輸入與輸出處理。它會偵測並遮蔽個人識別資訊（PII），以符合隱私規範。此處理器能識別各種類型的 PII，並提供多種處理策略，包括多種遮蔽方法，以協助符合 GDPR、CCPA、HIPAA 及其他隱私法規，進而維護隱私。
+
+## 使用範例
+
+```typescript
+import { PIIDetector } from '@mastra/core/processors'
+
+const processor = new PIIDetector({
+  model: 'openrouter/openai/gpt-oss-safeguard-20b',
+  threshold: 0.6,
+  strategy: 'redact',
+  detectionTypes: ['email', 'phone', 'credit-card', 'ssn'],
+  lastMessageOnly: true,
+})
+```
+
+## 建構函式參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'Options',
+    description: 'PII 偵測與遮蔽的設定選項',
+    isOptional: false,
+    properties: [
+      {
+        type: 'Options',
+        parameters: [
+          {
+            name: 'model',
+            type: 'MastraModelConfig',
+            description: '偵測 Agent 的模型設定',
+            isOptional: false,
+          },
+          {
+            name: 'detectionTypes',
+            type: 'string[]',
+            description: '要偵測的 PII 類型。若未指定，則使用預設類型',
+            isOptional: true,
+            default:
+              "['email', 'phone', 'credit-card', 'ssn', 'api-key', 'ip-address', 'name', 'address', 'date-of-birth', 'url', 'uuid', 'crypto-wallet', 'iban']",
+          },
+          {
+            name: 'threshold',
+            type: 'number',
+            description: '標記內容的信賴度門檻（0-1）。若任一類別分數超過此門檻，就會標記該 PII',
+            isOptional: true,
+            default: '0.6',
+          },
+          {
+            name: 'strategy',
+            type: "'block' | 'warn' | 'filter' | 'redact'",
+            description:
+              "偵測到 PII 時採取的策略：'block' 以錯誤拒絕內容，'warn' 記錄警告但允許內容通過，'filter' 移除遭標記的訊息，'redact' 以遮蔽後的版本取代 PII",
+            isOptional: true,
+            default: "'redact'",
+          },
+          {
+            name: 'redactionMethod',
+            type: "'mask' | 'hash' | 'remove' | 'placeholder'",
+            description:
+              "PII 的遮蔽方法：'mask' 以星號取代，'hash' 以 SHA256 雜湊值取代，'remove' 完全移除，'placeholder' 以類型預留位置取代",
+            isOptional: true,
+            default: "'mask'",
+          },
+          {
+            name: 'instructions',
+            type: 'string',
+            description: '偵測 Agent 的自訂指示。若未提供，則使用依偵測類型產生的預設指示',
+            isOptional: true,
+            default: 'undefined',
+          },
+          {
+            name: 'includeDetections',
+            type: 'boolean',
+            description: '是否在記錄中包含偵測詳細資訊。適合用於合規稽核與偵錯',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'lastMessageOnly',
+            type: 'boolean',
+            description:
+              '是否只檢查批次中最新的訊息，而不檢查每則訊息。使用此選項，可避免在長討論串中為每則較早的訊息呼叫一次 LLM。',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'preserveFormat',
+            type: 'boolean',
+            description: '遮蔽時是否保留 PII 格式。設為 true 時，會保留電話號碼的 ***-**-1234 等結構',
+            isOptional: true,
+            default: 'true',
+          },
+          {
+            name: 'providerOptions',
+            type: 'ProviderOptions',
+            description:
+              "傳遞給內部偵測 Agent 的 Provider 專用選項。可用於控制模型行為，例如思考型模型的推理強度（如 `{ openai: { reasoningEffort: 'low' } }`）",
+            isOptional: true,
+            default: 'undefined',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 回傳值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "設為 'pii-detector' 的處理器識別碼",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: '選用的處理器顯示名稱',
+    isOptional: true,
+  },
+  {
+    name: 'processInput',
+    type: '(args: { messages: MastraDBMessage[]; abort: (reason?: string) => never; tracingContext?: TracingContext }) => Promise<MastraDBMessage[]>',
+    description: '處理輸入訊息，以便在傳送至 LLM 前偵測並遮蔽 PII',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputStream',
+    type: '(args: { part: ChunkType; streamParts: ChunkType[]; state: Record<string, any>; abort: (reason?: string) => never; tracingContext?: TracingContext }) => Promise<ChunkType | null | undefined>',
+    description: '處理串流輸出部分，以便在串流期間偵測並遮蔽 PII',
+    isOptional: false,
+  },
+]}
+/>
+
+## 進階使用範例
+
+### 輸入處理
+
+```typescript title="src/mastra/agents/private-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { PIIDetector } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'private-agent',
+  name: 'private-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [
+    new PIIDetector({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      detectionTypes: ['email', 'phone', 'credit-card', 'ssn'],
+      threshold: 0.6,
+      strategy: 'redact',
+      redactionMethod: 'mask',
+      instructions:
+        'Detect and redact personally identifiable information while preserving message intent',
+      includeDetections: true,
+      preserveFormat: true,
+    }),
+  ],
+})
+```
+
+### 搭配批次處理的輸出處理
+
+建議將 `PIIDetector` 作為輸出處理器時，搭配 `BatchPartsProcessor` 使用以最佳化效能。`BatchPartsProcessor` 會先將串流區塊批次合併，再傳遞給 PII 偵測器，減少偵測所需的 LLM 呼叫次數。
+
+```typescript title="src/mastra/agents/output-pii-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { BatchPartsProcessor, PIIDetector } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'output-pii-agent',
+  name: 'output-pii-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  outputProcessors: [
+    // Batch stream parts first to reduce LLM calls
+    new BatchPartsProcessor({
+      batchSize: 10,
+    }),
+    // Then apply PII detection on batched content
+    new PIIDetector({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      strategy: 'redact',
+    }),
+  ],
+})
+```
+
+## 相關資源
+
+- [防護機制](/docs/agents/guardrails)

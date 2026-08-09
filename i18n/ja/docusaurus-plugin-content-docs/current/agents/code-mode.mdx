@@ -1,0 +1,181 @@
+---
+title: "Code mode | Agent"
+description: "Agent が Sandbox 内で複数 Tool を使った計算を実行し、より正確な単一レスポンスを返せるようにします。"
+packages:
+  - "@mastra/core"
+---
+
+# Code mode
+
+**追加バージョン：** `@mastra/core@1.38.0`
+
+:::experimental
+
+この機能はベータ版です。API が安定するまで、メジャーバージョンを上げずに破壊的変更が行われる可能性があります。
+
+:::
+
+Code mode を使用すると、Agent は分離された Sandbox で複数 Tool を使った計算を実行し、その結果をより正確な単一レスポンスとして返せます。
+
+Tool をターンごとに呼び出す代わりに、モデルがユーザーのクエリに合わせた関数を作成します。この関数は既存の Tool を `external_*` 関数として連携し、その結果を縮約または集約して1つの構造化された回答にします。
+
+[`createCodeMode()`](/reference/tools/create-code-mode) は、デフォルトの `id` が `execute_typescript` の Tool を返します。`id` は設定可能なため、1つの Agent に対象の Tool セットが異なる複数の Code mode Tool を追加できます（[複数の Code Tool で Tool のスコープを分ける](#scoping-tools-across-multiple-code-tools)を参照）。
+
+## Code mode を使用する場面
+
+ユーザーのクエリへの回答や複雑な計算に Agent が複数の Tool を使用する場合は、Code mode を使用します。
+
+- 往復回数の削減：Tool の選択ごとに Agent のループを繰り返さず、複数 Tool のクエリを1回の Tool 呼び出しで実行します。
+- コンテキストの縮小：大きな Tool レスポンスを Agent に返す前に、関数内で縮約または集約できます。
+- 正確な計算：合計、平均などの算術演算をトークン予測ではなく JavaScript で実行します。
+- 事前の計画：フィルタリング、集約、分岐を別々のターンではなく関数内で行います。
+
+## 仕組み
+
+Code mode を使用しない場合、複数 Tool のクエリでは Agent のループが何度も実行されることがあります。モデルは Tool を選択して結果を読み、必要に応じてこの処理を繰り返します。
+
+各ターンで Tool のレスポンス全体が Agent のコンテキストウィンドウに追加されるため、推論の質が低下し、トークン使用量が増える可能性があります。
+
+Code mode でも Tool は完全な検証、リクエストコンテキスト、Trace を使用してホスト上で動作し続けます。Sandbox で実行されるのはモデルの連携コードだけです。各 `external_*` 呼び出しはホスト上の実際の Tool に中継され、関数は1つのレスポンスを Agent に返す前に結果を縮約または集約できます。
+
+関数は [Workspace Sandbox](/docs/workspace/overview) で実行されます。Code mode はモデルが作成したコードを実行するため、実行境界を明示的に選ぶ必要があり、Sandbox が必須です。`sandbox` で渡すか、Sandbox を提供する Workspace 内で Agent を実行します。ホストマシンで実行するには `new LocalSandbox()` を明示的に渡します。関数がホスト権限を持つホストの `node` プロセスとして動作するため、信頼できる環境またはローカル開発でのみ使用してください。
+
+独自の実行境界を持つ transport は例外です。[`IsolatedVmCodeModeTransport`](/reference/tools/isolated-vm-transport) ではプログラムがプロセス内の V8 isolate で動作するため、Sandbox は不要です（[プロセス内分離](#in-process-isolation)を参照）。
+
+## クイックスタート
+
+`createCodeMode()` は Tool と生成された instructions を返します。`id` を省略すると、Tool 名は `execute_typescript` になります。両方を Agent に追加します。
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { createCodeMode, createTool } from '@mastra/core/tools'
+import { LocalSandbox } from '@mastra/core/workspace'
+import { z } from 'zod'
+
+const getTopProducts = createTool({
+  id: 'getTopProducts',
+  description: 'Get top selling products',
+  inputSchema: z.object({ limit: z.number() }),
+  outputSchema: z.object({
+    products: z.array(z.object({ id: z.string(), name: z.string(), totalSales: z.number() })),
+  }),
+  execute: async ({ limit }) => fetchTopProducts(limit),
+})
+
+const getProductRatings = createTool({
+  id: 'getProductRatings',
+  description: 'Get ratings for a product',
+  inputSchema: z.object({ productId: z.string() }),
+  outputSchema: z.object({ ratings: z.array(z.object({ score: z.number() })) }),
+  execute: async ({ productId }) => fetchRatings(productId),
+})
+
+const { tool, instructions } = createCodeMode({
+  tools: { getTopProducts, getProductRatings },
+  sandbox: new LocalSandbox(), // required; runs on the host — see "How it works"
+})
+
+const agent = new Agent({
+  id: 'shop-assistant',
+  name: 'shop-assistant',
+  instructions: ['You are a helpful shopping assistant.', instructions],
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { execute_typescript: tool },
+})
+```
+
+「上位5つの商品と各商品の平均評価は？」と尋ねると、モデルは個別の Tool を何度も呼び出す代わりに、`execute_typescript` を1回呼び出します。
+
+```typescript
+const top = await external_getTopProducts({ limit: 5 })
+const ratings = await Promise.all(
+  top.products.map(p => external_getProductRatings({ productId: p.id })),
+)
+return top.products.map((product, i) => {
+  const scores = ratings[i].ratings.map(r => r.score)
+  const avg = scores.reduce((sum, s) => sum + s, 0) / scores.length
+  return {
+    name: product.name,
+    sales: product.totalSales,
+    averageRating: Math.round(avg * 100) / 100,
+  }
+})
+```
+
+5件の評価検索はすべて並列実行され、平均値は JavaScript で計算されます。Agent は1つの構造化結果を受け取ります。
+
+`createCodeMode()` を効果的に使用するため、次の点に注意してください。
+
+- 各 Tool を1つの処理に特化させ、モデルがコード内で組み合わせられるようにします。
+- `Promise.all` で呼び出しを並列化できる場合に、Code mode が最も効果を発揮します。
+
+設定オプション、戻り値、結果形式、instructions の確認方法は、[`createCodeMode()` リファレンス](/reference/tools/create-code-mode)を参照してください。
+
+## 複数の Code Tool で Tool のスコープを分ける
+
+`createCodeMode()` は呼び出しごとに独自の許可リストを保持します。複数回呼び出すことで、それぞれ異なる Tool のサブセットを対象とする複数の Code Tool を Agent に追加できます。呼び出せる `external_*` 関数は、各 `createCodeMode()` に渡された Tool のものだけなので、サブセット同士は分離されます。
+
+ID が重複しないよう各 Tool に異なる `id` を設定し、それぞれの instructions を Agent に追加します。
+
+```typescript
+const sales = createCodeMode({
+  id: 'sales_code',
+  tools: { listRecentOrders, getCustomer },
+  sandbox,
+})
+
+const inventory = createCodeMode({
+  id: 'inventory_code',
+  tools: { listProducts, getSupplier },
+  sandbox,
+})
+
+const agent = new Agent({
+  id: 'ops-assistant',
+  name: 'ops-assistant',
+  instructions: ['You are an ops assistant.', sales.instructions, inventory.instructions],
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { sales_code: sales.tool, inventory_code: inventory.tool },
+})
+```
+
+`sales_code` 用に生成されたコードから在庫 Tool を呼び出すことはできず、その逆も同様です。最小権限のスコープを適用し、各 Tool のプロンプト範囲を小さく保つために使用します。
+
+## リモート Sandbox
+
+デフォルトでは、Code mode はプログラムをホストのファイルシステムに書き込み、`node` で実行する transport を使用します。ホストを共有する `LocalSandbox` では動作しますが、ホストのパスが存在しない独自の micro-VM 上で動作するリモート Sandbox（[E2B](/reference/workspace/e2b-sandbox) など）では動作しません。
+
+リモート Sandbox では、プログラムを Sandbox のファイルシステムに書き込む transport が必要です。E2B では、付属の `E2BCodeModeTransport` を `createCodeMode` の第2引数に渡します。
+
+```typescript
+import { createCodeMode } from '@mastra/core/tools'
+import { E2BSandbox, E2BCodeModeTransport } from '@mastra/e2b'
+
+const { tool, instructions } = createCodeMode(
+  { tools, sandbox: new E2BSandbox() },
+  new E2BCodeModeTransport(),
+)
+```
+
+## プロセス内分離
+
+プロセスの起動やリモート Sandbox の実行なしで安全な境界を設けるには、[`IsolatedVmCodeModeTransport`](/reference/tools/isolated-vm-transport) を `@mastra/isolated-vm` から使用します。プログラムはプロセス内の V8 isolate で実行されるため、Sandbox は不要です。isolate はファイルシステム、ネットワーク、プロセスにアクセスできず、利用できるのはホスト上の Tool に中継される `external_*` 関数だけです。
+
+```typescript
+import { createCodeMode } from '@mastra/core/tools'
+import { IsolatedVmCodeModeTransport } from '@mastra/isolated-vm'
+
+const { tool, instructions } = createCodeMode(
+  { tools }, // no sandbox needed
+  new IsolatedVmCodeModeTransport({ memoryLimitMb: 128 }),
+)
+```
+
+`isolated-vm` はネイティブアドオンです。Node.js 20 以降では、ホストプロセスを `--no-node-snapshot` フラグ付きで起動する必要があります。セットアップの詳細は、[IsolatedVmCodeModeTransport リファレンス](/reference/tools/isolated-vm-transport)を参照してください。
+
+## 関連項目
+
+- [createCodeMode() リファレンス](/reference/tools/create-code-mode)
+- [IsolatedVmCodeModeTransport リファレンス](/reference/tools/isolated-vm-transport)
+- [Tool](/docs/agents/using-tools)
+- [Workspace の概要](/docs/workspace/overview)

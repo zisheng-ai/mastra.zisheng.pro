@@ -1,0 +1,310 @@
+---
+title: "Schedule | ファイルベースの Agent"
+description: schedules/ で、ファイルベースの Agent に繰り返し実行する cron タスクを宣言します。
+packages:
+  - "@mastra/core"
+---
+
+# Schedule
+
+ファイルベースの Agent は、自身の `schedules/` ディレクトリから **Schedule** を検出します。各ファイルでは、cron 式と、実行時に Agent が行う処理からなる 1 つの繰り返しタスクを宣言します。Mastra は起動時にこれらを Schedule ストレージへ登録するため、スケジュールされた Agent にランタイム登録コードは必要ありません。
+
+ファイルベースの規約については、このページを参照してください。代わりに実行時に Schedule を作成するには、[Schedule](/reference/schedules/overview)を参照してください。
+
+ファイルベースの Agent が 1 つの import パスを使用できるように、`defineSchedule` は `@mastra/core/agent` から再 export されています。`@mastra/core/schedules` からも export されています。
+
+## クイックスタート
+
+Agent の `schedules/` ディレクトリにファイルを追加します。
+
+```typescript title="src/mastra/agents/support/schedules/heartbeat.ts"
+import { defineSchedule } from '@mastra/core/agent'
+
+export default defineSchedule({
+  cron: '*/5 * * * *',
+  prompt: 'Check system health and report any failures.',
+})
+```
+
+Mastra は 5 分ごとに、そのプロンプトで `support` Agent を実行します。
+
+## Schedule の ID
+
+Schedule の ID は、`schedules/` からの相対パスから拡張子を除いたものです。そのため、ネストしたディレクトリを使用して関連する Schedule をグループ化できます。
+
+```text title="Schedule layout"
+src/mastra/agents/
+└── support/
+    ├── config.ts
+    ├── instructions.md
+    └── schedules/
+        ├── heartbeat.ts      # id: heartbeat
+        ├── cleanup.md        # id: cleanup
+        └── billing/
+            └── sweep.ts      # id: billing/sweep
+```
+
+この ID はビルド間で変わらないため、Mastra は編集された Schedule と新しい Schedule を区別できます。ファイルの名前変更や移動は、1 つの Schedule の削除と別の Schedule の作成として扱われます。
+
+`heartbeat.ts` と `heartbeat.md` は同じ ID に解決されるため、両方を宣言するとビルドエラーになります。
+
+## 実行モード
+
+Schedule には、実行モードを 1 つだけ設定します。両方を設定した場合や、どちらも設定しなかった場合は、ビルドに失敗します。
+
+### Prompt モード
+
+`prompt` は、固定メッセージで所有元の Agent を実行します。これは実行後に処理を待機しない方式で、結果を待つものはありません。
+
+```typescript title="src/mastra/agents/support/schedules/digest.ts"
+import { defineSchedule } from '@mastra/core/agent'
+
+export default defineSchedule({
+  cron: '0 9 * * 1',
+  timezone: 'America/New_York',
+  prompt: 'Summarize last week and post the digest.',
+})
+```
+
+### Handler モード
+
+`handler` は、Schedule がトリガーされたときに実行パラメーターを算出します。プロンプトが現在の状態に依存する場合、一部の実行をスキップする必要がある場合、または実行にチャネル配信のコンテキストが必要な場合に使用します。
+
+```typescript title="src/mastra/agents/support/schedules/billing/sweep.ts"
+import { defineSchedule } from '@mastra/core/agent'
+
+export default defineSchedule({
+  cron: '0 3 * * *',
+  handler: async ({ mastra, agentId }) => {
+    const overdue = await findOverdueInvoices()
+
+    // Returning null skips this fire; nothing runs and the trigger is
+    // recorded with outcome 'skipped'.
+    if (overdue.length === 0) return null
+
+    return {
+      prompt: `Chase these overdue invoices: ${overdue.join(', ')}`,
+      threadId: 'billing-ops',
+      resourceId: agentId,
+    }
+  },
+})
+```
+
+Handler の戻り値は、保存されている Schedule のフィールドに上書きマージされます。`undefined` を返すと上書きは適用されず、その実行では保存済みフィールドが使用されます。Handler モードの Schedule では `prompt` を宣言できないため、その実行はプロンプトがないことで失敗します。実行するには `prompt` を返し、スキップするには `null` を返してください。
+
+Handler は関数であるため、保存される Schedule の行には永続化できません。Mastra は Schedule の実行時に、同一プロセス内で Handler を解決します。プロンプトを返さず、宣言もしていない Handler モードの Schedule は、Agent に空のメッセージを送信せず、理由を示してその実行を失敗させます。
+
+この同一プロセス内での検索では、Scheduler を実行するプロセスに所有元の Agent が登録されている必要があります。通常のデプロイでは単一のエントリを起動するため、この要件は自動的に満たされます。独立した Worker には、サーバーと同じエントリが必要です。機能を絞ったエントリから起動すると呼び出す Handler がないため、実行されずに失敗します。
+
+### Markdown Schedule
+
+`.md` の Schedule は、frontmatter を cron に使用し、ドキュメント本文をプロンプトとして使用します。これは、より多くの内容を記述できる Prompt モードです。
+
+```markdown title="src/mastra/agents/support/schedules/cleanup.md"
+---
+cron: '0 3 * * *'
+timezone: 'UTC'
+name: 'nightly cleanup'
+---
+
+Review tickets untouched for 30 days.
+
+Close the ones that are clearly resolved and summarize the rest.
+```
+
+cron は必ず引用符で囲んでください。先頭の `*` は YAML のエイリアスとして扱われるため、`cron: */5 * * * *` は解析エラーになりますが、`cron: "*/5 * * * *"` は有効です。
+
+frontmatter では、以下のすべてのオプションを使用できます。ただし、関数が必要な `handler` は使用できないため、`.ts` または `.js` の Schedule モジュールが必要です。本文がプロンプトになるため、`prompt` も設定できません。不明な frontmatter フィールドは黙って無視されず、ビルドに失敗するため、`ifIdel` のような入力ミスはビルド時に検出されます。
+
+## オプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'cron',
+    type: 'string',
+    description:
+      '標準の 5 フィールド cron 式。必須です。Scheduler は tick ループで Schedule を評価するため、実質的な粒度は 1 分です。1 分未満のフィールドはサポートされていません。',
+  },
+  {
+    name: 'prompt',
+    type: 'string',
+    description: '実行のたびに Agent が処理するメッセージ。これか `handler` のどちらか一方を設定します。',
+    isOptional: true,
+  },
+  {
+    name: 'handler',
+    type: '(ctx) => ScheduleOverrides | null | undefined',
+    description:
+      'トリガー時に実行内容を算出します。適用する上書き値を返すか、この実行をスキップする場合は `null` を返します。何も返さない場合は上書きが適用されず、Handler モードには保存済みのプロンプトがないため、その実行は失敗します。これか `prompt` のどちらか一方を設定します。',
+    isOptional: true,
+  },
+  {
+    name: 'timezone',
+    type: 'string',
+    description:
+      'cron を評価する IANA タイムゾーン（例：`America/New_York`）。デフォルトはホストプロセスのタイムゾーンですが、デプロイによって異なるため、時刻に依存する処理では明示的に設定してください。DST の移行はタイムゾーンルールに従って処理されるため、`0 9 * * *` は移行前後を通して現地時間の午前 9 時に維持されます。',
+    isOptional: true,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: 'Studio に表示され、`mastra.schedules.list({ name })` で絞り込み可能な自由形式のラベル。',
+    isOptional: true,
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    description:
+      '新しい実行を開始する代わりに、既存の Thread へシグナルとして実行を送信します。`resourceId` が必要です。',
+    isOptional: true,
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    description: '対象 Thread の所有者。`threadId` を設定する場合は必須です。',
+    isOptional: true,
+  },
+  {
+    name: 'signalType',
+    type: "'user' | 'state' | 'reactive' | 'notification' | 'user-message' | 'system-reminder'",
+    description: '実行のシグナルカテゴリ。Thread を使用する Schedule のみで使用できます。',
+    isOptional: true,
+    defaultValue: "'notification'",
+  },
+  {
+    name: 'tagName',
+    type: 'string',
+    description: 'シグナルのレンダリングに使用する XML タグ。これにより、実行は `<schedule>…</schedule>` として Agent に届きます。',
+    isOptional: true,
+    defaultValue: "'schedule'",
+  },
+  {
+    name: 'attributes',
+    type: 'Record<string, string | number | boolean | null>',
+    description: 'シグナルの XML タグにレンダリングされる属性。',
+    isOptional: true,
+  },
+  {
+    name: 'providerOptions',
+    type: 'Record<string, unknown>',
+    description: '実行のたびに Schedule のシグナルペイロードへマージされる Provider オプション。JSON で安全に扱える必要があります。',
+    isOptional: true,
+  },
+  {
+    name: 'ifActive',
+    type: 'ScheduleIfActive',
+    description:
+      '対象 Thread がすでにストリーミング中の場合の処理：`deliver`、`persist`、`discard` のいずれか。Thread を使用する Schedule のみで使用できます。',
+    isOptional: true,
+  },
+  {
+    name: 'ifIdle',
+    type: 'ScheduleIfIdle',
+    description: '対象 Thread がアイドル状態の場合の処理：`wake`、`persist`、`discard` のいずれか。Thread を使用する Schedule のみで使用できます。',
+    isOptional: true,
+  },
+  {
+    name: 'status',
+    type: "'active' | 'paused'",
+    description:
+      '行の作成時に設定されるステータス。API で一時停止した状態が再デプロイ後も維持されるように、同期では `status` を更新しないため、初回作成時にのみ適用されます。後からコード内でこの値を変更しても、既存の Schedule には影響しません。',
+    isOptional: true,
+    defaultValue: "'active'",
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown>',
+    description: 'Schedule の行とともに保存される、JSON で安全に扱える任意のデータ。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 開発中に Schedule をテストする
+
+Schedule は cron の周期に従って実行されるため、反復開発中には不便です。代わりに、ID を指定してオンデマンドで実行します。
+
+```bash
+# List schedules to find the id
+curl http://localhost:4111/api/schedules
+
+# Fire one now, out-of-band from its cron
+curl -X POST http://localhost:4111/api/schedules/<scheduleId>/run
+```
+
+この操作では、`triggerKind: "manual"` のトリガーが記録され、`nextFireAt` は進まないため、通常の実行周期には影響しません。Studio には、同じ Schedule とそのトリガー履歴が表示されます。
+
+保存される ID には名前空間が付与され、URL エンコードされます。`support` Agent の `billing/sweep` は `fsa_support__billing%2Fsweep` になるため、手動で組み立てず、一覧レスポンスから ID をコピーしてください。
+
+## 登録とライフサイクル
+
+Mastra は起動時と、その後 Agent が登録されるたびに、宣言された Schedule を Schedule ストレージへ同期します。Schedule を宣言するだけで Scheduler が起動するため、`scheduler: { enabled: true }` は不要です。
+
+同期では、宣言された各 Schedule と保存済みの行を比較し、変更された内容だけを書き込みます。
+
+- 新しい Schedule ファイルは、行を作成します。
+- `cron` または `timezone` を編集すると、行が更新され、次回実行時刻が再計算されます。そのため、編集した Schedule が以前の周期で実行されることはありません。
+- Schedule ファイルを削除または名前変更すると、その行が削除されます。
+- API で一時停止した Schedule は、再デプロイ後も一時停止した状態を維持します。同期では意図的に `status` を変更しません。
+
+同期で削除されるのは、現在のプロセスに登録されている Agent が所有する行だけです。そのため、一部の Agent のみを保持するプロセスが、他の Agent の Schedule を削除することはありません。Agent をプロジェクトから完全に削除すると、残った行は次回の実行時にクリーンアップされます。その際、Scheduler は実行する Agent がないことを検出します。
+
+実行時に `mastra.schedules.create(...)` で作成された Schedule は、別の名前空間に保存され、この同期の影響を受けません。
+
+## 制限事項
+
+**ルート Agent のみ。** Schedule はトップレベルの Agent で宣言する必要があります。`subagents/` 内の `schedules/` ディレクトリはビルドエラーになります。Subagent は Mastra インスタンスに登録されるのではなく、親 Agent に組み込まれるため、Scheduler が対象として解決できないからです。親 Agent に Schedule を設定し、処理を委譲させてください。
+
+**ストレージが必須。** Schedule は永続化される行であるため、インスタンスには[ストレージ](/reference/file-based-agents/storage)の設定が必要です。インメモリストアの行は、再起動後に維持されません。
+
+**ホスティング。** Scheduler は Mastra プロセス内のバックグラウンド Worker として動作するため、そのプロセスを稼働し続けるホストが必要です。長時間稼働する Node サーバーやコンテナを使用できます。ほとんどのサーバーレス関数プラットフォームを含め、リクエスト間でプロセスを停止または再作成する環境では、実行が欠落します。そのような環境では、代わりにプラットフォーム独自の cron から実行エンドポイントを呼び出してください。
+
+**コードで定義された Agent。** `config.ts` が `new Agent({...})` を export する Agent ディレクトリはそのまま使用されるため、その `schedules/` ディレクトリは警告とともに無視されます。このような Agent には `mastra.schedules.create(...)` を使用してください。
+
+## 例
+
+2 つの Schedule を持つサポート Agent の例です。固定の週次ダイジェストと、処理対象がある場合にのみ実行される夜間の確認処理を設定します。
+
+```text title="Scheduled support agent"
+src/mastra/agents/
+└── support/
+    ├── config.ts
+    ├── instructions.md
+    └── schedules/
+        ├── weekly-digest.md
+        └── billing/
+            └── sweep.ts
+```
+
+```typescript title="src/mastra/agents/support/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+```markdown title="src/mastra/agents/support/schedules/weekly-digest.md"
+---
+cron: '0 9 * * 1'
+timezone: 'America/New_York'
+---
+
+Summarize the past week's tickets and post the digest to the team channel.
+```
+
+```typescript title="src/mastra/agents/support/schedules/billing/sweep.ts"
+import { defineSchedule } from '@mastra/core/agent'
+
+export default defineSchedule({
+  cron: '0 3 * * *',
+  timezone: 'America/New_York',
+  handler: async () => {
+    const overdue = await findOverdueInvoices()
+    if (overdue.length === 0) return null
+    return { prompt: `Draft reminders for ${overdue.length} overdue invoices.` }
+  },
+})
+```

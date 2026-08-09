@@ -1,0 +1,77 @@
+---
+title: "CopilotKit Channels | Frameworks"
+description: "同じ Mastra Agent を Slack やその他のメッセージングプラットフォームで Bot として実行する"
+---
+
+# CopilotKit Channels
+
+アプリ内 Copilot を動かす同じ Mastra Agent を、メッセージングプラットフォームの Bot として実行することもできます。CopilotKit の Channels SDK は Agent を Slack などのメッセージングプラットフォームに接続し、スレッド、Tool 呼び出し、リッチな対話型メッセージ、Human-in-the-loop 承認を各チャネル内でネイティブに処理します。
+
+:::info
+
+プラットフォームの完全なセットアップについては、[CopilotKit Channels ドキュメント](https://docs.copilotkit.ai/slack/mastra)を参照してください。このページでは、Channels と Mastra Agent の連携方法を説明します。
+
+:::
+
+## 連携の仕組み
+
+Mastra Agent はデプロイ先に留まり、`registerCopilotKit()` を介して AG-UI 上に公開されます（[CopilotKit の概要](/guides/build-your-ui/copilotkit/overview)を参照）。Channel は `@copilotkit/channels` で構築する別の長時間実行プロセスです。1 つ以上のプラットフォーム Adapter を接続し、Agent を参照するように Channel を設定します。`createChannel` は Adapter の配列を受け取るため、1 つのプロセスで複数のプラットフォームに同時に対応できます。
+
+SDK（すべての Adapter を含む）をインストールします。
+
+```bash npm2yarn
+npm install @copilotkit/channels
+```
+
+```typescript title="channel.ts"
+import { createChannel, Message, Section } from '@copilotkit/channels'
+import { slack } from '@copilotkit/channels/slack'
+import { mastraAgent } from './agent' // your AG-UI Mastra agent
+
+const channel = createChannel({
+  // Point the channel at your Mastra agent (an AbstractAgent, or a per-thread factory).
+  agent: mastraAgent,
+  adapters: [
+    slack({
+      botToken: process.env.SLACK_BOT_TOKEN!,
+      appToken: process.env.SLACK_APP_TOKEN!,
+    }),
+  ],
+})
+
+channel.onMention(async ({ thread }) => {
+  await thread.runAgent()
+})
+
+await channel.start()
+```
+
+Agent は通常の AG-UI 入力を受け取り、通常の AG-UI イベントを送出します。プラットフォーム固有の処理は Adapter の背後に隠れるため、同じ Mastra Agent を変更せずにすべての Channel で実行できます。リッチメッセージは JSX で記述され、各プラットフォームのネイティブ形式（Slack の Block Kit など）でレンダリングされます。そのため、プラットフォームに同等の機能がない場合でも、対話型カードは適切に簡略化されます。
+
+## Slack
+
+[Slack クイックスタート](https://docs.copilotkit.ai/slack/mastra)では、ゼロから Channel 内で `@` メンションできる Bot を作成し、対話型のボタンカードを追加します。Slack は Socket Mode で動作し、Slack への外向き WebSocket を開くため、開発中に公開 URL やトンネルは必要ありません。
+
+Slack の認証情報を環境に設定します。
+
+- `SLACK_BOT_TOKEN`：Bot User OAuth Token（`xoxb-...`）
+- `SLACK_APP_TOKEN`：`connections:write` Scope を持つ App-level Token（`xapp-...`）
+
+## その他のプラットフォーム
+
+Channels SDK は Slack に限定されません。Microsoft Teams などのプラットフォームも同じ `@copilotkit/channels` API で動作します。対応する Adapter を `adapters` 配列に追加するだけで、Agent のその他のコードはそのまま使用できます。現在対応しているプラットフォームと各プラットフォームの設定については、[CopilotKit Channels ドキュメント](https://docs.copilotkit.ai/slack/mastra)を参照してください。
+
+## メッセージパイプラインとアーキテクチャ
+
+マネージド Channel では認証情報を意図的に分離します。Mastra Agent が別のモデルキーや Tool を使用する場合、この分離が重要です。
+
+- **ユーザー側で管理するもの**：Agent ロジック、モデルの認証情報、Tool、Channel プロセス。
+- **CopilotKit Intelligence が管理するもの**：プラットフォームの認証情報、メッセージ配信、登録、Health、再接続。
+
+ユーザーがアプリにメッセージを送ると、Turn が始まります。Intelligence がプラットフォームイベントを受信し、Gateway が実行中の Channel プロセスに Turn を配信します。Mastra Agent が実行され、返信をレンダリングします。その後、Intelligence がプラットフォームのネイティブコンテンツとして返信を返します。プラットフォームの認証情報が Agent プロセスに入ることはありません。データレジデンシー要件に対応するため、Enterprise Intelligence はセルフホストもできます。
+
+:::note
+
+デフォルトでは、対話型アクションはメモリ内に保持され、再起動するとリセットされます。ボタンとスレッドごとの状態を再起動後も保持し、複数のインスタンスで共有するには、永続的なアクションおよび状態ストア（Redis または Postgres）を Channel に接続してください。
+
+:::

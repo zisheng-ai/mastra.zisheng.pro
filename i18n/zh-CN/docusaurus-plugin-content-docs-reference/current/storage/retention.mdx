@@ -1,0 +1,329 @@
+---
+title: "参考：存储保留（prune）| 存储"
+description: "Mastra 存储中保留策略和 prune() 的 API 参考。"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/pg"
+---
+
+# 存储保留
+
+默认情况下，存储会无限增长。保留是一种可选的、基于时间的清理机制：你可在 `retention` 配置中声明每张表的 `maxAge` 策略，然后调用 `storage.prune()` 删除超过配置保留时间的行。未配置的内容会永久保留，因此在你启用前不会有任何行为变化。
+
+`prune()` 会删除行。它能限制增长，并可安全地在大型表上运行（支持分批、有界、可恢复和可取消）。它绝不会回收磁盘空间：在 SQLite/libSQL 上，释放的页会由后续写入复用，因此文件不再增长；但将磁盘空间返还给操作系统（例如通过 `VACUUM`）则由底层数据库和操作人员负责管理。
+
+保留机制仅涵盖**增长表**：这些表会作为正常操作的副作用无限累积行（对话历史、遥测数据、任务与运行记录、计划触发历史、事件源）。由用户创建的产物和配置（Agent、Skill、Workspace、提示词块、数据集、计划定义、频道安装配置等）会随用户意图增长，并由用户显式编辑或删除，因此不能用作有效的保留键。
+
+[libSQL](/reference/storage/libsql)、[PostgreSQL](/reference/storage/postgresql) 和 [MongoDB](/reference/storage/mongodb) 是参考实现。其他适配器在实现保留机制前会永久保留行。
+
+## 使用示例
+
+在任意 `MastraCompositeStore`（或扩展它的适配器，例如 `LibSQLStore`）上声明 `retention`，然后从你自己的调度器调用 `prune()`。
+
+```typescript title="src/mastra/index.ts"
+import { LibSQLStore } from '@mastra/libsql'
+
+const storage = new LibSQLStore({
+  id: 'mastra-storage',
+  url: 'file:./mastra.db',
+  retention: {
+    memory: {
+      messages: { maxAge: '30d' },
+      threads: { maxAge: '90d', batchSize: 500 },
+    },
+    observability: {
+      spans: { maxAge: '7d' },
+    },
+  },
+})
+
+// Wire this to your own cron/scheduler: Mastra never runs it for you.
+const results = await storage.prune()
+```
+
+`retention` 具有完整的类型定义。键必须是真实的域键，每个表键必须是该域声明为符合保留条件的键。直接将对象传入存储配置即可进行类型检查；如果单独构建它，请使用 `satisfies RetentionConfig`，以便未知的域或表会产生编译错误：
+
+```typescript
+import type { RetentionConfig } from '@mastra/core/storage'
+
+const retention = {
+  memory: {
+    messages: { maxAge: '30d' }, // ok
+    bogus: { maxAge: '30d' }, // Error: not a memory retention table
+  },
+  bogusDomain: {}, // Error: not a storage domain
+} satisfies RetentionConfig
+```
+
+## 保留配置
+
+在存储配置上设置 `retention` 字段。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'retention',
+    type: 'RetentionConfig',
+    isOptional: true,
+    description: '按域、按表配置的保留时间策略。未设置的域和表会永久保留。',
+    properties: [
+      {
+        type: 'RetentionConfig',
+        parameters: [
+          {
+            name: '[domain]',
+            type: 'Record<TableKey, TableRetentionPolicy>',
+            isOptional: true,
+            description:
+              '真实的存储域键（例如 `memory`、`observability`）。将该域中符合保留条件的表键映射到其策略。',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+### TableRetentionPolicy
+
+<PropertiesTable
+  content={[
+  {
+    name: 'maxAge',
+    type: 'Duration',
+    description:
+      "要保留行的最长时间。锚点时间戳严格早于 `Date.now() - maxAge` 的行符合删除条件。数字单位为毫秒；也可以使用带单位后缀的字符串：`ms`、`s`、`m`、`h`、`d`、`w`（例如 `'30d'`、`'12h'`）。",
+  },
+  {
+    name: 'batchSize',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '1000',
+    description:
+      '每批删除的行数。每个批次都是独立事务，可限制大型表上的锁定时长和 WAL 增长。',
+  },
+]}
+/>
+
+### 符合 retention 条件的表
+
+每个域都会声明其中哪些表可按时间清理，以及哪一列时间戳作为比较锚点。选择锚点是为了让 `maxAge` 对应数据符合直觉的含义。只追加的日志使用创建时间，实时状态使用最后活动时间。任务和运行使用完成时间，因此进行中的工作绝不会被清理。
+
+| 域 | 表键 | 锚点列 | `maxAge` 衡量的内容 |
+| - | - | - | - |
+| `memory` | `threads` | `createdAt` | 线程存在时间 |
+| `memory` | `messages` | `createdAt` | 消息存在时间 |
+| `memory` | `resources` | `createdAt` | 资源存在时间 |
+| `threadState` | `threadState` | `updatedAt` | 非活动时间：仍处于活动状态的线程状态会保留 |
+| `observability` | `spans` | `startedAt` | Span 存在时间 |
+| `observability` | `metrics` | `timestamp` | 指标事件存在时间（仅限 v-next） |
+| `observability` | `logs` | `timestamp` | 日志事件存在时间（仅限 v-next） |
+| `observability` | `scores` | `timestamp` | 分数事件存在时间（仅限 v-next） |
+| `observability` | `feedback` | `timestamp` | 反馈事件存在时间（仅限 v-next） |
+| `scores` | `scorers` | `createdAt` | 分数记录存在时间 |
+| `workflows` | `workflowSnapshot` | `updatedAt` | 非活动时间：已暂停或长时间运行的 Workflow 会保留 |
+| `backgroundTasks` | `backgroundTasks` | `completedAt` | 自完成后的时间；进行中的任务（`NULL`）绝不会被清理 |
+| `experiments` | `experiments` | `completedAt` | 自完成后的时间；正在运行的实验绝不会被清理 |
+| `notifications` | `notifications` | `createdAt` | 通知存在时间 |
+| `harness` | `sessions` | `createdAt` | 会话记录存在时间 |
+| `schedules` | `triggers` | `actual_fire_at` | 触发历史存在时间（epoch-ms 列） |
+
+:::note
+
+- Memory 的 `observational_memory` 表没有时间戳锚点，因此无法按时间清理，也不是有效的保留键。
+- 实验会作为整体清理：过期实验的结果行会随实验一并删除（结果会随其父项级联删除），因此运行记录绝不会只被部分删除。保留机制没有单独的 `results` 键。
+- 对于 `schedules`，增长表是触发历史（`schedule_triggers`，每次触发一行）；计划定义属于配置，不会被清理。
+- 在 PostgreSQL 上，时间戳锚点使用带时区的镜像列（例如 `createdAtZ`、`completedAtZ`）。
+- LibSQL 和 PostgreSQL 支持上述所有域，`harness` 除外，因为 PostgreSQL 未实现它。MongoDB 支持除 `threadState` 和 `harness` 以外的所有域。
+- v-next PostgreSQL Observability 域将信号事件存储在按天分区的表中（`spans`、`metrics`、`logs`、`scores`、`feedback`）。对于它，`prune()` 会删除完全早于截止时间的整日分区（或 TimescaleDB chunk），而非删除行：有效粒度为一天，且仅当分区的整天均超过 `maxAge` 后才会删除。`PruneResult.deleted` 会报告已删除分区中的行数。
+
+:::
+
+## 方法
+
+### Retention
+
+#### `prune(options?)`
+
+删除所有在 `retention` 中配置了策略的域内、超过所配置 `maxAge` 的行。每个受影响的表返回一个 `PruneResult`。未配置 `retention` 时，此操作不会执行任何操作并返回 `[]`。
+
+`prune()` 旨在安全地用于包含数百万行的表。它以有界的分批块进行删除（每个批次都是独立事务），因此不会长时间锁定表或使事务日志膨胀。它绝不会运行 `VACUUM`。
+
+传入 `options.retention` 可仅替换本次调用的已配置策略：例如跳过某个域（保留聊天记录），或比现有配置更积极地清理。存储已配置的 `retention` 不会改变。
+
+对于配置了策略的每张表，锚点列索引会在第一次调用 `prune()` 时按需创建（绝不会在 `init()` 时创建），因此未配置保留机制的部署无需承担额外的索引写入或磁盘开销。首次清理现有大型表时需要一次性构建索引，后续清理会复用该索引。
+
+```typescript
+const results = await storage.prune({
+  maxRows: 50_000, // cap work this call
+  pauseMs: 50, // breathe between batches
+})
+
+for (const r of results) {
+  console.log(`${r.domain}.${r.table}: deleted ${r.deleted}, done=${r.done}`)
+}
+
+// One-off pass with different policies (configured retention untouched):
+await storage.prune({
+  retention: {
+    observability: { spans: { maxAge: '1d' } },
+  },
+})
+```
+
+返回值：`Promise<PruneResult[]>`
+
+##### PruneOptions
+
+<PropertiesTable
+  content={[
+  {
+    name: 'maxBatches',
+    type: 'number',
+    isOptional: true,
+    description:
+      '每次调用中每张表最多执行的删除批次数。达到上限时，该表的结果将以 `done: false` 返回。',
+  },
+  {
+    name: 'maxRows',
+    type: 'number',
+    isOptional: true,
+    description:
+      '每次调用中每张表最多删除的行数。达到上限时，该表的结果将以 `done: false` 返回。',
+  },
+  {
+    name: 'pauseMs',
+    type: 'number',
+    isOptional: true,
+    description: '批次之间的延迟时间（以毫秒为单位），以避免阻塞实时流量。',
+  },
+  {
+    name: 'signal',
+    type: 'AbortSignal',
+    isOptional: true,
+    description:
+      '协作式取消。批处理循环会在批次之间检查它，并干净地停止，返回 `done: false` 的部分结果。',
+  },
+  {
+    name: 'retention',
+    type: 'RetentionConfig',
+    isOptional: true,
+    description:
+      '仅替换本次调用的存储保留策略，例如跳过某个域或更积极地清理。已配置的 `retention` 不会改变。',
+  },
+]}
+/>
+
+##### PruneResult
+
+每个结果描述一张表的处理进度：
+
+```typescript
+interface PruneResult {
+  domain: string // e.g. 'memory'
+  table: string // physical table name, e.g. 'mastra_messages'
+  deleted: number // rows deleted during this call
+  done: boolean // false => eligible rows remain; call prune() again
+}
+```
+
+## 按计划运行 prune
+
+`prune()` 没有内置调度器：何时运行由你决定。由于它是有界的，一次调用可能无法删除所有内容。当任何结果的 `done: false` 时，仍有符合条件的行，需要在下一次 tick 时再次调用。这能使每次调用保持简短，并让大量积压通过多次运行逐步清理。
+
+```typescript
+// Runs on your own cron (node-cron, a workflow schedule, an external job, etc.).
+async function retentionTick() {
+  const results = await storage.prune({ maxRows: 100_000, pauseMs: 25 })
+  const incomplete = results.filter(r => !r.done)
+  if (incomplete.length) {
+    // Rows remain; the next scheduled tick will continue where this one stopped.
+    console.log(
+      'retention still draining:',
+      incomplete.map(r => `${r.domain}.${r.table}`),
+    )
+  }
+}
+```
+
+你还可以使用 `AbortSignal` 取消长时间运行的清理：循环会在批次之间停止，并返回 `done: false` 的部分结果，因此下一次运行可顺利继续。
+
+## MongoDB TTL 索引（prune 的替代方案）
+
+MongoDB 提供原生的 [TTL（Time-To-Live）索引](https://www.mongodb.com/docs/manual/core/index-ttl/)，可自动删除过期文档，无需手动调用 `prune()`。这是一项以后台线程运行的数据库级功能。
+
+:::note[何时使用 TTL 或 prune()]
+
+**适合使用 MongoDB TTL 索引的情形：**
+
+- 希望自动删除，无需维护
+- 保留期固定（例如“始终为 30 天”）
+- 更倾向于数据库原生方案
+
+**适合使用 `prune()` 的情形：**
+
+- 需要细粒度控制删除时机
+- 希望在营业时间限制删除速率
+- 需要可恢复、可取消的清理操作
+- 正在使用包含多个数据库的复合存储
+
+两种方案都有效。TTL 更简单，`prune()` 则提供更多控制能力。
+:::
+
+### 在 MongoDB 上设置 TTL 索引
+
+TTL 索引作用于日期字段。MongoDB 每 60 秒检查一次索引，并删除日期字段加上 TTL 时长早于当前时间的文档。
+
+```typescript
+import { MongoDBStore } from '@mastra/mongodb'
+
+const storage = new MongoDBStore({
+  id: 'mongodb-storage',
+  uri: process.env.MONGODB_URI!,
+  dbName: process.env.MONGODB_DB_NAME!,
+  indexes: [
+    // Messages expire after 30 days
+    {
+      collection: 'mastra_messages',
+      keys: { createdAt: 1 },
+      options: { expireAfterSeconds: 30 * 24 * 60 * 60 }, // 30 days
+    },
+    // Threads expire after 90 days
+    {
+      collection: 'mastra_threads',
+      keys: { createdAt: 1 },
+      options: { expireAfterSeconds: 90 * 24 * 60 * 60 }, // 90 days
+    },
+    // Spans expire after 7 days
+    {
+      collection: 'mastra_ai_spans',
+      keys: { startedAt: 1 },
+      options: { expireAfterSeconds: 7 * 24 * 60 * 60 }, // 7 days
+    },
+  ],
+})
+```
+
+:::tip
+TTL 索引会在文档过期后不久删除它们（后台线程约每 60 秒运行一次），但无法保证确切时间。如需精确、即时的清理，请改用 `prune()`。
+:::
+
+## 回收磁盘空间
+
+`prune()` 会删除行，但不会缩小数据库文件。在 SQLite/libSQL 上，释放的页会进入空闲列表并由后续写入复用，因此文件不再增长：对大多数用户而言，仅此便可解决无限增长问题。
+
+将这些空闲空间返还给操作系统是 Mastra 不管理的另一项工作。如果确实需要缩小文件，请在维护窗口中自行运行底层数据库的压缩操作（例如自托管 libSQL 上的 `VACUUM`）。完整的 `VACUUM` 会锁定文件，并需要约为文件大小两倍的可用磁盘空间。在 PostgreSQL 上，autovacuum 会自动回收死元组以供复用；仅在必须将磁盘空间返还给操作系统时，才需要手动运行 `VACUUM FULL`。
+
+对于 MongoDB，已删除的文档会由后续插入复用。要回收磁盘空间，请在维护窗口中运行 [`db.runCommand({ compact: "collection_name" })`](https://www.mongodb.com/docs/manual/reference/command/compact/)。
+
+:::note[libSQL 和 Turso]
+[Turso Cloud](/reference/storage/libsql) 会为你管理存储压缩，因此无需手动回收任何空间。这仅适用于自托管的 libSQL 文件。
+:::
+
+## 相关内容
+
+- [libSQL 存储](/reference/storage/libsql)
+- [PostgreSQL 存储](/reference/storage/postgresql)
+- [复合存储](/reference/storage/composite)
+- [存储概览](/reference/storage/overview)

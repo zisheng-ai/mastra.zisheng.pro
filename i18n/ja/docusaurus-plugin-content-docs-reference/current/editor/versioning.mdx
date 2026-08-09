@@ -1,0 +1,137 @@
+---
+title: "リファレンス：バージョニング | Editor"
+description: "Editor のバージョンライフサイクル、選択、サブ Agent への伝播、ソースの動作、REST エンドポイント、SDK メソッドのリファレンス。"
+packages:
+  - "@mastra/core"
+  - "@mastra/editor"
+  - "@mastra/client-js"
+---
+
+# バージョニング
+
+Editor は、保存済み Agent と Prompt Block をバージョン管理します。データベースを基盤とするリソースでは、ドラフト操作と公開操作を使用します。コードを基盤とする Agent のオーバーライドでは、決定的なファイルと Git 履歴を使用します。
+
+リリースと実験のパターンについては、[Editor のバージョニング](/docs/editor/overview#versioning)を参照してください。
+
+## データベースのライフサイクル
+
+リソースレコードには `activeVersionId` が保存されます。個々のスナップショットにはライフサイクルのステータスは保存されません。
+
+| 用語 | 意味 |
+| - | - |
+| 最新 | 最も新しく作成された設定のスナップショット |
+| 公開済み | `activeVersionId` で選択されているスナップショット |
+| ドラフト | `activeVersionId` と異なる場合の最新スナップショット、またはアクティブなバージョンが存在しない場合の最新スナップショット |
+| 履歴 | それ以外の保持されているスナップショット |
+
+変更されたスナップショットフィールドを保存すると、新しい最新バージョンが作成されます。同一のスナップショットフィールドを保存する場合や、メタデータだけを変更する場合は、バージョンは作成されません。
+
+アクティブなバージョンが存在する場合、ドラフトを作成しても、公開済みリクエストを処理するバージョンは変わりません。公開すると `activeVersionId` が更新されます。履歴バージョンを復元すると、その設定が新しい非アクティブなドラフトにコピーされます。
+
+直接呼び出す名前空間メソッドと REST API には、重要な違いが1つあります。`editor.prompt.update()` は非アクティブなドラフトを作成します。`editor.agent.update()` はバージョンを作成し、すぐに `activeVersionId` に割り当てます。保存済み Agent の REST `PATCH` ルートは、`autoPublish` が有効でない限り、非アクティブなドラフトを作成します。
+
+汎用の保存済みリソースにアクティブなバージョンがない場合、公開済みバージョンの解決では、最新のスナップショットにフォールバックできます。コードで定義された Agent のオーバーライドでは、アクティブなオーバーライドがない状態で `status: 'published'` をリクエストすると、元のコード Agent が返されます。
+
+## コードソース
+
+`source: 'code'` の場合、アクティブな Agent のオーバーライドは、`<codePath>/agents/<encodedAgentId>.json` に決定的な JSON としてシリアライズされます。デフォルトの `codePath` は `./mastra/editor` です。
+
+最初の Agent は、ファイルを作成するために公開されます。以降のサーバー更新では、デフォルトでドラフトが作成され、そのバージョンがアクティブになった時点でファイルに書き込まれます。Git のバージョンは Studio では読み取り専用で、コミットメッセージを変更メッセージとして使用します。デフォルトの履歴スキャンでは、直近50件までのコミットを読み取り、解析した JSON スナップショットが変わらない連続コミットをスキップします。
+
+ソースのオプションについては、[`MastraEditor`](/reference/editor/mastra-editor#source)を参照してください。
+
+## Agent バージョンを選択する
+
+セレクターを指定せずに [`mastra.getAgentById()`](/reference/core/getAgentById) を呼び出すと、登録済みのコード定義 Agent が返されます。保存済みのオーバーライドを適用するには、`status` または `versionId` を渡します。TypeScript の例については、[バージョンを選択する](/docs/editor/overview#select-a-version)を参照してください。
+
+デフォルトのサーバープレフィックスを使用する場合は、`/api` 配下のクエリパラメーターとしてセレクターを渡します。
+
+```bash title="Version selection through the API"
+# Published version
+curl http://localhost:4111/api/agents/support-agent
+
+# Latest draft
+curl http://localhost:4111/api/agents/support-agent?status=draft
+
+# Exact version
+curl http://localhost:4111/api/agents/support-agent?versionId=abc-123
+```
+
+Client SDK と React SDK のセレクターについては、[Client SDK の Agent リファレンス](/reference/client-js/agents#version-management)を参照してください。
+
+## サブ Agent のバージョニング
+
+バージョンのオーバーライドは、リクエストコンテキスト内の[スーパーバイザー Agent による委任](/docs/capabilities/subagents)を通じて伝播します。セレクターは次の3つのレベルで定義します。
+
+1. `Mastra` インスタンスの `versions`：すべての呼び出しに対するデフォルト
+1. サーバーのリクエストボディの `versions`：リクエストごとにリクエストコンテキストへ追加される値
+1. `generate()` または `stream()` を直接呼び出す際の `versions`：呼び出しごとの値
+
+エントリは Agent ID ごとにマージされます。同じ ID に対する優先順位は、**直接呼び出し > リクエストボディまたは既存のリクエストコンテキスト > Mastra インスタンスのデフォルト**です。
+
+Mastra インスタンスにデフォルトを設定します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraEditor } from '@mastra/editor'
+
+export const mastra = new Mastra({
+  agents: { supervisor, researchAgent, writerAgent },
+  editor: new MastraEditor(),
+  versions: {
+    agents: {
+      'research-agent': { status: 'published' },
+      'writer-agent': { versionId: 'abc-123' },
+    },
+  },
+})
+```
+
+直接呼び出す際に、1つのサブ Agent をオーバーライドします。
+
+```typescript title="src/routes/experiment.ts"
+const result = await supervisor.generate('Research and write about AI safety', {
+  versions: {
+    agents: {
+      'research-agent': { status: 'draft' },
+    },
+  },
+})
+```
+
+または、サーバーのリクエストボディでセレクターを渡します。
+
+```bash title="Per-request sub-agent versions"
+curl -X POST http://localhost:4111/api/agents/supervisor/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{ "role": "user", "content": "Research AI safety" }],
+    "versions": {
+      "agents": {
+        "research-agent": { "status": "draft" }
+      }
+    }
+  }'
+```
+
+Editor が設定されていない場合や、バージョンを解決できない場合、Mastra は警告をログに記録し、コードで定義されたサブ Agent を使用します。
+
+## 保存済み Agent の REST API
+
+Mastra サーバーのデフォルトプレフィックスは `/api` です。カスタムサーバープレフィックスを使用すると、以下のパスも変わります。
+
+| メソッド | パス | 説明 |
+| - | - | - |
+| `GET` | `/api/stored/agents` | 保存済み Agent を一覧表示します |
+| `POST` | `/api/stored/agents` | 保存済み Agent を作成します |
+| `GET` | `/api/stored/agents/:storedAgentId` | 保存済み Agent を取得します |
+| `PATCH` | `/api/stored/agents/:storedAgentId` | 保存済み Agent を更新します |
+| `DELETE` | `/api/stored/agents/:storedAgentId` | 保存済み Agent を削除します |
+| `GET` | `/api/stored/agents/:storedAgentId/dependents` | 読み取り可能な依存元を一覧表示し、非表示の Workspace 間参照をカウントします |
+| `POST` | `/api/stored/agents/:storedAgentId/export` | 許可されたオーバーライドフィールドを決定的な JSON としてエクスポートします |
+
+依存元のレスポンスには、呼び出し元が読み取れる Agent が `id` と `name` ごとに一覧表示されます。`hiddenCount` フィールドは、呼び出し元が読み取れない Workspace 間参照をカウントしますが、対象 Agent が公開されている場合に限ります。
+
+バージョン管理ルートは、`/api/stored/agents/:storedAgentId/versions` 配下にネストされています。操作と Client SDK メソッドについては、[バージョン管理](/reference/client-js/agents#version-management)を参照してください。
+
+Client SDK は、`listStoredAgents()`、`createStoredAgent()`、`getStoredAgent()` を公開します。`getStoredAgent(id)` が返すリソースには、更新、削除、依存元、エクスポート、バージョン管理の各メソッドが含まれます。

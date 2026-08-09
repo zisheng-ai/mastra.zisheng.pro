@@ -1,0 +1,549 @@
+---
+title: "リファレンス：スコアラーユーティリティ | Evals"
+description: テキスト内容、推論、システムメッセージ、Tool 呼び出しなど、スコアラーの実行入出力からデータを抽出するためのユーティリティ関数。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+# スコアラーユーティリティ
+
+Mastra は、スコアラーの実行入出力からデータを抽出して処理するためのユーティリティ関数を提供します。これらは、カスタムスコアラーの `preprocess` ステップで特に役立ちます。
+
+## インポート
+
+```typescript
+import {
+  getAssistantMessageFromRunOutput,
+  getReasoningFromRunOutput,
+  getUserMessageFromRunInput,
+  getSystemMessagesFromRunInput,
+  getCombinedSystemPrompt,
+  extractToolCalls,
+  extractInputMessages,
+  extractAgentResponseMessages,
+  compareTrajectories,
+  createTrajectoryTestRun,
+} from '@mastra/evals/scorers/utils'
+```
+
+Trajectory 抽出関数は `@mastra/core/evals` から利用できます。
+
+```typescript
+import {
+  extractTrajectory,
+  extractWorkflowTrajectory,
+  extractTrajectoryFromTrace,
+} from '@mastra/core/evals'
+```
+
+## メッセージの抽出
+
+### `getAssistantMessageFromRunOutput`
+
+実行出力の最初の assistant メッセージからテキスト内容を抽出します。
+
+```typescript
+const scorer = createScorer({
+  id: 'my-scorer',
+  description: 'My scorer',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    const response = getAssistantMessageFromRunOutput(run.output)
+    return { response }
+  })
+  .generateScore(({ results }) => {
+    return results.preprocessStepResult?.response ? 1 : 0
+  })
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'output',
+    type: 'ScorerRunOutputForAgent',
+    isOptional: true,
+    description: 'スコアラーの実行出力（MastraDBMessage の配列）',
+  },
+]}
+/>
+
+**戻り値：** `string | undefined` - assistant メッセージのテキスト。assistant メッセージが見つからない場合は undefined。
+
+### `getUserMessageFromRunInput`
+
+実行入力の最初の user メッセージからテキスト内容を抽出します。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const userMessage = getUserMessageFromRunInput(run.input);
+  return { userMessage };
+})
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'input',
+    type: 'ScorerRunInputForAgent',
+    isOptional: true,
+    description: '入力メッセージを含むスコアラーの実行入力',
+  },
+]}
+/>
+
+**戻り値：** `string | undefined` - user メッセージのテキスト。user メッセージが見つからない場合は undefined。
+
+### `extractInputMessages`
+
+すべての入力メッセージからテキスト内容を配列として抽出します。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const allUserMessages = extractInputMessages(run.input);
+  return { conversationHistory: allUserMessages.join("\n") };
+})
+```
+
+**戻り値：** `string[]` - 各入力メッセージのテキスト文字列の配列。
+
+### `extractAgentResponseMessages`
+
+すべての assistant 応答メッセージからテキスト内容を配列として抽出します。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const allResponses = extractAgentResponseMessages(run.output);
+  return { allResponses };
+})
+```
+
+**戻り値：** `string[]` - 各 assistant メッセージのテキスト文字列の配列。
+
+## 推論の抽出
+
+### `getReasoningFromRunOutput`
+
+実行出力から推論テキストを抽出します。思考過程の推論を生成する `deepseek-reasoner` などの推論モデルの応答を評価するときに特に役立ちます。
+
+推論は次の2か所に保存できます。
+
+1. `content.reasoning` - メッセージ内容の文字列フィールド
+1. `content.parts` - `type: 'reasoning'` で、`details` を含むパーツ
+
+```typescript
+import {
+  getReasoningFromRunOutput,
+  getAssistantMessageFromRunOutput,
+} from '@mastra/evals/scorers/utils'
+
+const reasoningQualityScorer = createScorer({
+  id: 'reasoning-quality',
+  name: 'Reasoning Quality',
+  description: 'Evaluates the quality of model reasoning',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    const reasoning = getReasoningFromRunOutput(run.output)
+    const response = getAssistantMessageFromRunOutput(run.output)
+    return { reasoning, response }
+  })
+  .analyze(({ results }) => {
+    const { reasoning } = results.preprocessStepResult || {}
+    return {
+      hasReasoning: !!reasoning,
+      reasoningLength: reasoning?.length || 0,
+      hasStepByStep: reasoning?.includes('step') || false,
+    }
+  })
+  .generateScore(({ results }) => {
+    const { hasReasoning, reasoningLength } = results.analyzeStepResult || {}
+    if (!hasReasoning) return 0
+    // Score based on reasoning length (normalized to 0-1)
+    return Math.min(reasoningLength / 500, 1)
+  })
+  .generateReason(({ results, score }) => {
+    const { hasReasoning, reasoningLength } = results.analyzeStepResult || {}
+    if (!hasReasoning) {
+      return 'No reasoning was provided by the model.'
+    }
+    return `Model provided ${reasoningLength} characters of reasoning. Score: ${score}`
+  })
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'output',
+    type: 'ScorerRunOutputForAgent',
+    isOptional: true,
+    description: 'スコアラーの実行出力（MastraDBMessage の配列）',
+  },
+]}
+/>
+
+**戻り値：** `string | undefined` - 推論テキスト。推論がない場合は undefined。
+
+## システムメッセージの抽出
+
+### `getSystemMessagesFromRunInput`
+
+標準のシステムメッセージとタグ付きシステムメッセージ（メモリ指示などの特別なプロンプト）の両方を含む、実行入力のすべてのシステムメッセージを抽出します。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const systemMessages = getSystemMessagesFromRunInput(run.input);
+  return { 
+    systemPromptCount: systemMessages.length,
+    systemPrompts: systemMessages 
+  };
+})
+```
+
+**戻り値：** `string[]` - システムメッセージ文字列の配列。
+
+### `getCombinedSystemPrompt`
+
+すべてのシステムメッセージを、2つの改行で連結した単一のプロンプト文字列にまとめます。
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const fullSystemPrompt = getCombinedSystemPrompt(run.input);
+  return { fullSystemPrompt };
+})
+```
+
+**戻り値：** `string` - 結合されたシステムプロンプト文字列。
+
+## Tool 呼び出しの抽出
+
+### `extractToolCalls`
+
+Tool 名、呼び出し ID、メッセージ配列内の位置など、実行出力に含まれるすべての Tool 呼び出しの情報を抽出します。
+
+```typescript
+const toolUsageScorer = createScorer({
+  id: 'tool-usage',
+  description: 'Evaluates tool usage patterns',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    const { tools, toolCallInfos } = extractToolCalls(run.output)
+    return {
+      toolsUsed: tools,
+      toolCount: tools.length,
+      toolDetails: toolCallInfos,
+    }
+  })
+  .generateScore(({ results }) => {
+    const { toolCount } = results.preprocessStepResult || {}
+    // Score based on appropriate tool usage
+    return toolCount > 0 ? 1 : 0
+  })
+```
+
+**戻り値：**
+
+```typescript prettier:false
+{
+  tools: string[];           // Array of tool names
+  toolCallInfos: ToolCallInfo[];  // Detailed tool call information
+}
+```
+
+`ToolCallInfo` は次のとおりです。
+
+```typescript
+type ToolCallInfo = {
+  toolName: string // Name of the tool
+  toolCallId: string // Unique call identifier
+  messageIndex: number // Index in the output array
+  invocationIndex: number // Index within message's tool invocations
+}
+```
+
+## テストユーティリティ
+
+これらのユーティリティは、スコアラー開発用のテストデータ作成を支援します。
+
+### `createTestMessage`
+
+テスト用の `MastraDBMessage` オブジェクトを作成します。
+
+```typescript
+import { createTestMessage } from '@mastra/evals/scorers/utils'
+
+const userMessage = createTestMessage({
+  content: 'What is the weather?',
+  role: 'user',
+})
+
+const assistantMessage = createTestMessage({
+  content: 'The weather is sunny.',
+  role: 'assistant',
+  toolInvocations: [
+    {
+      toolCallId: 'call-1',
+      toolName: 'weatherTool',
+      args: { location: 'London' },
+      result: { temp: 20 },
+      state: 'result',
+    },
+  ],
+})
+```
+
+### `createAgentTestRun`
+
+スコアラーのテストに使用する完全なテスト実行オブジェクトを作成します。
+
+```typescript
+import { createAgentTestRun, createTestMessage } from '@mastra/evals/scorers/utils'
+
+const testRun = createAgentTestRun({
+  inputMessages: [createTestMessage({ content: 'Hello', role: 'user' })],
+  output: [createTestMessage({ content: 'Hi there!', role: 'assistant' })],
+})
+
+// Run your scorer with the test data
+const result = await myScorer.run({
+  input: testRun.input,
+  output: testRun.output,
+})
+```
+
+## Trajectory ユーティリティ
+
+### `extractTrajectory`
+
+`Trajectory` を Agent の出力メッセージ（`MastraDBMessage[]`）から抽出します。Tool 呼び出しを `ToolCallStep` オブジェクトに変換します。`runEvals` パイプラインは Trajectory スコアラーに対してこれを自動的に呼び出すため、直接テストする場合にのみ必要です。
+
+`@mastra/core/evals` から利用できます。
+
+```typescript
+import { extractTrajectory } from '@mastra/core/evals'
+
+const trajectory = extractTrajectory(agentOutputMessages)
+// trajectory.steps — ToolCallStep[] extracted from toolInvocations
+// trajectory.rawOutput — the original MastraDBMessage[] array
+```
+
+**戻り値：** `Trajectory`：`steps: TrajectoryStep[]`、`totalDurationMs`、`rawOutput` を含みます。
+
+### `extractWorkflowTrajectory`
+
+Workflow のステップ結果から `Trajectory` を抽出します。実行パスの順序を維持しながら、`StepResult` レコードを `WorkflowStepStep` オブジェクトに変換します。
+
+`@mastra/core/evals` から利用できます。
+
+```typescript
+import { extractWorkflowTrajectory } from '@mastra/core/evals'
+
+const trajectory = extractWorkflowTrajectory(
+  workflowResult.steps, // Record<string, StepResult>
+  workflowResult.stepExecutionPath, // string[] (optional)
+)
+// trajectory.steps — WorkflowStepStep[] in execution order
+```
+
+**戻り値：** `Trajectory`：`steps: TrajectoryStep[]`、`totalDurationMs`、`rawWorkflowResult` を含みます。
+
+### `extractTrajectoryFromTrace`
+
+階層的な `Trajectory` を可観測性 Trace の span（`SpanRecord[]`）から構築します。親子関係の span ツリーを再構築し、各 span を適切な `TrajectoryStep` 判別共用体型にマッピングして、ネストされた `children` を持たせます。
+
+ストレージを利用できる場合は、この抽出方法を推奨します。`runEvals` パイプラインは、ターゲットの `Mastra` インスタンスにストレージバックエンドが設定されていると、これを自動的に呼び出します。ネストされた Agent の実行、Tool 呼び出し、モデル生成など、実行ツリー全体を取得するため、`extractTrajectory` や `extractWorkflowTrajectory` よりも詳細な Trajectory を生成します。
+
+`@mastra/core/evals` から利用できます。
+
+```typescript
+import { extractTrajectoryFromTrace } from '@mastra/core/evals'
+
+// After fetching a trace from the observability store
+const traceData = await observabilityStore.getTrace({ traceId })
+const trajectory = extractTrajectoryFromTrace(traceData.spans, rootSpanId)
+// trajectory.steps — hierarchical TrajectoryStep[] with children
+```
+
+**パラメーター：**
+
+- `spans`（`SpanRecord[]`）：Trace クエリから取得した span レコードの配列。
+- `rootSpanId`（`string`、任意）：開始点として使用する span ID。省略した場合は、親を持たない span を使用します。
+
+**戻り値：** `Trajectory`：`steps: TrajectoryStep[]` は再帰的な `children` を持ち、`totalDurationMs` も含みます。
+
+#### span 型のマッピング
+
+| span 型 | Trajectory ステップ型 | 抽出される主要フィールド |
+| - | - | - |
+| `TOOL_CALL` | `tool_call` | `toolArgs`、`toolResult`、`success` |
+| `MCP_TOOL_CALL` | `mcp_tool_call` | `toolArgs`、`toolResult`、`mcpServer`、`success` |
+| `MODEL_GENERATION` | `model_generation` | `modelId`、`promptTokens`、`completionTokens`、`finishReason` |
+| `AGENT_RUN` | `agent_run` | `agentId`（エンティティ ID から取得） |
+| `WORKFLOW_RUN` | `workflow_run` | `workflowId`（エンティティ ID から取得） |
+| `WORKFLOW_STEP` | `workflow_step` | `output` |
+| `WORKFLOW_CONDITIONAL` | `workflow_conditional` | `conditionCount`、`selectedSteps` |
+| `WORKFLOW_PARALLEL` | `workflow_parallel` | `branchCount`、`parallelSteps` |
+| `WORKFLOW_LOOP` | `workflow_loop` | `loopType`、`totalIterations` |
+| `WORKFLOW_SLEEP` | `workflow_sleep` | `sleepDurationMs`、`sleepType` |
+| `WORKFLOW_WAIT_EVENT` | `workflow_wait_event` | `eventName`、`eventReceived` |
+| `PROCESSOR_RUN` | `processor_run` | `processorId` |
+
+`GENERIC`、`MODEL_STEP`、`MODEL_CHUNK`、`WORKFLOW_CONDITIONAL_EVAL` 型の span はノイズとしてスキップされます。
+
+### `compareTrajectories`
+
+実際の Trajectory と期待する Trajectory を比較し、詳細な比較結果を返します。`createTrajectoryAccuracyScorerCode` が内部で使用します。
+
+`expected` パラメーターは、`Trajectory`（実際の Trajectory）または `{ steps: ExpectedStep[] }` を受け取ります。`ExpectedStep[]` を使用する場合は、名前だけ、または名前と stepType で照合できます。比較対象のデータも含められます。詳細は[期待するステップ](/reference/evals/trajectory-accuracy#expected-steps)を参照してください。
+
+```typescript
+import { compareTrajectories } from '@mastra/evals/scorers/utils'
+
+// Using ExpectedStep[] (recommended for expectations)
+// Data fields (e.g. toolArgs) are auto-compared when present on expected steps
+const result = compareTrajectories(
+  actualTrajectory,
+  { steps: [{ name: 'search' }, { name: 'summarize', stepType: 'tool_call' }] },
+  { allowRepeatedSteps: true },
+)
+// result.score — 0.0 to 1.0
+// result.missingSteps — step names not found
+// result.extraSteps — unexpected step names
+// result.outOfOrderSteps — steps found but in wrong order
+```
+
+**戻り値：** `TrajectoryComparisonResult`
+
+### `createTrajectoryTestRun`
+
+Trajectory スコアラー用のテスト実行オブジェクトを作成します。`Trajectory` を想定される `ScorerRun` 形式でラップします。
+
+```typescript
+import { createTrajectoryTestRun } from '@mastra/evals/scorers/utils'
+
+const run = createTrajectoryTestRun({
+  steps: [
+    { stepType: 'tool_call', name: 'search', toolArgs: { q: 'test' } },
+    { stepType: 'tool_call', name: 'summarize' },
+  ],
+})
+
+const result = await trajectoryScorer.run(run)
+```
+
+### `checkTrajectoryEfficiency`
+
+ステップ、トークン、所要時間の上限に照らして Trajectory の効率を評価します。冗長な呼び出し（同じ引数による同一 Tool の呼び出し）も検出します。
+
+```typescript
+import { checkTrajectoryEfficiency } from '@mastra/evals/scorers/utils'
+
+const result = checkTrajectoryEfficiency(trajectory, {
+  maxSteps: 5,
+  maxTotalTokens: 2000,
+  maxTotalDurationMs: 5000,
+  noRedundantCalls: true,
+})
+// result.score — 1.0 if within all budgets, lower with penalties
+// result.redundantCalls — duplicate tool+args combos
+// result.overStepBudget — true if maxSteps exceeded
+// result.overTokenBudget — true if maxTotalTokens exceeded
+// result.overDurationBudget — true if maxTotalDurationMs exceeded
+```
+
+**戻り値：** `TrajectoryEfficiencyResult`
+
+### `checkTrajectoryBlacklist`
+
+Trajectory に禁止された Tool や Tool 呼び出しシーケンスが含まれているかを確認します。
+
+```typescript
+import { checkTrajectoryBlacklist } from '@mastra/evals/scorers/utils'
+
+const result = checkTrajectoryBlacklist(trajectory, {
+  blacklistedTools: ['deleteAll', 'admin-override'],
+  blacklistedSequences: [['escalate', 'admin-override']],
+})
+// result.score — 1.0 if no violations, 0.0 if any found
+// result.violatedTools — blacklisted tools that were called
+// result.violatedSequences — blacklisted sequences that were detected
+```
+
+**戻り値：** `TrajectoryBlacklistResult`
+
+### `analyzeToolFailures`
+
+再試行、フォールバック、引数の修正など、Tool の失敗パターンを検出します。
+
+```typescript
+import { analyzeToolFailures } from '@mastra/evals/scorers/utils'
+
+const result = analyzeToolFailures(trajectory, {
+  maxRetriesPerTool: 2,
+})
+// result.score — 1.0 if no failure patterns, lower if patterns detected
+// result.patterns — detected patterns (retry, fallback, arg_correction)
+```
+
+**戻り値：** `ToolFailureAnalysisResult`
+
+## 完全な例
+
+複数のユーティリティを組み合わせて使用する完全な例を次に示します。
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+import {
+  getAssistantMessageFromRunOutput,
+  getReasoningFromRunOutput,
+  getUserMessageFromRunInput,
+  getCombinedSystemPrompt,
+  extractToolCalls,
+} from '@mastra/evals/scorers/utils'
+
+const comprehensiveScorer = createScorer({
+  id: 'comprehensive-analysis',
+  name: 'Comprehensive Analysis',
+  description: 'Analyzes all aspects of an agent response',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    // Extract all relevant data
+    const userMessage = getUserMessageFromRunInput(run.input)
+    const response = getAssistantMessageFromRunOutput(run.output)
+    const reasoning = getReasoningFromRunOutput(run.output)
+    const systemPrompt = getCombinedSystemPrompt(run.input)
+    const { tools, toolCallInfos } = extractToolCalls(run.output)
+
+    return {
+      userMessage,
+      response,
+      reasoning,
+      systemPrompt,
+      toolsUsed: tools,
+      toolCount: tools.length,
+    }
+  })
+  .generateScore(({ results }) => {
+    const { response, reasoning, toolCount } = results.preprocessStepResult || {}
+
+    let score = 0
+    if (response && response.length > 0) score += 0.4
+    if (reasoning) score += 0.3
+    if (toolCount > 0) score += 0.3
+
+    return score
+  })
+  .generateReason(({ results, score }) => {
+    const { response, reasoning, toolCount } = results.preprocessStepResult || {}
+
+    const parts = []
+    if (response) parts.push('provided a response')
+    if (reasoning) parts.push('included reasoning')
+    if (toolCount > 0) parts.push(`used ${toolCount} tool(s)`)
+
+    return `Score: ${score}. The agent ${parts.join(', ')}.`
+  })
+```

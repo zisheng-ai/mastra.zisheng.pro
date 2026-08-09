@@ -1,0 +1,175 @@
+---
+title: "リファレンス: Upstash ストレージ | Storage"
+description: Mastra の Upstash ストレージ実装に関するドキュメントです。
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+  - "@mastra/upstash"
+---
+
+# Upstash ストレージ
+
+Upstash ストレージ実装は、Upstash の Redis 互換 Key-Value ストアを使用し、サーバーレス環境に適したストレージソリューションを提供します。
+
+:::warning[料金]
+
+Mastra を Upstash と組み合わせる場合、Agent との会話中に大量の Redis コマンドが生成されるため、従量課金モデルでは予想外に高額な費用が発生する可能性があります。費用を予測可能にするため、**固定料金プラン**の利用を強く推奨します。詳しくは、[Upstash の料金](https://upstash.com/pricing/redis)と背景を説明する [GitHub issue #5850](https://github.com/mastra-ai/mastra/issues/5850)を参照してください。
+
+:::
+
+:::warning[Observability は未対応]
+
+Upstash ストレージは **observability ドメインに対応していません**。`MastraStorageExporter` の Trace を Upstash に永続化できず、Upstash だけをストレージ Provider として使用すると [Studio](/docs/studio/overview) の observability 機能も動作しません。observability を有効にするには、[Composite storage](/reference/storage/composite#specialized-storage-for-observability)を使用し、observability データを ClickHouse などの対応 Provider にルーティングしてください。
+
+:::
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/upstash@latest
+```
+
+## 使用方法
+
+```typescript
+import { UpstashStore } from '@mastra/upstash'
+
+const storage = new UpstashStore({
+  id: 'upstash-storage',
+  url: process.env.UPSTASH_URL,
+  token: process.env.UPSTASH_TOKEN,
+})
+```
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'url',
+    type: 'string',
+    description: 'Upstash Redis の URL',
+    isOptional: false,
+  },
+  {
+    name: 'token',
+    type: 'string',
+    description: 'Upstash Redis の認証トークン',
+    isOptional: false,
+  },
+  {
+    name: 'prefix',
+    type: 'string',
+    description: '保存するすべての項目に付けるキープレフィックス',
+    isOptional: true,
+    defaultValue: 'mastra:',
+  },
+]}
+/>
+
+## 補足
+
+### キー構造
+
+Upstash ストレージ実装では、次の Key-Value 構造を使用します。
+
+- Thread のキー: `{prefix}thread:{threadId}`
+- Message のキー: `{prefix}message:{messageId}`
+- メタデータのキー: `{prefix}metadata:{entityId}`
+
+### サーバーレス環境での利点
+
+Upstash ストレージは、特にサーバーレス環境へのデプロイに適しています。
+
+- 接続管理が不要
+- リクエスト単位の料金体系
+- グローバルレプリケーションのオプション
+- Edge 環境に対応
+
+### データの永続化
+
+Upstash には次の機能があります。
+
+- データの自動永続化
+- Point-in-time recovery
+- クロスリージョンレプリケーションのオプション
+
+### パフォーマンス上の考慮事項
+
+最適なパフォーマンスを得るには、次の点に注意してください。
+
+- 適切なキープレフィックスでデータを整理する
+- Redis のメモリ使用量を監視する
+- 必要に応じてデータの有効期限ポリシーを検討する
+
+## 使用例
+
+### Agent に Memory を追加する
+
+Agent に Upstash Memory を追加するには、`Memory` クラスを使用し、`UpstashStore` で新しい `storage` キーを、`UpstashVector` で新しい `vector` キーを作成します。設定ではリモートサービスまたはローカル環境を指定できます。
+
+```typescript title="src/mastra/agents/example-upstash-agent.ts"
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+import { UpstashStore } from '@mastra/upstash'
+
+export const upstashAgent = new Agent({
+  id: 'upstash-agent',
+  name: 'Upstash Agent',
+  instructions:
+    'You are an AI agent with the ability to automatically recall memories from previous interactions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new UpstashStore({
+      id: 'upstash-agent-storage',
+      url: process.env.UPSTASH_REDIS_REST_URL!,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+    }),
+    options: {
+      generateTitle: true, // Explicitly enable automatic title generation
+    },
+  }),
+})
+```
+
+### Agent を使用する
+
+このリクエストで呼び出す記憶の範囲は `memoryOptions` で指定します。直近の記憶を `lastMessages: 5` で制限し、`semanticRecall` で最も関連性の高い `topK: 3` 件の Message を取得します。各一致の前後にある `messageRange: 2` 件の Message もコンテキストとして含まれます。
+
+```typescript title="src/test-upstash-agent.ts"
+import 'dotenv/config'
+
+import { mastra } from './mastra'
+
+const threadId = '123'
+const resourceId = 'user-456'
+
+const agent = mastra.getAgent('upstashAgent')
+
+const message = await agent.stream('My name is Mastra', {
+  memory: {
+    thread: threadId,
+    resource: resourceId,
+  },
+})
+
+await message.textStream.pipeTo(new WritableStream())
+
+const stream = await agent.stream("What's my name?", {
+  memory: {
+    thread: threadId,
+    resource: resourceId,
+  },
+  memoryOptions: {
+    lastMessages: 5,
+    semanticRecall: {
+      topK: 3,
+      messageRange: 2,
+    },
+  },
+})
+
+for await (const chunk of stream.textStream) {
+  process.stdout.write(chunk)
+}
+```

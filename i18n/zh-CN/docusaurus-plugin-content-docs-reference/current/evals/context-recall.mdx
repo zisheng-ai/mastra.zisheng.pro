@@ -1,0 +1,258 @@
+---
+title: "参考：上下文召回率 Scorer | Evals"
+description: Mastra 上下文召回率 Scorer 的文档。该 Scorer 用于评估检索到的上下文对 ground truth 参考答案中各项论断的覆盖程度。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# 上下文召回率 Scorer
+
+`createContextRecallScorer()` 函数会创建一个 scorer，用于评估检索到的上下文对 ground-truth 参考答案中论断的覆盖程度。它通过检查 ground truth 中有多少论断可归因于检索到的上下文，衡量检索完整性。
+
+此 scorer 需要 ground-truth 参考答案，因此适用于 CI 或测试环境中的标注数据集。如果 run 中未提供 `groundTruth`，scorer 会返回 0 分，而不是抛出错误。
+
+## RAG 检索评估
+
+适合在以下 RAG pipeline 中评估检索完整性：
+
+- 需要验证 retriever 是否获取了所有必要信息
+- 拥有包含已知正确答案的标注数据集
+- 希望发现 retriever 返回内容的回归问题
+
+## 数据集驱动的测试
+
+适合对精选测试集运行评估：
+
+- 包含 ground-truth 标注问题的 CI pipeline
+- 对检索策略进行 A/B 测试
+- 对 embedding 模型的覆盖率进行基准测试
+
+## 参数
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description: '用于评估论断归因的语言模型',
+    required: true,
+  },
+  {
+    name: 'options',
+    type: 'ContextRecallMetricOptions',
+    description: 'scorer 的配置选项',
+    required: true,
+    children: [
+      {
+        name: 'context',
+        type: 'string[]',
+        description: '用于核查论断的检索上下文片段数组',
+        required: false,
+      },
+      {
+        name: 'contextExtractor',
+        type: '(input, output) => string[]',
+        description: '从 run 输入和输出中动态提取上下文的函数',
+        required: false,
+      },
+      {
+        name: 'scale',
+        type: 'number',
+        description: '最终得分所乘的缩放系数（默认值：1）',
+        required: false,
+      },
+    ],
+  },
+]}
+/>
+
+必须提供 `context` 或 `contextExtractor`。如果两者都提供，则仅当 run 的输入和输出采用 Agent 形式（`MastraDBMessage[]`）时才使用 `contextExtractor`；否则 scorer 会回退到 `context`。
+
+## `.run()` 返回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'score',
+    type: 'number',
+    description:
+      '介于 0 和 scale 之间的召回率得分（默认 0-1），表示上下文覆盖的 ground-truth 论断比例',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description: '便于理解的说明，指出在上下文中找到和未找到的 ground-truth 论断',
+  },
+]}
+/>
+
+## 评分详情
+
+### 论断归因
+
+Context Recall 先执行两步 LLM 评估，再进行确定性的得分计算：
+
+1. **论断提取**：将 ground-truth 答案拆分为原子论断
+1. **归因检查**：逐一检查检索上下文是否支持各项论断
+
+随后将已归因论断数与论断总数的比值乘以 scale，得到最终得分。
+
+### 评分公式
+
+```
+Context Recall = attributed_claims / total_claims × scale
+
+Where:
+- attributed_claims = number of ground-truth claims supported by the context
+- total_claims = total number of claims extracted from the ground truth
+- Attribution is binary: a claim is either supported (yes) or not (no)
+```
+
+### 得分解读
+
+以下区间假设使用默认 `scale` 值 1。使用自定义 scale 时，请相应换算。
+
+- **0.9-1.0**：召回率极佳，上下文覆盖几乎所有 ground-truth 论断
+- **0.7-0.8**：召回率良好。大多数论断已被覆盖，仅有少量缺失
+- **0.4-0.6**：召回率一般，上下文缺少大量信息
+- **0.1-0.3**：召回率较差，上下文中未找到大多数 ground-truth 论断
+- **0.0**：无召回，所有 ground-truth 论断均未出现在上下文中
+
+### 原因分析
+
+reason 字段说明：
+
+- 在上下文中找到了哪些 ground-truth 论断
+- 缺少哪些论断，以及存在哪些信息缺口
+- 支持已归因论断的具体上下文片段
+
+### 优化建议
+
+可利用结果：
+
+- **改进检索**：识别 retriever 遗漏的信息类型
+- **调整 chunk 大小**：确保 chunk 包含足够细节以覆盖 ground-truth 论断
+- **评估 embedding**：测试不同的 embedding 模型以提高信息覆盖率
+- **扩充知识库**：添加能够覆盖经常遗漏论断的文档
+
+### 计算示例
+
+ground truth：“爱因斯坦出生于 1879 年。他提出了相对论，并获得了诺贝尔奖。”
+
+提取的论断数：3
+
+- “Einstein was born in 1879” → 已归因（上下文提到了出生日期）
+- “Einstein developed relativity” → 已归因（上下文涵盖相对论）
+- “Einstein won the Nobel Prize” → 未归因（上下文未提及诺贝尔奖）
+
+Recall = 2/3 = 0.67
+
+## Scorer 配置
+
+### 动态上下文提取
+
+```typescript
+const scorer = createContextRecallScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      const query = input?.inputMessages?.[0]?.content || ''
+      const searchResults = vectorDB.search(query, { limit: 10 })
+      return searchResults.map(result => result.content)
+    },
+    scale: 1,
+  },
+})
+```
+
+### 静态上下文评估
+
+```typescript
+const scorer = createContextRecallScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Document 1: Einstein was born on 14 March 1879 in Ulm, Germany.',
+      'Document 2: Einstein published the theory of special relativity in 1905.',
+      'Document 3: Einstein moved to the United States in 1933.',
+    ],
+  },
+})
+```
+
+## 示例
+
+使用标注数据集评估 RAG 检索完整性：
+
+```typescript title="src/example-context-recall.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createContextRecallScorer } from '@mastra/evals/scorers/prebuilt'
+import { myAgent } from './agent'
+
+const scorer = createContextRecallScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract context from tool invocation results in the agent output
+      return output
+        .filter(msg => msg?.role === 'assistant')
+        .flatMap(msg => msg?.content?.toolInvocations ?? [])
+        .filter((tool: any) => tool.state === 'result')
+        .map((tool: any) => JSON.stringify(tool.result))
+    },
+  },
+})
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'What are the health benefits of green tea?',
+      groundTruth:
+        'Green tea contains antioxidants that reduce inflammation, L-theanine that improves focus, and catechins that boost metabolism.',
+    },
+    {
+      input: 'How does photosynthesis work?',
+      groundTruth:
+        'Photosynthesis converts sunlight into chemical energy using chlorophyll in chloroplasts, producing glucose and oxygen from carbon dioxide and water.',
+    },
+  ],
+  scorers: [scorer],
+  target: myAgent,
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+有关 `runEvals` 的更多详情，请参阅 [runEvals 参考文档](/reference/evals/run-evals)。
+
+要将此 scorer 添加到 Agent，请参阅 [Scorer 概览](/docs/evals/overview#adding-scorers-to-agents)指南。
+
+## 与 Context Precision 的比较
+
+根据需要选择合适的 scorer：
+
+| 用例 | Context Recall | Context Precision |
+| - | - | - |
+| **衡量内容** | ground truth 的覆盖率 | 检索到的 chunk 的相关性 |
+| **方向** | ground truth → 上下文 | 上下文 → ground truth |
+| **位置敏感** | 否 | 是（奖励靠前的位置） |
+| **需要 ground truth** | 是 | 是 |
+| **发现的故障模式** | 信息缺失 | 无关噪声 |
+
+同时使用两者可全面了解检索质量：precision 能发现上下文中的无关内容，recall 能发现信息缺口。
+
+## 相关内容
+
+- [Context Precision Scorer](/reference/evals/context-precision)：评估检索到的上下文是否相关且排序合理
+- [Context Relevance Scorer](/reference/evals/context-relevance)：评估上下文的使用情况和质量
+- [Faithfulness Scorer](/reference/evals/faithfulness)：衡量回答是否基于上下文
+- [Custom Scorer](/docs/evals/custom-scorers)：创建自己的评估指标

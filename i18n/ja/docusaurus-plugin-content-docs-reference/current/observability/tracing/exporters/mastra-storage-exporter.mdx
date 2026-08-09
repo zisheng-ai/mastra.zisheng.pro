@@ -1,0 +1,240 @@
+---
+title: "リファレンス：MastraStorageExporter | Observability"
+description: MastraStorageExporter（旧 DefaultExporter）の API リファレンス
+packages:
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# MastraStorageExporter
+
+自動バッチ処理と再試行ロジックを使用して、Trace を Mastra に設定されたストレージへ永続化します。
+
+:::note
+
+`MastraStorageExporter` は以前 `DefaultExporter` と呼ばれていました。既存の import が引き続き動作するよう、元の `DefaultExporter` クラスも `@mastra/observability` から引き続き export されますが、非推奨であり、将来のメジャーバージョンで削除されます。新しいコードでは `MastraStorageExporter` を使用してください。
+
+:::
+
+## コンストラクター
+
+```typescript prettier:false
+new MastraStorageExporter(config?: MastraStorageExporterConfig)
+```
+
+<PropertiesTable
+  props={[
+  {
+    name: 'config',
+    type: 'MastraStorageExporterConfig',
+    description: 'バッチ処理と設定のオプション',
+    required: false,
+  },
+]}
+/>
+
+## `MastraStorageExporterConfig`
+
+```typescript
+interface MastraStorageExporterConfig extends BaseExporterConfig {
+  /** Maximum number of spans per batch. Default: 1000 */
+  maxBatchSize?: number
+
+  /** Maximum total buffer size before emergency flush. Default: 10000 */
+  maxBufferSize?: number
+
+  /** Maximum time to wait before flushing batch in milliseconds. Default: 5000 */
+  maxBatchWaitMs?: number
+
+  /** Maximum number of retry attempts. Default: 4 */
+  maxRetries?: number
+
+  /** Base retry delay in milliseconds (uses exponential backoff). Default: 500 */
+  retryDelayMs?: number
+
+  /** Tracing storage strategy or 'auto' for automatic selection. Default: 'auto' */
+  strategy?: TracingStorageStrategy | 'auto'
+}
+```
+
+`BaseExporterConfig` を拡張し、次の項目を含みます。
+
+- `logger?: IMastraLogger` - Logger インスタンス
+- `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'` - ログレベル（デフォルト：INFO）
+
+## `TracingStorageStrategy`
+
+```typescript
+type TracingStorageStrategy = 'realtime' | 'batch-with-updates' | 'insert-only'
+```
+
+### Strategy の動作
+
+- **realtime**：各イベントをただちにストレージへ永続化します
+- **batch-with-updates**：作成と更新を別々にバッチ処理し、順番に適用します
+- **insert-only**：SPAN\_ENDED イベントのみを処理し、更新を無視します
+
+## プロパティ
+
+```typescript prettier:false
+readonly name = 'mastra-storage-exporter';
+```
+
+後方互換性のため、非推奨の `DefaultExporter` クラスは引き続き `'mastra-default-observability-exporter'` を `name` として使用します。
+
+## メソッド
+
+### init
+
+```typescript prettier:false
+init(options: InitExporterOptions): void
+```
+
+依存関係の準備が整った後に exporter を初期化します。ストレージの機能に基づいて Tracing strategy を決定します。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'options',
+    type: 'InitExporterOptions',
+    description: 'Mastra インスタンスと設定を含む初期化オプション',
+    required: true,
+  },
+]}
+/>
+
+### `exportTracingEvent`
+
+```typescript prettier:false
+async exportTracingEvent(event: TracingEvent): Promise<void>
+```
+
+決定された strategy に従って Tracing イベントを処理します。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'event',
+    type: 'TracingEvent',
+    description: 'エクスポートする Tracing イベント',
+    required: true,
+  },
+]}
+/>
+
+### flush
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+exporter をシャットダウンせず、バッファー内のすべてのイベントをストレージへ強制的にフラッシュします。ランタイム終了前に Span が確実にエクスポートされるようにする必要があるサーバーレス環境で役立ちます。
+
+### shutdown
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+バッファー内に残っているイベントをフラッシュし、クリーンアップを実行します。
+
+## Strategy の自動選択
+
+`strategy: 'auto'`（デフォルト）の場合、exporter はストレージアダプターに対応機能を問い合わせます。
+
+```typescript
+interface TracingStrategy {
+  /** Strategies supported by this adapter */
+  supported: TracingStorageStrategy[]
+
+  /** Preferred strategy for optimal performance */
+  preferred: TracingStorageStrategy
+}
+```
+
+exporter は次のように動作します。
+
+1. 利用可能な場合は、ストレージアダプターの推奨 strategy を使用します
+1. 推奨 strategy が利用できない場合は、最初にサポートされている strategy へフォールバックします
+1. ユーザーが指定した strategy がサポートされていない場合は警告をログに記録します
+
+## バッチ処理の動作
+
+### フラッシュのトリガー
+
+次のいずれかの条件を満たすと、バッファーがフラッシュされます。
+
+- バッファーサイズが `maxBatchSize` に達した
+- 最初のイベントがバッファーに追加されてからの時間が `maxBatchWaitMs` を超えた
+- バッファーサイズが `maxBufferSize` に達した（緊急フラッシュ）
+- `shutdown()` が呼び出された
+
+### 再試行ロジック
+
+フラッシュに失敗した場合は、指数バックオフを使用して再試行されます。
+
+- 再試行の遅延：`retryDelayMs * 2^attempt`
+- 最大試行回数：`maxRetries`
+- すべての再試行に失敗するとバッチは破棄されます
+
+### 順不同イベントの処理
+
+`batch-with-updates` strategy の場合：
+
+- 作成済みの Span を追跡します
+- まだ作成されていない Span の更新や終了を拒否します
+- 順不同のイベントについて警告をログに記録します
+- 更新順序を保つためにシーケンス番号を維持します
+
+## 使用方法
+
+```typescript
+import { MastraStorageExporter } from '@mastra/observability'
+
+// Default configuration
+const exporter = new MastraStorageExporter()
+
+// Custom batching configuration
+const customExporter = new MastraStorageExporter({
+  maxBatchSize: 500,
+  maxBatchWaitMs: 2000,
+  strategy: 'batch-with-updates',
+  logLevel: 'debug',
+})
+```
+
+## `DefaultExporter` からの移行
+
+両クラスのコンストラクターシグネチャと動作は同じです。移行するには、import とコンストラクターを置き換えます。
+
+```typescript
+// Before
+import { DefaultExporter } from '@mastra/observability'
+const exporter = new DefaultExporter()
+
+// After
+import { MastraStorageExporter } from '@mastra/observability'
+const exporter = new MastraStorageExporter()
+```
+
+以前の `mastra-default-observability-exporter` という exporter 名に一致するダッシュボードやアラートルールが、移行するまで引き続き動作するよう、元の `DefaultExporter` は変更されずに維持されます。
+
+## 関連項目
+
+### ドキュメント
+
+- [Tracing の概要](/docs/observability/tracing/overview)：完全なガイド
+- [Exporter](/docs/observability/integrations/overview#exporters)：exporter の概念
+
+### その他の Exporter
+
+- [MastraPlatformExporter](/reference/observability/tracing/exporters/mastra-platform-exporter)：Mastra platform
+- [ConsoleExporter](/reference/observability/tracing/exporters/console-exporter)：デバッグ出力
+- [Langfuse](/reference/observability/tracing/exporters/langfuse)：Langfuse 連携
+- [Braintrust](/reference/observability/tracing/exporters/braintrust)：Braintrust 連携
+
+### リファレンス
+
+- [設定](/reference/observability/tracing/configuration)：設定オプション
+- [インターフェース](/reference/observability/tracing/interfaces)：型定義

@@ -1,0 +1,608 @@
+---
+title: "參考：Context relevance scorer | Evals"
+description: Mastra Context Relevance Scorer 的文件。透過加權相關性評分，評估所提供的 context 對產生 Agent 回應的相關性和實用程度。
+packages:
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Context relevance scorer
+
+`createContextRelevanceScorerLLM()` 函式會建立一個 scorer，評估所提供的 context 對產生 Agent 回應有多相關和實用。它採用加權相關性級別，並針對未使用的高相關性 context 和缺漏資料施加扣分。
+
+它尤其適合以下使用情境：
+
+## 內容產生評估
+
+最適合評估以下情境的 context 質素：
+
+- 重視 context 使用情況的聊天系統
+- 需要詳細相關性評估的 RAG pipeline
+- 缺漏 context 會影響質素的系統
+
+## Context 選取最佳化
+
+適合最佳化以下項目：
+
+- 全面涵蓋 context
+- 有效運用 context
+- 識別 context 缺口
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description: '用於評估 context 相關性的語言模型',
+    required: true,
+  },
+  {
+    name: 'options',
+    type: 'ContextRelevanceOptions',
+    description: 'Scorer 的設定選項',
+    required: true,
+    children: [
+      {
+        name: 'context',
+        type: 'string[]',
+        description: '要評估相關性的 context 片段陣列',
+        required: false,
+      },
+      {
+        name: 'contextExtractor',
+        type: '(input, output) => string[]',
+        description: '從執行輸入和輸出中動態擷取 context 的函式',
+        required: false,
+      },
+      {
+        name: 'scale',
+        type: 'number',
+        description: '最終分數的乘數比例（預設：1）',
+        required: false,
+      },
+      {
+        name: 'penalties',
+        type: 'object',
+        description: '可設定的評分扣分設定',
+        required: false,
+        children: [
+          {
+            name: 'unusedHighRelevanceContext',
+            type: 'number',
+            description: '每個未使用高相關性 context 的扣分（預設：0.1）',
+            required: false,
+          },
+          {
+            name: 'missingContextPerItem',
+            type: 'number',
+            description: '每項缺漏 context 的扣分（預設：0.15）',
+            required: false,
+          },
+          {
+            name: 'maxMissingContextPenalty',
+            type: 'number',
+            description: '缺漏 context 的最高總扣分（預設：0.5）',
+            required: false,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+注意：必須提供 `context` 或 `contextExtractor` 其中一項。如果兩者均有提供，會優先使用 `contextExtractor`。
+
+## `.run()` 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'score',
+    type: 'number',
+    description: '介乎 0 與 scale 之間的加權相關性分數（預設為 0–1）',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description: '以人類可讀方式解釋 context 相關性評估',
+  },
+]}
+/>
+
+## 評分詳情
+
+### 加權相關性評分
+
+Context Relevance 採用進階評分演算法，考慮以下因素：
+
+1. **相關性級別**：每個 context 片段都會按加權值分類：
+   - `high` = 1.0（直接回應查詢）
+   - `medium` = 0.7（支援資料）
+   - `low` = 0.3（僅屬間接相關）
+   - `none` = 0.0（完全不相關）
+
+1. **使用情況偵測**：追蹤回應是否實際使用了相關 context
+
+1. **套用扣分**（可透過 `penalties` 選項設定）：
+   - **未使用的高相關性 context**：每個未使用的高相關性 context 會按 `unusedHighRelevanceContext` 扣分（預設：0.1）
+   - **缺漏 Context**：因識別到缺漏資料而最多扣除 `maxMissingContextPenalty`（預設：0.5）
+
+### 評分公式
+
+```
+Base Score = Σ(relevance_weights) / (num_contexts × 1.0)
+Usage Penalty = count(unused_high_relevance) × unusedHighRelevanceContext
+Missing Penalty = min(count(missing_context) × missingContextPerItem, maxMissingContextPenalty)
+
+Final Score = max(0, Base Score - Usage Penalty - Missing Penalty) × scale
+```
+
+**預設值**：
+
+- `unusedHighRelevanceContext` = 0.1（每個未使用的高相關性 context 扣 10%）
+- `missingContextPerItem` = 0.15（每項缺漏 context 扣 15%）
+- `maxMissingContextPenalty` = 0.5（缺漏 context 最多扣 50%）
+- `scale` = 1
+
+### 分數解讀
+
+- **0.9–1.0**：極佳 — 所有 context 均高度相關並已使用
+- **0.7–0.8**：良好 — 大部分相關，只有少量缺口
+- **0.4–0.6**：參差 — 有大量不相關或未使用的 context
+- **0.2–0.3**：欠佳 — 大部分 context 均不相關
+- **0.0–0.1**：非常差 — 找不到相關 context
+
+### 原因分析
+
+reason 欄位會提供以下分析：
+
+- 每個 context 片段的相關性級別（high/medium/low/none）
+- 回應實際使用了哪些 context
+- 未使用高相關性 context 所引致的扣分（可透過 `unusedHighRelevanceContext` 設定）
+- 可改善回應的缺漏 context（按 `missingContextPerItem` 扣分，上限為 `maxMissingContextPenalty`）
+
+### 最佳化策略
+
+使用結果改善系統：
+
+- **篩走不相關 context**：處理前移除相關性為 low/none 的片段
+- **確保使用 context**：確保已納入高相關性 context
+- **填補 context 缺口**：加入 scorer 識別到的缺漏資料
+- **平衡 context 大小**：找出可達致最佳相關性的最適 context 數量
+- **調整扣分敏感度**：根據應用程式對未使用或缺漏 context 的容忍度，調整 `unusedHighRelevanceContext`、`missingContextPerItem` 和 `maxMissingContextPenalty`
+
+### 與 Context Precision 的分別
+
+| 項目 | Context Relevance | Context Precision |
+| - | - | - |
+| **演算法** | 設有扣分的加權級別 | Mean Average Precision (MAP) |
+| **相關性** | 多個級別（high/medium/low/none） | 二元（yes/no） |
+| **位置** | 不作考慮 | 關鍵（較前位置可獲較高分） |
+| **使用情況** | 追蹤未使用的 context 並扣分 | 不作考慮 |
+| **缺漏** | 識別缺口並扣分 | 不作評估 |
+
+## Scorer 設定
+
+### 自訂扣分設定
+
+控制如何就未使用和缺漏的 context 施加扣分：
+
+```typescript
+import { createContextRelevanceScorerLLM } from '@mastra/evals'
+
+// Stricter penalty configuration
+const strictScorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Einstein won the Nobel Prize for photoelectric effect',
+      'He developed the theory of relativity',
+      'Einstein was born in Germany',
+    ],
+    penalties: {
+      unusedHighRelevanceContext: 0.2, // 20% penalty per unused high-relevance context
+      missingContextPerItem: 0.25, // 25% penalty per missing context item
+      maxMissingContextPenalty: 0.6, // Maximum 60% penalty for missing context
+    },
+    scale: 1,
+  },
+})
+
+// Lenient penalty configuration
+const lenientScorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Einstein won the Nobel Prize for photoelectric effect',
+      'He developed the theory of relativity',
+      'Einstein was born in Germany',
+    ],
+    penalties: {
+      unusedHighRelevanceContext: 0.05, // 5% penalty per unused high-relevance context
+      missingContextPerItem: 0.1, // 10% penalty per missing context item
+      maxMissingContextPenalty: 0.3, // Maximum 30% penalty for missing context
+    },
+    scale: 1,
+  },
+})
+
+const testRun = {
+  input: {
+    inputMessages: [
+      {
+        id: '1',
+        role: 'user',
+        content: 'What did Einstein achieve in physics?',
+      },
+    ],
+  },
+  output: [
+    {
+      id: '2',
+      role: 'assistant',
+      content: 'Einstein won the Nobel Prize for his work on the photoelectric effect.',
+    },
+  ],
+}
+
+const strictResult = await strictScorer.run(testRun)
+const lenientResult = await lenientScorer.run(testRun)
+
+console.log('Strict penalties:', strictResult.score) // Lower score due to unused context
+console.log('Lenient penalties:', lenientResult.score) // Higher score, less penalty
+```
+
+### 動態擷取 context
+
+```typescript
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract context based on the query
+      const userQuery = input?.inputMessages?.[0]?.content || ''
+      if (userQuery.includes('Einstein')) {
+        return [
+          'Einstein won the Nobel Prize for the photoelectric effect',
+          'He developed the theory of relativity',
+        ]
+      }
+      return ['General physics information']
+    },
+    penalties: {
+      unusedHighRelevanceContext: 0.15,
+    },
+  },
+})
+```
+
+### 自訂比例系數
+
+```typescript
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: ['Relevant information...', 'Supporting details...'],
+    scale: 100, // Scale scores from 0-100 instead of 0-1
+  },
+})
+
+// Result will be scaled: score: 85 instead of 0.85
+```
+
+### 結合多個 context 來源
+
+```typescript
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      const query = input?.inputMessages?.[0]?.content || ''
+
+      // Combine from multiple sources
+      const kbContext = knowledgeBase.search(query)
+      const docContext = documentStore.retrieve(query)
+      const cacheContext = contextCache.get(query)
+
+      return [...kbContext, ...docContext, ...cacheContext]
+    },
+    scale: 1,
+  },
+})
+```
+
+## 範例
+
+### 高相關性範例
+
+此範例展示極佳的 context 相關性，所有 context 都直接支援回應：
+
+```typescript
+import { createContextRelevanceScorerLLM } from '@mastra/evals'
+
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Einstein won the Nobel Prize for his discovery of the photoelectric effect in 1921.',
+      'He published his theory of special relativity in 1905.',
+      'His general relativity theory, published in 1915, revolutionized our understanding of gravity.',
+    ],
+    scale: 1,
+  },
+})
+
+const result = await scorer.run({
+  input: {
+    inputMessages: [
+      {
+        id: '1',
+        role: 'user',
+        content: "What were Einstein's major scientific achievements?",
+      },
+    ],
+  },
+  output: [
+    {
+      id: '2',
+      role: 'assistant',
+      content:
+        "Einstein's major achievements include the Nobel Prize for the photoelectric effect, special relativity in 1905, and general relativity in 1915.",
+    },
+  ],
+})
+
+console.log(result)
+// Output:
+// {
+//   score: 1.0,
+//   reason: "The score is 1.0 because all context pieces are highly relevant to Einstein's achievements and were effectively used in generating the comprehensive response."
+// }
+```
+
+### 混合相關性範例
+
+此範例展示中等相關性，當中部分 context 不相關或未有使用：
+
+```typescript
+import { createContextRelevanceScorerLLM } from '@mastra/evals'
+
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Solar eclipses occur when the Moon blocks the Sun.',
+      'The Moon moves between the Earth and Sun during eclipses.',
+      'The Moon is visible at night.',
+      'Stars twinkle due to atmospheric interference.',
+      'Total eclipses can last up to 7.5 minutes.',
+    ],
+    scale: 1,
+  },
+})
+
+const result = await scorer.run({
+  input: {
+    inputMessages: [
+      {
+        id: '1',
+        role: 'user',
+        content: 'What causes solar eclipses?',
+      },
+    ],
+  },
+  output: [
+    {
+      id: '2',
+      role: 'assistant',
+      content:
+        'Solar eclipses happen when the Moon moves between Earth and the Sun, blocking sunlight.',
+    },
+  ],
+})
+
+console.log(result)
+// Output with default penalties:
+// {
+//   score: 0.64,
+//   reason: "The score is 0.64 because contexts 1 and 2 are highly relevant and used, context 5 is relevant but unused (10% penalty), while contexts 3 and 4 are irrelevant."
+// }
+
+// With custom penalty configuration
+const customScorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Solar eclipses occur when the Moon blocks the Sun.',
+      'The Moon moves between the Earth and Sun during eclipses.',
+      'The Moon is visible at night.',
+      'Stars twinkle due to atmospheric interference.',
+      'Total eclipses can last up to 7.5 minutes.',
+    ],
+    penalties: {
+      unusedHighRelevanceContext: 0.05, // Lower penalty for unused context
+      missingContextPerItem: 0.1,
+      maxMissingContextPenalty: 0.3,
+    },
+  },
+})
+
+const customResult = await customScorer.run({
+  input: {
+    inputMessages: [{ id: '1', role: 'user', content: 'What causes solar eclipses?' }],
+  },
+  output: [
+    {
+      id: '2',
+      role: 'assistant',
+      content:
+        'Solar eclipses happen when the Moon moves between Earth and the Sun, blocking sunlight.',
+    },
+  ],
+})
+
+console.log(customResult)
+// Output with lenient penalties:
+// {
+//   score: 0.69, // Higher score due to reduced penalty for unused context
+//   reason: "The score is 0.69 because contexts 1 and 2 are highly relevant and used, context 5 is relevant but unused (5% penalty), while contexts 3 and 4 are irrelevant."
+// }
+```
+
+### 低相關性範例
+
+此範例展示欠佳的 context 相關性，當中大部分資料都不相關：
+
+```typescript
+import { createContextRelevanceScorerLLM } from '@mastra/evals'
+
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'The Great Barrier Reef is located in Australia.',
+      'Coral reefs need warm water to survive.',
+      'Many fish species live in coral reefs.',
+      'Australia has six states and two territories.',
+      'The capital of Australia is Canberra.',
+    ],
+    scale: 1,
+  },
+})
+
+const result = await scorer.run({
+  input: {
+    inputMessages: [
+      {
+        id: '1',
+        role: 'user',
+        content: 'What is the capital of Australia?',
+      },
+    ],
+  },
+  output: [
+    {
+      id: '2',
+      role: 'assistant',
+      content: 'The capital of Australia is Canberra.',
+    },
+  ],
+})
+
+console.log(result)
+// Output:
+// {
+//   score: 0.26,
+//   reason: "The score is 0.26 because only context 5 is relevant to the query about Australia's capital, while the other contexts about reefs are completely irrelevant."
+// }
+```
+
+### 動態擷取 context
+
+根據執行輸入，在 runtime 擷取 context：
+
+```typescript
+import { createContextRelevanceScorerLLM } from '@mastra/evals'
+
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract query from input
+      const query = input?.inputMessages?.[0]?.content || ''
+
+      // Dynamically retrieve context based on query
+      if (query.toLowerCase().includes('einstein')) {
+        return [
+          'Einstein developed E=mc²',
+          'He won the Nobel Prize in 1921',
+          'His theories revolutionized physics',
+        ]
+      }
+
+      if (query.toLowerCase().includes('climate')) {
+        return [
+          'Global temperatures are rising',
+          'CO2 levels affect climate',
+          'Renewable energy reduces emissions',
+        ]
+      }
+
+      return ['General knowledge base entry']
+    },
+    penalties: {
+      unusedHighRelevanceContext: 0.15, // 15% penalty for unused relevant context
+      missingContextPerItem: 0.2, // 20% penalty per missing context item
+      maxMissingContextPenalty: 0.4, // Cap at 40% total missing context penalty
+    },
+    scale: 1,
+  },
+})
+```
+
+### RAG 系統整合
+
+與 RAG pipeline 整合，以評估檢索到的 context：
+
+```typescript
+import { createContextRelevanceScorerLLM } from '@mastra/evals'
+
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract from RAG retrieval results
+      const ragResults = inputData.metadata?.ragResults || []
+
+      // Return the text content of retrieved documents
+      return ragResults.filter(doc => doc.relevanceScore > 0.5).map(doc => doc.content)
+    },
+    penalties: {
+      unusedHighRelevanceContext: 0.12, // Moderate penalty for unused RAG context
+      missingContextPerItem: 0.18, // Higher penalty for missing information in RAG
+      maxMissingContextPenalty: 0.45, // Slightly higher cap for RAG systems
+    },
+    scale: 1,
+  },
+})
+
+// Evaluate RAG system performance
+const evaluateRAG = async testCases => {
+  const results = []
+
+  for (const testCase of testCases) {
+    const score = await scorer.run(testCase)
+    results.push({
+      query: testCase.inputData.inputMessages[0].content,
+      relevanceScore: score.score,
+      feedback: score.reason,
+      unusedContext: score.reason.includes('unused'),
+      missingContext: score.reason.includes('missing'),
+    })
+  }
+
+  return results
+}
+```
+
+## 與 Context Precision 比較
+
+按需要選擇合適的 scorer：
+
+| 使用情境 | Context Relevance | Context Precision |
+| - | - | - |
+| **RAG 評估** | 重視使用情況時 | 重視排序時 |
+| **Context 質素** | 細緻級別 | 二元相關性 |
+| **缺漏偵測** | ✓ 識別缺口 | ✗ 不作評估 |
+| **使用情況追蹤** | ✓ 追蹤使用情況 | ✗ 不作考慮 |
+| **位置敏感度** | ✗ 不受位置影響 | ✓ 較前位置可獲較高分 |
+
+## 相關內容
+
+- [Context Precision Scorer](/reference/evals/context-precision)：使用 MAP 評估 context 排序
+- [Faithfulness Scorer](/reference/evals/faithfulness)：量度答案以 context 為依據的程度
+- [自訂 Scorer](/docs/evals/custom-scorers)：建立你自己的評估指標

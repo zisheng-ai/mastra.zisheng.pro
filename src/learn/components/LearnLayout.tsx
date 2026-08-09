@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import Layout from '@theme/Layout'
 import { cn } from '@site/src/lib/utils'
 
-import { course } from '../course'
+import { useLocalizedLearnContent } from '../localization'
 import { LearnStorageProvider, useSharedLearnStorage } from '../hooks/LearnStorageContext'
 import { LearnSidebar } from './LearnSidebar'
 import { LearnMobileSidebar } from './LearnMobileSidebar'
@@ -15,10 +15,14 @@ type LearnLayoutProps = {
 }
 
 function LearnLayoutInner({ children, title, description, className }: LearnLayoutProps) {
+  const { course, isSimplifiedChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
   const { storage } = useSharedLearnStorage()
 
   return (
-    <Layout title={title ?? 'Learn'} description={description ?? course.description}>
+    <Layout
+      title={title ?? (isSimplifiedChinese ? '学习' : isHongKongChinese ? '學習' : isJapanese ? '学ぶ' : 'Learn')}
+      description={description ?? course.description}
+    >
       <LearnMobileSidebar lessons={course.lessons} storage={storage} />
       <div className="learn-layout-flex">
         <LearnSidebar lessons={course.lessons} storage={storage} />

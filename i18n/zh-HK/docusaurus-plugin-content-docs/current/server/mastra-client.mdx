@@ -1,0 +1,326 @@
+---
+title: "Mastra client SDK | Server"
+description: "了解如何設定及使用 Mastra Client SDK"
+packages:
+  - "@mastra/client-js"
+  - "@mastra/core"
+  - "@mastra/react"
+---
+
+# Mastra client SDK
+
+Mastra Client SDK 提供簡潔且 type-safe 的介面，讓你從客戶端環境與 [Mastra 伺服器](/docs/server/mastra-server)互動。
+
+## 先決條件
+
+開始本機開發前，請準備：
+
+- Node.js `v22.13.0` 或以上版本
+- TypeScript `v4.7` 或以上版本（如使用 TypeScript）
+- 正在運行的本機 Mastra 伺服器（通常使用 port `4111`）
+
+:::note
+
+Mastra Client SDK 專為瀏覽器環境而設，並使用原生 `fetch` API 向 Mastra 伺服器發出 HTTP 請求。
+
+:::
+
+## 安裝
+
+要使用 Mastra Client SDK，請安裝所需依賴套件：
+
+```bash npm2yarn
+npm install @mastra/client-js@latest
+```
+
+### 初始化 `MastraClient`
+
+使用 `baseUrl` 初始化後，`MastraClient` 會公開 type-safe 介面，用於呼叫 Agent、Tool 及 Workflow。
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  baseUrl: process.env.MASTRA_API_URL || 'http://localhost:4111',
+})
+```
+
+## 核心 API
+
+Mastra Client SDK 會公開 Mastra 伺服器所提供的所有資源。
+
+- **[Agent](/reference/client-js/agents)**：產生回應及串流傳送對話。
+- **[A2A](/docs/agents/a2a)**：透過 agent card 探索 Agent，並使用基於 task 的 A2A stream。
+- **[Memory](/reference/client-js/memory)**：管理 conversation thread 及 message history。
+- **[Tool](/reference/client-js/tools)**：執行及管理 Tool。
+- **[Workflow](/reference/client-js/workflows)**：觸發 Workflow 並追蹤其執行情況。
+- **[Vector](/reference/client-js/vectors)**：使用 vector embedding 進行語意搜尋。
+- **[Responses](/reference/client-js/responses)**：透過兼容 OpenAI、建基於 Agent 的介面，使用 Mastra Agent 作為 Responses API。此 API 目前屬實驗性質。
+- **[Conversations](/reference/client-js/conversations)**：使用 Mastra Agent 作為 Responses API 背後已儲存的 conversation thread 及 item history。此 API 目前屬實驗性質。
+- **[Log](/reference/client-js/logs)**：查看 log 及 debug 系統行為。
+- **[Telemetry](/reference/client-js/telemetry)**：查看應用程式效能及 Trace 活動。
+
+## 建立及運行動態 Workflow
+
+使用 `upsertDynamicWorkflow()` 建立或取代持久儲存的 Workflow 定義。成功 upsert 後，系統會驗證完整定義、向正在運行的 Mastra instance 註冊，並讓它可透過標準 Workflow execution API 使用。
+
+以下範例展示 mapping Workflow 的完整 lifecycle，涵蓋建立、檢視、執行以至刪除：
+
+```typescript title="lib/dynamic-workflow.ts"
+import { MastraClient } from '@mastra/client-js'
+import type { UpsertDynamicWorkflowParams } from '@mastra/client-js'
+
+const client = new MastraClient({
+  baseUrl: process.env.MASTRA_API_URL || 'http://localhost:4111',
+})
+
+const definition = {
+  id: 'greeting-workflow',
+  description: 'Returns a greeting for the supplied name',
+  inputSchema: {
+    type: 'object',
+    properties: { name: { type: 'string' } },
+    required: ['name'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: { message: { type: 'string' } },
+    required: ['message'],
+  },
+  graph: [
+    {
+      type: 'mapping',
+      id: 'create-greeting',
+      mapConfig: JSON.stringify({
+        message: { template: 'Hello, ${initData.name}!' },
+      }),
+    },
+  ],
+} satisfies UpsertDynamicWorkflowParams
+
+await client.upsertDynamicWorkflow(definition)
+
+const dynamicWorkflow = client.getDynamicWorkflow(definition.id)
+const dynamicDefinition = await dynamicWorkflow.details()
+
+const workflow = client.getWorkflow(dynamicDefinition.id)
+const run = await workflow.createRun()
+const result = await run.startAsync({ inputData: { name: 'Ada' } })
+
+console.log(result)
+
+await dynamicWorkflow.delete()
+```
+
+使用 `listDynamicWorkflows()` 列出已持久儲存的定義。再次呼叫 `upsertDynamicWorkflow()` 時，如使用相同 `id`，便會取代已儲存的定義及即時 Workflow registration。
+
+:::warning
+
+持久儲存需要已配置、且支援 `workflowDefinitions` domain 的 storage Adapter。如沒有此 domain，Core 可在 memory 中註冊 Workflow，但伺服器的 dynamic-workflow API 無法在重新啟動後保留它。
+
+已儲存的定義支援 declarative Agent、Tool、mapping、巢狀 Workflow、parallel、foreach、sleep、sleep-until、conditional 及 loop entry，但不能包含 JavaScript closure。Conditional 及 loop 邏輯必須使用 declarative predicate 格式，而引用的 Agent、Tool 及巢狀 Workflow 必須已註冊。
+
+已驗證的伺服器在操作定義時需要 `stored-workflows:read` 或 `stored-workflows:write`，執行 Workflow 則需要 `workflows:execute`。
+
+:::
+
+## 產生回應
+
+使用字串 prompt 呼叫 `.generate()`：
+
+```typescript
+import { mastraClient } from 'lib/mastra-client'
+
+const testAgent = async () => {
+  try {
+    const agent = mastraClient.getAgent('testAgent')
+
+    const response = await agent.generate('Hello')
+
+    console.log(response.text)
+  } catch (error) {
+    return 'Error occurred while generating response'
+  }
+}
+```
+
+:::info
+
+你亦可呼叫 `.generate()`，並傳入包含 `role` 及 `content` 的 message object array。請參閱 [.generate() 參考](/reference/client-js/agents#generate)了解詳情。
+
+:::
+
+## 串流回應
+
+使用字串 prompt 呼叫 `.stream()`，取得即時回應：
+
+```typescript
+import { mastraClient } from 'lib/mastra-client'
+
+const testAgent = async () => {
+  try {
+    const agent = mastraClient.getAgent('testAgent')
+
+    const stream = await agent.stream('Hello')
+
+    stream.processDataStream({
+      onTextPart: text => {
+        console.log(text)
+      },
+    })
+  } catch (error) {
+    return 'Error occurred while generating response'
+  }
+}
+```
+
+:::info
+
+你亦可呼叫 `.stream()`，並傳入包含 `role` 及 `content` 的 message object array。請參閱 [.stream() 參考](/reference/client-js/agents#stream)了解詳情。
+
+:::
+
+## 配置選項
+
+`MastraClient` 接受 `retries`、`backoffMs` 及 `headers` 等選填 parameter，以控制請求行為。這些 parameter 可用於控制 retry 行為及加入 diagnostic metadata。
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  retries: 3,
+  backoffMs: 300,
+  maxBackoffMs: 5000,
+  headers: {
+    'X-Development': 'true',
+  },
+})
+```
+
+請參閱 [MastraClient](/reference/client-js/mastra-client)，了解更多配置選項。
+
+## Credential 及 session cookie
+
+當 UI 與 Mastra API 並非同源（host、subdomain 或 port 不同，例如 Mastra Studio 使用一個 port，而自訂伺服器使用另一個 port）時，請**使用 session cookie 驗證 Mastra API 呼叫**。加入 **`credentials: 'include'`** 至 `MastraClient`，讓每個請求帶上使用者登入後已有的 cookie。如略過此設定，即使已在瀏覽器成功登入，仍經常會收到 Mastra 的 **`401`** 回應。
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  baseUrl: process.env.MASTRA_API_URL || 'http://localhost:4111',
+  credentials: 'include',
+})
+```
+
+**在伺服器允許附帶 credential 的跨來源請求**，請參閱 [CORS：附帶 credential 的請求](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS#requests_with_credentials)。你需要指定明確的 `Access-Control-Allow-Origin`（不可使用 `*`）及 `Access-Control-Allow-Credentials: true`，否則瀏覽器會在呼叫到達 Mastra 前將其封鎖。
+
+**正在使用 `@mastra/react`？** 請以 `MastraReactProvider` 包裝應用程式，設定 `baseUrl` 及 `apiPrefix` 以配合伺服器，並沿用預設的 `credentials: 'include'`。只有在想將 `credentials` 改為 `same-origin` 或 `omit` 行為時，才更改設定。
+
+## 加入取消請求功能
+
+`MastraClient` 使用標準 Node.js `AbortSignal` API 支援取消請求。這適用於取消進行中的請求，例如使用者中止操作，或清理過時的網絡呼叫。
+
+將 `AbortSignal` 傳遞至 client constructor，以啟用取消所有請求的功能。
+
+```typescript {3,7} title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const controller = new AbortController()
+
+export const mastraClient = new MastraClient({
+  baseUrl: process.env.MASTRA_API_URL || 'http://localhost:4111',
+  abortSignal: controller.signal,
+})
+```
+
+### 使用 `AbortController`
+
+呼叫 `.abort()` 會取消與該 signal 關聯的所有進行中請求。
+
+```typescript
+import { mastraClient, controller } from 'lib/mastra-client'
+
+const handleAbort = () => {
+  controller.abort()
+}
+```
+
+## 客戶端 Tool
+
+使用 `createTool()` function，直接在客戶端應用程式中定義 Tool。透過 `clientTools` parameter，將它們傳遞至 Agent，以供 `.generate()` 或 `.stream()` 呼叫使用。
+
+這讓 Agent 可觸發瀏覽器端功能，例如 DOM 操作、存取 local storage 或其他 Web API，使 Tool 在使用者的環境而非伺服器上執行。
+
+```typescript {26}
+import { createTool } from '@mastra/client-js'
+import { z } from 'zod'
+
+const handleClientTool = async () => {
+  try {
+    const agent = mastraClient.getAgent('colorAgent')
+
+    const colorChangeTool = createTool({
+      id: 'color-change-tool',
+      description: 'Changes the HTML background color',
+      inputSchema: z.object({
+        color: z.string(),
+      }),
+      outputSchema: z.object({
+        success: z.boolean(),
+      }),
+      execute: async inputData => {
+        const { color } = inputData
+
+        document.body.style.backgroundColor = color
+        return { success: true }
+      },
+    })
+
+    const response = await agent.generate('Change the background to blue', {
+      clientTools: { colorChangeTool },
+    })
+
+    console.log(response)
+  } catch (error) {
+    console.error(error)
+  }
+}
+```
+
+### 客戶端 Tool Agent
+
+這是一個標準 Mastra [Agent](../agents/overview#quickstart)，配置為傳回十六進制顏色代碼，並配合以上在瀏覽器運行的客戶端 Tool 使用。
+
+```typescript title="src/mastra/agents/color-agent"
+import { Agent } from '@mastra/core/agent'
+
+export const colorAgent = new Agent({
+  id: 'color-agent',
+  name: 'Color Agent',
+  instructions: `You are a helpful CSS assistant.
+  You can change the background color of web pages.
+  Respond with a hex reference for the color requested by the user`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+## 在伺服器上使用 MastraClient
+
+你亦可在 API Route、serverless function 或 action 等伺服器端環境中使用 `MastraClient`。用法維持不變，但你可能需要為客戶端重新建立回應：
+
+```typescript {8}
+export async function action() {
+  const agent = mastraClient.getAgent('testAgent')
+
+  const stream = await agent.stream('Hello')
+
+  return new Response(stream.body)
+}
+```
+
+## 最佳做法
+
+1. **錯誤處理**：在開發情境中使用[錯誤處理](/reference/client-js/error-handling)。
+1. **環境變數**：使用環境變數進行配置。
+1. **Debug**：有需要時啟用詳細[記錄](/reference/client-js/logs)。
+1. **效能**：追蹤應用程式效能、[telemetry](/reference/client-js/telemetry) 及 Trace。

@@ -1,0 +1,128 @@
+---
+title: "Subagents | 基于文件的 Agent"
+description: 在 subagents/ 下为 File-based Agent 声明专业子 Agent。
+packages:
+  - "@mastra/core"
+---
+
+# Subagents
+
+File-based Agent 可以声明 **subagents**，即由其委派任务的专业子 Agent。父级模型会将每个子 Agent 视为一个以子 Agent 目录命名的委派 Tool，并通过调用该 Tool 移交任务。子 Agent 的结果会返回父级对话。
+
+本页介绍基于文件的约定。有关更广泛的委派模式、hook、memory 隔离、Tool 审批传播和评分，请参阅 [Supervisor Agent](/docs/capabilities/subagents)。
+
+## 快速开始
+
+在 `subagents/` 下为每个子 Agent 声明一个目录：
+
+```text title="Subagent layout"
+src/mastra/agents/
+└── supervisor/
+    ├── config.ts
+    ├── instructions.md
+    └── subagents/
+        └── researcher/
+            ├── config.ts
+            ├── instructions.md
+            └── tools/
+                └── search.ts
+```
+
+Mastra 会将 `researcher` 组装为独立 Agent，并将其连接到 supervisor 的 `agents` map 中。父级模型可以使用生成的 `researcher` 委派 Tool 向它委派任务。
+
+子 Agent 的 `config.ts` 必须设置非空的 `description`。父级模型在决定是否委派时会读取它。
+
+```typescript title="src/mastra/agents/supervisor/subagents/researcher/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  description: 'Researches a topic and returns cited findings.',
+})
+```
+
+## 模型如何委派
+
+子 Agent 的 `description` 是供父级模型使用的路由文本。请像编写 [Tool 描述](/reference/file-based-agents/tools#tool-options)一样编写它：说明子 Agent 的作用以及应在何时向其委派。
+
+如果发现的子 Agent 未提供非空描述，构建会失败。
+
+## 隔离
+
+子 Agent 相互隔离。子 Agent 不会继承父级的 Tool、Skill、Workspace、memory、处理器或子 Agent。每个子级都是一个拥有自身目录的独立 Agent。
+
+如果多个 Agent 应共享同一依赖项，请在代码中定义它，并通过每个 Agent 的 config 分别分配。
+
+## 嵌套
+
+子 Agent 可以声明自己的 `subagents/` 目录，最多可在顶层 Agent 下嵌套三层。更深层级的 `subagents/` 目录会被忽略，并会发出警告。
+
+```text title="Nested subagents"
+src/mastra/agents/
+└── supervisor/            # depth 0
+    └── subagents/
+        └── researcher/    # depth 1
+            └── subagents/
+                └── summarizer/ # depth 2
+```
+
+## 命名规则
+
+- 子 Agent id 与父级的某个 Tool 键冲突时，会导致构建错误。
+- 同一父级下存在重复的子 Agent id 时，会导致构建错误。
+- 如果父级的 `config.agents` 中也存在某个子 Agent id，则 `config.agents` 条目优先，并会记录警告。
+- 如果 `config.agents` 是函数，Mastra 会忽略发现的子 Agent 并发出警告，因为它们无法进行静态合并。
+
+## 示例
+
+此 supervisor 协调研究和写作流程。`researcher` 子 Agent 拥有搜索 Tool，`writer` 子 Agent 则拥有用于起草文件的 Workspace。
+
+```text title="Research supervisor"
+src/mastra/agents/
+└── research-supervisor/
+    ├── config.ts
+    ├── instructions.md
+    └── subagents/
+        ├── researcher/
+        │   ├── config.ts
+        │   ├── instructions.md
+        │   └── tools/
+        │       └── search_web.ts
+        └── writer/
+            ├── config.ts
+            ├── instructions.md
+            └── workspace/
+                └── draft-template.md
+```
+
+```typescript title="src/mastra/agents/research-supervisor/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+```markdown title="src/mastra/agents/research-supervisor/instructions.md"
+You coordinate research and writing.
+
+Delegate fact gathering to `researcher`. Delegate final drafting to `writer`.
+```
+
+```typescript title="src/mastra/agents/research-supervisor/subagents/researcher/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  description: 'Use to gather facts, sources, and concise research notes for a topic.',
+})
+```
+
+```typescript title="src/mastra/agents/research-supervisor/subagents/writer/config.ts"
+import { agentConfig } from '@mastra/core/agent'
+
+export default agentConfig({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  description: 'Use to turn research notes into a structured draft.',
+})
+```

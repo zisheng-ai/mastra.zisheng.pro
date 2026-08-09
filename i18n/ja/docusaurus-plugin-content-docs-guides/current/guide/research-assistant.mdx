@@ -1,0 +1,360 @@
+---
+title: "ガイド：RAG を使用した研究論文 assistant の構築"
+description: RAG を使用して学術論文を分析し、その内容に関する質問へ回答できる AI research assistant の作成方法を説明します。
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# RAG を使用した研究論文 assistant の構築
+
+このガイドでは、Retrieval Augmented Generation（RAG）を使用して学術論文を分析し、その内容に関する具体的な質問へ回答できる AI research assistant を作成します。
+
+例として、Transformer の原論文 [「Attention Is All You Need」](https://arxiv.org/html/1706.03762)を使用します。データベースにはローカルの libSQL データベースを使用します。
+
+## 前提条件
+
+- Node.js `v22.13.0` 以降がインストールされていること
+- サポートされている [Model Provider](/models) の API キー
+- 既存の Mastra プロジェクト（新しいプロジェクトをセットアップするには、[インストールガイド](/guides/getting-started/quickstart)に従ってください）
+
+## RAG の仕組み
+
+RAG の仕組みと、各コンポーネントの実装方法を確認します。
+
+### Knowledge Store/Index
+
+- テキストをベクトル表現に変換する
+- コンテンツの数値表現を作成する
+- **実装**：OpenAI の `text-embedding-3-small` で埋め込みを作成し、LibSQLVector に保存します
+
+### Retriever
+
+- similarity search で関連コンテンツを見つける
+- クエリ埋め込みと保存済みベクトルを照合する
+- **実装**：LibSQLVector を使用し、保存済み埋め込みに対して similarity search を行います
+
+### Generator
+
+- 取得したコンテンツを LLM で処理する
+- コンテキストに基づいた応答を生成する
+- **実装**：OpenAI モデルを使用し、取得したコンテンツに基づいて回答を生成します
+
+この実装では次を行います。
+
+1. Transformer 論文を処理して埋め込みに変換する
+1. すばやく取得できるよう LibSQLVector に保存する
+1. similarity search で関連セクションを見つける
+1. 取得したコンテキストを使って正確な応答を生成する
+
+## Agent の作成
+
+Agent の動作を定義して Mastra プロジェクトに接続し、ベクトル store を作成します。
+
+<Steps>
+  <StepItem title="追加の依存関係をインストールする">
+    追加の依存関係をインストールします
+
+    [インストールガイド](/guides/getting-started/quickstart)の手順を実行した後、追加の依存関係をインストールします。
+
+    ```bash npm2yarn
+    npm install @mastra/rag@latest ai
+    ```
+  </StepItem>
+
+  <StepItem title="Agent を定義する">
+    次に、RAG を利用する research assistant を作成します。この Agent は次を使用します。
+
+    - 論文内の関連コンテンツを見つけるため、ベクトル store に対して semantic search を行う [Vector Query Tool](/reference/tools/vector-query-tool)
+    - クエリを理解して応答を生成する OpenAI モデル
+    - 論文の分析、取得したコンテンツの効果的な使用、制限事項の明示について Agent を導くカスタム instructions
+
+    新しいファイル `src/mastra/agents/researchAgent.ts` を作成し、Agent を定義します。
+
+    ```ts title="src/mastra/agents/researchAgent.ts"
+    import { Agent } from '@mastra/core/agent'
+    import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
+    import { createVectorQueryTool } from '@mastra/rag'
+
+    // Create a tool for semantic search over the paper embeddings
+    const vectorQueryTool = createVectorQueryTool({
+      vectorStoreName: 'libSqlVector',
+      indexName: 'papers',
+      model: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+    })
+
+    export const researchAgent = new Agent({
+      id: 'research-agent',
+      name: 'Research Assistant',
+      instructions: `You are a helpful research assistant that analyzes academic papers and technical documents.
+        Use the provided vector query tool to find relevant information from your knowledge base,
+        and provide accurate, well-supported answers based on the retrieved content.
+        Focus on the specific content available in the tool and acknowledge if you cannot find sufficient information to answer a question.
+        Base your responses only on the content provided, not on general knowledge.`,
+      model: '__GATEWAY_OPENAI_MODEL__',
+      tools: {
+        vectorQueryTool,
+      },
+    })
+    ```
+  </StepItem>
+
+  <StepItem title="Vector Store を作成する">
+    プロジェクトルートで `pwd` コマンドを実行し、absolute path を取得します。path は次のようになります。
+
+    ```bash
+    > pwd
+    /Users/your-name/guides/research-assistant
+    ```
+
+    既存の `src/mastra/index.ts` ファイルと設定に、次を追加します。
+
+    ```ts title="src/mastra/index.ts" {2, 4-6, 9}
+    import { Mastra } from '@mastra/core'
+    import { LibSQLVector } from '@mastra/libsql'
+
+    const libSqlVector = new LibSQLVector({
+      id: 'research-vectors',
+      url: 'file:/Users/your-name/guides/research-assistant/vector.db',
+    })
+
+    export const mastra = new Mastra({
+      vectors: { libSqlVector },
+    })
+    ```
+
+    `url` には、`pwd` コマンドで取得した absolute path を使用します。これにより、プロジェクトルートに `vector.db` ファイルが作成されます。
+
+    :::note
+
+    このガイドではローカルの libSQL ファイルへの absolute path をハードコードしていますが、本番環境では機能しません。本番環境では、remote の永続データベースを使用してください。
+
+    :::
+  </StepItem>
+
+  <StepItem title="Agent を Mastra に登録する">
+    `src/mastra/index.ts` ファイルで Agent を Mastra に追加します。
+
+    ```ts title="src/mastra/index.ts" {3, 10}
+    import { Mastra } from '@mastra/core'
+    import { LibSQLVector } from '@mastra/libsql'
+    import { researchAgent } from './agents/researchAgent'
+
+    const libSqlVector = new LibSQLVector({
+      id: 'research-vectors',
+      url: 'file:/Users/your-name/guides/research-assistant/vector.db',
+    })
+
+    export const mastra = new Mastra({
+      agents: { researchAgent },
+      vectors: { libSqlVector },
+    })
+    ```
+  </StepItem>
+</Steps>
+
+## ドキュメントの処理
+
+次の手順では、研究論文を取得して小さな chunk に分割します。その後、埋め込みを生成し、chunk をベクトルデータベースに保存します。
+
+<Steps>
+  <StepItem title="論文を読み込んで処理する">
+    このステップでは URL を指定して研究論文を取得し、document object に変換して、扱いやすい小さな chunk に分割します。chunk に分割することで、より高速かつ効率的に処理できます。
+
+    新しいファイル `src/store.ts` を作成し、次を追加します。
+
+    ```ts title="src/store.ts"
+    import { MDocument } from '@mastra/rag'
+
+    // Load the paper
+    const paperUrl = 'https://arxiv.org/html/1706.03762'
+    const response = await fetch(paperUrl)
+    const paperText = await response.text()
+
+    // Create document and chunk it
+    const doc = MDocument.fromText(paperText)
+    const chunks = await doc.chunk({
+      strategy: 'recursive',
+      maxSize: 512,
+      overlap: 50,
+      separators: ['\n\n', '\n', ' '],
+    })
+
+    console.log('Number of chunks:', chunks.length)
+    ```
+
+    ターミナルでファイルを実行します。
+
+    ```bash
+    npx bun src/store.ts
+    ```
+
+    次の応答が返されます。
+
+    ```bash
+    Number of chunks: 892
+    ```
+  </StepItem>
+
+  <StepItem title="Embedding を作成して保存する">
+    最後に、次の手順で RAG 用のコンテンツを準備します。
+
+    1. テキストの各 chunk に対して埋め込みを生成する
+    1. 埋め込みを保持するベクトル store インデックスを作成する
+    1. 埋め込みとメタデータ（元のテキストとソース情報）の両方をベクトルデータベースに保存する
+
+    :::note
+
+    このメタデータは、ベクトル store が関連する一致を見つけたときに、実際のコンテンツを返せるようにするため重要です。
+
+    :::
+
+    Agent はベクトルインデックスを使用して、関連情報を検索、取得します。
+
+    `src/store.ts` ファイルを開き、次を追加します。
+
+    ```ts title="src/store.ts"
+    import { MDocument } from '@mastra/rag'
+    import { embedMany } from 'ai'
+    import { mastra } from './mastra'
+
+    // Load the paper
+    const paperUrl = 'https://arxiv.org/html/1706.03762'
+    const response = await fetch(paperUrl)
+    const paperText = await response.text()
+
+    // Create document and chunk it
+    const doc = MDocument.fromText(paperText)
+    const chunks = await doc.chunk({
+      strategy: 'recursive',
+      maxSize: 512,
+      overlap: 50,
+      separators: ['\n\n', '\n', ' '],
+    })
+
+    // Generate embeddings
+    const { embeddings } = await embedMany({
+      model: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+      values: chunks.map(chunk => chunk.text),
+    })
+
+    // Get the vector store instance from Mastra
+    const vectorStore = mastra.getVector('libSqlVector')
+
+    // Create an index for paper chunks
+    await vectorStore.createIndex({
+      indexName: 'papers',
+      dimension: 1536,
+    })
+
+    // Store embeddings
+    await vectorStore.upsert({
+      indexName: 'papers',
+      vectors: embeddings,
+      metadata: chunks.map(chunk => ({
+        text: chunk.text,
+        source: 'transformer-paper',
+      })),
+    })
+    ```
+
+    最後に、スクリプトをもう一度実行して埋め込みを保存します。
+
+    ```bash
+    npx bun src/store.ts
+    ```
+
+    操作が成功した場合、ターミナルには出力もエラーも表示されません。
+  </StepItem>
+</Steps>
+
+## Assistant のテスト
+
+すべての埋め込みがベクトルデータベースに保存されたので、さまざまな種類のクエリで research assistant をテストできます。
+
+新しいファイル `src/ask-agent.ts` を作成し、異なる種類のクエリを追加します。
+
+```ts title="src/ask-agent.ts"
+import { mastra } from './mastra'
+const agent = mastra.getAgent('researchAgent')
+
+// Basic query about concepts
+const query1 = 'What problems does sequence modeling face with neural networks?'
+const response1 = await agent.generate(query1)
+console.log('\nQuery:', query1)
+console.log('Response:', response1.text)
+```
+
+スクリプトを実行します。
+
+```bash
+npx bun src/ask-agent.ts
+```
+
+次のような出力が表示されます。
+
+```bash
+Query: What problems does sequence modeling face with neural networks?
+Response: Sequence modeling with neural networks faces several key challenges:
+1. Vanishing and exploding gradients during training, especially with long sequences
+2. Difficulty handling long-term dependencies in the input
+3. Limited computational efficiency due to sequential processing
+4. Challenges in parallelizing computations, resulting in longer training times
+```
+
+別の質問も試します。
+
+```ts title="src/ask-agent.ts"
+import { mastra } from './mastra'
+const agent = mastra.getAgent('researchAgent')
+
+// Query about specific findings
+const query2 = 'What improvements were achieved in translation quality?'
+const response2 = await agent.generate(query2)
+console.log('\nQuery:', query2)
+console.log('Response:', response2.text)
+```
+
+出力：
+
+```
+Query: What improvements were achieved in translation quality?
+Response: The model showed significant improvements in translation quality, achieving more than 2.0
+BLEU points improvement over previously reported models on the WMT 2014 English-to-German translation
+task, while also reducing training costs.
+```
+
+### Application の提供
+
+Mastra サーバーを起動し、research assistant を API として公開します。
+
+```bash
+mastra dev
+```
+
+research assistant は次の URL で利用できます。
+
+```
+http://localhost:4111/api/agents/researchAgent/generate
+```
+
+curl でテストします。
+
+```bash
+curl -X POST http://localhost:4111/api/agents/researchAgent/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      { "role": "user", "content": "What were the main findings about model parallelization?" }
+    ]
+  }'
+```
+
+## 高度な RAG の例
+
+より高度な RAG 手法については、次の例を参照してください。
+
+- メタデータを使用して結果をフィルターする [Filter RAG](https://github.com/mastra-ai/mastra/tree/main/examples/basics/rag/filter-rag)
+- 情報密度を最適化する [Cleanup RAG](https://github.com/mastra-ai/mastra/tree/main/examples/basics/rag/cleanup-rag)
+- Workflow を使って複雑な reasoning クエリを処理する [Chain of Thought RAG](https://github.com/mastra-ai/mastra/tree/main/examples/basics/rag/cot-rag)
+- 結果の関連性を向上させる [Rerank RAG](https://github.com/mastra-ai/mastra/tree/main/examples/basics/rag/rerank-rag)

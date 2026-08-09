@@ -1,0 +1,164 @@
+---
+title: "參考：CachingPubSub | PubSub"
+description: CachingPubSub 的 API 參考；這個 pub/sub 包裝器加入事件快取和重播功能，以支援可恢復串流。
+packages:
+  - "@mastra/core"
+---
+
+# CachingPubSub
+
+`CachingPubSub` 會包裝任何 [`PubSub`](/reference/pubsub/base) 實作，並加入事件快取和重播功能。它會按主題在快取中記錄每個已發佈事件，因此較遲連線或中斷後重新連線的訂閱者，可以先重播錯過的事件，再繼續接收即時事件。
+
+你可以在不保留歷史記錄的傳輸（例如 [`EventEmitterPubSub`](/reference/pubsub/event-emitter)）之上，使用它建立可恢復串流。已持久保存事件的傳輸（例如 [`RedisStreamsPubSub`](/reference/pubsub/redis-streams)）則不需要此包裝器。
+
+`CachingPubSub` 對批次處理透明：`subscribe()` 會將 `options.batch` 轉交內部 pub/sub，而 `supportsNativeBatching` 會反映內部實作的值。若內部實作不支援批次處理，即使傳入 `options.batch`，事件仍會逐一傳送。
+
+## 使用範例
+
+包裝內部 pub/sub，並提供用於儲存事件的伺服器快取。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { CachingPubSub, EventEmitterPubSub } from '@mastra/core/events'
+import { InMemoryServerCache } from '@mastra/core/cache'
+
+const cache = new InMemoryServerCache()
+const pubsub = new CachingPubSub(new EventEmitterPubSub(), cache)
+
+export const mastra = new Mastra({
+  pubsub,
+})
+```
+
+以 inline 方式包裝時，`withCaching` 輔助函數會傳回相同執行個體，令程式碼更易讀：
+
+```typescript
+import { withCaching, EventEmitterPubSub } from '@mastra/core/events'
+import { InMemoryServerCache } from '@mastra/core/cache'
+
+const pubsub = withCaching(new EventEmitterPubSub(), new InMemoryServerCache())
+```
+
+## 建構函數參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'inner',
+    type: 'PubSub',
+    description:
+      '要包裝的 pub/sub 實作。所有發佈及即時訂閱都會經過此執行個體。',
+    isOptional: false,
+  },
+  {
+    name: 'cache',
+    type: 'MastraServerCache',
+    description: '用於按主題儲存事件以供重播的快取。',
+    isOptional: false,
+  },
+  {
+    name: 'options',
+    type: 'CachingPubSubOptions',
+    description: '可選設定。',
+    isOptional: true,
+    properties: [
+      {
+        name: 'keyPrefix',
+        type: 'string',
+        description: '快取 key 的前綴，用於劃分事件命名空間。',
+        isOptional: true,
+        defaultValue: 'pubsub:',
+      },
+      {
+        name: 'logger',
+        type: 'IMastraLogger',
+        description: '用於錯誤的 logger。省略時會改用 `console.error`。',
+        isOptional: true,
+      },
+    ],
+  },
+]}
+/>
+
+## 屬性
+
+<PropertiesTable
+  content={[
+  {
+    name: 'supportsNativeBatching',
+    type: 'boolean',
+    description: '反映內部 pub/sub。只有被包裝的實作支援批次處理時才傳回 `true`。',
+  },
+]}
+/>
+
+## 方法
+
+`CachingPubSub` 實作 [`PubSub`](/reference/pubsub/base) 合約。它會覆寫重播方法以讀取快取事件。以下方法說明快取行為。
+
+### `publish(topic, event)`
+
+以連續索引快取事件，然後將它發佈至內部 pub/sub。
+
+```typescript
+await pubsub.publish('my-topic', {
+  type: 'example',
+  data: { value: 1 },
+  runId: 'run-123',
+})
+```
+
+### `subscribeWithReplay(topic, cb)`
+
+重播主題的所有快取事件，然後訂閱即時事件。
+
+```typescript
+await pubsub.subscribeWithReplay('my-topic', event => {
+  console.log(event)
+})
+```
+
+### `subscribeFromOffset(topic, offset, cb)`
+
+從 `offset` 開始重播快取事件，然後訂閱即時事件。當用戶端知道上次位置時使用此方法，可避免重播完整歷史記錄。
+
+```typescript
+await pubsub.subscribeFromOffset('my-topic', 42, event => {
+  console.log(event)
+})
+```
+
+### `getHistory(topic, offset?)`
+
+傳回主題從 `offset` 開始的快取事件。
+
+```typescript
+const events = await pubsub.getHistory('my-topic', 0)
+```
+
+傳回：`Promise<Event[]>`
+
+### `clearTopic(topic)`
+
+移除主題的快取事件及 offset 計數器，並將呼叫轉交內部 pub/sub，讓持久傳輸（例如 [`RedisStreamsPubSub`](/reference/pubsub/redis-streams)）亦可刪除保留的狀態。Mastra 的執行生命週期會在一次執行完成時自動呼叫此方法。
+
+```typescript
+await pubsub.clearTopic('my-topic')
+```
+
+## 函數
+
+### `withCaching(pubsub, cache, options?)`
+
+用於建構 `CachingPubSub` 的便利包裝器。它接受與建構函數相同的引數，並傳回新執行個體。
+
+```typescript
+import { withCaching, EventEmitterPubSub } from '@mastra/core/events'
+import { InMemoryServerCache } from '@mastra/core/cache'
+
+const pubsub = withCaching(new EventEmitterPubSub(), new InMemoryServerCache(), {
+  keyPrefix: 'events:',
+})
+```
+
+傳回：`CachingPubSub`

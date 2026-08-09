@@ -1,0 +1,916 @@
+---
+title: 'リファレンス：LiveKit | Voice'
+description: 'Mastra Agent をリアルタイム LiveKit Voice Agent に変換する @mastra/livekit の API リファレンスです。'
+packages:
+  - '@mastra/livekit'
+---
+
+# LiveKit
+
+`@mastra/livekit` パッケージは、Mastra Agent を LiveKit Agents フレームワークに接続します。LiveKit が音声パイプライン（Voice Activity Detection、Speech-to-Text、ターン検出、Text-to-Speech、割り込み）を実行し、このパッケージが応答生成を Mastra Agent の `stream()` 呼び出しに橋渡しします。
+
+セットアップと概念については、[リアルタイム Voice](/guides/voice/realtime-voice)を参照してください。
+
+パッケージには3つのエントリーポイントがあります。
+
+- `@mastra/livekit`：サーバー側 API の [`liveKitConnectionRoute()`](#livekitconnectionroute)、[`dispatchVoiceSession()`](#dispatchvoicesession)、[`pipeAgentReplyToWriter()`](#pipeagentreplytowriter)、[`serializeSessionMetadata()`](#livekitsessionmetadata)、[`createEndCallTool()`](#createendcalltool)。Mastra サーバーコードからインポートします。このエントリーが LiveKit Agents ランタイムを読み込むことはありません。
+- `@mastra/livekit/worker`：Worker ランタイムの [`createLiveKitWorker()`](#createlivekitworker)、[`runLiveKitWorker()`](#runlivekitworker)、[`chatContextToMessages()`](#chatcontexttomessages)、セッションヘルパーの [`speakGreeting()`](#speakgreeting)、[`waitForAgentDoneSpeaking()`](#waitforagentdonespeaking)、[`runEndCall()`](#runendcall)。Worker エントリーファイルからだけインポートします。
+- `@mastra/livekit/plugin`：LLM コンポーネントプラグインの [`MastraLLM`](#mastrallm) と [`createRemoteAgentReplyGenerator()`](#createremoteagentreplygenerator)。独自の `voice.AgentSession` を構築する Worker でインポートします。`createRemoteAgentReplyGenerator()` は `createLiveKitWorker()` の `generate` オプションに接続するため、`@mastra/livekit/worker` からもエクスポートされます。`MastraLLM` はプラグイン専用です。
+
+## `createLiveKitWorker()`
+
+Mastra Agent で Voice セッションに応答する LiveKit Agent 定義を構築します。Worker エントリーファイルのデフォルトエクスポートとして使用します。
+
+```typescript title="src/mastra/voice-worker.ts"
+import { fileURLToPath } from 'node:url'
+import { createLiveKitWorker, runLiveKitWorker } from '@mastra/livekit/worker'
+import { mastra } from './index'
+
+export default createLiveKitWorker({
+  mastra,
+  agent: 'support',
+  stt: 'deepgram/nova-3',
+  tts: 'cartesia/sonic-3',
+  turnDetection: 'multilingual',
+})
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  runLiveKitWorker({ entry: import.meta.url, agentName: 'mastra-voice' })
+}
+```
+
+### オプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'mastra',
+    type: 'Mastra',
+    description: 'Voice セッションを処理する Agent を持つ Mastra インスタンス。',
+  },
+  {
+    name: 'agent',
+    type: 'string | (args) => string | Agent | Promise<string | Agent>',
+    description:
+      '各セッションに応答する Mastra Agent。固定の Agent キー／ID、または Dispatch メタデータと Job コンテキストを使用してセッションごとに呼び出す Resolver。デフォルトは Dispatch メタデータの agentId です。',
+    isOptional: true,
+  },
+  {
+    name: 'workflow',
+    type: 'string | Workflow | (args) => string | Promise<string>',
+    description:
+      'Agent の代わりに Mastra Workflow で各ターンの応答を生成します。Workflow インスタンス、固定の Workflow キー／ID、またはセッションごとに Workflow ID を返す Resolver を指定します。Workflow はターンごとに1回、完了まで実行されます（suspend／resume はありません）。agent とは同時に指定できず、workflowInput が必要です。',
+    isOptional: true,
+  },
+  {
+    name: 'workflowInput',
+    type: '(args: VoiceTurnContext & { metadata }) => unknown | Promise<unknown>',
+    description:
+      'ターンを Workflow の inputData にマッピングします。workflow を設定した場合は必須です。各ターンで完全な文字起こしを渡すステートレスなマッピングにより、Workflow で会話状態を保持せずに済みます。',
+    isOptional: true,
+  },
+  {
+    name: 'replyStep',
+    type: 'string',
+    description: 'この Workflow Step ID のテキストだけをストリーミングします。デフォルトは writer に書き込むすべての Step です。',
+    isOptional: true,
+  },
+  {
+    name: 'resultText',
+    type: '(result: unknown) => string | undefined',
+    description:
+      'Workflow が writer 経由でテキストをストリーミングしない場合のフォールバック。最終実行結果から発話応答を取得します。',
+    isOptional: true,
+  },
+  {
+    name: 'generate',
+    type: 'VoiceReplyGenerator',
+    description:
+      '最下層のエスケープハッチ。任意の応答 Generator（カスタム Workflow、リモートブリッジなど）を直接指定します。',
+    isOptional: true,
+  },
+  {
+    name: 'stt',
+    type: 'STT | string',
+    description:
+      "Speech-to-Text。LiveKit プラグインインスタンスまたは 'deepgram/nova-3' などの推論モデル文字列。呼び出しごとに選択するには configuration.stt Resolver を設定します。Resolver が優先され、このオプションがフォールバックになります。",
+    isOptional: true,
+  },
+  {
+    name: 'tts',
+    type: 'TTS | string',
+    description:
+      "Text-to-Speech。LiveKit プラグインインスタンスまたは 'cartesia/sonic-3' などの推論モデル文字列。呼び出しごとに選択するには configuration.tts Resolver を設定します。Resolver が優先され、このオプションがフォールバックになります。",
+    isOptional: true,
+  },
+  {
+    name: 'vad',
+    type: "VAD | 'silero' | false",
+    description:
+      "Voice Activity Detection。'silero' は prewarm 中に @livekit/agents-plugin-silero から Silero VAD を読み込みます。独自のものを使用するにはインスタンスを渡し、無効にするには false を渡します。",
+    isOptional: true,
+    defaultValue: "'silero'",
+  },
+  {
+    name: 'turnDetection',
+    type: "'multilingual' | 'english' | TurnDetectionMode",
+    description:
+      "ターン終了検出。'multilingual' と 'english' は @livekit/agents-plugin-livekit から LiveKit の Semantic Turn Detector を読み込みます。'vad'、'stt'、'manual' などのその他の値はそのまま渡されます。",
+    isOptional: true,
+  },
+  {
+    name: 'turnHandling',
+    type: 'Partial<TurnHandlingOptions>',
+    description:
+      'ターン処理の調整。エンドポイント遅延、中断感度、先行生成を設定します。ここで設定しない限り、Worker は preemptiveGeneration を無効にします。先行生成を試みるたびに Mastra Agent が再実行され、重複するユーザーメッセージが永続化されるためです。',
+    isOptional: true,
+  },
+  {
+    name: 'sessionOptions',
+    type: 'Partial<AgentSessionOptions>',
+    description: 'このヘルパーが構築する設定に統合する追加の LiveKit AgentSession オプション。',
+    isOptional: true,
+  },
+  {
+    name: 'memory',
+    type: 'false | ((args) => { thread, resource } | false)',
+    description:
+      'Memory マッピング。解決された Agent に Memory が設定されている場合、デフォルトは { thread: metadata.threadId ?? room name, resource: metadata.resourceId ?? thread } です。無効にするには false、カスタマイズするには関数を渡します。',
+    isOptional: true,
+  },
+  {
+    name: 'toolFeedback',
+    type: '(toolCall) => string | undefined',
+    description:
+      'Mastra Agent が応答途中で Tool 呼び出しを開始したときに呼び出されます。Tool の実行中に発話する短いフレーズを返します。',
+    isOptional: true,
+  },
+  {
+    name: 'onTurnComplete',
+    type: '(ctx: VoiceTurnCompleteContext) => void | Promise<void>',
+    description:
+      'Text-to-Speech への応答ストリーミング完了後、ターンごとに1回呼び出されます。音声パス外で実行され、await されません。コンテキストには生成された応答（text、toolCalls、interrupted、usage）と解決済みの Memory マッピングが含まれます。',
+    isOptional: true,
+  },
+  {
+    name: 'configuration',
+    type: 'LiveKitWorkerConfiguration',
+    description:
+      'グループ化された会話およびコンプライアンス設定。冒頭の挨拶と AI 開示、同意要件、Agent による通話終了、通話ごとの STT／TTS 選択を設定します。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'LiveKitWorkerConfiguration',
+        parameters: [
+          {
+            name: 'greeting',
+            type: 'GreetingConfiguration',
+            description:
+              '冒頭の挨拶と AI 開示。text（固定文字列またはテナントごとの挨拶用の通話ごとの Resolver）、allowInterruptions、awaitPlayout、persist、repeatEvery と repeatText による定期的な再開示を設定します。',
+            isOptional: true,
+          },
+          {
+            name: 'consentPolicy',
+            type: 'ConsentConfiguration',
+            description:
+              '名前付き要件（summaryStorage から始まる）としての通話同意ポリシー。宣言的なだけで、Worker 自体は何もブロックしません。createConsentTool で実行時に許可を取得し、独自コードで適用します。宣言したポリシーは照合用に onCallEnd で公開されます。',
+            isOptional: true,
+          },
+          {
+            name: 'endCall',
+            type: 'EndCallConfiguration',
+            description:
+              'Agent による通話終了。Worker は各ターンで通話終了 Tool（createEndCallTool と組み合わせます）を監視し、Agent の終了メッセージの再生完了を待ってから切断し、その過程で onCallEnd を実行します。',
+            isOptional: true,
+          },
+          {
+            name: 'stt',
+            type: '(context: VoiceCallContext) => STT | string | undefined',
+            description:
+              '通話ごとの Speech-to-Text。接続後、通話ごとに { metadata, requestContext, roomName, ctx } を指定して1回呼び出される Resolver で、トップレベルの stt オプションが受け付ける任意の値を返します。トップレベルの stt にフォールバックするには undefined を返します。Resolver は通話セットアップ中に実行されるため、プラグインインスタンスを通話間でキャッシュしてください。',
+            isOptional: true,
+          },
+          {
+            name: 'tts',
+            type: '(context: VoiceCallContext) => TTS | string | undefined',
+            description:
+              '通話ごとの Text-to-Speech。接続後、通話ごとに { metadata, requestContext, roomName, ctx } を指定して1回呼び出される Resolver で、トップレベルの tts オプションが受け付ける任意の値を返します。テナントごとに1つの Voice または言語を指定できます。トップレベルの tts にフォールバックするには undefined を返します。プラグインインスタンスを通話間でキャッシュしてください。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'greeting',
+    type: 'string',
+    description: 'セッション開始時に発話する静的な挨拶。非推奨：configuration.greeting.text を優先してください。',
+    isOptional: true,
+  },
+  {
+    name: 'persistGreeting',
+    type: 'boolean',
+    description:
+      '発話した挨拶をアシスタントメッセージとして Memory Thread に保存し、保存済み Thread を正確な通話文字起こしにします。挨拶を設定し、Memory が有効な場合だけ適用されます。非推奨：configuration.greeting.persist を優先してください。',
+    isOptional: true,
+    defaultValue: 'true',
+  },
+  {
+    name: 'observability',
+    type: 'boolean',
+    description:
+      'Mastra インスタンスに Observability が設定されている場合、各通話を Trace します。セッションごとに `voice call` Span を開き、各ターンの Agent 実行をその下にネストします。LiveKit の STT、TTS、発話終了、VAD、LLM レイテンシーのメトリクスが子 Span となり、モデルごとの使用量集計とともに Span を閉じます。無効にするには false を渡します。',
+    isOptional: true,
+    defaultValue: 'true',
+  },
+  {
+    name: 'inputOptions',
+    type: 'Partial<RoomInputOptions>',
+    description: 'session.start() に渡す LiveKit Room 入力オプション。',
+    isOptional: true,
+  },
+  {
+    name: 'outputOptions',
+    type: 'Partial<RoomOutputOptions>',
+    description: 'session.start() に渡す LiveKit Room 出力オプション。',
+    isOptional: true,
+  },
+  {
+    name: 'onSessionStart',
+    type: '(args: { session, ctx, agent, metadata }) => void | Promise<void>',
+    description: 'セッション開始後に呼び出されます。ここでイベントリスナーを設定するか、応答を開始します。',
+    isOptional: true,
+  },
+]}
+/>
+
+## `runLiveKitWorker()`
+
+Worker エントリーファイル用の LiveKit Worker CLI（`dev`、`start`、`connect` サブコマンド）を起動します。Worker 定義をデフォルトエクスポートするファイルから呼び出し、直接実行した場合だけ動作するようにガードします。`@livekit/agents` の `cli.runApp` の代わりにこのヘルパーを使用すると、Worker ランタイムとブリッジが LiveKit SDK の同じコピーを共有することが保証されます。
+
+### オプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'entry',
+    type: 'string | URL',
+    description: 'Agent 定義をデフォルトエクスポートする Worker エントリーモジュール。import.meta.url を渡します。',
+  },
+  {
+    name: 'agentName',
+    type: 'string',
+    description: '明示的な Dispatch に使用する LiveKit Agent 名。',
+    isOptional: true,
+    defaultValue: "'mastra-voice'",
+  },
+  {
+    name: 'serverOptions',
+    type: 'Partial<ServerOptions>',
+    description: 'このヘルパーが構築する設定に統合する追加の LiveKit ServerOptions。',
+    isOptional: true,
+  },
+]}
+/>
+
+## `pipeAgentReplyToWriter()`
+
+Workflow の応答パスで、Mastra Agent の応答を Workflow Step の `writer` にストリーミングします。Agent のテキスト差分を転送するため、完全な応答の準備前に Text-to-Speech が開始されます。また Tool 呼び出しチャンクも転送するため、`toolFeedback` が発生し、`onTurnComplete` で Tool 一覧を確認できます。`stream.textStream` だけをパイプすると Tool 呼び出しが通知なしで失われます。Step の `abortSignal` を `agent.stream()` に渡し、割り込み時に生成をすぐ停止できるようにしてください。
+
+```typescript title="src/mastra/workflows/phone-conversation.ts"
+import { pipeAgentReplyToWriter } from '@mastra/livekit'
+
+const generateResponse = createStep({
+  id: 'generateResponse',
+  // input and output schemas omitted
+  execute: async ({ inputData, mastra, writer, abortSignal }) => {
+    const stream = await mastra.getAgent('support').stream(inputData.turn, { abortSignal })
+    const reply = await pipeAgentReplyToWriter(stream, writer)
+    return { reply }
+  },
+})
+```
+
+戻り値：`Promise<string>`。蓄積された応答テキスト。
+
+### パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agentStream',
+    type: 'AgentReplyStreamLike',
+    description: 'agent.stream() が返すストリーム。fullStream 非同期 Iterable を公開する任意のオブジェクト。',
+  },
+  {
+    name: 'writer',
+    type: 'WritableStream<unknown>',
+    description: 'Workflow Step の writer。',
+  },
+]}
+/>
+
+## `chatContextToMessages()`
+
+LiveKit Chat コンテキストを、指示と関数呼び出しを除いた `agent.stream()` が受け付けるプレーンメッセージに変換します。完全な文字起こしをステートレスな Workflow に渡すため、`workflowInput` で使用します。
+
+```typescript title="src/mastra/voice-worker.ts"
+import { createLiveKitWorker, chatContextToMessages } from '@mastra/livekit/worker'
+
+export default createLiveKitWorker({
+  mastra,
+  workflow: 'phoneConversation',
+  workflowInput: ({ chatCtx }) => ({ history: chatContextToMessages(chatCtx) }),
+})
+```
+
+戻り値：`VoiceTurnMessage[]`。各要素は `{ role: 'system' | 'user' | 'assistant'; content: string; id?: string }` です。
+
+## `MastraLLM`
+
+Mastra Agent を基盤とする標準 LiveKit LLM プラグイン（`llm.LLM`）です。独自に `voice.AgentSession` を構築し、`llm` スロットで Mastra を使用する場合に利用します。マネージドな代替手段は [`createLiveKitWorker()`](#createlivekitworker) です。選択方法については、[Mastra を LLM コンポーネントとして使用する](/guides/voice/realtime-voice#use-mastra-as-the-llm-component)を参照してください。
+
+`remote` を指定すると、プラグインは Server-Sent Events（SSE）を使用し、Mastra サーバーから HTTP 経由で各ターンをストリーミングします。Agent ループ、Tool、Memory はサーバー側で実行され、Agent を中断するとサーバー側の生成も中止されます。
+
+```typescript title="src/mastra/voice-worker-plugin.ts"
+import { voice } from '@livekit/agents'
+import { MastraLLM } from '@mastra/livekit/plugin'
+
+const session = new voice.AgentSession({
+  llm: new MastraLLM({
+    remote: { baseUrl: process.env.MASTRA_URL!, agentId: 'support' },
+    memory: { thread: callId, resource: userId },
+  }),
+  stt: 'deepgram/nova-3',
+  tts: 'cartesia/sonic-3',
+  // Required with `memory`: LiveKit enables preemptive generation by default.
+  turnHandling: { preemptiveGeneration: { enabled: false } },
+})
+```
+
+プラグインは `provider` を `mastra`、`model` を Agent ID として報告するため、LiveKit のメトリクスとフォールバックアダプターはほかの LLM と同様に識別します。
+
+### コンストラクターオプション
+
+`remote`、`agent`、`generate` のいずれか1つだけを応答ソースとして指定します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'remote',
+    type: 'RemoteMastraAgentOptions',
+    description:
+      'HTTP 経由で接続するリモート Mastra サーバー。createRemoteAgentReplyGenerator() と同じ接続オプション（baseUrl、agentId、apiPrefix、headers、fetch、timeoutMs、retries、body）を受け取ります。',
+    isOptional: true,
+  },
+  {
+    name: 'agent',
+    type: 'Agent',
+    description: 'プロセス内の Mastra Agent。2つ目のデプロイなしでセッションを所有します。',
+    isOptional: true,
+  },
+  {
+    name: 'generate',
+    type: 'VoiceReplyGenerator',
+    description:
+      'カスタム応答ソース。generate ソースは独自の Hook を所有します。以下の toolFeedback、onToolCall、onTurnComplete は remote と agent ソースだけに適用されます。',
+    isOptional: true,
+  },
+  {
+    name: 'memory',
+    type: '{ thread: string; resource?: string } | false',
+    description:
+      '通話ごとに解決される会話の永続化（SIP 発信者 ID からの解決など）。設定すると、Agent の最後の発話以降の新しいメッセージだけが各ターンで送信され、履歴は Mastra Memory が提供します。省略すると、各ターンで完全な LiveKit Chat コンテキストが送信されます。',
+    isOptional: true,
+    defaultValue: 'false',
+  },
+  {
+    name: 'requestContext',
+    type: 'RequestContext | Record<string, unknown>',
+    description: '生成へ転送するリクエストコンテキスト（テナント、ダイヤル番号など）。',
+    isOptional: true,
+  },
+  {
+    name: 'toolFeedback',
+    type: '(toolCall: VoiceToolCall) => string | undefined',
+    description: 'サーバー側 Tool の実行中に発話する短いフレーズを返します。',
+    isOptional: true,
+  },
+  {
+    name: 'onToolCall',
+    type: '(toolCall: VoiceToolCall) => void',
+    description:
+      '各 Tool 呼び出しがストリーム途中で開始されたときに呼び出されます。runEndCall() と組み合わせ、独自の Agent 主導の通話終了フローを実装します。',
+    isOptional: true,
+  },
+  {
+    name: 'onTurnComplete',
+    type: '(ctx: VoiceTurnCompleteContext) => void | Promise<void>',
+    description:
+      '応答ストリーミング完了後、ターンごとに1回、音声パス外で呼び出され、await されません。コンテキストには生成された応答（text、toolCalls、interrupted、usage）が含まれます。',
+    isOptional: true,
+  },
+]}
+/>
+
+:::warning
+`memory` をセッションの `preemptiveGeneration` オプションと組み合わせないでください。独自に構築したセッションでは LiveKit がこのオプションをデフォルトで有効にします。LiveKit が破棄する前に先行ターンが完了すると、ユーザーメッセージと発話されなかった応答が Thread に永続化されます。セッションで `turnHandling: { preemptiveGeneration: { enabled: false } }` を設定してください。ステートレスモード（`memory` なし）は先行生成と併用できます。
+:::
+
+### Mastra Agent で実行する Tool
+
+Tool は Mastra Agent のサーバー側で定義および実行されます。プラグインが LiveKit Tool 定義を転送することはありません。セッションが空でない `toolCtx` を渡すと、無視した Tool の名前を含む警告を1回記録します。すべての Tool はサーバー側で完了する必要があります。承認またはクライアント側の実行が必要な Tool は、通話を停止させる代わりに説明的なエラーでターンを失敗させます。
+
+Tool のアクティビティは `toolFeedback`、`onToolCall`、`onTurnComplete` を通じて Worker に届きます。
+
+### 指示
+
+LiveKit は `voice.Agent` の `instructions` を各リクエストの Chat コンテキストに挿入します。サーバー側 Mastra Agent の指示が正となるため、プラグインはこれを破棄します。プロンプトを変更するには Mastra Agent を変更してください。
+
+### 中断されたターン
+
+ユーザーが応答を中断した場合：
+
+1. プラグインがストリームをキャンセルします。サーバーは生成を中止し、そのターンの内容を永続化しません。
+1. LiveKit はユーザーが実際に聞いた部分を、中断済みのフラグを付けて Chat コンテキストに記録します。
+1. 次のターンで、プラグインは聞こえた部分だけを新しいユーザーメッセージの前に再送信し、Memory Thread を通話に合わせて補完します。メッセージには LiveKit のメッセージ ID があり、サーバーは ID で重複排除するため、再試行と再送信は冪等です。
+
+中断直後にユーザーが通話を終了すると、最後の断片は記録されません。文字起こしに含める必要がある場合は、セッションイベントからすぐに反映してください。共有メッセージ ID により、次のターンでの再送信は重複ではなく Upsert になります。
+
+```typescript title="src/mastra/voice-worker-plugin.ts"
+import { voice } from '@livekit/agents'
+import { MastraClient } from '@mastra/client-js'
+
+const client = new MastraClient({ baseUrl: process.env.MASTRA_URL! })
+
+session.on(voice.AgentSessionEventTypes.ConversationItemAdded, ({ item }) => {
+  if (item.type !== 'message' || item.role !== 'assistant' || !item.interrupted) return
+  void client.saveMessageToMemory({
+    agentId: 'support',
+    messages: [
+      {
+        id: item.id,
+        threadId: callId,
+        resourceId: userId,
+        role: 'assistant',
+        content: item.textContent ?? '',
+        type: 'text',
+        createdAt: new Date(),
+      },
+    ],
+  })
+})
+```
+
+### 使用量メトリクス
+
+サーバーがターンのトークン使用量を報告すると、プラグインは LiveKit に渡します。そのため、セッションの `metrics_collected` イベントにはほかの LLM プラグインと同様に、最初のトークンまでの時間、所要時間、トークン数が含まれます。同じ使用量オブジェクト（`promptTokens`、`completionTokens`、`promptCachedTokens`、`totalTokens`）が `onTurnComplete` に `result.usage` として届きます。
+
+### エラーとタイムアウト
+
+トランスポートは LiveKit の `APIError` 型（`APIStatusError`、`APIConnectionError`、`APITimeoutError`）をスローするため、セッションの再試行ポリシー（`connOptions.maxRetry`）と `FallbackAdapter` のフェイルオーバーはそのまま動作します。最初のトークン後にターンが再試行されることはありません。Voice 応答では、途中まで聞こえた内容を再生し直すよりも速やかに失敗する方が適切です。
+
+接続と最初のトークンの Watchdog はセッションの `connOptions.timeoutMs`（デフォルト10秒）を使用するため、接続を受け入れてもストリーミングしないサーバーによって無音状態が無期限に続くことはありません。
+
+通話途中で Mastra サーバーが停止すると、各応答の試行は再試行後に型付きエラーで失敗し、応答が数回連続で失敗すると LiveKit がセッションを閉じます。その上限に達する前にサーバーを復旧すれば、次のターンで通話が復旧します。
+
+### メッセージ内容
+
+メッセージ抽出の対象はテキストだけです。画像コンテンツは破棄され、音声コンテンツは文字起こしだけが含まれます。Voice パイプラインには影響しませんが、Chat コンテキストに独自に挿入する項目にはテキストが必要です。
+
+## `createRemoteAgentReplyGenerator()`
+
+HTTP／SSE 経由で**リモート** Mastra サーバー上の Agent ループを実行する応答 Generator を構築します。`MastraLLM` の `remote` モードが内部で使用します。`createLiveKitWorker` の `generate` オプションから直接使用し、機能一式を備えた Worker をリモートサーバーに対して実行できます。
+
+```typescript title="src/mastra/voice-worker.ts"
+import { createLiveKitWorker, createRemoteAgentReplyGenerator } from '@mastra/livekit/worker'
+import { mastra } from './index'
+
+export default createLiveKitWorker({
+  mastra, // local instance for logger and worker config; replies come from the remote server
+  generate: createRemoteAgentReplyGenerator({
+    baseUrl: process.env.MASTRA_URL!,
+    agentId: 'support',
+  }),
+  memory: ({ metadata, roomName }) => ({ thread: metadata.threadId ?? roomName }),
+  stt: 'deepgram/nova-3',
+  tts: 'cartesia/sonic-3',
+})
+```
+
+`generate` パスでは Worker レベルの `toolFeedback` と `onTurnComplete` オプションは適用されず、Worker の通話終了検出も発生しません。代わりに Hook を Generator へ渡してください。
+
+ターンのキャンセル（割り込み）は HTTP リクエストを破棄し、サーバー上の生成を中止します。エラーは LiveKit の `APIError` 型としてスローされます。`retries` オプションは最初の接続試行だけに適用されます。最初のチャンク後にターンが再試行されることはありません。
+
+戻り値：`VoiceReplyGenerator`。
+
+### オプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'baseUrl',
+    type: 'string',
+    description: 'リモート Mastra サーバーのベース URL（例：https://my-app.example.com）。',
+  },
+  {
+    name: 'agentId',
+    type: 'string',
+    description: 'リモート Mastra インスタンスに登録された Agent のキーまたは ID。',
+  },
+  {
+    name: 'apiPrefix',
+    type: 'string',
+    description: 'Mastra API のパスプレフィックス。',
+    isOptional: true,
+    defaultValue: "'/api'",
+  },
+  {
+    name: 'headers',
+    type: 'Record<string, string> | () => Record<string, string> | Promise<Record<string, string>>',
+    description: '静的ヘッダー、またはターンごとに呼び出す Resolver（新しい認証トークンの発行など）。',
+    isOptional: true,
+  },
+  {
+    name: 'fetch',
+    type: 'typeof fetch',
+    description: 'テストまたは Proxy 用に注入可能な fetch 実装。',
+    isOptional: true,
+    defaultValue: 'globalThis.fetch',
+  },
+  {
+    name: 'timeoutMs',
+    type: 'number',
+    description:
+      '接続と最初のトークンのタイムアウト（ミリ秒）。MastraLLM 経由で使用する場合、デフォルトはセッションの connOptions.timeoutMs です。',
+    isOptional: true,
+    defaultValue: '10000',
+  },
+  {
+    name: 'retries',
+    type: 'number',
+    description:
+      '最初のチャンクより前の初期接続の再試行回数。MastraLLM 経由で使用する場合、LiveKit セッションが再試行を管理するため、0 に固定されます。',
+    isOptional: true,
+    defaultValue: '2',
+  },
+  {
+    name: 'body',
+    type: 'Record<string, unknown>',
+    description: '各ストリームリクエスト本文に統合する追加フィールド。',
+    isOptional: true,
+  },
+  {
+    name: 'toolFeedback',
+    type: '(toolCall: VoiceToolCall) => string | undefined',
+    description: 'サーバー側 Tool の実行中に発話する短いフレーズを返します。',
+    isOptional: true,
+  },
+  {
+    name: 'onToolCall',
+    type: '(toolCall: VoiceToolCall) => void',
+    description: '各 Tool 呼び出しがストリーム途中で開始されたときに呼び出されます。',
+    isOptional: true,
+  },
+  {
+    name: 'onTurnComplete',
+    type: '(ctx: VoiceTurnCompleteContext) => void | Promise<void>',
+    description: '応答ストリーミング完了後、ターンごとに1回、音声パス外で呼び出されます。',
+    isOptional: true,
+  },
+]}
+/>
+
+## `speakGreeting()`
+
+所有するセッションで、中断と再生オプションに従って冒頭の挨拶を発話します。LiveKit の `SpeechHandle` を返し、挨拶テキストがない場合は `undefined` を返します。`createLiveKitWorker()` は `greeting` 設定で内部的に使用します。
+
+```typescript
+import { speakGreeting } from '@mastra/livekit/worker'
+
+await speakGreeting(session, {
+  text: "You've reached support. You're speaking with an AI assistant.",
+  allowInterruptions: false,
+  awaitPlayout: true,
+})
+```
+
+### パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'session',
+    type: 'voice.AgentSession',
+    description: '発話するセッション。',
+  },
+  {
+    name: 'greeting',
+    type: '{ text?: string; allowInterruptions?: boolean; awaitPlayout?: boolean }',
+    description:
+      '挨拶テキストと再生オプション。awaitPlayout が true の場合、返された Promise は挨拶の再生完了後（または中断後）に解決します。',
+  },
+]}
+/>
+
+## `waitForAgentDoneSpeaking()`
+
+Agent が応答の生成も再生も行わなくなり、状態が `thinking` と `speaking` から移行すると解決します。Agent がすでにアイドル状態の場合は直ちに解決し、安全上の上限として常に `maxWaitMs`（デフォルト30秒）以内に解決します。終了メッセージが途中で切れずに再生されるよう、セッションを破棄する前に使用します。
+
+```typescript
+import { waitForAgentDoneSpeaking } from '@mastra/livekit/worker'
+
+await waitForAgentDoneSpeaking(session)
+```
+
+## `runEndCall()`
+
+Agent が通話終了を求めた後に通話を終了します。Agent の終了メッセージを待ち、省略可能な最後の `message` を中断なしで発話します。その後 Room を削除し、SIP 発信者を含む通話相手を切断します。Job は登録済みコールバックとともにシャットダウンします。
+
+[`MastraLLM`](#mastrallm) の `onToolCall` およびサーバー側 Agent の[通話終了 Tool](#createendcalltool)と組み合わせ、所有するセッションで Agent 主導の通話終了を再構築します。
+
+```typescript title="src/mastra/voice-worker-plugin.ts"
+import { MastraLLM } from '@mastra/livekit/plugin'
+import { DEFAULT_END_CALL_TOOL, runEndCall } from '@mastra/livekit/worker'
+
+let ending = false
+
+const llm = new MastraLLM({
+  remote: { baseUrl: process.env.MASTRA_URL!, agentId: 'support' },
+  onToolCall: ({ toolName }) => {
+    if (toolName !== DEFAULT_END_CALL_TOOL || ending) return
+    ending = true
+    void runEndCall(session, ctx, {}, console)
+  },
+})
+```
+
+エクスポートされる定数 `DEFAULT_END_CALL_TOOL`（`'endCall'`）、`DEFAULT_END_CALL_REASON`、`DEFAULT_END_CALL_MAX_WAIT_MS`（30000）にはデフォルト値が格納されています。
+
+### パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'session',
+    type: 'voice.AgentSession',
+    description: 'Agent が終了メッセージを終えようとしているセッション。',
+  },
+  {
+    name: 'ctx',
+    type: 'JobContext',
+    description: 'Room の削除とシャットダウンに使用する LiveKit Job コンテキスト。',
+  },
+  {
+    name: 'config',
+    type: '{ message?: string; reason?: string; maxWaitMs?: number; drainMs?: number }',
+    description:
+      '通話終了前に発話する省略可能な最後のメッセージ、記録するシャットダウン理由、終了メッセージの待機時間の安全上限、Room 削除前に通話相手側でバッファリングされた音声の再生を完了させる再生後のドレイン（デフォルト800 ms）。LiveKit の再生時間計測は Worker ローカルであるため、完了直後に通話を終了すると挨拶が途切れます。',
+  },
+  {
+    name: 'logger',
+    type: '{ warn: (message: string, ...args: unknown[]) => void }',
+    description: '破棄 Step が失敗した場合に警告を受け取ります。Logger または console を渡します。',
+  },
+]}
+/>
+
+## `createEndCallTool()`
+
+Agent が通話を終了するときに呼び出す Mastra Tool を構築します。Tool は意図を通知し、省略可能な記録処理を実行できます。実際の通話終了は Worker が行います。Tool はサーバーセーフなルートエントリーに存在します。サーバーコードで定義された Agent に追加してください。
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createEndCallTool } from '@mastra/livekit'
+
+const supportAgent = new Agent({
+  id: 'support',
+  name: 'Support',
+  instructions:
+    'Help the caller. When everything is wrapped up, say goodbye and call endCall as your final action.',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  tools: { endCall: createEndCallTool() },
+})
+```
+
+`createLiveKitWorker()` では `configuration: { endCall: {} }` を設定すると、Worker が Tool を監視して通話を終了します。所有するセッションでは、[`runEndCall()`](#runendcall) を使用して通話終了を再構築します。
+
+### オプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description:
+      'Agent が通話終了時に呼び出す Tool ID。Worker が監視する名前（Worker の configuration.endCall.tool、または独自の onToolCall チェック）と一致する必要があります。',
+    isOptional: true,
+    defaultValue: "'endCall'",
+  },
+  {
+    name: 'description',
+    type: 'string',
+    description: 'Tool の呼び出しを決定するときにモデルが参照する説明を上書きします。',
+    isOptional: true,
+  },
+  {
+    name: 'onEndCall',
+    type: '(request: { reason?: string; resourceId?: string; threadId?: string }) => void | Promise<void>',
+    description:
+      'Agent が Tool を呼び出したときに実行される記録用 Hook。理由を記録するか、通話を解決済みとしてマークします。ターン内で実行されるため、短時間で完了させてください。この Hook 自体は通話を終了しません。',
+    isOptional: true,
+  },
+]}
+/>
+
+## `liveKitConnectionRoute()`
+
+Voice Agent を Room に Dispatch した LiveKit アクセストークンを発行する [API Route](/docs/server/custom-api-routes) を返します。フロントエンドがセッションへの参加時に呼び出します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { liveKitConnectionRoute } from '@mastra/livekit'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [liveKitConnectionRoute({ agentName: 'mastra-voice' })],
+  },
+})
+```
+
+Route は省略可能な `agentId`、`threadId`、`resourceId` フィールドを含む JSON 本文を受け取り、`{ serverUrl, roomName, participantName, participantToken }` で応答します。`threadId` のデフォルトは生成された Room 名です。
+
+### オプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'path',
+    type: 'string',
+    description: 'Route のパス。',
+    isOptional: true,
+    defaultValue: "'/voice/livekit/connection-details'",
+  },
+  {
+    name: 'serverUrl',
+    type: 'string',
+    description: 'LiveKit サーバー URL。',
+    isOptional: true,
+    defaultValue: 'process.env.LIVEKIT_URL',
+  },
+  {
+    name: 'apiKey',
+    type: 'string',
+    description: 'LiveKit API キー。',
+    isOptional: true,
+    defaultValue: 'process.env.LIVEKIT_API_KEY',
+  },
+  {
+    name: 'apiSecret',
+    type: 'string',
+    description: 'LiveKit API シークレット。',
+    isOptional: true,
+    defaultValue: 'process.env.LIVEKIT_API_SECRET',
+  },
+  {
+    name: 'agentName',
+    type: 'string',
+    description: '明示的な Dispatch に使用する LiveKit Agent 名。Worker の agentName と一致する必要があります。',
+    isOptional: true,
+    defaultValue: "'mastra-voice'",
+  },
+  {
+    name: 'ttl',
+    type: 'string | number',
+    description: 'トークンの有効期間。',
+    isOptional: true,
+    defaultValue: "'15m'",
+  },
+  {
+    name: 'requiresAuth',
+    type: 'boolean',
+    description: 'Route で認証が必要かどうか。',
+    isOptional: true,
+    defaultValue: 'true',
+  },
+  {
+    name: 'roomName',
+    type: 'string | (args) => string',
+    description: 'Room 名、またはリクエストから Room 名を取得する関数。',
+    isOptional: true,
+  },
+  {
+    name: 'participantIdentity',
+    type: 'string | (args) => string',
+    description: '参加者 ID、またはリクエストから参加者 ID を取得する関数。',
+    isOptional: true,
+  },
+  {
+    name: 'metadata',
+    type: '(args) => LiveKitSessionMetadata | Promise<LiveKitSessionMetadata>',
+    description:
+      'Worker に配信するセッションメタデータを構築します。デフォルトではリクエスト本文の agentId、threadId、resourceId をそのまま渡します。',
+    isOptional: true,
+  },
+]}
+/>
+
+## `dispatchVoiceSession()`
+
+Mastra Voice Agent をプログラムで LiveKit Room に Dispatch します。発信通話など、サーバーが開始するセッションに使用します。
+
+```typescript
+import { dispatchVoiceSession } from '@mastra/livekit'
+
+await dispatchVoiceSession({
+  roomName: 'support-call-42',
+  agentName: 'mastra-voice',
+  metadata: { agentId: 'support', threadId: 'thread-42' },
+})
+```
+
+### オプション
+
+<PropertiesTable
+  content={[
+  {
+    name: 'roomName',
+    type: 'string',
+    description: 'Agent を Dispatch する Room。必要に応じて作成されます。',
+  },
+  {
+    name: 'agentName',
+    type: 'string',
+    description: 'Worker の agentName と一致する必要があります。',
+    isOptional: true,
+    defaultValue: "'mastra-voice'",
+  },
+  {
+    name: 'metadata',
+    type: 'LiveKitSessionMetadata',
+    description: 'セッションメタデータ：agentId、threadId、resourceId、requestContext。',
+    isOptional: true,
+  },
+  {
+    name: 'serverUrl',
+    type: 'string',
+    description: 'LiveKit サーバー URL。',
+    isOptional: true,
+    defaultValue: 'process.env.LIVEKIT_URL',
+  },
+  {
+    name: 'apiKey',
+    type: 'string',
+    description: 'LiveKit API キー。',
+    isOptional: true,
+    defaultValue: 'process.env.LIVEKIT_API_KEY',
+  },
+  {
+    name: 'apiSecret',
+    type: 'string',
+    description: 'LiveKit API シークレット。',
+    isOptional: true,
+    defaultValue: 'process.env.LIVEKIT_API_SECRET',
+  },
+]}
+/>
+
+## `LiveKitSessionMetadata`
+
+LiveKit Job Dispatch を通じて Mastra サーバーから Worker に渡されるメタデータです。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agentId',
+    type: 'string',
+    description: '実行する Mastra Agent。登録済みのキーまたは Agent ID で指定します。',
+    isOptional: true,
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    description: 'Memory Thread ID。デフォルトは LiveKit Room 名です。',
+    isOptional: true,
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    description: 'Memory Resource ID。通常はエンドユーザー ID です。',
+    isOptional: true,
+  },
+  {
+    name: 'requestContext',
+    type: 'Record<string, unknown>',
+    description: 'Agent の実行時に RequestContext へ復元されるプレーンオブジェクトの項目。',
+    isOptional: true,
+  },
+]}
+/>
+
+メタデータは JSON 文字列として転送されます。`liveKitConnectionRoute()` と `dispatchVoiceSession()` がシリアライズします。独自コードから Dispatch する場合は `serializeSessionMetadata(metadata)` を使用するか、SIP Dispatch ルールなどの LiveKit 側設定に JSON を直接記述します。`requestContext` の項目は、通話の各ターンで Agent の実行時定義の指示、Tool、Input Processor に届きます。
+
+## 関連項目
+
+- [リアルタイム Voice](/guides/voice/realtime-voice)
+- [LiveKit Agents ドキュメント](https://docs.livekit.io/agents/)

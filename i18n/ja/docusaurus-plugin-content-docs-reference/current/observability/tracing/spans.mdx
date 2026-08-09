@@ -1,0 +1,392 @@
+---
+title: "リファレンス：Spans | Observability"
+description: Span のインターフェース、メソッド、ライフサイクルイベント
+packages:
+  - "@mastra/core"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Spans
+
+## `BaseSpan`
+
+すべての span 型の基底インターフェースです。
+
+```typescript
+interface BaseSpan<TType extends SpanType> {
+  /** Unique span identifier */
+  id: string
+
+  /** OpenTelemetry-compatible trace ID (32 hex chars) */
+  traceId: string
+
+  /** Name of the span */
+  name: string
+
+  /** Type of the span */
+  type: TType
+
+  /** When span started */
+  startTime: Date
+
+  /** When span ended */
+  endTime?: Date
+
+  /** Type-specific attributes */
+  attributes?: SpanTypeMap[TType]
+
+  /** User-defined metadata */
+  metadata?: Record<string, any>
+
+  /** Input passed at the start of the span */
+  input?: any
+
+  /** Output generated at the end of the span */
+  output?: any
+
+  /** Error information if span failed */
+  errorInfo?: {
+    message: string
+    id?: string
+    domain?: string
+    category?: string
+    details?: Record<string, any>
+  }
+
+  /** Snapshot of the RequestContext */
+  requestContext?: Record<string, any>
+  /** Is an event span? (occurs at startTime, has no endTime) */
+  isEvent: boolean
+}
+```
+
+## Span
+
+tracing で内部的に使用される Span インターフェースです。BaseSpan をライフサイクルメソッドとプロパティで拡張します。
+
+```typescript
+interface Span<TType extends SpanType> extends BaseSpan<TType> {
+  /** Is an internal span? (spans internal to the operation of mastra) */
+  isInternal: boolean
+
+  /** Parent span reference (undefined for root spans) */
+  parent?: AnySpan
+
+  /** Pointer to the ObservabilityInstance instance */
+  observabilityInstance: ObservabilityInstance
+}
+```
+
+### プロパティ
+
+```typescript prettier:false
+/** Returns TRUE if the span is the root span of a trace */
+get isRootSpan(): boolean
+
+/** Returns TRUE if the span is a valid span (not a NO-OP Span) */
+get isValid(): boolean
+
+/** Get the closest parent spanId that isn't an internal span */
+getParentSpanId(includeInternalSpans?: boolean): string | undefined
+
+/** Returns a lightweight span ready for export */
+exportSpan(includeInternalSpans?: boolean): ExportedSpan<TType> | undefined
+```
+
+### メソッド
+
+#### end
+
+```typescript prettier:false
+end(options?: EndSpanOptions<TType>): void
+```
+
+span を終了し、設定済みの exporter への export を開始します。`endTime` を設定し、必要に応じて `output`、`metadata`、`attributes` を更新します。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'output',
+    type: 'any',
+    description: '操作による最終出力データ',
+    required: false,
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, any>',
+    description: 'マージする追加メタデータ',
+    required: false,
+  },
+  {
+    name: 'attributes',
+    type: 'Partial<SpanTypeMap[TType]>',
+    description: '更新する型固有の属性',
+    required: false,
+  },
+]}
+/>
+
+#### error
+
+```typescript prettier:false
+error(options: ErrorSpanOptions<TType>): void
+```
+
+span にエラーを記録します。`errorInfo` フィールドを設定し、必要に応じて span を終了できます。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'error',
+    type: 'Error',
+    description: '発生したエラー',
+    required: true,
+  },
+  {
+    name: 'endSpan',
+    type: 'boolean',
+    description: 'エラーの記録後に span を終了するかどうか',
+    required: false,
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, any>',
+    description: '追加のエラーコンテキストメタデータ',
+    required: false,
+  },
+  {
+    name: 'attributes',
+    type: 'Partial<SpanTypeMap[TType]>',
+    description: '更新する型固有の属性',
+    required: false,
+  },
+]}
+/>
+
+#### update
+
+```typescript prettier:false
+update(options: UpdateSpanOptions<TType>): void
+```
+
+span がアクティブな間にデータを更新します。`input`、`output`、`metadata`、`attributes` を変更できます。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'input',
+    type: 'any',
+    description: '入力データを更新または設定',
+    required: false,
+  },
+  {
+    name: 'output',
+    type: 'any',
+    description: '出力データを更新または設定',
+    required: false,
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, any>',
+    description: '既存データとマージするメタデータ',
+    required: false,
+  },
+  {
+    name: 'attributes',
+    type: 'Partial<SpanTypeMap[TType]>',
+    description: '更新する型固有の属性',
+    required: false,
+  },
+]}
+/>
+
+#### `createChildSpan`
+
+```typescript prettier:false
+createChildSpan<TChildType extends SpanType>(
+  options: ChildSpanOptions<TChildType>
+): Span<TChildType>
+```
+
+この span の下に子 span を作成します。子 span はサブ操作を追跡し、Trace コンテキストを継承します。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'type',
+    type: 'TChildType',
+    description: '子 span の型',
+    required: true,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: '子 span の名前',
+    required: true,
+  },
+  {
+    name: 'attributes',
+    type: 'SpanTypeMap[TChildType]',
+    description: '型固有の属性',
+    required: false,
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, any>',
+    description: '初期メタデータ',
+    required: false,
+  },
+  {
+    name: 'input',
+    type: 'any',
+    description: '初期入力データ',
+    required: false,
+  },
+]}
+/>
+
+#### `createEventSpan`
+
+```typescript prettier:false
+createEventSpan<TChildType extends SpanType>(
+  options: ChildEventOptions<TChildType>
+): Span<TChildType>
+```
+
+この span の下にイベント span を作成します。イベント span は、継続時間のない特定時点の事象を表します。
+
+<PropertiesTable
+  props={[
+  {
+    name: 'type',
+    type: 'TChildType',
+    description: 'イベント span の型',
+    required: true,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: 'イベント名',
+    required: true,
+  },
+  {
+    name: 'attributes',
+    type: 'SpanTypeMap[TChildType]',
+    description: '型固有の属性',
+    required: false,
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, any>',
+    description: 'イベントのメタデータ',
+    required: false,
+  },
+  {
+    name: 'input',
+    type: 'any',
+    description: 'イベントの入力データ',
+    required: false,
+  },
+  {
+    name: 'output',
+    type: 'any',
+    description: 'イベントの出力データ',
+    required: false,
+  },
+]}
+/>
+
+## `ExportedSpan`
+
+tracing exporter で使用される、export 済み Span のインターフェースです。メソッドや循環参照を持たない軽量版の Span です。
+
+```typescript
+interface ExportedSpan<TType extends SpanType> extends BaseSpan<TType> {
+  /** Parent span id reference (undefined for root spans) */
+  parentSpanId?: string
+
+  /** TRUE if the span is the root span of a trace */
+  isRootSpan: boolean
+}
+```
+
+## Span のライフサイクルイベント
+
+span のライフサイクル中に発行されるイベントです。
+
+### `TracingEventType`
+
+```typescript
+enum TracingEventType {
+  /** Emitted when a span is created and started */
+  SPAN_STARTED = 'span_started',
+
+  /** Emitted when a span is updated via update() */
+  SPAN_UPDATED = 'span_updated',
+
+  /** Emitted when a span is ended via end() or error() */
+  SPAN_ENDED = 'span_ended',
+}
+```
+
+### `TracingEvent`
+
+```typescript
+type TracingEvent =
+  | { type: 'span_started'; exportedSpan: AnyExportedSpan }
+  | { type: 'span_updated'; exportedSpan: AnyExportedSpan }
+  | { type: 'span_ended'; exportedSpan: AnyExportedSpan }
+```
+
+exporter はこれらのイベントを受け取り、Trace データを処理して observability プラットフォームへ送信します。
+
+## Union 型
+
+### `AnySpan`
+
+```typescript
+type AnySpan = Span<keyof SpanTypeMap>
+```
+
+任意の span 型を処理する必要がある場合の Union 型です。
+
+### `AnyExportedSpan`
+
+```typescript
+type AnyExportedSpan = ExportedSpan<keyof SpanTypeMap>
+```
+
+任意の export 済み span 型を処理する必要がある場合の Union 型です。
+
+## NO-OP span
+
+tracing が無効な場合（sampling が false を返す場合）、NO-OP span が返されます。
+
+### `NoOpSpan`
+
+```typescript prettier:false
+class NoOpSpan<TType extends SpanType> extends BaseSpan<TType>
+```
+
+何の処理も行わない span です。すべてのメソッドが no-op です。
+
+- `id` は `'no-op'` を返します
+- `traceId` は `'no-op-trace'` を返します
+- `isValid` は `false` を返します
+- `end()`、`error()`、`update()` は何も行いません
+- `createChildSpan()` は別の NO-OP span を返します
+
+## 関連項目
+
+### ドキュメント
+
+- [Tracing の概要](/docs/observability/tracing/overview)：概念と使用方法
+- [子 span の作成](/docs/observability/tracing/overview#creating-child-spans)：実践的な例
+- [Trace ID の取得](/docs/observability/tracing/overview#retrieving-trace-ids)：Trace ID の使用方法
+
+### リファレンス
+
+- [Tracing クラス](/reference/observability/tracing/instances)：tracing の主要クラス
+- [インターフェース](/reference/observability/tracing/interfaces)：完全な型リファレンス
+- [設定](/reference/observability/tracing/configuration)：設定オプション

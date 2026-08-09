@@ -1,0 +1,166 @@
+---
+title: "部署 Mastra 伺服器 | 部署"
+description: "瞭解如何建置及部署 Mastra 伺服器。"
+packages:
+  - "@mastra/deployer"
+---
+
+# 部署 Mastra 伺服器
+
+Mastra 會將應用程式編譯成獨立的 Node.js 伺服器，可在任何支援 Node.js、Bun 或 Deno 的平台上執行。
+
+:::tip
+
+本指南說明如何部署 `mastra build` 產生的獨立伺服器。若要將 Mastra 整合至現有的 Express 或 Hono 應用程式，請改為參閱[伺服器 Adapter](/docs/server/server-adapters)。
+
+:::
+
+## 建置應用程式
+
+從專案根目錄執行建置指令：
+
+```bash
+mastra build
+```
+
+這會建立包含可供正式環境使用之伺服器的 `.mastra` 目錄。所有可用旗標請參閱 [`mastra build`](/reference/cli/mastra#mastra-build) 參考。
+
+## 建置輸出
+
+建置後，Mastra 會建立以下結構：
+
+```
+.mastra/
+├── .build/                # Intermediate build artifacts (module maps, analysis)
+└── output/
+    ├── index.mjs          # Server entry point
+    ├── mastra.mjs         # Your bundled Mastra configuration
+    ├── tools.mjs          # Aggregated tool exports
+    ├── tools/             # Individual tool bundles
+    ├── package.json       # Production dependencies
+    ├── node_modules/      # Installed dependencies
+    ├── .npmrc             # Copied from your project (if present)
+    ├── public/            # Static assets (if src/mastra/public exists)
+    └── playground/        # Studio UI (if --studio flag used)
+```
+
+`output` 目錄可獨立使用。你可以將它複製至任何伺服器並直接執行。
+
+## 執行伺服器
+
+使用 Mastra CLI 啟動伺服器：
+
+```bash
+mastra start
+```
+
+或直接使用 Node.js 執行：
+
+```bash
+node .mastra/output/index.mjs
+```
+
+`mastra start` 指令提供額外功能：
+
+- 從 `.env.production` 與 `.env` 載入環境變數
+- 缺少模組時提供實用的錯誤訊息
+- 處理程序訊號，以正常關閉伺服器
+
+所有可用旗標請參閱 [`mastra start`](/reference/cli/mastra#mastra-start) 參考。
+
+## 建置設定
+
+### 建置階段設定
+
+Mastra 建置應用程式時會讀取 `bundler`、`deployer` 與 `server` 選項。請將這些選項保留為傳入 `new Mastra()` 之物件的直接屬性，讓建置程序能擷取它們。
+
+以下進入檔案形式可正常運作：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+
+export const mastra = new Mastra({
+  bundler: {
+    externals: ['sharp'],
+  },
+  server: {
+    port: 4111,
+  },
+})
+```
+
+各選項的值可以來自變數、匯入或函式呼叫，但選項本身必須是直接屬性。請勿將建置階段選項藏在 factory 呼叫或物件展開後：
+
+```typescript title="src/mastra/index.ts"
+const options = {
+  bundler: {
+    externals: ['sharp'],
+  },
+}
+
+// These patterns prevent Mastra from extracting `bundler` during the build.
+export const mastra = new Mastra(createMastraOptions())
+export const otherMastra = new Mastra({ ...options })
+```
+
+Mastra 無法擷取選項時，會對該選項採用預設建置行為。可用的 `bundler`、`deployer` 與 `server` 設定請參閱[設定參考](/reference/configuration)。
+
+### Public 資料夾
+
+若 Mastra 目錄中有 `public` 資料夾（`src/mastra/public`），建置時會將其內容複製至輸出目錄。伺服器會將這些檔案作為靜態資產提供。
+
+### Mastra 設定
+
+建置程序會遵循 Mastra 執行個體中的設定。CORS、逾時及 middleware 等伺服器行為請參閱[伺服器概覽](/docs/server/mastra-server)。所有可用選項請參閱[設定參考](/reference/configuration)。
+
+## 建置程序
+
+建置會依序執行下列步驟：
+
+1. **尋找進入檔案**：在 Mastra 目錄中尋找 `index.ts` 或 `index.js`。
+1. **探索 Tool**：掃描符合 `{mastraDir}/tools/**/*.{js,ts}` 的 Tool 檔案，排除測試檔案。
+1. **分析相依性**：判斷哪些套件要打包、哪些要在外部安裝。
+1. **打包程式碼**：使用 Rollup，包含 tree-shaking 與選用的 source map。
+1. **產生伺服器**：建立以 Hono 為基礎的 HTTP 伺服器 `index.mjs`。
+1. **安裝相依性**：在輸出目錄執行 `npm install`。
+1. **複製資產**：複製 `public` 資料夾及 `.npmrc`（若存在）。
+
+## 環境變數
+
+| 變數 | 說明 |
+| - | - |
+| `PORT` | 伺服器連接埠（預設：`4111`） |
+| `MASTRA_STUDIO_PATH` | Studio 建置目錄的路徑（預設：`./playground`） |
+| `MASTRA_SKIP_DOTENV` | 設定時略過載入 `.env` 檔案 |
+| `NODE_OPTIONS` | Node.js 選項（例如建置記憶體問題可使用 `--max-old-space-size=4096`） |
+
+## 伺服器端點
+
+建置後的伺服器會公開健康狀態檢查、Agent、Workflow 等端點：
+
+| 端點 | 說明 |
+| - | - |
+| `GET /health` | 健康狀態檢查端點，傳回 `200 OK` |
+| `GET /api/openapi.json` | OpenAPI 規格（若啟用 `server.build.openAPIDocs`）。 |
+| `GET /swagger-ui` | 互動式 API 文件（若啟用 `server.build.swaggerUI`） |
+
+此清單並未列出全部端點。若要檢視所有端點，請執行 `mastra dev` 並前往 `http://localhost:4111/swagger-ui`。
+
+若要新增自己的端點，請參閱[自訂 API 路由](/docs/server/custom-api-routes)。
+
+## 疑難排解
+
+### 建置時發生記憶體錯誤
+
+若遇到 `JavaScript heap out of memory` 錯誤：
+
+```bash
+NODE_OPTIONS="--max-old-space-size=4096" mastra build
+```
+
+## 相關資源
+
+- [伺服器概覽](/docs/server/mastra-server)：設定伺服器行為、middleware 與驗證
+- [伺服器 Adapter](/docs/server/server-adapters)：使用 Express 或 Hono 取代 `mastra build`
+- [自訂 API 路由](/docs/server/custom-api-routes)：新增自訂 HTTP 端點
+- [設定參考](/reference/configuration)：完整設定選項

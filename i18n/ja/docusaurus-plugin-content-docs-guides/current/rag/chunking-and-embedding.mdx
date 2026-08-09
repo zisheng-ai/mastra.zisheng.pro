@@ -1,0 +1,198 @@
+---
+title: ドキュメントのチャンク分割と埋め込み | RAG
+description: 効率的な処理と取得のために、Mastra でドキュメントをチャンク分割して埋め込む方法を説明します。
+packages:
+  - "@mastra/core"
+  - "@mastra/rag"
+---
+
+# ドキュメントのチャンク分割と埋め込み
+
+処理を始める前に、コンテンツから MDocument インスタンスを作成します。さまざまな形式から初期化できます。
+
+```ts
+const docFromText = MDocument.fromText('Your plain text content...')
+const docFromHTML = MDocument.fromHTML('<html>Your HTML content...</html>')
+const docFromMarkdown = MDocument.fromMarkdown('# Your Markdown content...')
+const docFromJSON = MDocument.fromJSON(`{ "key": "value" }`)
+```
+
+## ドキュメントの処理
+
+`chunk` を使って、ドキュメントを扱いやすい単位に分割します。Mastra は、ドキュメントの種類ごとに最適化された複数のチャンク分割戦略をサポートしています。
+
+- `recursive`: コンテンツ構造に基づくスマートな分割
+- `character`: 文字単位のシンプルな分割
+- `token`: トークンを考慮した分割
+- `markdown`: Markdown を考慮した分割
+- `semantic-markdown`: 関連する見出し階層に基づく Markdown の分割
+- `html`: HTML 構造を考慮した分割
+- `json`: JSON 構造を考慮した分割
+- `latex`: LaTeX 構造を考慮した分割
+- `sentence`: 文を考慮した分割
+
+:::note
+各戦略では、それぞれの分割方法に最適化された異なるパラメーターを指定できます。
+:::
+
+`recursive` 戦略の使用例を次に示します。
+
+```ts
+const chunks = await doc.chunk({
+  strategy: 'recursive',
+  maxSize: 512,
+  overlap: 50,
+  separators: ['\n'],
+  extract: {
+    metadata: true, // Optionally extract metadata
+  },
+})
+```
+
+文の構造を保つことが重要なテキストでは、`sentence` 戦略を次のように使用します。
+
+```ts
+const chunks = await doc.chunk({
+  strategy: 'sentence',
+  maxSize: 450,
+  minSize: 50,
+  overlap: 0,
+  sentenceEnders: ['.'],
+})
+```
+
+セクション間の意味的な関係を保つことが重要な Markdown ドキュメントでは、`semantic-markdown` 戦略を次のように使用します。
+
+```ts
+const chunks = await doc.chunk({
+  strategy: 'semantic-markdown',
+  joinThreshold: 500,
+  modelName: 'gpt-3.5-turbo',
+})
+```
+
+:::note
+メタデータの抽出では LLM 呼び出しを使用する場合があるため、API キーが設定されていることを確認してください。
+:::
+
+チャンク分割戦略の詳細については、[`chunk()` のリファレンスドキュメント](/reference/rag/chunk)を参照してください。
+
+## 埋め込みの生成
+
+任意の Provider を使ってチャンクを埋め込みに変換します。Mastra は Model Router を通じて埋め込みモデルをサポートします。
+
+### Model Router を使用する
+
+最も簡単な方法は、`provider/model` 形式の文字列で Mastra の Model Router を使用することです。
+
+```ts
+import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
+import { embedMany } from 'ai'
+
+const { embeddings } = await embedMany({
+  model: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+  values: chunks.map(chunk => chunk.text),
+})
+```
+
+Mastra は OpenAI と Google の埋め込みモデルをサポートしています。サポート対象モデルの一覧については、[埋め込みリファレンス](/reference/rag/embeddings)を参照してください。
+
+Model Router は、環境変数から API キーを自動的に検出します。
+
+埋め込み関数は、テキストの意味を表す数値配列であるベクトルを返します。このベクトルは、ベクトルデータベースでの類似性検索にそのまま使用できます。
+
+### 埋め込みの次元数を設定する
+
+埋め込みモデルは通常、固定次元数のベクトルを出力します（例: OpenAI の `text-embedding-3-small` は 1536 次元）。
+一部のモデルでは次元数を減らすことができ、次の効果があります。
+
+- ベクトルデータベースのストレージ要件を削減
+- 類似性検索の計算コストを削減
+
+対応モデルの例を次に示します。
+
+OpenAI（text-embedding-3 モデル）:
+
+```ts
+import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
+
+const { embeddings } = await embedMany({
+  model: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+  options: {
+    dimensions: 256, // Only supported in text-embedding-3 and later
+  },
+  values: chunks.map(chunk => chunk.text),
+})
+```
+
+Google（text-embedding-001）:
+
+```ts
+const { embeddings } = await embedMany({
+  model: google('gemini-embedding-001', {
+    outputDimensionality: 256, // Truncates excessive values from the end
+  }),
+  values: chunks.map(chunk => chunk.text),
+})
+```
+
+:::important[ベクトルデータベースとの互換性]
+埋め込みを保存する際は、ベクトルデータベースのインデックスを埋め込みモデルの出力サイズに合わせて設定する必要があります。次元数が一致しないと、エラーやデータ破損が発生する可能性があります。
+:::
+
+## 例: 完全なパイプライン
+
+両方の Provider を使ったドキュメント処理と埋め込み生成の例を次に示します。
+
+```ts
+import { embedMany } from 'ai'
+
+import { MDocument } from '@mastra/rag'
+
+// Initialize document
+const doc = MDocument.fromText(`
+  Climate change poses significant challenges to global agriculture.
+  Rising temperatures and changing precipitation patterns affect crop yields.
+`)
+
+// Create chunks
+const chunks = await doc.chunk({
+  strategy: 'recursive',
+  maxSize: 256,
+  overlap: 50,
+})
+
+// Generate embeddings with OpenAI
+import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
+
+const { embeddings } = await embedMany({
+  model: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+  values: chunks.map(chunk => chunk.text),
+})
+
+// OR
+
+// Generate embeddings with Cohere
+const { embeddings } = await embedMany({
+  model: 'cohere/embed-english-v3.0',
+  values: chunks.map(chunk => chunk.text),
+})
+
+// Store embeddings in your vector database
+await vectorStore.upsert({
+  indexName: 'embeddings',
+  vectors: embeddings,
+})
+```
+
+##
+
+チャンク分割戦略と埋め込み設定の例については、次を参照してください。
+
+- [チャンクのリファレンス](/reference/rag/chunk)
+- [埋め込みのリファレンス](/reference/rag/embeddings)
+
+ベクトルデータベースと埋め込みの詳細については、次を参照してください。
+
+- [ベクトルデータベース](./vector-databases)
+- [埋め込み API リファレンス](/reference/rag/embeddings)

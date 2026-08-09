@@ -1,0 +1,825 @@
+---
+title: "リファレンス: Trajectory 精度スコアラー | Evals"
+description: Agent または Workflow が期待されるアクションの順序に従っているかを評価する、Mastra の Trajectory 精度スコアラーのドキュメントです。
+packages:
+  - "@mastra/evals"
+  - "@mastra/core"
+---
+
+# Trajectory 精度スコアラー
+
+Mastra は、Agent または Workflow が期待されるアクションの順序に従っているかを評価する 2 種類の Trajectory 精度スコアラーを提供します。
+
+1. **コードベースのスコアラー** - ステップの厳密な照合と順序による決定論的評価
+1. **LLM ベースのスコアラー** - AI で Trajectory の品質と妥当性を判定する意味的評価
+
+どちらのスコアラーも Agent と Workflow に対応します。`runEvals` パイプラインが Trajectory を自動的に抽出するため、スコアラーは `Trajectory` オブジェクトを直接受け取ります。
+
+## Trajectory の抽出
+
+`runEvals` パイプラインは、observability ストレージが設定されているかどうかに応じて 2 つの抽出方法を使用します。
+
+### Trace ベースの抽出（推奨）
+
+対象の `Mastra` インスタンスにストレージが設定されている場合、パイプラインは observability ストアから完全な実行 Trace を取得し、`extractTrajectoryFromTrace()` を呼び出します。これにより、完全な実行ツリーを捉えた、`children` がネストされた階層型 Trajectory が生成されます。このツリーには、Workflow ステップ内でネストされた Agent の実行と Tool 呼び出しに加え、モデル生成も含まれます。
+
+たとえば、Agent を呼び出し、その Agent が Tool を呼び出す Workflow では、次のようになります。
+
+```
+workflow_run
+  └─ workflow_step (validate-input)
+  └─ workflow_step (process-data)
+       └─ agent_run (my-agent)
+            └─ model_generation
+            └─ tool_call (search)
+            └─ model_generation
+            └─ tool_call (summarize)
+  └─ workflow_step (save-result)
+```
+
+### フォールバック抽出
+
+ストレージを利用できない場合、パイプラインは次の方法にフォールバックします。
+
+- **Agent:** `extractTrajectory()` は、Agent のメッセージ出力にある `toolInvocations` から `ToolCallStep` エントリを抽出します。Tool 呼び出しのフラットなリストを生成します。
+- **Workflow:** `extractWorkflowTrajectory()` は、`stepResults` から `WorkflowStepStep` エントリを抽出します。Workflow ステップのフラットなリストを生成します。
+
+これらのフォールバックでは、ネストされた実行や Tool 呼び出し以外の Span は取得されません。
+
+## Trajectory の型
+
+Trajectory ステップは `stepType` を判別プロパティとする判別共用体を使用します。各ステップ型には固有のプロパティがあります。
+
+### `ToolCallStep`
+
+Agent の Tool 呼び出しを表します。
+
+<PropertiesTable
+  content={[
+  { name: 'stepType', type: "'tool_call'", description: '判別子。', required: true },
+  { name: 'name', type: 'string', description: 'Tool 名。', required: true },
+  { name: 'toolArgs', type: 'Record<string, unknown>', description: 'Tool に渡される引数。', isOptional: true },
+  {
+    name: 'toolResult',
+    type: 'Record<string, unknown>',
+    description: 'Tool が返す結果。',
+    isOptional: true,
+  },
+  { name: 'success', type: 'boolean', description: '呼び出しが成功したかどうか。', isOptional: true },
+  { name: 'durationMs', type: 'number', description: '実行時間（ミリ秒）。', isOptional: true },
+  { name: 'metadata', type: 'Record<string, unknown>', description: '任意のメタデータ。', isOptional: true },
+  { name: 'children', type: 'TrajectoryStep[]', description: 'ネストされたサブステップ。', isOptional: true },
+]}
+/>
+
+### `WorkflowStepStep`
+
+Workflow ステップの実行を表します。
+
+<PropertiesTable
+  content={[
+  { name: 'stepType', type: "'workflow_step'", description: '判別子。', required: true },
+  { name: 'name', type: 'string', description: 'ステップ識別子。', required: true },
+  { name: 'stepId', type: 'string', description: 'Workflow 内のステップ ID。', isOptional: true },
+  {
+    name: 'status',
+    type: 'string',
+    description: 'ステップ結果のステータス（success、failed、suspended など）。',
+    isOptional: true,
+  },
+  { name: 'output', type: 'Record<string, unknown>', description: 'ステップの出力データ。', isOptional: true },
+  { name: 'durationMs', type: 'number', description: '実行時間（ミリ秒）。', isOptional: true },
+  { name: 'metadata', type: 'Record<string, unknown>', description: '任意のメタデータ。', isOptional: true },
+  {
+    name: 'children',
+    type: 'TrajectoryStep[]',
+    description: 'ネストされたサブステップ（ステップ内の Tool 呼び出しなど）。',
+    isOptional: true,
+  },
+]}
+/>
+
+### その他のステップ型
+
+判別共用体には、次のステップ型も含まれます。
+
+| ステップ型 | 主なプロパティ |
+| - | - |
+| `mcp_tool_call` | `toolArgs`, `toolResult`, `mcpServer`, `success` |
+| `model_generation` | `modelId`, `promptTokens`, `completionTokens`, `finishReason` |
+| `agent_run` | `agentId` |
+| `workflow_run` | `workflowId`, `status` |
+| `workflow_conditional` | `conditionCount`, `selectedSteps` |
+| `workflow_parallel` | `branchCount`, `parallelSteps` |
+| `workflow_loop` | `loopType`, `totalIterations` |
+| `workflow_sleep` | `durationMs`, `sleepType` |
+| `workflow_wait_event` | `eventName`, `eventReceived` |
+| `processor_run` | `processorId` |
+
+すべてのステップ型は、基本プロパティ `name`、`durationMs`、`metadata`、`children` を共有します。
+
+## 期待されるステップ
+
+期待される Trajectory を定義する際は、完全な `TrajectoryStep` 判別共用体ではなく `ExpectedStep` を使用します。`ExpectedStep` は `TrajectoryStep` に対応する判別共用体です。`stepType` を指定すると、そのバリアントのフィールド（たとえば `tool_call` の `toolArgs`、`model_generation` の `modelId`）が自動補完されます。バリアント固有のフィールドはすべて任意なので、必要な項目だけを検証できます。
+
+名前だけで任意のステップに一致させるには、`stepType` を完全に省略します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'name',
+    type: 'string',
+    description: '照合するステップ名（Tool 名、Agent ID、Workflow ステップ名など）。',
+    required: true,
+  },
+  {
+    name: 'stepType',
+    type: 'TrajectoryStepType',
+    description:
+      "ステップ型の判別子。設定すると、そのバリアントのフィールドが自動補完されます。省略すると、指定した名前を持つ任意のステップ型に一致します。",
+    isOptional: true,
+  },
+  {
+    name: '(variant fields)',
+    type: 'varies',
+    description:
+      '対応する TrajectoryStep バリアントの型固有フィールド。たとえば、`tool_call` の `toolArgs` と `toolResult`、`model_generation` の `modelId`、`workflow_step` の `output` です。すべて任意で、指定したフィールドだけが比較されます。',
+    isOptional: true,
+  },
+  {
+    name: 'children',
+    type: 'TrajectoryExpectation',
+    description:
+      "このステップの children に対するネストされた期待値設定。このステップの children を評価する際に親の設定を上書きします。",
+    isOptional: true,
+  },
+]}
+/>
+
+### 単純な期待ステップ
+
+```typescript
+const steps: ExpectedStep[] = [
+  // Match by name only (any step type)
+  { name: 'search' },
+
+  // Match by name and step type (autocomplete for tool_call fields)
+  { name: 'search', stepType: 'tool_call' },
+
+  // Match with specific toolArgs (auto-compared when present)
+  { name: 'search', stepType: 'tool_call', toolArgs: { query: 'weather' } },
+
+  // Match a model generation step by model ID
+  { name: 'gpt-4o', stepType: 'model_generation', modelId: 'gpt-4o' },
+]
+```
+
+### ネストされた期待値
+
+期待される各ステップには、独自の評価ルールを持つ `children` 設定を含められます。これにより、階層のレベルごとに異なる順序ルールや比較ルールを設定できます。
+
+```typescript
+const scorer = createTrajectoryScorerCode({
+  defaults: {
+    ordering: 'strict',
+    steps: [
+      { name: 'validate-input', stepType: 'workflow_step' },
+      {
+        name: 'research-agent',
+        stepType: 'agent_run',
+        children: {
+          // Sub-agent can call tools in any order
+          ordering: 'unordered',
+          steps: [
+            { name: 'search', stepType: 'tool_call' },
+            { name: 'summarize', stepType: 'tool_call' },
+          ],
+        },
+      },
+      { name: 'save-result', stepType: 'workflow_step' },
+    ],
+  },
+})
+```
+
+この例では、親 Workflow のステップには厳密な順序が必要ですが、ネストされた `research-agent` の Tool 呼び出しは任意の順序で構いません。
+
+## スコアラーの選択
+
+### コードベースのスコアラーが適している場合
+
+- **決定論的で再現可能な**結果が必要
+- 比較対象となる**既知の期待 Trajectory** がある
+- **厳密なステップ順序**を検証したい
+- 速度とコストを優先する（LLM 呼び出しなし）
+- CI/CD で自動テストを実行している
+
+### LLM ベースのスコアラーが適している場合
+
+- ステップが適切だったかを**意味的に理解**する必要がある
+- 最適な Trajectory が**事前に決まっていない**（タスク要件に基づいて評価する）
+- **不要、冗長、または欠落した**ステップを検出したい
+- スコア判定の**説明**が必要
+- **本番環境の Agent の動作**を評価している
+
+## コードベースの Trajectory 精度スコアラー
+
+`@mastra/evals/scorers/prebuilt` の `createTrajectoryAccuracyScorerCode()` 関数は、期待される Trajectory に対するステップの照合と順序に基づく決定論的スコアリングを提供します。
+
+### パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'expectedTrajectory',
+    type: 'Trajectory | ExpectedStep[]',
+    description:
+      '比較対象となる静的な期待 Trajectory。完全な Trajectory または ExpectedStep マッチャーの配列を受け取ります。省略すると、実行時に各データセット項目から expectedTrajectory を読み取ります。',
+    isOptional: true,
+  },
+  {
+    name: 'comparisonOptions',
+    type: 'TrajectoryComparisonOptions',
+    description: '比較方法を制御します。',
+    isOptional: true,
+    properties: [
+      {
+        name: 'strictOrder',
+        type: 'boolean',
+        description:
+          'Trajectory の厳密な一致（同じステップが同じ順序で並び、余分なステップがないこと）を要求します。false の場合、期待されるステップが順番どおりに現れる限り、追加ステップを許可します。',
+        isOptional: true,
+        defaultValue: 'false',
+      },
+      {
+        name: 'allowRepeatedSteps',
+        type: 'boolean',
+        description: 'Trajectory 内のステップの繰り返しをペナルティなしで許可するかどうか。',
+        isOptional: true,
+        defaultValue: 'true',
+      },
+    ],
+  },
+]}
+/>
+
+この関数は MastraScorer クラスのインスタンスを返します。`.run()` メソッドとその入出力の詳細については、[MastraScorer リファレンス](./mastra-scorer)を参照してください。
+
+### 期待 Trajectory の取得元
+
+コードベースのスコアラーは、優先順位に従って 2 つの取得元から `expectedTrajectory` を解決します。
+
+1. **コンストラクターオプション**: スコアラーの作成時に渡す静的 Trajectory。すべてのデータセット項目に使用されます。
+1. **データセット項目**: `runEvals` パイプラインを通じて渡される、データセット項目の `expectedTrajectory` フィールド。項目ごとに異なる期待 Trajectory を指定できます。
+
+```typescript title="src/static-expected.ts"
+// Static: same expected trajectory for all items
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'search' },
+      { stepType: 'tool_call', name: 'summarize' },
+    ],
+  },
+})
+```
+
+```typescript title="src/per-item-expected.ts"
+// Per-item: each dataset item has its own expectedTrajectory
+const scorer = createTrajectoryAccuracyScorerCode()
+
+await runEvals({
+  target: myAgent,
+  scorers: { trajectory: [scorer] },
+  data: [
+    {
+      input: 'Search and summarize weather',
+      expectedTrajectory: {
+        steps: [
+          { stepType: 'tool_call', name: 'search' },
+          { stepType: 'tool_call', name: 'summarize' },
+        ],
+      },
+    },
+    {
+      input: 'Just search for weather',
+      expectedTrajectory: {
+        steps: [{ stepType: 'tool_call', name: 'search' }],
+      },
+    },
+  ],
+})
+```
+
+### 評価モード
+
+コードベースのスコアラーは、`strictOrder` に応じて 2 つのモードで動作します。
+
+#### 厳密モード（`strictOrder: true`）
+
+厳密な一致が必要です。実際のステップは、余分なステップや欠落したステップがなく、期待されるステップと同じ順序で一致する必要があります。厳密に一致すれば `1.0`、それ以外は `0.0` を返します。
+
+#### 緩和モード（`strictOrder: false`、デフォルト）
+
+余分なステップを許可します。期待されるステップは正しい相対順序で現れる必要があります。スコアは一致した期待ステップの数に基づいて計算され、余分なステップや繰り返されたステップには任意でペナルティが適用されます。
+
+## コードベースのスコアリング詳細
+
+- **連続スコア**: 緩和モードでは 0.0〜1.0、厳密モードでは二値（0 または 1）を返します
+- **決定論的**: 同じ入力からは常に同じ出力が得られます
+- **高速**: 外部 API を呼び出しません
+
+### コードベースのスコアラーの結果
+
+```typescript prettier:false
+{
+  runId: string,
+  preprocessStepResult: {
+    actualTrajectory: Trajectory,
+    expectedTrajectory: Trajectory,
+    comparison: {
+      score: number,
+      matchedSteps: number,
+      totalExpectedSteps: number,
+      totalActualSteps: number,
+      missingSteps: string[],
+      extraSteps: string[],
+      outOfOrderSteps: string[],
+      repeatedSteps: string[]
+    },
+    actualStepNames: string[],
+    expectedStepNames: string[]
+  },
+  score: number
+}
+```
+
+## コードベースのスコアラーの例
+
+### 厳密な順序の Agent Trajectory
+
+Agent が Tool 呼び出しの厳密な順序に従うことを検証します。
+
+```typescript title="src/example-strict-trajectory.ts"
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'auth-tool' },
+      { stepType: 'tool_call', name: 'fetch-tool' },
+    ],
+  },
+  comparisonOptions: { strictOrder: true },
+})
+
+const result = await runEvals({
+  target: myAgent,
+  scorers: { trajectory: [scorer] },
+  data: [{ input: 'Get my data' }],
+})
+
+console.log(result.scores.trajectory['trajectory-accuracy']) // 1.0
+```
+
+### 緩和された順序の Agent Trajectory
+
+期待されるステップが正しい相対順序で現れる限り、余分なステップを許可します。
+
+```typescript title="src/example-relaxed-trajectory.ts"
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'search-tool' },
+      { stepType: 'tool_call', name: 'summarize-tool' },
+    ],
+  },
+  comparisonOptions: { strictOrder: false },
+})
+
+// Agent called search-tool → log-tool → summarize-tool
+// The extra log-tool is allowed in relaxed mode
+// score: 0.75 — all expected steps matched, small penalty for extra step
+```
+
+### Workflow Trajectory
+
+Workflow の実行パスを評価します。
+
+```typescript title="src/example-workflow-trajectory.ts"
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'workflow_step', name: 'validate-input' },
+      { stepType: 'workflow_step', name: 'process-data' },
+      { stepType: 'workflow_step', name: 'save-result' },
+    ],
+  },
+})
+
+const result = await runEvals({
+  target: myWorkflow,
+  scorers: { trajectory: [scorer] },
+  data: [{ input: { data: 'test' } }],
+})
+
+console.log(result.scores.trajectory['trajectory-accuracy'])
+```
+
+### ステップデータの比較
+
+ステップ名とステップ固有のデータを検証します。Tool 呼び出しでは `toolArgs` と `toolResult`、Workflow ステップでは `output` を比較します。
+
+```typescript title="src/example-trajectory-with-data.ts"
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      {
+        stepType: 'tool_call',
+        name: 'search-tool',
+        toolArgs: { query: 'weather in NYC' },
+      },
+    ],
+  },
+})
+// Data fields like toolArgs are auto-compared when present on expected steps
+```
+
+## LLM ベースの Trajectory 精度スコアラー
+
+`@mastra/evals/scorers/prebuilt` の `createTrajectoryAccuracyScorerLLM()` 関数は、LLM を使って Agent または Workflow の Trajectory が適切、効率的、かつ完全だったかを評価します。
+
+### パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description: 'Trajectory の品質評価に使用する LLM モデル。',
+    required: true,
+  },
+  {
+    name: 'expectedTrajectory',
+    type: 'Trajectory | ExpectedStep[]',
+    description:
+      '比較対象となる任意の静的な期待 Trajectory。完全な Trajectory または ExpectedStep マッチャーの配列を受け取ります。省略すると、LLM はタスク要件だけに基づいて Trajectory を評価します。実行時にデータセット項目から取得することもできます。',
+    isOptional: true,
+  },
+]}
+/>
+
+### 機能
+
+LLM ベースのスコアラーは次の機能を提供します。
+
+- **タスクを考慮した評価**: ユーザーのリクエストに対して各ステップが必要だったかを判定します
+- **順序の評価**: ステップが論理的な順序で実行されたかを評価します
+- **欠落ステップの検出**: 実行すべきだったステップを特定します
+- **冗長性の検出**: 不要なステップや繰り返されたステップを指摘します
+- **理由の生成**: スコア判定について人が読める説明を提供します
+
+### 評価プロセス
+
+1. **Trajectory の受け取り**: パイプラインから抽出済みの `Trajectory` オブジェクトを取得します
+1. **ステップの分析**: LLM を使って各ステップの必要性と順序を評価します
+1. **スコアの生成**: 必要性 60%、順序 30% の重みから、欠落ペナルティ 10% を差し引いてスコアを計算します
+1. **理由の生成**: 人が読める説明を提供します
+
+## LLM ベースのスコアリング詳細
+
+- **小数スコア**: 0.0〜1.0 の値を返します
+- **コンテキストを考慮**: ユーザーの意図とタスク要件を考慮します
+- **説明可能**: スコアの理由を提供します
+- **柔軟**: 期待 Trajectory の有無にかかわらず動作します
+
+### LLM ベースのスコアラーのオプション
+
+```typescript
+// Evaluate based on task requirements (no expected trajectory)
+const openScorer = createTrajectoryAccuracyScorerLLM({
+  model: { provider: 'openai', name: 'gpt-5.4' },
+})
+
+// Evaluate against a static expected trajectory
+const guidedScorer = createTrajectoryAccuracyScorerLLM({
+  model: { provider: 'openai', name: 'gpt-5.4' },
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'search-tool' },
+      { stepType: 'tool_call', name: 'summarize-tool' },
+    ],
+  },
+})
+```
+
+### LLM ベースのスコアラーの結果
+
+```typescript prettier:false
+{
+  runId: string,
+  preprocessStepResult: {
+    actualTrajectory: Trajectory,
+    actualTrajectoryFormatted: string,
+    expectedTrajectoryFormatted?: string,
+    hasSteps: boolean
+  },
+  analyzeStepResult: {
+    stepEvaluations: Array<{
+      stepName: string,
+      wasNecessary: boolean,
+      wasInOrder: boolean,
+      reasoning: string
+    }>,
+    missingSteps?: string[],
+    extraSteps?: string[],
+    overallAssessment: string
+  },
+  score: number,
+  reason: string
+}
+```
+
+## 統合 Trajectory スコアラー
+
+`@mastra/evals/scorers/prebuilt` の `createTrajectoryScorerCode()` 関数は、精度、効率、ブラックリスト登録された Tool、Tool の失敗パターンを 1 回で確認する多次元の Trajectory 評価を提供します。
+
+### パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'defaults',
+    type: 'TrajectoryExpectation',
+    description:
+      'すべてのデータセット項目に適用するデフォルトの期待値。項目ごとの expectedTrajectory 値がこのデフォルトを上書きします。',
+    isOptional: true,
+    properties: [
+      {
+        name: 'steps',
+        type: 'ExpectedStep[]',
+        description: '精度スコアリングで期待されるステップ。[期待されるステップ](#expected-steps)を参照してください。',
+        isOptional: true,
+      },
+      {
+        name: 'ordering',
+        type: "'strict' | 'relaxed' | 'unordered'",
+        description:
+          "ステップの順序を評価する方法。'strict' は厳密な一致を要求し、'relaxed'（デフォルト）は余分なステップを許可し、'unordered' は存在だけを確認します。",
+        isOptional: true,
+        defaultValue: "'relaxed'",
+      },
+      {
+        name: 'allowRepeatedSteps',
+        type: 'boolean',
+        description: 'ステップの繰り返しをペナルティなしで許可するかどうか。',
+        isOptional: true,
+        defaultValue: 'true',
+      },
+      {
+        name: 'maxSteps',
+        type: 'number',
+        description: '許可する最大ステップ数。この上限を超えるステップは効率スコアを下げます。',
+        isOptional: true,
+      },
+      {
+        name: 'maxTotalTokens',
+        type: 'number',
+        description: 'model_generation ステップ全体の最大合計トークン数。',
+        isOptional: true,
+      },
+      {
+        name: 'maxTotalDurationMs',
+        type: 'number',
+        description: '全ステップの最大合計所要時間。',
+        isOptional: true,
+      },
+      {
+        name: 'noRedundantCalls',
+        type: 'boolean',
+        description: '冗長な呼び出し（同じ引数を持つ同じ Tool）にペナルティを科すかどうか。',
+        isOptional: true,
+        defaultValue: 'true',
+      },
+      {
+        name: 'blacklistedTools',
+        type: 'string[]',
+        description: '呼び出してはならない Tool。ブラックリスト登録された Tool が 1 つでも存在すると、スコアは 0 になります。',
+        isOptional: true,
+      },
+      {
+        name: 'blacklistedSequences',
+        type: 'string[][]',
+        description:
+          '順番どおりに現れてはならない Tool 名のシーケンス。一致するシーケンスがあると、スコアは 0 になります。',
+        isOptional: true,
+      },
+      {
+        name: 'maxRetriesPerTool',
+        type: 'number',
+        description: '失敗パターンとして報告されるまでに Tool ごとに許可される最大再試行回数。',
+        isOptional: true,
+        defaultValue: '2',
+      },
+    ],
+  },
+  {
+    name: 'weights',
+    type: 'TrajectoryScoreWeights',
+    description: '各次元のスコアを組み合わせるカスタム重み。重みは合計が 1.0 になるよう正規化されます。',
+    isOptional: true,
+    properties: [
+      {
+        name: 'accuracy',
+        type: 'number',
+        description: '精度スコアリングの重み。',
+        isOptional: true,
+        defaultValue: '0.4',
+      },
+      {
+        name: 'efficiency',
+        type: 'number',
+        description: '効率スコアリングの重み。',
+        isOptional: true,
+        defaultValue: '0.3',
+      },
+      {
+        name: 'toolFailures',
+        type: 'number',
+        description: 'Tool 失敗分析の重み。',
+        isOptional: true,
+        defaultValue: '0.2',
+      },
+      {
+        name: 'blacklist',
+        type: 'number',
+        description: 'ブラックリストスコアリングの重み（違反がない場合）。',
+        isOptional: true,
+        defaultValue: '0.1',
+      },
+    ],
+  },
+]}
+/>
+
+### スコアリング動作
+
+統合スコアラーは 4 つの次元を評価します。
+
+1. **精度**: 実際のステップを期待されるステップと照合します（`steps` が設定されている場合）。`ordering` モードを使用します。
+1. **効率**: ステップの上限（`maxSteps`、`maxTotalTokens`、`maxTotalDurationMs`）と冗長な呼び出し（`noRedundantCalls`）を確認します。
+1. **ブラックリスト**: 禁止された Tool またはシーケンスを確認します。違反があると、他の次元にかかわらず即座にスコアが **0.0** になります。
+1. **Tool の失敗**: 再試行とフォールバックのパターンを検出します。引数の修正パターンも検出します。
+
+最終スコアは有効な次元の加重和であり、有効な次元に応じて正規化されます。デフォルトの重みは、精度 0.4、効率 0.3、Tool の失敗 0.2、ブラックリスト 0.1 ですが、`weights` オプションでカスタマイズできます。ブラックリスト違反がある場合、他のすべてを上書きして 0 になります。ネストされた評価がある場合、スコアはトップレベルが 70%、ネストされた評価の平均が 30% です。
+
+### 統合スコアラーの結果
+
+```typescript prettier:false
+{
+  runId: string,
+  preprocessStepResult: {
+    accuracy?: TrajectoryComparisonResult,
+    efficiency?: TrajectoryEfficiencyResult,
+    blacklist?: TrajectoryBlacklistResult,
+    toolFailures?: ToolFailureAnalysisResult,
+    nested?: NestedEvaluationResult[],
+  },
+  score: number,
+  reason: string
+}
+```
+
+### 項目ごとの期待値
+
+各データセット項目は、独自の `expectedTrajectory` でデフォルトを上書きできます。これにより、プロンプトごとに期待値を変えられます。
+
+```typescript title="src/unified-per-item.ts"
+import { createTrajectoryScorerCode } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+
+// Default blacklist applies to all items
+const scorer = createTrajectoryScorerCode({
+  defaults: {
+    blacklistedTools: ['deleteAll'],
+    maxSteps: 5,
+  },
+})
+
+const result = await runEvals({
+  target: myAgent,
+  scorers: { trajectory: [scorer] },
+  data: [
+    {
+      input: 'Search for weather',
+      expectedTrajectory: {
+        steps: [{ stepType: 'tool_call', name: 'search' }],
+        maxSteps: 2,
+      },
+    },
+    {
+      input: 'Search and summarize',
+      expectedTrajectory: {
+        steps: [
+          { stepType: 'tool_call', name: 'search' },
+          { stepType: 'tool_call', name: 'summarize' },
+        ],
+      },
+    },
+  ],
+})
+```
+
+### 例: 効率とブラックリスト
+
+```typescript title="src/unified-scorer.ts"
+import { createTrajectoryScorerCode } from '@mastra/evals/scorers/prebuilt'
+
+const scorer = createTrajectoryScorerCode({
+  defaults: {
+    blacklistedTools: ['escalate', 'admin-override'],
+    blacklistedSequences: [['escalate', 'admin-override']],
+    maxSteps: 10,
+    noRedundantCalls: true,
+    maxRetriesPerTool: 2,
+  },
+  // Customize how dimensions contribute to the final score
+  weights: {
+    accuracy: 0.5, // prioritize step accuracy
+    efficiency: 0.3,
+    toolFailures: 0.1,
+    blacklist: 0.1,
+  },
+})
+```
+
+## `runEvals` で Trajectory スコアラーを使用する
+
+Trajectory スコアラーは、スコアラー設定の `trajectory` キーに設定します。`runEvals` パイプラインが Trajectory の抽出を自動的に処理します。
+
+### Agent Trajectory の評価
+
+```typescript title="src/agent-trajectory-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt'
+
+const trajectoryScorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'search' },
+      { stepType: 'tool_call', name: 'format' },
+    ],
+  },
+})
+
+const result = await runEvals({
+  target: myAgent,
+  scorers: {
+    agent: [qualityScorer], // receives raw MastraDBMessage[] output
+    trajectory: [trajectoryScorer], // receives pre-extracted Trajectory
+  },
+  data: [{ input: 'Find and format the data' }],
+})
+
+// result.scores.agent['quality'] — agent-level score
+// result.scores.trajectory['trajectory-accuracy'] — trajectory score
+```
+
+### Workflow Trajectory の評価
+
+```typescript title="src/workflow-trajectory-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt'
+
+const workflowTrajectoryScorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'workflow_step', name: 'validate' },
+      { stepType: 'workflow_step', name: 'process' },
+      { stepType: 'workflow_step', name: 'notify' },
+    ],
+  },
+})
+
+const result = await runEvals({
+  target: myWorkflow,
+  scorers: {
+    workflow: [outputScorer], // receives workflow output
+    trajectory: [workflowTrajectoryScorer], // receives pre-extracted Trajectory from step results
+  },
+  data: [{ input: { userId: '123' } }],
+})
+
+// result.scores.workflow['output-quality'] — workflow-level score
+// result.scores.trajectory['trajectory-accuracy'] — trajectory score
+```
+
+## 関連項目
+
+- [runEvals リファレンス](./run-evals): Trajectory を抽出してスコアラーに渡すパイプライン
+- [MastraScorer リファレンス](./mastra-scorer): スコアラーの基本インターフェース
+- [スコアラーのユーティリティ](./scorer-utils): `extractTrajectory` や `compareTrajectories` などのユーティリティ関数

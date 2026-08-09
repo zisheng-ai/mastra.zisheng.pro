@@ -1,0 +1,446 @@
+---
+title: "リファレンス：ストレージの概要 | ストレージ"
+description: Mastra ストレージシステムのコアデータスキーマとテーブル構造です。
+packages:
+  - "@mastra/core"
+---
+
+import { SchemaTable } from "@site/src/components/SchemaTable";
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# ストレージの概要
+
+Mastra ストレージはドメイン単位で構成されます。各ドメインは一連のテーブルまたはコレクションを所有します。使用するアダプターと設定に応じて、すべてのドメインまたは一部のドメインのみを使用できます。
+
+## ストレージドメイン
+
+`MastraCompositeStore` は、次のドメインキーを振り分けられます。
+
+すべてのストレージアダプターがすべてのドメインを実装しているわけではありません。対応するドメインクラスをアダターパッケージがエクスポートしていれば、複合ストレージによってドメインごとにアダプターを組み合わせられます。
+
+| ドメイン | 説明 |
+| - | - |
+| `memory` | 会話の永続化：メッセージ、スレッド、リソース（ワーキングメモリを含む）。 |
+| `workflows` | 一時停止と再開に使用する Workflow 実行スナップショット。 |
+| `workflowDefinitions` | 永続化された[動的 Workflow](/docs/workflows/dynamic-workflows) 定義（ベータ版）。起動時に読み込まれ、ライブ登録されます。 |
+| `scores` | Eval 実行による評価スコアレコード。 |
+| `observability` | Observability Exporter と Studio が使用する Trace と Span。 |
+| `datasets` | 実験で使用するデータセットレコード、バージョン管理された項目、データセットバージョン。 |
+| `experiments` | 実験の実行と項目ごとの実験結果。 |
+
+以下のスキーマ定義は、`memory`、`workflows`、`scores`、`observability` について文書化された、組み込みのデータベースベースのテーブルを対象としています。その他のドメインと非データベースアダプターは、実装固有のストレージ構造を使用します。
+
+## コアスキーマ
+
+<Tabs>
+  <TabItem value="messages" label="メッセージ">
+    会話メッセージとそのメタデータを保存します。各メッセージはスレッドに属し、実際の内容に加えて、送信者のロールとメッセージタイプに関するメタデータを含みます。
+
+    <SchemaTable
+      columns={[
+  {
+    name: 'id',
+    type: 'uuidv4',
+    description: 'メッセージの一意な識別子（形式：`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）',
+    constraints: [{ type: 'primaryKey' }, { type: 'nullable', value: false }],
+  },
+  {
+    name: 'thread_id',
+    type: 'uuidv4',
+    description: '親スレッドへの参照',
+    constraints: [
+      { type: 'foreignKey', value: 'threads.id' },
+      { type: 'nullable', value: false },
+    ],
+  },
+  {
+    name: 'resourceId',
+    type: 'uuidv4',
+    description: 'このメッセージを所有するリソースの ID',
+    constraints: [{ type: 'nullable', value: true }],
+  },
+  {
+    name: 'content',
+    type: 'text',
+    description: 'V2 形式のメッセージ内容を表す JSON。例：`{ format: 2, parts: [...] }`',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'role',
+    type: 'text',
+    description: '`user | assistant` の列挙型',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'createdAt',
+    type: 'timestamp',
+    description: 'スレッド内のメッセージ順序に使用',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+]}
+    />
+
+    メッセージの `content` 列には、`MastraMessageContentV2` 型に準拠する JSON オブジェクトが格納されます。この型は、AI SDK の `UIMessage` メッセージ構造に厳密に合わせるよう設計されています。
+
+    <SchemaTable
+      columns={[
+  {
+    name: 'format',
+    type: 'integer',
+    description: 'メッセージ形式のバージョン（現在は 2）',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'parts',
+    type: 'array (JSON)',
+    description:
+      'メッセージパーツ（テキスト、Tool 呼び出し、ファイル、推論など）の配列。配列内の項目構造は `type` によって異なります。',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'experimental_attachments',
+    type: 'array (JSON)',
+    description: '任意のファイル添付配列',
+    constraints: [{ type: 'nullable', value: true }],
+  },
+  {
+    name: 'content',
+    type: 'text',
+    description: '任意のメッセージ本文',
+    constraints: [{ type: 'nullable', value: true }],
+  },
+  {
+    name: 'toolInvocations',
+    type: 'array (JSON)',
+    description: 'Tool 呼び出しと結果を要約する任意の配列',
+    constraints: [{ type: 'nullable', value: true }],
+  },
+  {
+    name: 'reasoning',
+    type: 'object (JSON)',
+    description: 'Assistant の応答に至る推論プロセスに関する任意の情報',
+    constraints: [{ type: 'nullable', value: true }],
+  },
+  {
+    name: 'annotations',
+    type: 'object (JSON)',
+    description: '任意の追加メタデータまたは注釈',
+    constraints: [{ type: 'nullable', value: true }],
+  },
+]}
+    />
+  </TabItem>
+
+  <TabItem value="threads" label="スレッド">
+    関連するメッセージをグループ化し、リソースに関連付けます。会話に関するメタデータを含みます。
+
+    <SchemaTable
+      columns={[
+  {
+    name: 'id',
+    type: 'uuidv4',
+    description: 'スレッドの一意な識別子（形式：`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）',
+    constraints: [{ type: 'primaryKey' }, { type: 'nullable', value: false }],
+  },
+  {
+    name: 'resourceId',
+    type: 'text',
+    description:
+      'このスレッドに関連付けられた外部リソースの主識別子。関連スレッドのグループ化と取得に使用します。',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'title',
+    type: 'text',
+    description: '会話スレッドのタイトル',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'metadata',
+    type: 'text',
+    description: '文字列化された JSON 形式のカスタムスレッドメタデータ。例：',
+    example: {
+      category: 'support',
+      priority: 1,
+    },
+  },
+  {
+    name: 'createdAt',
+    type: 'timestamp',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'updatedAt',
+    type: 'timestamp',
+    description: 'スレッド履歴の並べ替えに使用',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+]}
+    />
+  </TabItem>
+
+  <TabItem value="resources" label="リソース">
+    リソース単位のワーキングメモリに使用するユーザー固有データを保存します。各リソースはユーザーまたはエンティティを表し、そのユーザーのすべての会話スレッドにわたってワーキングメモリを永続化できます。
+
+    <SchemaTable
+      columns={[
+  {
+    name: 'id',
+    type: 'text',
+    description: 'リソース識別子（ユーザーまたはエンティティ ID）：スレッドと Agent 呼び出しで使用する resourceId と同じ値',
+    constraints: [{ type: 'primaryKey' }, { type: 'nullable', value: false }],
+  },
+  {
+    name: 'workingMemory',
+    type: 'text',
+    description:
+      'Markdown テキスト形式の永続的なワーキングメモリデータ。会話スレッド間で維持されるユーザープロフィール、設定、コンテキスト情報を含みます。',
+    constraints: [{ type: 'nullable', value: true }],
+  },
+  {
+    name: 'metadata',
+    type: 'jsonb',
+    description: 'JSON 形式の追加リソースメタデータ。例：',
+    example: {
+      preferences: { language: 'en', timezone: 'UTC' },
+      tags: ['premium', 'beta-user'],
+    },
+    constraints: [{ type: 'nullable', value: true }],
+  },
+  {
+    name: 'createdAt',
+    type: 'timestamp',
+    description: 'リソースレコードが最初に作成された日時',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'updatedAt',
+    type: 'timestamp',
+    description: 'ワーキングメモリが最後に更新された日時',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+]}
+    />
+  </TabItem>
+
+  <TabItem value="workflows" label="Workflow">
+    Workflow で `suspend()` が呼び出されると、その状態が次の形式で保存されます。`resume()` が呼び出されると、その状態が復元されます。
+
+    <SchemaTable
+      columns={[
+  {
+    name: 'workflow_name',
+    type: 'text',
+    description: 'Workflow 名',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'run_id',
+    type: 'uuidv4',
+    description:
+      'Workflow 実行の一意な識別子。一時停止と再開のサイクルをまたいだ状態追跡に使用します（形式：`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'snapshot',
+    type: 'text',
+    description: 'JSON としてシリアライズされた Workflow の状態。例：',
+    example: {
+      value: { currentState: 'running' },
+      context: {
+        stepResults: {},
+        attempts: {},
+        triggerData: {},
+      },
+      activePaths: [],
+      runId: '550e8400-e29b-41d4-a716-446655440000',
+      timestamp: 1648176000000,
+    },
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'createdAt',
+    type: 'timestamp',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'updatedAt',
+    type: 'timestamp',
+    description: '最終更新日時。Workflow 実行中の状態変化の追跡に使用します',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+]}
+    />
+  </TabItem>
+
+  <TabItem value="evals" label="Eval">
+    Agent の出力に対してメトリクスを実行した Eval 結果を保存します。
+
+    <SchemaTable
+      columns={[
+  {
+    name: 'input',
+    type: 'text',
+    description: 'Agent に提供された入力',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'output',
+    type: 'text',
+    description: 'Agent が生成した出力',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'result',
+    type: 'jsonb',
+    description: 'スコアと詳細を含む Eval 結果データ。例：',
+    example: {
+      score: 0.95,
+      details: {
+        reason: 'Response accurately reflects source material',
+        citations: ['page 1', 'page 3'],
+      },
+    },
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'agent_name',
+    type: 'text',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'metric_name',
+    type: 'text',
+    description: '例：Faithfulness、Hallucination など',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'instructions',
+    type: 'text',
+    description: 'Agent のシステムプロンプトまたは指示',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'test_info',
+    type: 'jsonb',
+    description: '追加のテストメタデータと設定',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'global_run_id',
+    type: 'uuidv4',
+    description: '関連する評価実行をグループ化します（例：1回の CI 実行に含まれるすべてのユニットテスト）',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'run_id',
+    type: 'uuidv4',
+    description: '評価対象の実行を示す一意な識別子（形式：`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'created_at',
+    type: 'timestamp',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+]}
+    />
+  </TabItem>
+
+  <TabItem value="traces" label="Trace">
+    監視とデバッグのために OpenTelemetry Trace を記録します。
+
+    <SchemaTable
+      columns={[
+  {
+    name: 'id',
+    type: 'text',
+    description: '一意な Trace 識別子',
+    constraints: [{ type: 'nullable', value: false }, { type: 'primaryKey' }],
+  },
+  {
+    name: 'parentSpanId',
+    type: 'text',
+    description: '親 Span の ID。最上位の Span の場合は null',
+  },
+  {
+    name: 'name',
+    type: 'text',
+    description: '階層化された操作名（例：`workflow.myWorkflow.execute`、`http.request`、`database.query`）',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'traceId',
+    type: 'text',
+    description: '関連する Span をグループ化するルート Trace 識別子',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'scope',
+    type: 'text',
+    description: 'Span を作成したライブラリ、パッケージ、サービス（例：`@mastra/core`、`express`、`pg`）',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'kind',
+    type: 'integer',
+    description:
+      '`INTERNAL`（0、プロセス内）、`CLIENT`（1、発信呼び出し）、`SERVER`（2、着信呼び出し）、`PRODUCER`（3、非同期ジョブ作成）、`CONSUMER`（4、非同期ジョブ処理）',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'attributes',
+    type: 'jsonb',
+    description: 'Span メタデータを格納するユーザー定義のキーと値のペア',
+  },
+  {
+    name: 'status',
+    type: 'jsonb',
+    description: '`code`（UNSET=0、ERROR=1、OK=2）と任意の `message` を含む JSON オブジェクト。例：',
+    example: {
+      code: 1,
+      message: 'HTTP request failed with status 500',
+    },
+  },
+  {
+    name: 'events',
+    type: 'jsonb',
+    description: 'Span 中に発生したタイムスタンプ付きイベント',
+  },
+  {
+    name: 'links',
+    type: 'jsonb',
+    description: '関連する他の Span へのリンク',
+  },
+  {
+    name: 'other',
+    type: 'text',
+    description: '文字列化された JSON 形式の追加 OpenTelemetry Span フィールド。例：',
+    example: {
+      droppedAttributesCount: 2,
+      droppedEventsCount: 1,
+      instrumentationLibrary: '@opentelemetry/instrumentation-http',
+    },
+  },
+  {
+    name: 'startTime',
+    type: 'bigint',
+    description: 'Span 開始時の Unix エポックからの経過ナノ秒',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'endTime',
+    type: 'bigint',
+    description: 'Span 終了時の Unix エポックからの経過ナノ秒',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+  {
+    name: 'createdAt',
+    type: 'timestamp',
+    constraints: [{ type: 'nullable', value: false }],
+  },
+]}
+    />
+  </TabItem>
+</Tabs>

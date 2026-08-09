@@ -1,0 +1,120 @@
+---
+title: "参考：Span 过滤 | Observability"
+description: "excludeSpanTypes、spanFilter 和 Span 过滤行为的参考"
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Span 过滤
+
+Span 过滤用于控制从可观测性配置导出哪些 Span。你可以用它来减少干扰或降低按 Span 计费的成本，也可以仅保留对特定 Exporter 或环境有意义的 Span。
+
+有关 Tracing 配置的简要概览，请参阅 [Tracing](/docs/observability/tracing/overview)。
+
+## 用法示例
+
+以下示例演示如何在一项可观测性配置中结合使用 `excludeSpanTypes` 和 `spanFilter`：
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { SpanType } from '@mastra/core/observability'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+import { LangfuseExporter } from '@mastra/langfuse'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-app',
+        exporters: [new MastraStorageExporter(), new LangfuseExporter()],
+        excludeSpanTypes: [SpanType.MODEL_CHUNK, SpanType.MODEL_STEP],
+        spanFilter: span => {
+          if (span.type === SpanType.TOOL_CALL && span.attributes?.success) {
+            return false
+          }
+
+          return true
+        },
+      },
+    },
+  }),
+})
+```
+
+## 配置选项
+
+<PropertiesTable
+  content={[
+  {
+    name: 'excludeSpanTypes',
+    type: 'SpanType[]',
+    description:
+      '在处理器和 spanFilter 运行前，按类型丢弃 Span。适合执行范围广、开销低的过滤。',
+    isOptional: true,
+  },
+  {
+    name: 'spanFilter',
+    type: '(span: AnyExportedSpan) => boolean',
+    description:
+      '接收导出的 Span，并返回 true 以保留它，或返回 false 以丢弃它。当过滤条件取决于属性、元数据、时间信息或实体标识符时使用此选项。',
+    isOptional: true,
+  },
+]}
+/>
+
+### `excludeSpanTypes`
+
+如果希望以最少的配置排除整个 Span 类别，请使用 `excludeSpanTypes`。
+
+有关当前支持的值，请参阅 [`SpanType` 枚举](https://github.com/mastra-ai/mastra/blob/main/packages/core/src/observability/types/tracing.ts)。
+
+```ts title="src/mastra/index.ts"
+import { SpanType } from '@mastra/core/observability'
+
+excludeSpanTypes: [SpanType.MODEL_CHUNK, SpanType.MODEL_STEP, SpanType.WORKFLOW_SLEEP]
+```
+
+### `spanFilter`
+
+当过滤条件取决于导出的 Span 内容时，请使用 `spanFilter`。
+
+```ts title="src/mastra/index.ts"
+import { SpanType } from '@mastra/core/observability'
+
+spanFilter: span => {
+  if (span.type === SpanType.MODEL_CHUNK) return false
+  if (span.type === SpanType.TOOL_CALL && span.attributes?.success) return false
+
+  return true
+}
+```
+
+其他示例：
+
+```ts title="src/mastra/index.ts"
+// Only export spans from production
+spanFilter: span => span.metadata?.environment === 'production'
+
+// Exclude spans from a specific entity
+spanFilter: span => span.entityId !== 'noisy-agent'
+```
+
+## 处理顺序
+
+Span 过滤会在导出时按以下顺序进行：
+
+1. 除非 `includeInternalSpans` 为 `true`，否则丢弃内部 Span。
+1. `excludeSpanTypes` 移除类型匹配的 Span。
+1. `spanOutputProcessors` 转换其余 Span。
+1. `spanFilter` 决定是否保留最终导出的 Span。
+
+如果 `spanFilter` 抛出错误，Mastra 会保留该 Span 并记录错误，以免数据在没有提示的情况下丢失。
+
+## 相关内容
+
+- [Tracing 概览](/docs/observability/tracing/overview)，了解设置方法和相关概念
+- [配置 API](/reference/observability/tracing/configuration)，了解 `ObservabilityInstanceConfig`
+- [敏感数据过滤器](/docs/observability/integrations/processors/sensitive-data-filter)，了解如何对 Span 数据进行脱敏

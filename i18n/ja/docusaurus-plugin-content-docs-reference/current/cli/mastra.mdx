@@ -1,0 +1,1788 @@
+---
+title: 'リファレンス：CLI コマンド | CLI'
+description: プロジェクトの開発、ビルド、起動に使用する Mastra CLI のドキュメント。
+packages:
+  - 'mastra'
+---
+
+# CLI コマンド
+
+Mastra が提供するコマンドラインインターフェイス（CLI）を使用して、Mastra プロジェクトを開発、ビルド、起動できます。
+
+## `mastra dev`
+
+Agent、Tool、Workflow 用の [Studio](/docs/studio/overview) と REST エンドポイントを公開するサーバーを起動します。`mastra dev` の実行後、[http://localhost:4111/swagger-ui](http://localhost:4111/swagger-ui) にアクセスすると、利用可能なすべてのエンドポイントの概要を確認できます。
+
+[サーバーを設定](/reference/configuration#server-options)することもできます。
+
+### フラグ
+
+このコマンドは、[共通フラグ][common-flags]と次の追加フラグを受け付けます。
+
+#### `--https`
+
+ローカル HTTPS サポートを有効にします。[詳細はこちら](/reference/configuration#serverhttps)。
+
+#### `--inspect`
+
+開発サーバーを inspect モードで起動します。デバッグに便利です。必要に応じて、カスタムのホストとポートを指定できます（例：Docker では `--inspect=0.0.0.0:9229`）。`--inspect-brk` と同時には使用できません。
+
+#### `--inspect-brk`
+
+開発サーバーを inspect モードで起動し、スクリプトの冒頭で停止します。必要に応じて、カスタムのホストとポートを指定できます（例：`--inspect-brk=0.0.0.0:9229`）。`--inspect` と同時には使用できません。
+
+#### `--custom-args`
+
+Node.js プロセスに渡すカスタム引数のカンマ区切りリスト（例：`--require=newrelic` または `--experimental-transform-types`）。
+
+#### `--request-context-presets`
+
+[request context](/docs/server/request-context) のプリセットを含む JSON ファイルへのパス。指定すると、Studio の request context エディターにドロップダウンが表示され、プリセット設定をすばやく切り替えられます。
+
+```bash
+mastra dev --request-context-presets ./presets.json
+```
+
+ファイルは、各キーがプリセット名、各値がオブジェクトである JSON オブジェクトにする必要があります。
+
+```json
+{
+  "development": { "userId": "dev-user", "env": "development" },
+  "production": { "userId": "prod-user", "env": "production" }
+}
+```
+
+### 設定
+
+環境変数を設定すると、`mastra dev` の動作を変更できます。
+
+#### peer dependency チェックを省略する
+
+起動時の peer dependency バージョン不一致チェックを省略するには、`MASTRA_SKIP_PEERDEP_CHECK=1` を設定します。
+
+```bash
+MASTRA_SKIP_PEERDEP_CHECK=1 mastra dev
+```
+
+これは、peer dependency が更新されていてもパッケージがまだ公開されていない場合がある monorepo の開発中に便利です。
+
+#### ビルドキャッシュを無効にする
+
+`.mastra/` にキャッシュされたアセットを使用せず、完全な再ビルドを強制するには、`MASTRA_DEV_NO_CACHE=1` を設定します。
+
+```bash
+MASTRA_DEV_NO_CACHE=1 mastra dev
+```
+
+これは、bundler プラグインをデバッグしている場合や、古い出力が残っている可能性がある場合に役立ちます。
+
+#### 並列処理を制限する
+
+`MASTRA_CONCURRENCY` は、コストの高い操作を並列実行する最大数を制限します（主にビルドと評価のステップ）。例：
+
+```bash
+MASTRA_CONCURRENCY=4 mastra dev
+```
+
+未設定のままにすると、CLI がマシンに適したデフォルト値を選択します。
+
+#### カスタム Provider エンドポイント
+
+Vercel AI SDK がサポートする Provider を使用する場合、ベース URL を設定することで、プロキシや内部ゲートウェイを介してリクエストをリダイレクトできます。OpenAI の場合：
+
+```bash
+OPENAI_API_KEY=<your-api-key> \
+OPENAI_BASE_URL=https://openrouter.example/v1 \
+mastra dev
+```
+
+Anthropic の場合：
+
+```bash
+ANTHROPIC_API_KEY=<your-api-key> \
+ANTHROPIC_BASE_URL=https://anthropic.internal \
+mastra dev
+```
+
+これらは Mastra モデルルーターに転送され、`"openai/..."`
+または `"anthropic/..."` のモデル選択で機能します。
+
+## `mastra factory dev`
+
+[Agent Builder](https://agent-builder.mastra.ai/) 開発用の開発サーバーを起動します。[`mastra dev`](#mastra-dev) と同じ開発ランタイムとフラグを使用し、同じ `.mastra/output` ディレクトリに書き込みます。
+
+```bash
+npx mastra factory dev
+```
+
+両方のコマンドは同じ開発ロックを共有するため、同じプロジェクト内で `mastra dev` と `mastra factory dev` を同時に実行することはできません。一方がすでに実行中の場合、もう一方は開発サーバーの重複エラーで終了します。
+
+Agent Builder の機能を開発する場合は、`mastra factory dev` を使用します。[`mastra dev`](#mastra-dev) と同じフラグ（`--https`、`--inspect`、`--inspect-brk`、`--custom-args`、`--request-context-presets` など）を受け付けます。
+
+## `mastra build`
+
+`mastra build` コマンドは、Mastra プロジェクトを本番環境対応の Hono サーバーにバンドルします。[Hono](https://hono.dev/) は軽量で型安全な Web フレームワークです。Middleware をサポートする HTTP エンドポイントとして Mastra Agent を簡単にデプロイできます。
+
+内部では、Mastra の Rollup サーバーが Mastra のエントリーファイルを特定し、本番環境対応の Hono サーバーにバンドルします。バンドル中にコードを tree-shake し、デバッグ用のソースマップを生成します。
+
+`.mastra` の出力は、[`mastra start`](#mastra-start) を使用して任意のクラウドサーバーにデプロイできます。
+
+[serverless platform](/docs/deployment/cloud-providers) にデプロイする場合は、適切な `.mastra` 出力を得るために、対応する deployer をインストールする必要があります。
+
+このコマンドは[共通フラグ][common-flags]を受け付けます。
+
+### フラグ
+
+#### `--studio`
+
+Studio UI をビルドにバンドルします。
+
+### 設定
+
+環境変数を設定すると、`mastra build` の動作を変更できます。
+
+#### peer dependency チェックを省略する
+
+peer dependency バージョン不一致チェックを省略するには、`MASTRA_SKIP_PEERDEP_CHECK=1` を設定します。
+
+```bash
+MASTRA_SKIP_PEERDEP_CHECK=1 mastra build
+```
+
+#### 並列処理を制限する
+
+CI またはリソースが制限された環境で実行する場合、`MASTRA_CONCURRENCY` を設定して、コストの高いタスクを同時に実行する最大数を制限できます。
+
+```bash
+MASTRA_CONCURRENCY=2 mastra build
+```
+
+## `mastra start`
+
+:::info
+
+`mastra start` を使用する前に、`mastra build` を実行する必要があります。
+
+:::
+
+ビルド済みの Mastra アプリケーションを本番モードで提供するローカルサーバーを起動します。デフォルトでは、[OTEL Tracing](/docs/observability/tracing/overview) が有効です。
+
+### フラグ
+
+このコマンドは、[共通フラグ][common-flags]と次の追加フラグを受け付けます。
+
+#### `--dir`
+
+ビルド済みの Mastra 出力ディレクトリへのパス。デフォルトは `.mastra/output` です。
+
+#### `--custom-args`
+
+Node.js プロセスに渡すカスタム引数のカンマ区切りリスト（例：`--require=newrelic` または `--experimental-transform-types`）。
+
+## `mastra worker build`
+
+Worker へのデプロイ用に Mastra アプリケーションをバンドルします。`mastra build` と同じく、自己完結型の `.mastra/output/` ディレクトリを出力します。
+
+```bash
+mastra worker build [options]
+```
+
+### フラグ
+
+#### `--dir`
+
+Mastra ソースディレクトリへのパス。デフォルトは `src/mastra` です。
+
+#### `--root`
+
+プロジェクトのルートディレクトリ。デフォルトは現在のディレクトリです。
+
+#### `--tools`
+
+バンドルに含める Tool パスのカンマ区切りリスト。
+
+#### `--output-dir`
+
+カスタム出力ディレクトリ。デフォルトは `.mastra/output` です。
+
+#### `--debug`
+
+ビルド中のデバッグログを有効にします。
+
+## `mastra experiment build`
+
+HTTP サーバーを公開せずに実験を実行する、スタンドアロンの companion worker をビルドします。Worker はエクスポートされた `Mastra` インスタンスを読み込み、バージョン付きの改行区切り JSON（NDJSON）プロトコルメッセージを標準入力から受け付けます。プロトコルイベントは標準出力に書き込みます。
+
+```bash
+mastra experiment build [options]
+```
+
+デフォルトでは、コマンドは Worker を `.mastra/experiment-worker` に書き込みます。このディレクトリには、実行可能なエントリーポイント、本番用の依存関係、`experiment-worker-manifest.json` が含まれます。標準出力はプロトコル専用の出力として扱ってください。Worker の診断情報は標準エラーに書き込まれます。
+
+### Artifact の規約
+
+`experiment-worker-manifest.json` は、Artifact を `mastra-experiment-worker` バージョン `1` として識別し、次の情報を提供します。
+
+- 実行可能ファイルに埋め込まれた CLI バージョン、作成時刻、一意のビルド ID。
+- サポートされるプロトコルとデータセット正規化のバージョン。
+- Worker の起動に必要な実行可能ファイル、引数、作業ディレクトリ。
+- 依存関係マニフェストと生成された lockfile のパス。
+- 各 Artifact ファイルのソート済み SHA-256 ダイジェスト。
+- それらのファイルパスとダイジェストから生成された SHA-256 コンテンツダイジェスト。
+
+自己参照ダイジェストを避けるため、コンテンツダイジェストから `experiment-worker-manifest.json` は除外されます。マニフェストはディレクトリの残りの内容と一緒にパッケージ化してください。マニフェスト自体の証明が必要な場合は、外側のパッケージダイジェストを使用します。
+
+### プロトコルの規約
+
+Worker は、固定された experiment companion-worker プロトコルのバージョン `1` を実装します。標準入力から厳密な UTF-8 NDJSON フレームを読み取り、最後のフレームを含むすべてのフレームが改行で終わることを要求します。1 MiB を超えるフレーム、不正または途中で切れたフレーム、サポートされていないプロトコルまたは正規化バージョン、アクティブな実験の相関情報と一致しないメッセージは、プロトコルエラーとして拒否されます。
+
+実行リクエストは、Artifact に埋め込まれたビルド ID と一致し、順序付けられたデータセット項目数と SHA-256 Attestation を含む必要があります。Worker は、`0` から始まる連続したシーケンス番号、タイマー駆動の heartbeat、待機済みの実験ライフサイクルイベント、厳密に1つの終了イベントを発行します。キャンセルは、アクティブなプロトコルバージョン、実験 ID、ジョブ ID、試行回数、idempotency key と一致する必要があります。
+
+プロトコルの終了コードは次のとおりです。
+
+| コード | 意味 |
+| - | - |
+| `0` | 完了 |
+| `10` | 項目エラーを伴う完了 |
+| `20` | 致命的な失敗 |
+| `21` | 再試行可能な失敗 |
+| `30` | キャンセル |
+| `31` | タイムアウト |
+| `70` | プロトコルエラー |
+
+### パケットフィールドの処理
+
+Worker は、対象の識別情報、順序付けられたインラインデータセット項目、Scorer ID、並列数、タイムアウト、実験メタデータ、request context、Tool mock、キャンセルを `runExperiment` に渡します。Scorer のバージョンと Artifact の provenance は、実験メタデータとして保持されます。Scorer コードの provenance は、実行時の Scorer 検索ではなく、Artifact の受け入れ時に適用されます。
+
+バージョン `1` では、宣言されていない Tool を決定論的に拒否します。空でないネットワーク許可リストと secret 参照は、policy failure で拒否されます。ネットワークの適用と secret の materialization はプロセス Sandbox が担うためです。データセット項目のソースと期待される trajectory のフィールドは、`runExperiment` に渡される際に項目メタデータとして保持されます。
+
+### フラグ
+
+#### `--dir`
+
+Mastra ソースディレクトリへのパス。デフォルトは `src/mastra` です。
+
+#### `--root`
+
+プロジェクトのルートディレクトリ。デフォルトは現在のディレクトリです。
+
+#### `--output-dir`
+
+カスタム Artifact ディレクトリ。相対パスはプロジェクトルートから解決されます。デフォルトは `.mastra/experiment-worker` です。
+
+#### `--debug`
+
+ビルド中のデバッグログを有効にします。
+
+## `mastra worker start`
+
+:::info
+
+`mastra worker start` を使用する前に、`mastra worker build` または `mastra build` を実行する必要があります。
+
+:::
+
+以前にビルドしたバンドルから Worker プロセスを起動します。オプションの `name` 引数は、生成されたプロセスで `MASTRA_WORKERS` を設定し、起動する Worker を制御します。
+
+```bash
+mastra worker start [name] [options]
+```
+
+### フラグ
+
+#### `--dir`
+
+ビルド出力ディレクトリへのパス。デフォルトは `.mastra/output` です。
+
+#### `--env`
+
+環境ファイルへのパス。デフォルトは `.env.production` で、見つからない場合は `.env` にフォールバックします。
+
+### 例
+
+```bash
+# Start only the orchestration worker
+mastra worker start orchestration
+
+# Start only the scheduler
+mastra worker start scheduler
+
+# Start from a custom build directory
+mastra worker start orchestration --dir ./dist
+```
+
+デプロイトポロジーと設定については、[Workers](/docs/deployment/workers) を参照してください。
+
+## `mastra studio`
+
+[Studio](/docs/studio/overview) を静的サーバーとして起動します。起動後、Mastra インスタンスの URL（例：`http://localhost:4111`）を入力して、Studio を Mastra バックエンドに接続できます。設定には、現在の作業ディレクトリにある `.env` ファイルと `.env.production` ファイルを使用します。
+
+### フラグ
+
+このコマンドは、[共通フラグ][common-flags]と次の追加フラグを受け付けます。
+
+#### `--port`
+
+Studio を実行するポート。デフォルトは `3000` です。
+
+#### `--server-host`
+
+接続先となる Mastra API サーバーのホスト。デフォルトは `localhost` です。
+
+#### `--server-port`
+
+接続先となる Mastra API サーバーのポート。デフォルトは `4111` です。
+
+#### `--server-protocol`
+
+接続先となる Mastra API サーバーのプロトコル。デフォルトは `http` です。
+
+#### `--server-api-prefix`
+
+Mastra API サーバーの API ルートプレフィックス。デフォルトは `/api` です。
+
+#### `--request-context-presets`
+
+[request context](/docs/server/request-context) のプリセットを含む JSON ファイルへのパス。[`mastra dev` フラグ](#--request-context-presets)と同様に機能します。
+
+```bash
+mastra studio --request-context-presets ./presets.json
+```
+
+## `mastra deploy`
+
+`--env` で選択した Mastra platform 環境にプロジェクトをビルドしてデプロイします。これはすべての新規デプロイに推奨されるコマンドであり、[`mastra studio deploy`](#mastra-studio-deploy) と [`mastra server deploy`](#mastra-server-deploy) の両方を置き換えます。これらのコマンドは引き続き機能しますが、新しいセットアップには使用しないでください。
+
+認証には、[`mastra auth login`](#mastra-auth-login) または `MASTRA_API_TOKEN` 環境変数が必要です。
+
+```bash
+mastra deploy
+mastra deploy --env staging
+mastra deploy --env production --region eu
+```
+
+このコマンドは `mastra build` を実行し、出力を zip にまとめてから、選択した環境にアップロードします。その後、ビルドログをストリーミングしながらデプロイ状態をポーリングし、デプロイが終了状態になるまで待機します。
+
+Organization、Project、Environment は、環境変数（`MASTRA_ORG_ID`、`MASTRA_PROJECT_ID`）、CLI フラグ（`--org`、`--project`、`--env`）、`.mastra-project.json` 設定ファイル、認証情報に保存された現在の Organization、最後に対話型プロンプトの順で解決されます。初回デプロイ時には、解決した Organization ID と Project ID が `.mastra-project.json` に保存されるため、以後のデプロイではプロンプトが省略されます。
+
+Project がまだ存在しない場合、確認後に `package.json` の `name` フィールドから作成されます。対象 Environment が存在しない場合も確認後に作成され、`production` 以外ではデフォルトで `type: staging` になります。`--yes` と組み合わせると、すべてを作成してデプロイする処理を1つの非対話型コマンドで実行できます。
+
+```bash
+mastra deploy --env staging --yes
+```
+
+`--env <name>` を指定し、`--env-file` を指定していない場合、Project ディレクトリに `.env.<name>` があれば CLI が自動的に選択します（例：`.env.staging`）。`<name>` の値はファイルパスに埋め込まれる前に、厳格な許可リストで検証されます。
+
+### 引数
+
+#### `[dir]`
+
+Project ディレクトリ。デフォルトは現在のディレクトリです。
+
+### フラグ
+
+#### `--env`
+
+対象 Environment の名前。デフォルトは `production` です。`--env-file` を指定していない場合、Project ディレクトリの `.env.<name>` を自動的に選択します。Environment が存在しない場合は、確認後に作成します。
+
+#### `--org`
+
+Organization ID。`MASTRA_ORG_ID` 環境変数でも設定できます。
+
+#### `--project`
+
+Project の ID、slug、または名前。`MASTRA_PROJECT_ID` 環境変数でも設定できます。一致する Project がない場合、この値を新しい Project の名前として使用し、デプロイ時に作成します。
+
+#### `-y, --yes`
+
+Project や Environment の作成を含め、確認プロンプトなしでデフォルトを自動承認します。
+
+#### `-c, --config`
+
+Project 設定ファイルへのパス。デフォルトは `.mastra-project.json` です。
+
+#### `--env-file`
+
+デプロイに含める env ファイルへのパス（Project ディレクトリからの相対パス）。指定すると、`--env` に基づく `.env.<name>` の自動選択が無効になります。
+
+```bash
+mastra deploy --env staging --env-file .env.staging.local
+```
+
+#### `--region`
+
+新しく作成する Environment のリージョン（例：`eu`）。CLI が Environment を作成する場合にのみ適用されます。
+
+#### `--skip-build`
+
+ビルドステップを省略し、既存の `.mastra/output` ディレクトリをデプロイします。既存ビルドが現在のソースより古い場合、CLI は警告を表示します。
+
+#### `--skip-preflight`
+
+ビルド出力のアップロード前検証を省略します。
+
+#### `--debug`
+
+ビルドステップ中のデバッグログを有効にします。
+
+### CI/CD での使用
+
+ヘッドレスデプロイでは、`MASTRA_API_TOKEN`、`MASTRA_ORG_ID`、`MASTRA_PROJECT_ID` を環境変数として設定します。`MASTRA_API_TOKEN` が設定されている場合、対話型プロンプトは自動的に省略されます。`--yes` と組み合わせると、Environment の作成を自動承認できます。
+
+```bash
+export MASTRA_API_TOKEN="..."
+export MASTRA_ORG_ID="..."
+export MASTRA_PROJECT_ID="..."
+mastra deploy --env staging --yes
+```
+
+## `mastra env`
+
+Mastra platform の Environment を管理します。Environment は Project に属するデプロイ先です（例：`production`、`staging`、`preview-42`）。現在の Organization は保存済みの認証情報から解決されます。
+
+各サブコマンドは、固定された順序で Project を解決します。最初に `MASTRA_PROJECT_ID` 環境変数と `--project <name|slug|id>` フラグを確認し、次に現在のディレクトリにある [`mastra deploy`](#mastra-deploy) が書き込んだ `.mastra-project.json` ファイルを読み込みます。Project ディレクトリで実行すれば、Project を指定する必要はありません。
+
+### `mastra env list`
+
+Project の Environment を一覧表示します。各 Environment には最新のデプロイ（トラフィックを処理中の場合は `(active)` マーカー付き）と、接続済みデータベースなどの管理対象リソースから注入される env var 名が表示されます。
+
+```bash
+mastra env list
+```
+
+#### `--json`
+
+機械可読な JSON を出力します。機密性のないメタデータ（id、name、slug、type、region、branch、URL、管理対象の env var 名、最新のデプロイ状態）のみを含むため、CI で安全にログへ記録できます。
+
+### `mastra env create`
+
+Project に新しい Environment を作成します。
+
+```bash
+mastra env create staging --type staging --region eu
+```
+
+#### `-t, --type`
+
+Environment の種類。`production`、`staging`、`preview` のいずれかです。デフォルトは `staging` です。
+
+#### `-r, --region`
+
+Environment のリージョン（例：`eu`）。
+
+#### `--json`
+
+機械可読な JSON を出力します。[`mastra env list`](#mastra-env-list) と同様に、機密フィールドは省略されます。
+
+### `mastra env delete`
+
+Environment を削除します。
+
+```bash
+mastra env delete <env>
+```
+
+`<env>` には Environment の名前、slug、または ID を指定できます。`--yes` を渡さない限り、CLI は確認を求めます。
+
+#### `-y, --yes`
+
+確認プロンプトを省略します。
+
+### `mastra env restart`
+
+Environment で実行中のサービスを再起動し、新しいデプロイを行わずに、保存済みの env var（接続済みデータベースの管理対象変数を含む）を即時反映します。
+
+```bash
+mastra env restart <env>
+```
+
+`<env>` には Environment の名前、slug、または ID を指定できます。Environment が一度もデプロイされていない場合は、競合エラーになります。
+
+### `mastra env vars pull`
+
+Environment の env var をローカルの env ファイル（デフォルト：`.env`）に取得します。このファイルには、デプロイで使用する統合済みの値が含まれます。Environment に保存された変数（たとえば Dashboard の Environment エディターで追加したもの）と Project レベルの変数が統合され、競合時には Project の値が優先されます。接続済みデータベースが注入する管理対象変数は platform 管理の secret であるため、名前だけがコメントとして記載されます。
+
+```bash
+mastra env vars pull
+mastra env vars pull <env> --output .env.staging
+```
+
+`<env>` には Environment の名前、slug、または ID を指定できます。Project の Environment が1つだけの場合は省略できます。ファイルは `0600` 権限で書き込まれます。出力ファイルがすでに存在する場合、コマンドは停止します。置き換えるには `--force` を渡します。
+
+#### `-o, --output`
+
+書き込み先ファイル。デフォルトは `.env` です。
+
+#### `-f, --force`
+
+既存の出力ファイルを置き換えます。
+
+### `mastra env db`
+
+Mastra platform の Project に接続されたデータベースを管理します。データベースは管理対象 Provider（Turso や Neon など）からプロビジョニングされ、接続用 env var がデプロイに自動的に注入されます。
+
+データベースは、**Environment スコープ**（env var が1つの Environment にのみ渡される）または **shared**（Project スコープ：env var がすべての Environment に渡される）のいずれかです。`mastra env db create` のデフォルトは Environment スコープです。Environment 引数を渡すか、CLI に選択またはプロンプト表示させます。代わりに shared データベースを接続するには、作成時に `--shared` を渡します。ほかのサブコマンド（`list`、`delete`、`keys`）では、Environment スコープのデータベースを操作する場合は Environment 引数を渡し、shared データベースの場合は省略します。
+
+データベースの作成と削除には、Organization の `admin` ロールが必要です。
+
+### `mastra env db list`
+
+Project に接続されたデータベースを、Provider、プロビジョニング状態、スコープ（各データベースが変数を提供する Environment）、注入する env var 名とともに一覧表示します。Environment を渡すと、その Environment に変数を提供するデータベース（Environment スコープと shared）のみが表示されます。
+
+```bash
+mastra env db list
+mastra env db list <env>
+```
+
+#### `--json`
+
+機械可読な JSON を出力します。
+
+### `mastra env db create`
+
+管理対象データベースをプロビジョニングして接続し、準備が完了するまでポーリングします。プロビジョニングエラーは、Provider のエラー詳細とともに表示されます。
+
+デフォルトでは、データベースのスコープは1つの Environment です。Environment 引数を渡して選択するか、省略して CLI に選択させます。Project の Environment が1つなら、その Environment が使用されます。複数ある場合は対話形式で選択を求められます。非対話型の環境（CI、`--json`）では Environment 引数が必要です。代わりに、すべての Environment で共有する Project スコープのデータベースを接続するには `--shared` を渡します。
+
+Environment スコープのデータベースは、Provider のリージョンを Environment から継承します。shared データベースでは `--region` を指定できます。
+
+```bash
+mastra env db create --kind turso                                    # picks or prompts for an environment
+mastra env db create staging --kind turso                            # scoped to the "staging" environment
+mastra env db create --kind turso --shared                           # shared by all environments
+mastra env db create --kind neon --name my-app-db --region aws-us-east-1 --shared
+```
+
+#### `--kind`
+
+データベース Provider（必須）。`turso` または `neon` です。
+
+#### `--name`
+
+データベース名。デフォルトは Project slug から生成した名前です（例：`my-app-db`）。
+
+#### `--region`
+
+shared データベースの Provider リージョン ID。Environment スコープのデータベースでは無視されます。
+
+#### `--shared`
+
+すべての Environment で共有する Project スコープのデータベースとして接続します。Environment 引数とは併用できません。
+
+#### `--no-wait`
+
+データベースの準備完了までポーリングせず、接続処理がキューに入った直後に終了します。進行状況は後で `mastra env db show` を使って確認できます。
+
+#### `--json`
+
+機械可読な JSON を出力します。このモードで Project に複数の Environment がある場合、Environment 引数または `--shared` が必要です（対話型プロンプトはありません）。
+
+### `mastra env db show`
+
+データベースの詳細と、準備完了後は接続用 env var を表示します。secret の値はデフォルトでマスクされます。
+
+```bash
+mastra env db show <database>
+```
+
+`<database>` にはデータベース ID または名前を指定できます。
+
+#### `--show-secrets`
+
+secret の接続値をマスクせずに表示します。
+
+#### `--json`
+
+機械可読な JSON を出力します。`--show-secrets` を渡さない限り、secret の値はマスクされます。
+
+### `mastra env db delete`
+
+Provider からデータベースとそのすべてのデータを完全に削除します。この操作は元に戻せません。`--yes` を渡さない限り、CLI は確認を求めます。削除後、デプロイにはそのデータベースの env var が渡されなくなります。
+
+```bash
+mastra env db delete <database>
+```
+
+#### `-y, --yes`
+
+確認プロンプトを省略します。
+
+### `mastra env deploys`
+
+Project のデプロイを新しい順に一覧表示します。トラフィックを処理中のデプロイには `(active)` が付きます。
+
+```bash
+mastra env deploys [environment]
+```
+
+すべての Environment のデプロイを表示するには `[environment]` を省略し、1つに絞り込むには Environment の名前、slug、または ID を渡します。
+
+#### `--json`
+
+機械可読な JSON を出力します。
+
+## `mastra studio deploy`
+
+:::info
+
+`mastra studio deploy` は引き続き動作しますが、単一の Project で Environment（`--env staging`、`--env production`）をサポートする [`mastra deploy`](#mastra-deploy) に置き換えられました。新しいセットアップでは `mastra deploy` を使用してください。
+
+:::
+
+Project をビルドして Mastra platform にデプロイします。認証には [`mastra auth login`](#mastra-auth-login) または `MASTRA_API_TOKEN` 環境変数が必要です。
+
+```bash
+mastra studio deploy
+```
+
+このコマンドは `mastra build` を実行し、出力を zip にまとめます。Project ディレクトリから env ファイルを読み込み、すべてを platform にアップロードします。アップロード後は、デプロイ状態をポーリングし、デプロイが終了状態になるまでビルドログをストリーミングします。
+
+deploy コマンドは Project の `.env` ファイルを自動的に読み込みます。`MASTRA_PROJECT_ID` が Observability 用にプロビジョニングされた Project を指している場合、新しい Project を作成せず、その Project にデプロイを関連付けます。Observability 専用 Project に Studio をデプロイすると、platform 側で Studio Project に変換されます。
+
+CLI では、Project ディレクトリに少なくとも1つの `.env` または `.env.*` ファイル（`.env.example` を除く）が必要です。存在しない場合は `Error: No env file found for deploy.` で失敗します。複数の env ファイルがある場合、CLI は選択を求めます（デフォルトは `.env.production`）。明示的に選択するには `--env-file` を渡します。複数の env ファイルがある状態で `--yes` を使う場合、`--env-file` を渡さないとデプロイはエラーになります。
+
+Organization と Project は、環境変数フラグ、`.mastra-project.json` 設定ファイル、認証情報に保存された現在の Organization、最後に対話型プロンプトの順で解決されます。初回デプロイ時には、解決した ID が `.mastra-project.json` に保存されるため、以後のデプロイではプロンプトが省略されます。
+
+`--project <value>` が既存の Project（ID または slug）に一致しない場合、CLI は `<value>` を新しい Project 名として扱い、確認後に作成します。`--yes` と組み合わせると、新しい Project の作成とデプロイを1つの非対話型コマンドで実行できます。
+
+```bash
+mastra studio deploy --project "my-new-project" --yes
+```
+
+### 引数
+
+#### `[dir]`
+
+Project ディレクトリ。デフォルトは現在のディレクトリです。
+
+### フラグ
+
+#### `--org`
+
+Organization ID。`MASTRA_ORG_ID` 環境変数でも設定できます。
+
+#### `--project`
+
+Project ID または slug。`MASTRA_PROJECT_ID` 環境変数でも設定できます。一致する Project がない場合、この値を新しい Project の名前として使用し、デプロイ時に作成します。
+
+#### `-y, --yes`
+
+確認プロンプトなしでデフォルトを自動承認します。
+
+#### `-c, --config`
+
+Project 設定ファイルへのパス。デフォルトは `.mastra-project.json` です。
+
+#### `--env-file`
+
+デプロイに含める env ファイルへのパス（Project ディレクトリからの相対パス）。異なる env ファイル（例：`.env.staging`、`.env.production`）を指定して、同じ Project を複数の環境にデプロイする場合に使用します。
+
+```bash
+mastra studio deploy --env-file .env.staging --yes
+```
+
+#### `--skip-build`
+
+ビルドステップを省略し、既存の `.mastra/output` ディレクトリをデプロイします。
+
+#### `--debug`
+
+ビルドステップ中のデバッグログを有効にします。
+
+### CI/CD での使用
+
+ヘッドレスデプロイでは、`MASTRA_API_TOKEN`、`MASTRA_ORG_ID`、`MASTRA_PROJECT_ID` を環境変数として設定します。`MASTRA_API_TOKEN` が設定されている場合、対話型プロンプトは自動的に省略されます。
+
+### `mastra studio deploy list`
+
+すべての Project を、最新のデプロイ状態と URL とともに一覧表示します。
+
+### `mastra studio deploy status`
+
+特定のデプロイの状態を表示します。
+
+```bash
+mastra studio deploy status <deploy-id>
+```
+
+#### `--watch, -w`
+
+デプロイが終了状態になるまで、状態の変化をポーリングします。
+
+### `mastra studio deploy logs`
+
+特定のデプロイのログを表示します。
+
+```bash
+mastra studio deploy logs <deploy-id>
+```
+
+#### `--follow, -f`
+
+ログをリアルタイムでストリーミングします。
+
+#### `--tail`
+
+表示する直近のログ行数。
+
+### `mastra studio deploy suggestions`
+
+失敗した Studio デプロイの診断結果と修正候補を表示します。
+
+```bash
+mastra studio deploy suggestions [deploy-id]
+```
+
+`deploy-id` を省略すると、関連付けられた Project の最新デプロイを使用します。診断がまだ存在しない場合、コマンドが診断を開始し、結果の準備が整うまでポーリングします。診断で問題が見つかった場合にのみ、候補が表示されます。
+
+### `mastra studio projects`
+
+現在の Organization にあるすべての Project を一覧表示します。
+
+### `mastra studio projects create`
+
+対話型プロンプトで新しい Project を作成します。このコマンドは `--name` フラグを受け付けません。非対話型で Project を作成するには、代わりに [`mastra studio deploy --project <name> --yes`](#mastra-studio-deploy) を使用します。これにより Project の作成とデプロイを1ステップで実行できます。
+
+## `mastra server deploy`
+
+:::info
+
+`mastra server deploy` は引き続き動作しますが、Studio と Server のコマンドを分けずに1つの Project を複数の Environment にデプロイする [`mastra deploy`](#mastra-deploy) に置き換えられました。新しいセットアップでは `mastra deploy` を使用してください。
+
+:::
+
+Project をビルドして Mastra platform の Server にデプロイします。[`mastra studio deploy`](#mastra-studio-deploy) と同じフラグ、引数、解決ロジックで動作します。
+
+deploy コマンドは Project の `.env` ファイルを自動的に読み込みます。`MASTRA_PROJECT_ID` が Observability 用にプロビジョニングされた Project を指している場合、新しい Project を作成せず、その Project にデプロイを関連付けます。Observability 専用 Project に Server をデプロイすると、platform 側で Server Project に変換されます。
+
+```bash
+mastra server deploy [dir]
+```
+
+### `mastra server deploy suggestions`
+
+失敗した Server デプロイの診断結果と修正候補を表示します。
+
+```bash
+mastra server deploy suggestions [deploy-id]
+```
+
+`deploy-id` を省略すると、関連付けられた Project の最新デプロイを使用します。診断がまだ存在しない場合、コマンドが診断を開始し、結果の準備が整うまでポーリングします。診断で問題が見つかった場合にのみ、候補が表示されます。
+
+## `mastra server pause`
+
+関連付けられた Project で実行中の Server インスタンスを一時停止します。Organization と Project は [`mastra server deploy`](#mastra-server-deploy) と同じ方法で解決されます。
+
+```bash
+mastra server pause
+```
+
+### フラグ
+
+#### `--org`
+
+Organization ID。`MASTRA_ORG_ID` 環境変数でも設定できます。
+
+#### `--project`
+
+`MASTRA_PROJECT_ID` が設定されていない場合の Project ID または slug。slug は現在の Organization にある Project に対して解決されます。
+
+#### `-c, --config`
+
+Project 設定ファイルへのパス。デフォルトは `.mastra-project.json` です。
+
+インスタンスが実行中でない場合は失敗します。
+
+## `mastra server restart`
+
+関連付けられた Project で一時停止または停止している Server インスタンスを再起動します。platform が再起動を受け付けると、CLI はデプロイ ID を解決します（API レスポンスに ID が含まれる場合はそれを使用し、含まれない場合は Project とデプロイのメタデータをポーリングします）。その後、デプロイが終了状態になるまで、[`mastra server deploy`](#mastra-server-deploy) と同じ方法でビルドログとデプロイログをストリーミングします。
+
+### フラグ
+
+[`mastra server pause`](#mastra-server-pause) と同じ **`--org`**、**`--project`**、**`-c` / `--config`** フラグを、同じデフォルト値と動作で使用できます。
+
+```bash
+mastra server restart
+```
+
+この Project でデプロイがまだアクティブ（実行中、ビルド中、デプロイ中など）な場合は失敗します。別のデプロイの進行中に再起動できないようにする platform の制約です。
+
+## `mastra server env`
+
+関連付けられた Server デプロイの環境変数を管理します。Organization と Project は [`mastra server deploy`](#mastra-server-deploy) と同じ方法で解決されます。
+
+すべてのサブコマンドで、Project 設定ファイルのパスとして `-c` / `--config` を指定できます（デフォルト：`.mastra-project.json`）。
+
+### `mastra server env list`
+
+関連付けられた Project のすべての環境変数を一覧表示します。出力では値の一部がマスクされます。
+
+### `mastra server env set`
+
+環境変数を設定します。CLI は現在のマップを読み取り、変更を適用して結果をアップロードします。
+
+```bash
+mastra server env set <key> <value>
+```
+
+### `mastra server env unset`
+
+環境変数を削除します。
+
+```bash
+mastra server env unset <key>
+```
+
+### `mastra server env import`
+
+ファイル（`.env` ファイルなど）から変数をインポートし、既存のマップに統合します。新しい値は Server にすでに存在するキーを上書きします。
+
+```bash
+mastra server env import <file>
+```
+
+### `mastra server env pull`
+
+関連付けられた Project から環境変数をダウンロードし、ローカルファイルに書き込みます。[`mastra server env import`](#mastra-server-env-import) の逆の操作です。
+
+```bash
+mastra server env pull [file]
+```
+
+引数を指定しない場合、ファイルのデフォルトは `.env` です。安全に shell から読み込めるよう、すべての値は二重引用符で囲まれ、エスケープされます。有効な shell 識別子ではないキーは省略されます。secret が含まれるため、出力ファイルは制限された権限（`0600`）で作成されます。
+
+#### `--project`
+
+Project ID または slug。`MASTRA_PROJECT_ID` が設定されていない場合、関連付けられた Project を上書きします。
+
+#### CI での使用
+
+継続的インテグレーションのパイプラインでは、`MASTRA_API_TOKEN` で認証し、アプリケーションを実行する前に環境を取得します。
+
+```bash
+export MASTRA_API_TOKEN="..."
+mastra server env pull .env.production --project my-project
+```
+
+## `mastra auth`
+
+Mastra platform の認証を管理します。認証情報は `~/.mastra/credentials.json` に保存されます。対話型ログインの代わりに、`MASTRA_API_TOKEN` 環境変数を設定することもできます。
+
+### `mastra auth login`
+
+ログイン用のブラウザーを開き、認証情報をローカルに保存します。
+
+### `mastra auth logout`
+
+保存済みの認証情報を削除します。環境に `MASTRA_API_TOKEN` が設定されたままの場合、引き続き使用されることを CLI が警告します。
+
+### `mastra auth whoami`
+
+現在のユーザーのメールアドレス、ユーザー ID、アクティブな Organization を表示します。
+
+### `mastra auth orgs`
+
+すべての Organization を、それぞれでの自分のロールとともに一覧表示します。現在の Organization にはマークが付きます。
+
+#### `mastra auth orgs switch`
+
+対話型プロンプトでアクティブな Organization を切り替えます。`MASTRA_API_TOKEN` または `MASTRA_ORG_ID` 環境変数が設定されている場合は使用できません。
+
+### `mastra auth tokens`
+
+すべての API token を最終使用日とともに一覧表示します。
+
+#### `mastra auth tokens create`
+
+新しい API token を作成します。secret は一度だけ表示され、後から取得することはできません。
+
+```bash
+mastra auth tokens create <name>
+```
+
+#### `mastra auth tokens revoke`
+
+API token を無効化します。
+
+```bash
+mastra auth tokens revoke <token-id>
+```
+
+## `mastra lint`
+
+`mastra lint` コマンドは、Mastra Project の構造とコードを検証します。
+
+デフォルトでは、`mastra lint` はソースファイルと設定に対して Project チェックを実行します。デプロイ前に `.mastra/output` に対するバンドルチェックも実行するには、`--preflight` を使用します。
+
+```bash
+mastra lint --preflight
+```
+
+このコマンドは[共通フラグ][common-flags]を受け付けます。
+
+### フラグ
+
+#### `--preflight`
+
+ビルド済みの Mastra 出力に対して、デプロイの preflight チェックを実行します。`--skip-build` も渡さない限り、チェック前に Project をビルドします。
+
+#### `--skip-build`
+
+ビルドステップを省略し、既存の `.mastra/output` ディレクトリを再利用します。このフラグは `--preflight` を設定した場合にのみ適用されます。
+
+#### `--env-file <file>`
+
+preflight 検証に指定した環境ファイルを使用します。このフラグは `--preflight` を設定した場合にのみ適用されます。
+
+#### `--strict`
+
+警告をエラーとして扱います。
+
+#### `--json`
+
+機械可読な JSON 出力を生成します。
+
+#### `--debug`
+
+デバッグログを有効にします。
+
+## `mastra scorers`
+
+`mastra scorers` コマンドは、AI が生成した出力の品質、正確性、パフォーマンスを測定する評価用 Scorer の管理機能を提供します。
+
+詳しくは [Scorer の概要](/docs/evals/overview)を参照してください。
+
+### `add`
+
+新しい Scorer を Project に追加します。対話型プロンプトを使用できます。
+
+```bash
+mastra scorers add
+```
+
+または、Scorer 名を直接指定します。
+
+```bash
+mastra scorers add answer-relevancy
+```
+
+正しい ID は [`list`](#list) コマンドで確認できます。
+
+### `list`
+
+使用可能なすべての Scorer テンプレートを一覧表示します。`add` コマンドにはこの ID を使用します。
+
+## `mastra create`
+
+[`create-mastra`](/reference/cli/create-mastra) と同じ Project 作成フローで、スタンドアロンの Mastra Project を作成します。
+
+```bash npm2yarn
+npx mastra@latest create
+```
+
+Project 名と `--llm` の両方を指定すると、対話型のセットアッププロンプトを省略します。任意のテンプレートには `--template [template]`、Provider を含まない最小構成の scaffold には `--empty` を使用します。
+
+このコマンドは、検出したコーディングアシスタント用の Mastra Skill をインストールし、必要に応じて Git を初期化します。省略するには `--no-skills` または `--no-git` を使用します。
+
+モードの動作、競合、検証、すべてのフラグの説明については、[`create-mastra` リファレンス](/reference/cli/create-mastra)を参照してください。
+
+## `mastra init`
+
+`mastra init` コマンドは、既存の Project で Mastra を初期化します。新しい Project を一から生成せず、必要なフォルダーと設定の scaffold を作成する場合に使用します。
+
+### フラグ
+
+このコマンドは、次の追加フラグを受け付けます。
+
+#### `--default`
+
+OpenAI を使用して `src` 内にファイルを作成します。また、`src/mastra` の各フォルダーにサンプルコードを追加します。
+
+#### `--dir`
+
+Mastra ファイルの保存先ディレクトリ。デフォルトは `src` です。
+
+#### `--components`
+
+追加する component のカンマ区切りリスト。component ごとに新しいフォルダーを作成します。`"agents" | "tools" | "workflows" | "scorers"` から選択できます。デフォルトは `['agents', 'tools', 'workflows']` です。
+
+#### `--llm`
+
+デフォルトのモデル Provider。`"openai" | "anthropic" | "groq" | "google" | "cerebras" | "mistral"` から選択できます。
+
+#### `--llm-api-key`
+
+選択したモデル Provider の API key。環境変数ファイル（`.env`）に書き込まれます。
+
+#### `--example`
+
+有効にすると、component のリストにサンプルコードを書き込みます（例：Agent のサンプルコード）。
+
+#### `--no-example`
+
+サンプルコードを含めません。`--default` フラグを使用する場合に便利です。
+
+#### `--mcp`
+
+Mastra の MCP server を使用するよう、コードエディターを設定します。`"cursor" | "cursor-global" | "windsurf" | "vscode"` から選択できます。
+
+#### `--observability`
+
+Mastra platform で Observability を有効にします。既存の platform Project を選択するか、新しく作成するよう CLI が求めます。その後、必要な環境変数を書き込み、Observability exporter を設定します。
+
+#### `--no-observability`
+
+Mastra Observability のプロンプトを省略します。
+
+#### `--observability-project`
+
+Mastra Observability が有効な場合に使用する platform Project 名を設定します。
+
+## `mastra migrate`
+
+Storage schema を更新するためのデータベース migration を実行します。Storage schema の変更を含む Mastra バージョンへアップグレードする場合に便利です。
+
+このコマンドは Project をバンドルして、設定済みの Storage backend に接続し、保留中の migration を実行します。現在、次の migration をサポートしています。
+
+- **重複 span の migration**：重複した `(traceId, spanId)` エントリを削除し、一意制約を追加してデータ整合性を確保します。
+- **ClickHouse の legacy-to-vNext span migration**：従来の `mastra_ai_spans` テーブルから vNext の `mastra_span_events` schema に過去の span をコピーします。メモリ制限内に収まるよう、バッチ単位で実行されます。詳しくは [ClickHouse Storage リファレンス](/reference/storage/clickhouse#migrating-from-legacy-to-vnext)を参照してください。
+
+```bash
+mastra migrate
+```
+
+migration が必要になる条件については、[Storage migration ガイド](/guides/migrations/upgrade-to-v1/storage#duplicate-spans-migration)を参照してください。
+
+このコマンドは[共通フラグ][common-flags]を受け付けます。
+
+## `mastra api`
+
+JSON 入力と JSON 出力を使用して Mastra runtime server を呼び出します。ローカル開発サーバー、デプロイ済みの Mastra platform Project、セルフホスト型 Mastra server、ホスト型 Mastra Platform Observability API に使用できます。
+
+```bash
+mastra api agent list
+mastra api agent run weather-agent '{"messages":"What is the weather in London?"}'
+mastra api tool execute get-weather '{"location":"San Francisco"}'
+mastra api trace list '{"page":0,"perPage":20}'
+```
+
+コマンドの例を表示するには、`mastra api <resource> <action> --help` を使用します。
+
+### 出力
+
+成功時のレスポンスは JSON として `stdout` に書き込まれます。単一リソースのコマンドは次を返します。
+
+```json
+{ "data": {} }
+```
+
+一覧コマンドは `data` 配列とページネーションのメタデータを返します。
+
+```json
+{ "data": [], "page": { "total": 0, "page": 0, "perPage": 0, "hasMore": false } }
+```
+
+エラーは JSON として `stderr` に書き込まれ、0 以外の終了コードを返します。
+
+```json
+{
+  "error": {
+    "code": "SERVER_UNREACHABLE",
+    "message": "Could not connect to target server",
+    "details": {}
+  }
+}
+```
+
+### 対象の解決
+
+runtime コマンドでは、次の順序で対象 Server を解決します。
+
+1. 明示的なリモート Server またはセルフホスト型 Server の `--url <url>`。
+1. ローカルの `mastra dev` Server の `http://localhost:4111`。
+1. Mastra platform Project の `.mastra-project.json`。
+
+platform の自動認証は、CLI が `.mastra-project.json` から Mastra platform の対象を解決した場合にのみ使用されます。localhost の対象と明示的な `--url` の対象には、認証情報が自動的に渡されません。`--header` で渡した header は、localhost を含むすべての対象に送信されます。
+
+Observability コマンド（`trace`、`log`、`score`、`metric`）では、Project のデプロイ URL の代わりに、デフォルトで `https://observability.mastra.ai` を対象とします。Trace Intelligence コマンド（`learning`）も同様ですが、対象は `https://output.signals.mastra.ai` です。どちらも次の順序で認証情報を解決します。
+
+1. `--header` で渡した明示的な `Authorization` header と `X-Mastra-Project-Id` header。
+1. 環境の `MASTRA_PLATFORM_ACCESS_TOKEN` と `MASTRA_PROJECT_ID`。
+1. Project ID 用の `.mastra-project.json` の Project メタデータ。
+1. 認証のフォールバックとしての Mastra CLI ログイン token。
+
+Learning コマンドは `X-Mastra-Organization-Id` も送信します。これは、明示的な `--header`、環境の `MASTRA_ORGANIZATION_ID`、`.mastra-project.json` の順で解決されます。
+
+ホスト型 Observability のデフォルトの対象または認証情報を上書きする必要がある場合は、`--url` と `--header` を使用します。
+
+### フラグ
+
+#### `--url <url>`
+
+特定の Mastra server URL を対象にします。
+
+```bash
+mastra api --url https://example.com agent list
+```
+
+#### `--server-api-prefix <prefix>`
+
+対象 Server の API ルートプレフィックスを設定します。デフォルトは `/api` です。Server がカスタムプレフィックスの配下にマウントされている場合（例：`prefix: "/api/mastra-studio"` を指定した `@mastra/fastify` の `MastraServer`）に、`mastra studio` の `--server-api-prefix` と同様に使用します。フラグの代わりに `MASTRA_API_PREFIX` 環境変数を設定することもできます。
+
+```bash
+mastra api --url https://example.com --server-api-prefix /api/mastra-studio agent list
+```
+
+#### `--header <"Key: Value">`
+
+カスタム HTTP header を送信します。複数の header を送るには、このフラグを繰り返します。
+
+```bash
+mastra api --url https://example.com --header "Authorization: Bearer $TOKEN" agent list
+```
+
+#### `--timeout <ms>`
+
+リクエストのタイムアウトをミリ秒単位で設定します。デフォルトは `30000` です。Workflow run の start コマンドと resume コマンドのデフォルトは `120000` です。
+
+#### `--pretty`
+
+JSON 出力を整形します。デフォルトは `false` です。
+
+#### `--schema`
+
+JSON 入力を受け付けるコマンドについて、CLI 向けのリクエスト schema を表示します。schema は対象 Server の route contract から取得され、コマンド形式、位置引数、例、リクエスト schema、レスポンス形式が含まれます。
+
+`--schema` は、JSON 入力を受け付ける末端コマンドで使用できます。最上位の `mastra api` フラグとしては使用できません。
+
+```bash
+mastra api agent run --schema
+mastra api tool execute --schema
+```
+
+### 入力モデル
+
+入力を受け付けるコマンドには、インライン JSON 引数を1つ渡します。ファイルパスや stdin は渡さないでください。
+
+```bash
+mastra api workflow run start data-pipeline '{"inputData":{"source":"s3://bucket/data.csv"}}'
+```
+
+安定した ID には位置引数を、filter や payload には JSON を使用します。query parameter と request body の両方が必要な route には、JSON オブジェクトを1つ渡します。CLI は Server の route schema に従って入力を分割します。
+
+```bash
+mastra api thread create '{"agentId":"weather-agent","resourceId":"user_123","threadId":"thread_abc123","title":"Support conversation"}'
+```
+
+対象 route がページネーションをサポートする場合、一覧コマンドでは JSON 入力に `page` と `perPage` を指定できます。
+
+```bash
+mastra api score list '{"page":0,"perPage":50}'
+mastra api trace list '{"page":0,"perPage":20}'
+```
+
+filter をサポートする route では、同じ JSON 入力で filter を指定できます。たとえば、Observability の Trace 一覧では、ページネーションと route がサポートする filter を使用できます。
+
+```bash
+mastra api trace list '{"page":0,"perPage":20,"filters":{"spanType":"agent"}}'
+```
+
+### コマンド固有のヘルプを表示する
+
+各 `mastra api` 末端コマンドのヘルプ出力には、コマンド固有の例が含まれます。呼び出したい正確なコマンドに `--help` を付けます。
+
+```bash
+mastra api agent run --help
+mastra api tool execute --help
+mastra api memory current update --help
+mastra api workflow run resume --help
+```
+
+JSON 入力を受け付けるコマンドで `--schema` を使用すると、対象 Server が返すリクエスト形式を確認できます。
+
+```bash
+mastra api agent run --schema
+mastra api thread create --schema
+mastra api score create --schema
+```
+
+一部のコマンドには重要な runtime 要件があります。たとえば、`mastra api memory current update` では Memory インスタンスの working memory を有効にする必要があり、`mastra api workflow run resume` は一時停止中の Workflow run でのみ動作します。
+
+### コマンド
+
+#### `mastra api agent list`
+
+対象 Server に登録されている Agent を一覧表示します。route がサポートする filter には、任意の JSON 入力を渡します。
+
+```bash
+mastra api agent list [input]
+```
+
+#### `mastra api agent get`
+
+登録済みの Agent 1件のメタデータを取得します。
+
+```bash
+mastra api agent get <agentId>
+```
+
+#### `mastra api agent run`
+
+JSON 入力で Agent を実行します。テキストプロンプト、chat message、Memory thread オプションの例はコマンドヘルプを参照してください。
+
+```bash
+mastra api agent run <agentId> <input>
+```
+
+#### `mastra api workflow list`
+
+対象 Server に登録されている Workflow を一覧表示します。route がサポートする filter には、任意の JSON 入力を渡します。
+
+```bash
+mastra api workflow list [input]
+```
+
+#### `mastra api workflow get`
+
+登録済みの Workflow 1件のメタデータを取得します。
+
+```bash
+mastra api workflow get <workflowId>
+```
+
+#### `mastra api workflow run start`
+
+JSON 入力で Workflow run を開始します。run は完了までに時間がかかることがあるため、Workflow の start コマンドでは、多くのコマンドより長いデフォルトタイムアウトを使用します。
+
+```bash
+mastra api workflow run start <workflowId> <input>
+```
+
+#### `mastra api workflow run list`
+
+Workflow の run を一覧表示します。route がサポートする filter またはページネーションには、任意の JSON 入力を渡します。
+
+```bash
+mastra api workflow run list <workflowId> [input]
+```
+
+#### `mastra api workflow run get`
+
+ID で Workflow run を1件取得します。
+
+```bash
+mastra api workflow run get <workflowId> <runId>
+```
+
+#### `mastra api workflow run resume`
+
+JSON 入力を使用して、一時停止中の Workflow run を再開します。run は一時停止状態である必要があります。
+
+```bash
+mastra api workflow run resume <workflowId> <runId> <input>
+```
+
+#### `mastra api workflow run cancel`
+
+Workflow run をキャンセルします。
+
+```bash
+mastra api workflow run cancel <workflowId> <runId>
+```
+
+#### `mastra api tool list`
+
+対象 Server に登録されている Tool を一覧表示します。route がサポートする filter には、任意の JSON 入力を渡します。
+
+```bash
+mastra api tool list [input]
+```
+
+#### `mastra api tool get`
+
+Tool 1件のメタデータと schema を取得します。
+
+```bash
+mastra api tool get <toolId>
+```
+
+#### `mastra api tool execute`
+
+JSON 入力で Tool を実行します。明示的な `data` オブジェクトを渡さない限り、Tool の生入力は route の `data` フィールドとしてラップされます。
+
+```bash
+mastra api tool execute <toolId> <input>
+```
+
+#### `mastra api mcp list`
+
+対象 Server に登録されている Model Context Protocol（MCP）Server を一覧表示します。route がサポートする filter には、任意の JSON 入力を渡します。
+
+```bash
+mastra api mcp list [input]
+```
+
+#### `mastra api mcp get`
+
+MCP Server 1件のメタデータを取得します。
+
+```bash
+mastra api mcp get <id>
+```
+
+#### `mastra api mcp tool list`
+
+MCP Server が公開する Tool を一覧表示します。route がサポートする filter には、任意の JSON 入力を渡します。
+
+```bash
+mastra api mcp tool list <serverId> [input]
+```
+
+#### `mastra api mcp tool get`
+
+MCP Tool 1件のメタデータと schema を取得します。
+
+```bash
+mastra api mcp tool get <serverId> <toolId>
+```
+
+#### `mastra api mcp tool execute`
+
+JSON 入力で MCP Tool を実行します。明示的な `data` オブジェクトを渡さない限り、Tool の生入力は route の `data` フィールドとしてラップされます。
+
+```bash
+mastra api mcp tool execute <serverId> <toolId> <input>
+```
+
+#### `mastra api thread list`
+
+Memory thread を一覧表示します。route がサポートする filter には、任意の JSON 入力を渡します。
+
+```bash
+mastra api thread list [input]
+```
+
+#### `mastra api thread get`
+
+ID で Memory thread を1件取得します。
+
+```bash
+mastra api thread get <threadId>
+```
+
+#### `mastra api thread create`
+
+Memory thread を作成します。JSON 入力オブジェクトを1つ渡します。Server の route で必要な場合、CLI は `agentId` などのフィールドを query parameter に分割します。
+
+```bash
+mastra api thread create <input>
+```
+
+#### `mastra api thread update`
+
+Memory thread を更新します。`agentId`、`resourceId`、`title`、`metadata` などのフィールドを含む JSON 入力オブジェクトを1つ渡します。
+
+```bash
+mastra api thread update <threadId> <input>
+```
+
+#### `mastra api thread delete`
+
+Memory thread を削除します。`agentId` や `resourceId` など、route で必要な query parameter を JSON 入力で渡します。
+
+```bash
+mastra api thread delete <threadId> <input>
+```
+
+#### `mastra api thread messages`
+
+Memory thread の message を一覧表示します。route がサポートする filter またはページネーションには、任意の JSON 入力を渡します。
+
+```bash
+mastra api thread messages <threadId> [input]
+```
+
+#### `mastra api memory search`
+
+長期 Memory を検索します。`agentId`、`resourceId`、`searchQuery` などの必須フィールドを確認するには、`--help` または `--schema` を使用します。
+
+```bash
+mastra api memory search <input>
+```
+
+#### `mastra api memory current get`
+
+thread の現在の working memory を読み取ります。
+
+```bash
+mastra api memory current get <input>
+```
+
+#### `mastra api memory current update`
+
+thread の現在の working memory を更新します。Memory インスタンスで working memory を有効にする必要があります。
+
+```bash
+mastra api memory current update <input>
+```
+
+#### `mastra api memory status`
+
+Agent と、任意の thread または resource context の Memory 状態を取得します。
+
+```bash
+mastra api memory status <input>
+```
+
+#### `mastra api trace list`
+
+Observability Trace を一覧表示します。route がサポートする filter またはページネーションには、任意の JSON 入力を渡します。
+
+```bash
+mastra api trace list [input]
+mastra api trace list '{"page":0,"perPage":20}'
+mastra api trace list '{"page":0,"perPage":20}' --verbose
+```
+
+`trace list` はデフォルトで軽量なルート span レコードを返すため、大きな input、output、attributes、metadata の payload を取得せずに Trace をページ送りできます。完全なルート span レコードを取得するには `--verbose` を渡します。
+
+#### `mastra api trace get`
+
+完全な span の input、output、attributes、metadata の payload を取得せずに、Observability Trace 1件の軽量な timeline を取得します。Trace の完全な payload を取得するには `--verbose` を渡します。
+
+```bash
+mastra api trace get <traceId>
+mastra api trace get <traceId> --verbose
+```
+
+#### `mastra api trace span`
+
+Observability Trace から完全な span を1件取得します。必要な span が判明した後、`trace get` に続けて使用します。
+
+```bash
+mastra api trace span <traceId> <spanId>
+```
+
+#### `mastra api log list`
+
+Observability log を一覧表示します。route がサポートする filter またはページネーションには、任意の JSON 入力を渡します。
+
+```bash
+mastra api log list [input]
+```
+
+#### `mastra api metric aggregate`
+
+集約された metric 値を1つ取得します。
+
+```bash
+mastra api metric aggregate '{"name":["latency_ms"],"aggregation":"avg"}'
+```
+
+#### `mastra api metric breakdown`
+
+label またはフィールドでグループ化した metric 値を取得します。
+
+```bash
+mastra api metric breakdown '{"name":["latency_ms"],"aggregation":"avg","groupBy":["model"],"limit":10}'
+```
+
+#### `mastra api metric timeseries`
+
+時系列の metric 値を取得します。
+
+```bash
+mastra api metric timeseries '{"name":["latency_ms"],"aggregation":"avg","interval":"1h"}'
+```
+
+#### `mastra api metric percentiles`
+
+時系列の metric percentile 値を取得します。percentile 値には `0` から `1` の小数を使用します。
+
+```bash
+mastra api metric percentiles '{"name":"latency_ms","percentiles":[0.5,0.95,0.99],"interval":"1h"}'
+```
+
+#### `mastra api metric names`
+
+検出された metric 名を一覧表示します。prefix 検索と件数制限には、任意の JSON 入力を渡します。
+
+```bash
+mastra api metric names '{"prefix":"lat","limit":10}'
+```
+
+#### `mastra api metric label-keys`
+
+metric の label key を一覧表示します。
+
+```bash
+mastra api metric label-keys '{"metricName":"latency_ms"}'
+```
+
+#### `mastra api metric label-values`
+
+metric の label key に対応する label 値を一覧表示します。結果を絞り込むには、任意の prefix と limit 値を渡します。
+
+```bash
+mastra api metric label-values '{"metricName":"latency_ms","labelKey":"model","prefix":"g","limit":10}'
+```
+
+#### `curl` で Observability を使用する
+
+platform access token と Project ID を使用して、ホスト型 Observability API を直接呼び出せます。
+
+```bash
+curl -sS "https://observability.mastra.ai/api/observability/traces?page=0&perPage=20" \
+  -H "Authorization: Bearer $MASTRA_PLATFORM_ACCESS_TOKEN" \
+  -H "X-Mastra-Project-Id: $MASTRA_PROJECT_ID" | jq
+```
+
+軽量な Trace timeline を取得します。
+
+```bash
+curl -sS "https://observability.mastra.ai/api/observability/traces/<trace-id>/light" \
+  -H "Authorization: Bearer $MASTRA_PLATFORM_ACCESS_TOKEN" \
+  -H "X-Mastra-Project-Id: $MASTRA_PROJECT_ID" | jq
+```
+
+特定の span を取得します。
+
+```bash
+curl -sS "https://observability.mastra.ai/api/observability/traces/<trace-id>/spans/<span-id>" \
+  -H "Authorization: Bearer $MASTRA_PLATFORM_ACCESS_TOKEN" \
+  -H "X-Mastra-Project-Id: $MASTRA_PROJECT_ID" | jq
+```
+
+#### `mastra api score create`
+
+Observability Score を作成します。入力には Server の Score body 形式を使用します。`--schema` で確認できます。
+
+```bash
+mastra api score create <input>
+```
+
+#### `mastra api score list`
+
+Observability Score を一覧表示します。run ID やページネーションなどの filter には、任意の JSON 入力を渡します。
+
+```bash
+mastra api score list [input]
+```
+
+#### `mastra api score get`
+
+ID で Observability Score を1件取得します。
+
+```bash
+mastra api score get <scoreId>
+```
+
+#### `mastra api dataset list`
+
+Dataset を一覧表示します。route がサポートする filter またはページネーションには、任意の JSON 入力を渡します。
+
+```bash
+mastra api dataset list [input]
+```
+
+#### `mastra api dataset get`
+
+ID で Dataset を1件取得します。
+
+```bash
+mastra api dataset get <datasetId>
+```
+
+#### `mastra api dataset create`
+
+JSON 入力で Dataset を作成します。
+
+```bash
+mastra api dataset create <input>
+```
+
+#### `mastra api dataset items`
+
+Dataset 内の項目を一覧表示します。route がサポートする filter またはページネーションには、任意の JSON 入力を渡します。
+
+```bash
+mastra api dataset items <datasetId> [input]
+```
+
+#### `mastra api experiment list`
+
+Dataset の実験を一覧表示します。route がサポートする filter またはページネーションには、任意の JSON 入力を渡します。
+
+```bash
+mastra api experiment list <datasetId> [input]
+```
+
+#### `mastra api experiment get`
+
+ID で実験を1件取得します。
+
+```bash
+mastra api experiment get <datasetId> <experimentId>
+```
+
+#### `mastra api experiment run`
+
+JSON 入力で Dataset の実験を開始します。
+
+```bash
+mastra api experiment run <datasetId> <input>
+```
+
+#### `mastra api experiment results`
+
+実験の結果を一覧表示します。route がサポートする filter またはページネーションには、任意の JSON 入力を渡します。
+
+```bash
+mastra api experiment results <datasetId> <experimentId> [input]
+```
+
+#### `mastra api learning entities`
+
+Trace Intelligence の出力がある entity（Agent）を、entity ごとに利用可能な Trace signal とともに一覧表示します。Trace Intelligence private beta への登録が必要です。
+
+```bash
+mastra api learning entities '{"entityType":"agent"}'
+```
+
+#### `mastra api learning snapshots`
+
+entity と、順序付けられたカンマ区切りの Trace signal リストに対する分析 snapshot を一覧表示します。後続のコマンドでは、この一覧にある `snapshotId` が必要です。
+
+```bash
+mastra api learning snapshots <entityId> '{"entityType":"agent","signalNames":"goal,outcome,behavior,sentiment","limit":10}'
+```
+
+#### `mastra api learning flow`
+
+1つの snapshot について、signal をまたぐ theme flow を取得します。stage と link で構成され、件数が個別の Trace を表す Sankey 形式のビューに使用できます。
+
+```bash
+mastra api learning flow <entityId> '{"entityType":"agent","signalNames":"goal,outcome","snapshotId":"<snapshotId>"}'
+```
+
+#### `mastra api learning paths`
+
+1つの snapshot 内で、順序付けられた Trace signal 全体にわたる Trace ごとの theme 割り当てを取得します。`limit` と `offset` でページネーションします。
+
+```bash
+mastra api learning paths <entityId> '{"entityType":"agent","signalNames":"goal,outcome","snapshotId":"<snapshotId>","limit":100}'
+```
+
+#### `mastra api learning theme list`
+
+1つの snapshot にある1つの Trace signal の theme を一覧表示します。
+
+```bash
+mastra api learning theme list <entityId> '{"entityType":"agent","signalName":"goal","snapshotId":"<snapshotId>"}'
+```
+
+#### `mastra api learning theme get`
+
+1つの snapshot にある theme を数値 theme ID で1件取得します。
+
+```bash
+mastra api learning theme get <entityId> <themeId> '{"entityType":"agent","signalName":"goal","snapshotId":"<snapshotId>"}'
+```
+
+#### `mastra api learning theme examples`
+
+1つの snapshot にある1つの theme の Trace 例を一覧表示します。`limit` と `offset` でページネーションします。
+
+```bash
+mastra api learning theme examples <entityId> <themeId> '{"entityType":"agent","signalName":"goal","snapshotId":"<snapshotId>","limit":10}'
+```
+
+#### `mastra api learning theme history`
+
+snapshot をまたぐ永続的な theme の lifecycle 履歴を、分割と統合の関係を含めて取得します。`snapshotId` は指定しません。
+
+```bash
+mastra api learning theme history <entityId> <themeId> '{"entityType":"agent","signalName":"goal"}'
+```
+
+#### `mastra api learning noise get`
+
+1つの snapshot にある1つの Trace signal について、cluster 化されていない（noise）bucket を取得します。
+
+```bash
+mastra api learning noise get <entityId> '{"entityType":"agent","signalName":"goal","snapshotId":"<snapshotId>"}'
+```
+
+#### `mastra api learning noise examples`
+
+1つの snapshot にある noise bucket の Trace 例を一覧表示します。`limit` と `offset` でページネーションします。
+
+```bash
+mastra api learning noise examples <entityId> '{"entityType":"agent","signalName":"goal","snapshotId":"<snapshotId>","limit":10}'
+```
+
+## 共通フラグ
+
+### `--dir`
+
+**使用可能なコマンド：** `dev`、`build`、`lint`、`migrate`
+
+Mastra フォルダーへのパス。デフォルトは `src/mastra` です。
+
+### `--debug`
+
+**使用可能なコマンド：** `dev`、`build`、`migrate`
+
+Mastra 内部の詳細ログを有効にします。デフォルトは `false` です。
+
+### `--env`
+
+**使用可能なコマンド：** `dev`、`start`、`studio`、`migrate`
+
+追加するカスタム環境変数ファイル。デフォルトでは `.env.development`、`.env.local`、`.env` が含まれます。
+
+### `--root`
+
+**使用可能なコマンド：** `dev`、`build`、`lint`、`migrate`
+
+ルートフォルダーへのパス。デフォルトは `process.cwd()` です。
+
+### `--tools`
+
+**使用可能なコマンド：** `dev`、`build`、`lint`
+
+含める Tool パスのカンマ区切りリスト。デフォルトは `src/mastra/tools` です。
+
+## グローバルフラグ
+
+`mastra` CLI の情報を取得するには、次のフラグを使用します。
+
+### `--version`
+
+Mastra CLI のバージョンを表示して終了します。
+
+### `--help`
+
+ヘルプメッセージを表示して終了します。
+
+## Telemetry
+
+デフォルトでは、Mastra は OS、Mastra のバージョン、Node.js のバージョンなど、Project に関する匿名情報を収集します。収集内容は[ソースコード](https://github.com/mastra-ai/mastra/blob/main/packages/cli/src/analytics/index.ts)で確認できます。
+
+`mastra dev` または `mastra start` で起動した Server で Observability metric が有効な場合、Mastra は起動時に匿名の集計済みモデル使用量も送信します。これには Provider およびモデルごとの input token 数と output token 数、コマンド（`dev` または `start`）、`NODE_ENV` が含まれます。プロンプト、レスポンス、その他の message 内容が送信されることはありません。収集内容は[ソースコード](https://github.com/mastra-ai/mastra/blob/main/packages/core/src/telemetry/usage-telemetry.ts)で確認できます。
+
+Server の起動時には、匿名の Project surface snapshot も送信されます。これには登録済みの Agent、Agent controller、Workflow、Tool、processor、vector store、Scorer、Workspace、MCP Server、gateway、channel の数、Memory、voice、editor、Observability の使用状況を表す boolean 値、Storage backend の大まかなカテゴリーが含まれます。名前や識別子は送信されません。収集内容は[ソースコード](https://github.com/mastra-ai/mastra/blob/main/packages/core/src/telemetry/feature-telemetry.ts)で確認できます。
+
+環境変数を設定すると、すべての CLI analytics と使用状況 analytics を無効にできます。
+
+```bash
+MASTRA_TELEMETRY_DISABLED=1
+```
+
+ほかの `mastra` コマンドを使用するときに設定することもできます。
+
+```bash
+MASTRA_TELEMETRY_DISABLED=1 mastra dev
+```
+
+[common-flags]: #common-flags

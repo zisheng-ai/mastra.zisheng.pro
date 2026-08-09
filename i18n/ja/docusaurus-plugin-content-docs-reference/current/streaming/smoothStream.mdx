@@ -1,0 +1,167 @@
+---
+title: "リファレンス：smoothStream() | Streaming"
+description: "テキストと推論の差分をバッファリングし、一定のチャンクとして出力する smoothStream() の API リファレンスです。"
+packages:
+  - "@mastra/core"
+  - "@mastra/ai-sdk"
+---
+
+# `smoothStream()`
+
+`smoothStream()` は、テキストと推論の差分をバッファリングしてから一定のチャンクとして出力する、実験的な変換ストリームを作成します。モデルが不均一な差分を出力する場合に、ストリーミングされる応答をより一定のペースで表示するために使用します。
+
+テキスト以外のチャンクは変更されず、そのまま渡されます。バッファリングされた内容は、Tool、制御、完了の各チャンクより前に出力されます。
+
+## 使用例
+
+Agent の `fullStream` を変換ストリームにパイプします。
+
+```typescript title="src/stream-agent.ts"
+import { smoothStream } from '@mastra/core/stream'
+
+const result = await agent.stream('Explain how rainbows form')
+
+const stream = result.fullStream.pipeThrough(
+  smoothStream({
+    delayInMs: 20,
+    chunking: 'word',
+  }),
+)
+
+for await (const chunk of stream) {
+  if (chunk.type === 'text-delta') {
+    process.stdout.write(chunk.payload.text)
+  }
+}
+```
+
+この変換が変更するのは、パイプされたストリームだけです。元の `MastraModelOutput` にある Promise プロパティやコールバック（`result.text` や `onChunk` など）では、モデル本来のチャンク出力タイミングが維持されます。
+
+## AI SDK ルート
+
+`handleChatStream()` が Agent の出力を AI SDK UI チャンクに変換する前に平滑化するには、`@mastra/ai-sdk` から `smoothStream()` をインポートします。
+
+```typescript title="app/api/chat/route.ts"
+import { handleChatStream, smoothStream } from '@mastra/ai-sdk'
+import { createUIMessageStreamResponse } from 'ai'
+import { mastra } from '@/src/mastra'
+
+export async function POST(req: Request) {
+  const params = await req.json()
+  const stream = await handleChatStream({
+    mastra,
+    agentId: 'weatherAgent',
+    params,
+    experimentalTransform: smoothStream({
+      delayInMs: 20,
+      chunking: 'word',
+    }),
+  })
+
+  return createUIMessageStreamResponse({ stream })
+}
+```
+
+`@mastra/ai-sdk` のエクスポートは再利用可能な変換ファクトリーを返すため、ルート設定によってリクエストごとに新しい `TransformStream` が作成されます。`@mastra/core/stream` のエクスポートは、`pipeThrough()` で直接使用するための `TransformStream` を返します。
+
+再利用可能なファクトリーは `Agent.stream()` に渡すこともできます。
+
+```typescript
+import { smoothStream } from '@mastra/ai-sdk'
+
+const result = await agent.stream('Explain how rainbows form', {
+  experimentalTransform: smoothStream({ delayInMs: 20 }),
+})
+
+for await (const chunk of result.fullStream) {
+  // Consume the transformed Mastra chunks.
+}
+```
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'SmoothStreamOptions',
+    description: '変換後のストリームの遅延とチャンク境界を制御します。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'SmoothStreamOptions',
+        parameters: [
+          {
+            name: 'delayInMs',
+            type: 'number | null',
+            description: '各チャンクの出力後に待機するミリ秒数。遅延を無効にするには、この値を null に設定します。',
+            isOptional: true,
+            defaultValue: '10',
+          },
+          {
+            name: 'chunking',
+            type: "'word' | 'line' | RegExp | SmoothStreamChunkDetector | Intl.Segmenter",
+            description: 'バッファリングされたテキストと推論をチャンクに分割する方法を制御します。',
+            isOptional: true,
+            defaultValue: "'word'",
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+`chunking` オプションには、次の値を指定できます。
+
+- `'word'`：末尾の空白を含む、完全な単語単位で出力します。
+- `'line'`：各改行までの内容を出力します。
+- `RegExp`：最初に一致した箇所までの内容を出力します。
+- `Intl.Segmenter`：ロケールに対応した分割を使用します。単語間に空白がない言語に便利です。
+- `SmoothStreamChunkDetector`：現在のバッファを引数として関数を呼び出します。関数は、出力する空でない接頭部分を返します。さらに内容を待つ場合は、`null` または `undefined` を返します。
+
+## カスタムチャンク分割
+
+正規表現を使用してチャンク境界を定義します。
+
+```typescript
+const stream = result.fullStream.pipeThrough(
+  smoothStream({
+    chunking: /[^,]*,\s*/,
+  }),
+)
+```
+
+ロケールに対応した分割には `Intl.Segmenter` を使用します。
+
+```typescript
+const stream = result.fullStream.pipeThrough(
+  smoothStream({
+    chunking: new Intl.Segmenter('ja', { granularity: 'word' }),
+  }),
+)
+```
+
+チャンク境界がカスタムロジックに依存する場合は、検出関数を使用します。戻り値はバッファの接頭部分でなければなりません。
+
+```typescript
+const stream = result.fullStream.pipeThrough(
+  smoothStream({
+    chunking: buffer => {
+      const boundary = buffer.indexOf('. ')
+      return boundary === -1 ? null : buffer.slice(0, boundary + 2)
+    },
+  }),
+)
+```
+
+## 戻り値
+
+`TransformStream<ChunkType<OUTPUT>, ChunkType<OUTPUT>>`
+
+この変換は、平滑化された `text-delta` と `reasoning-delta` のチャンクを出力します。チャンク ID、実行 ID、ソース、メタデータは保持されます。
+
+## 関連情報
+
+- [`MastraModelOutput`](/reference/streaming/agents/MastraModelOutput)
+- [`ChunkType`](/reference/streaming/ChunkType)

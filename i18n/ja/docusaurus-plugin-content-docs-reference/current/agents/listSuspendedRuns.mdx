@@ -1,0 +1,148 @@
+---
+title: "リファレンス：Agent.listSuspendedRuns() | Agents"
+description: "再起動後も承認を維持できるよう、Storage から中断中の Agent Run を検出する Agent.listSuspendedRuns() の API リファレンスです。"
+packages:
+  - "@mastra/core"
+---
+
+# Agent.listSuspendedRuns()
+
+**追加バージョン：** `@mastra/core@1.43.0`
+
+`.listSuspendedRuns()` メソッドは、Workflow Snapshot Storage から中断中の Agent Run を一覧表示します。対象となるのは、[承認](/docs/agents/agent-approval)が必要な Tool Call を待機している Run、または `suspend()` を呼び出した Tool を待機している Run です。検出にはメモリ内の状態ではなく Storage を使用するため、Server の再起動後や複数の Server インスタンス間でも機能します。
+
+返された `runId` を [`resumeStream()`](/docs/agents/agent-approval#runtime-suspension-with-suspend)、`approveToolCall()`、または `declineToolCall()` に渡すと、Run を再開できます。
+
+Filter の仕様は Workflow Run の一覧 API（`listWorkflowRuns`）と同じで、さらに Agent レベルの `threadId` Filter を利用できます。
+
+## 使用例
+
+Conversation の保留中の Run を検出して再開します。`requiresApproval` を確認し、適切な再開方法を選択してください。承認による中断には `approveToolCall()` / `declineToolCall()` を、`suspend()` による中断には再開データを指定した `resumeStream()` を使用します。
+
+```typescript
+const { runs } = await agent.listSuspendedRuns({
+  threadId: 'thread-123',
+  resourceId: 'user-456',
+})
+
+const run = runs[0]
+const toolCall = run?.toolCalls[0]
+
+if (run && toolCall) {
+  const stream = toolCall.requiresApproval
+    ? await agent.approveToolCall({ runId: run.runId, toolCallId: toolCall.toolCallId })
+    : await agent.resumeStream({ name: 'San Francisco' }, { runId: run.runId })
+}
+```
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'AgentListSuspendedRunsOptions',
+    isOptional: true,
+    defaultValue: '{}',
+    description: '結果の範囲を絞り込むための Filter と Pagination。',
+    properties: [
+      {
+        type: 'AgentListSuspendedRunsOptions',
+        parameters: [
+          {
+            name: 'threadId',
+            type: 'string',
+            isOptional: true,
+            description: 'この Memory Thread に属する Run だけを返します。',
+          },
+          {
+            name: 'resourceId',
+            type: 'string',
+            isOptional: true,
+            description: 'この Memory Resource に属する Run だけを返します。',
+          },
+          {
+            name: 'fromDate',
+            type: 'Date',
+            isOptional: true,
+            description: 'この日時以降に作成された Run だけを返します。',
+          },
+          {
+            name: 'toDate',
+            type: 'Date',
+            isOptional: true,
+            description: 'この日時以前に作成された Run だけを返します。',
+          },
+          {
+            name: 'perPage',
+            type: 'number',
+            isOptional: true,
+            description:
+              '1 Page あたりの項目数。perPage と page の両方を指定すると Pagination が適用され、それ以外の場合は一致するすべての Run が返されます。',
+          },
+          {
+            name: 'page',
+            type: 'number',
+            isOptional: true,
+            description: '0 から始まる Page 番号。',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'result',
+    type: 'Promise<AgentListSuspendedRunsResult>',
+    description: '一致する Run と Pagination 適用前の合計数に解決される Promise。',
+  },
+]}
+/>
+
+```typescript
+interface AgentListSuspendedRunsResult {
+  runs: AgentRun[]
+  /** Total number of matching runs, before pagination */
+  total: number
+}
+
+interface AgentRun {
+  /** Run ID accepted by resumeStream(), approveToolCall(), and declineToolCall() */
+  runId: string
+  status: 'suspended'
+  threadId?: string
+  resourceId?: string
+  /** When the run suspended */
+  suspendedAt: Date
+  /** Suspended tool calls awaiting approval or resume data */
+  toolCalls: AgentRunToolCall[]
+}
+
+interface AgentRunToolCall {
+  toolCallId?: string
+  toolName?: string
+  /** Arguments the model supplied (approval suspensions only) */
+  args?: unknown
+  /** True when the run is waiting on a tool-call approval */
+  requiresApproval: boolean
+  /** The tool-defined suspend payload when the tool called suspend() */
+  suspendPayload?: unknown
+}
+```
+
+## 検出範囲
+
+結果は、`listSuspendedRuns()` を呼び出した Agent が開始した Run に限定されます。Snapshot には所有する Agent の ID が保存されるため、同じ Mastra インスタンス上でほかの Agent が開始した Run は返されません。[Supervisor 構成](/docs/agents/agent-approval#tool-approval-supervisor-agents)では、Supervisor には自身の外側の Run（再開対象の Run）が表示され、Subagent の内側の Run はその Subagent 自身からのみ確認できます。結果を1つの Conversation に限定するには、`threadId` と `resourceId` で絞り込みます。
+
+Run の Snapshot は入力待ちの間だけ保存され、完了時に削除されます。そのため、Storage から検出できるのは中断中の Run だけです。再起動後も中断中の Run を維持するには、Mastra インスタンスに永続的な [Storage Provider](/docs/storage/overview) を設定する必要があります。デフォルトのメモリ内 Store では、再起動時に Snapshot が失われます。
+
+## 関連項目
+
+- [Agent の承認](/docs/agents/agent-approval)
+- [Storage](/docs/storage/overview)

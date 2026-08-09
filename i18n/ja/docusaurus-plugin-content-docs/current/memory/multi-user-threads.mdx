@@ -1,0 +1,219 @@
+---
+title: "マルチユーザースレッド | Memory"
+description: "発言者の識別情報をメッセージ本文に含め、1つの Mastra スレッドを複数のユーザーで共有します。"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+---
+
+# マルチユーザースレッド
+
+1つの Mastra スレッドを、それぞれ異なる名前と役割を持つ複数のユーザーで共有できます。発言者の識別情報をメッセージ本文に含めることで、Agent は1つの共有スレッドを読みながらユーザーを区別できます。
+
+## マルチユーザースレッドを使用する場面
+
+複数のユーザーが1つの Agent を介して同じテーマについて共同作業する場合に、マルチユーザースレッドを使用します。
+
+- 編集者、レビュー担当者、承認者が参加する共同ドキュメント
+- 1つのアシスタントが複数の参加者に対応するグループチャット
+- 役割ごとに異なる権限を持つ、複数の関係者によるレビュー
+
+## すべての参加者で1つの `resourceId` を共有する
+
+スレッドは必ず1つの `resourceId` に属するため、共有スレッドのすべての参加者が同じ値を渡す必要があります。ユーザー ID（シングルユーザーアプリのデフォルト）を使用する代わりに、会話自体を基準に `resourceId` を設定します。たとえば、共有ドキュメントには `doc_${docId}`、グループチャットには `room_${roomId}` を使用します。全員が同じ `resourceId` を参照することで、同じ履歴を読み書きできます。
+
+## 各ユーザーメッセージに発言者の識別情報を付ける
+
+モデルは、各ターンで誰が発言しているかを把握する必要があります。メッセージ本文は履歴に残り、コンテキストにも戻されるため、各ユーザーメッセージを、発言者の ID、名前、役割を持つ小さな `<turn>` タグで囲みます。このタグはメッセージに付いたままになるので、過去のターンが呼び出されたときも、モデルは誰が何を発言したかを確認できます。
+
+小さなヘルパーでタグを構築します。以下はその一例です。プロジェクトにコピーし、ユーザーデータの形式に合わせて変更してください。
+
+```typescript title="src/mastra/identity.ts"
+export type Speaker = {
+  id: string
+  name: string
+  role: string
+}
+
+function escapeAttr(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+export function asUserTurn(speaker: Speaker, text: string) {
+  const id = escapeAttr(speaker.id)
+  const name = escapeAttr(speaker.name)
+  const role = escapeAttr(speaker.role)
+  return {
+    role: 'user' as const,
+    content: `<turn author_id="${id}" author_name="${name}" functional_role="${role}">
+${text}
+</turn>`,
+  }
+}
+```
+
+instructions で `<turn>` タグの読み方を Agent に指示します。`thread` と `resource` を指定して呼び出せるように、Agent には `memory` を設定する必要があります。
+
+```typescript title="src/mastra/agents/collab.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'collab-storage', url: 'file:./collab.db' }),
+  options: {
+    lastMessages: 20,
+  },
+})
+
+export const collabAgent = new Agent({
+  id: 'collab',
+  name: 'CollabAgent',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  memory,
+  instructions: `
+You are a collaborative document assistant. Multiple users talk to you in the SAME thread.
+
+Every user message is wrapped in a <turn> tag carrying the user's identity:
+
+  <turn author_id="u_alice" author_name="Alice" functional_role="editor">
+  ...message text...
+  </turn>
+
+Rules:
+1. Address users by their author_name.
+2. Respect functional_role: editors propose changes, reviewers approve.
+3. When attributing past statements, read author_name from the surrounding <turn> tag.
+4. Do not echo the <turn> tags back at users.
+  `.trim(),
+})
+```
+
+ラップしたメッセージで Agent を呼び出します。すべての参加者が同じ `thread` と `resource` を共有します。
+
+```typescript title="src/mastra/call.ts"
+import { asUserTurn } from './identity'
+
+const docResourceId = 'doc_42'
+const docThreadId = 'doc_42'
+
+const alice = { id: 'u_alice', name: 'Alice', role: 'editor' }
+const bob = { id: 'u_bob', name: 'Bob', role: 'reviewer' }
+
+await collabAgent.generate([asUserTurn(alice, 'My favorite color is teal.')], {
+  memory: { thread: docThreadId, resource: docResourceId },
+})
+
+await collabAgent.generate([asUserTurn(bob, 'I want QA sign-off before publish.')], {
+  memory: { thread: docThreadId, resource: docResourceId },
+})
+```
+
+`<turn>` タグはメッセージ本文に残るため、後のターンで履歴が呼び出されたときも、モデルは誰が何を発言したかを確認できます。
+
+## Memory レイヤーとの組み合わせ
+
+ユーザーをタグ付けするこのパターンは、すべての Memory レイヤーと組み合わせられます。ユーザーごとの情報を会話でどれだけ長く保持する必要があるかに応じて、レイヤーを選択してください。
+
+- **短い会話**（単一セッション、または `lastMessages` に収まる程度のスレッド）、あるいは誰が何を発言したかを逐語的に記録する必要がある場合：[メッセージ履歴のみ](#message-history-alone)を使用します。履歴内のユーザータグだけで十分です。追加の Memory レイヤーは不要です。
+- **長期間続くスレッド**（会話が `lastMessages` の範囲を超え、履歴から削除された後もユーザーごとの情報を保持する必要がある場合）：[Observational Memory](#with-observational-memory-recommended)を使用します。
+- **構造化された参加者リストが必要な場合、またはストレージアダプターが OM をサポートしていない場合**（OM には LibSQL、PG、MongoDB のいずれかが必要）：[working memory](#with-working-memory)を使用します。
+
+Observational Memory と working memory は対象とするニーズが重複するため、どちらか一方の使用を推奨します。両方を実行すると、得られるメリットが少ない一方で、レイテンシーとトークンコストが増加します。
+
+### メッセージ履歴のみ
+
+短い会話、または誰が何を発言したかを逐語的に記録する必要がある場合は、履歴内のユーザータグだけで十分です。`lastMessages` は、発言者情報を保持したまま過去のターンをコンテキストに戻します。
+
+```typescript title="src/mastra/agents/collab-basic.ts"
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'collab-storage', url: 'file:./collab.db' }),
+  options: {
+    lastMessages: 20,
+  },
+})
+```
+
+モデルは、現在のメッセージでは `<turn>` タグから識別情報を読み取り、過去のメッセージでは `lastMessages` によって戻されたタグ付きメッセージから読み取ります。
+
+### Observational Memory との組み合わせ（推奨）
+
+[Observational Memory](../memory/observational-memory)（OM）は、Agent の Tool 使用枠を消費することなく、ユーザーごとの情報をバックグラウンドログに抽出します。デフォルトの Observer モデルは `<turn>` タグをそのまま読み取り、`Alice stated her favorite color is teal.` や `Bob asked for QA sign-off before publish.` のように発言者を明示した情報を生成します。
+
+ストレージが対応している場合、マルチユーザースレッドでは working memory より OM を優先してください。OM は情報を自動的に抽出し、参加者の人数に関係なく拡張でき、テンプレートの保守も不要です。オーバーライドを指定せずに有効化します。
+
+```typescript title="src/mastra/agents/collab-om.ts"
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'collab-storage', url: 'file:./collab.db' }),
+  options: {
+    lastMessages: 20,
+    observationalMemory: true,
+  },
+})
+```
+
+OM には、対応するストレージアダプター（`@mastra/libsql`、`@mastra/pg`、`@mastra/mongodb`、`@mastra/oracledb` のいずれか）が必要です。
+
+:::note
+
+Observer を性能の低いモデルに切り替えた結果、情報が汎用的な `User` に集約される場合は、[`observation.instruction`](/reference/memory/observational-memory) を使用して、Observer に `<turn>` タグの読み方を指示してください。
+
+:::
+
+### working memory との組み合わせ
+
+OM を使用できない場合に working memory を使用します。たとえば、ストレージアダプターが OM に対応していない場合や、Agent が各ターンで読み書きできる、構造化された確定的な参加者リストが必要な場合です。
+
+デフォルトの [working memory](../memory/working-memory) テンプレートでは、スレッドごとに1人のユーザー（「First Name」「Last Name」など）を想定しています。マルチユーザースレッドでは、参加者リストを含むテンプレートを指定します。
+
+```typescript title="src/mastra/agents/collab-wm.ts"
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'collab-storage', url: 'file:./collab.db' }),
+  options: {
+    lastMessages: 20,
+    workingMemory: {
+      enabled: true,
+      scope: 'thread',
+      template: `# Document Collaboration State
+
+## Participants
+<!-- One entry per known collaborator. Use author_id as the stable key. -->
+<!-- - **<author_name>** (<author_id>, <functional_role>): <their position> -->
+
+## Open Questions
+
+## Decisions
+`,
+    },
+  },
+})
+```
+
+参加者リストが個々のユーザーではなくドキュメントに属するように、`scope: 'thread'` を設定します。新しい `author_id` が `<turn>` に現れるたびに、その参加者をリストへ追加するよう Agent に指示を1つ追加します。
+
+テンプレートについて詳しくは、[カスタムテンプレート](../memory/working-memory#custom-templates)を参照してください。
+
+## セキュリティ
+
+`speaker` は必ず認証済みリクエストのコンテキストから設定し、リクエスト本文からは設定しないでください。クライアントが自身の `author_id` を選択できると、あるユーザーが別のユーザーになりすます可能性があります。[Request Context](/docs/server/request-context) を使用して認証レイヤーから検証済みユーザーを取得し、Agent を呼び出す前にサーバー上で `<turn>` タグを構築してください。
+
+## 関連項目
+
+- [working memory](../memory/working-memory)
+- [Observational Memory](../memory/observational-memory)
+- [Agent 間で Memory を共有する](../memory/overview#share-memory-between-agents)
+- [`Memory` リファレンス](/reference/memory/memory-class)

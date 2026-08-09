@@ -1,0 +1,260 @@
+---
+title: "リファレンス: MastraModelGateway | Core"
+description: "カスタムモデル Gateway を作成するための基底クラスとインターフェース"
+packages:
+  - "@mastra/core"
+---
+
+# MastraModelGateway
+
+カスタムモデル Gateway を実装するための抽象基底クラスです。Gateway は、Provider の設定、認証、URL の構築、モデルのインスタンス化など、言語モデルにアクセスするための Provider 固有のロジックを処理します。
+
+基底クラスを拡張せず、プレーンオブジェクトの Gateway を提供する場合は `MastraModelGatewayInterface` を使用します。
+
+## クラスの概要
+
+```typescript
+import { MastraModelGateway, type ProviderConfig } from '@mastra/core/llm'
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible-v5'
+import type { LanguageModelV2 } from '@ai-sdk/provider-v5'
+
+class MyCustomGateway extends MastraModelGateway {
+  readonly id = 'custom'
+  readonly name = 'My Custom Gateway'
+
+  async fetchProviders(): Promise<Record<string, ProviderConfig>> {
+    return {
+      'my-provider': {
+        name: 'My Provider',
+        models: ['__GATEWAY_OPENAI_MODEL__', '__GATEWAY_ANTHROPIC_MODEL_SONNET__'],
+        apiKeyEnvVar: 'MY_API_KEY',
+        gateway: this.id,
+      },
+    }
+  }
+
+  buildUrl(modelId: string, envVars?: Record<string, string>): string {
+    return 'https://api.my-provider.com/v1'
+  }
+
+  async getApiKey(modelId: string): Promise<string> {
+    const apiKey = process.env.MY_API_KEY
+    if (!apiKey) throw new Error('MY_API_KEY not set')
+    return apiKey
+  }
+
+  async resolveLanguageModel({
+    modelId,
+    providerId,
+    apiKey,
+  }: {
+    modelId: string
+    providerId: string
+    apiKey: string
+  }): Promise<LanguageModelV2> {
+    const baseURL = this.buildUrl(`${providerId}/${modelId}`)
+    return createOpenAICompatible({
+      name: providerId,
+      apiKey,
+      baseURL,
+    }).chatModel(modelId)
+  }
+}
+```
+
+## 必須プロパティ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description:
+      'Gateway の一意の識別子。この ID は、この Gateway に属するすべての Provider のプレフィックスとして使用されます（例: "netlify/anthropic"）。例外として、models.dev は Provider レジストリであるため、プレフィックスを使用しません。',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: 'Gateway の人が読める名前。',
+  },
+]}
+/>
+
+## 必須メソッド
+
+### `fetchProviders()`
+
+Gateway から Provider の設定を取得します。
+
+**戻り値:** `Promise<Record<string, ProviderConfig>>`
+
+**ProviderConfig の構造:**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'name',
+    type: 'string',
+    description: 'Provider の表示名',
+  },
+  {
+    name: 'models',
+    type: 'string[]',
+    description: '利用可能なモデル ID の配列',
+  },
+  {
+    name: 'apiKeyEnvVar',
+    type: 'string | string[]',
+    description: 'API キーの環境変数',
+  },
+  {
+    name: 'gateway',
+    type: 'string',
+    description: 'Gateway の識別子',
+  },
+  {
+    name: 'url',
+    type: 'string',
+    isOptional: true,
+    description: '任意のベース API URL',
+  },
+  {
+    name: 'apiKeyHeader',
+    type: 'string',
+    isOptional: true,
+    description: '任意のカスタム認証ヘッダー名',
+  },
+  {
+    name: 'docUrl',
+    type: 'string',
+    isOptional: true,
+    description: '任意のドキュメント URL',
+  },
+]}
+/>
+
+### `buildUrl()`
+
+特定のモデルと Provider の組み合わせに対する API URL を構築します。
+
+Provider の URL に `${ACCOUNT_ID}` などのプレースホルダーが含まれる場合は、最終的な URL を返す前に、`buildUrl()` 内で `envVars` または `process.env` から解決します。
+
+**パラメーター:**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'modelId',
+    type: 'string',
+    description: '完全なモデル ID（例: "custom/my-provider/model-1"）',
+  },
+  {
+    name: 'envVars',
+    type: 'Record<string, string>',
+    isOptional: true,
+    description: '任意の環境変数',
+  },
+]}
+/>
+
+**戻り値:** `string | undefined | Promise<string | undefined>`
+
+### `getApiKey()`
+
+認証用の API キーを取得します。
+
+**パラメーター:**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'modelId',
+    type: 'string',
+    description: '完全なモデル ID',
+  },
+]}
+/>
+
+**戻り値:** `Promise<string>`
+
+### `resolveAuth()`
+
+Mastra が言語モデルを作成する前に認証情報を解決します。Gateway が認証を担う場合は、この任意のフックを実装します。省略すると、Mastra は `getApiKey()` にフォールバックします。
+
+**パラメーター:**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'request',
+    type: 'GatewayAuthRequest',
+    description:
+      'Gateway が検査して検証するための gatewayId、providerId、modelId、routerId を含む受信リクエストコンテキスト。',
+  },
+]}
+/>
+
+**戻り値:** `GatewayAuthResult | undefined | Promise<GatewayAuthResult | undefined>`
+
+`GatewayAuthResult` には `apiKey`、`bearerToken`、`headers` と、認証情報の取得元を追跡するための任意の `source` フィールドを含めることができます。
+
+### `resolveLanguageModel()`
+
+言語モデルのインスタンスを作成します。
+
+**パラメーター:**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'modelId',
+    type: 'string',
+    description: 'モデル ID',
+  },
+  {
+    name: 'providerId',
+    type: 'string',
+    description: 'Provider ID',
+  },
+  {
+    name: 'apiKey',
+    type: 'string',
+    description: '認証用の API キー',
+  },
+]}
+/>
+
+**戻り値:** `Promise<LanguageModelV2> | LanguageModelV2`
+
+## インスタンスメソッド
+
+### `getId()`
+
+Gateway の一意の識別子を返します。
+
+**戻り値:** `string` - Gateway の `id` プロパティ
+
+## モデル ID の形式
+
+実際の Gateway では、Gateway ID がプレフィックスとして使用され、次の形式でモデルにアクセスします。
+
+```
+[gateway-id]/[provider]/[model]
+```
+
+例:
+
+- `id = 'custom'` の Gateway: `'custom/my-provider/model-1'`
+
+## 組み込み実装
+
+- **NetlifyGateway** - Netlify AI Gateway との統合
+- **ModelsDevGateway** - OpenAI 互換 Provider のレジストリ
+
+## 関連項目
+
+- [カスタム Gateway ガイド](/models/gateways/custom-gateways): カスタム Gateway の作成に関する完全なガイド
+- [Mastra.addGateway()](/reference/core/addGateway): Mastra に Gateway を追加
+- [Mastra.getGateway()](/reference/core/getGateway): 登録キーで Gateway を取得
+- [Mastra.getGatewayById()](/reference/core/getGatewayById): ID で Gateway を取得
+- [Mastra.listGateways()](/reference/core/listGateways): すべての Gateway を一覧表示

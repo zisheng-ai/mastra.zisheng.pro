@@ -1,0 +1,225 @@
+---
+title: "可观测性概览"
+description: "了解 Mastra 的 Tracing、指标和日志如何协同工作，帮助你监控、调试和优化 AI 应用。"
+packages:
+  - "@mastra/observability"
+---
+
+# 可观测性概览
+
+Mastra 的可观测性系统让你能够查看每次 Agent 运行、Workflow 步骤、Tool 调用和模型交互。Agent 的行为取决于模型响应、prompt、Tool、memory 和 Workflow 状态，因此可观测性可帮助你从第一天起检查运行时决策。它会捕获相互补充的信号，协同帮助你了解应用正在做什么以及原因。
+
+- [**配置**](#configuration)：一次配置可观测性，即可用于 Trace、日志、指标和反馈。
+- [**存储**](#storage)：为持久化 Trace、日志、指标聚合和反馈查询选择存储后端。
+- [**Tracing**](/docs/observability/tracing/overview)：将每个操作记录为 span 的分层时间线，并捕获输入、输出、token 用量和时间信息。
+- [**日志**](/docs/observability/logging)：将应用和 Mastra 内部的结构化日志条目转发到可观测性存储，并自动关联到 Trace。
+- [**指标**](/docs/observability/metrics/overview)：提取 Trace 用量和成本数据，无需额外埋点。
+- [**反馈**](/docs/observability/feedback)：存储与 Trace 和 span 关联的评分、评论、修正及其他审查信号。
+- [**集成**](/docs/observability/integrations/overview)：为 Studio、托管或外部可观测性工作流选择 exporter、bridge 和 span processor。
+
+## 何时使用可观测性
+
+- 检查完整决策路径、Tool 调用和模型响应，以调试意外的 Agent 行为。
+- 监控 Agent、Workflow 和 Tool 的延迟，找出瓶颈。
+- 持续跟踪 token 消耗和预估成本，以控制支出。
+- 逐步追踪 Workflow 执行，诊断失败原因。
+- 比较 prompt 或模型更改前后的 Agent 性能。
+
+## 各部分如何协同工作
+
+Tracing 是基础。配置可观测性后，每次 Agent 运行、Workflow 执行、Tool 调用和模型交互都会生成一个 [span](https://opentelemetry.io/docs/concepts/signals/traces/#spans)。Span 会组织成 Trace，以分层时间线的形式展示完整请求生命周期。
+
+指标会自动从 Trace 派生。当 span 结束时，Mastra 会提取持续时间、token 数量和成本估算，无需编写任何额外代码。这些指标为 [Studio](/docs/studio/observability) 中的仪表板提供数据。
+
+日志会自动关联到 Trace。在已追踪上下文中，每次调用 `logger.info()`、`logger.warn()` 或 `logger.error()` 都会标记当前 Trace ID 和 span ID。你可以直接从日志条目跳转到生成它的 Trace。
+
+反馈用于记录评分、评论和修正等人工审查信号。反馈可以关联到 Trace 和 span，然后通过指标所用的同一可观测性存储进行查询。
+
+这些信号共享 Trace ID、span ID、实体类型和实体名称等关联 ID。你可以利用这些 ID，从指标峰值跳转到对应的 Trace、日志和相关反馈。
+
+## 快速开始
+
+安装 `@mastra/observability` 以及支持 Trace 和指标的存储后端：
+
+```bash npm2yarn
+npm install @mastra/observability @mastra/libsql @mastra/duckdb
+```
+
+然后在 Mastra 实例中配置可观测性。以下示例使用 composite storage 将可观测性数据路由到支持指标聚合的 DuckDB，同时将其他所有数据保留在 LibSQL 中：
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { LibSQLStore } from '@mastra/libsql'
+import { DuckDBStore } from '@mastra/duckdb'
+import { MastraCompositeStore } from '@mastra/core/storage'
+import {
+  Observability,
+  MastraStorageExporter,
+  MastraPlatformExporter,
+  SensitiveDataFilter,
+} from '@mastra/observability'
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite-storage',
+    default: new LibSQLStore({
+      id: 'mastra-storage',
+      url: 'file:./mastra.db',
+    }),
+    domains: {
+      observability: await new DuckDBStore().getStore('observability'),
+    },
+  }),
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'mastra',
+        exporters: [
+          new MastraStorageExporter(), // Persists observability events to Mastra Storage
+          new MastraPlatformExporter(), // Sends observability events to Mastra platform (if MASTRA_PLATFORM_ACCESS_TOKEN is set)
+        ],
+        spanOutputProcessors: [
+          new SensitiveDataFilter(), // Redacts sensitive data like passwords, tokens, keys
+        ],
+        logging: {
+          enabled: true,
+          level: 'info',
+        },
+      },
+    },
+  }),
+})
+```
+
+这会启用 Tracing、日志转发和指标。Mastra 还支持 Langfuse、Datadog 以及任何兼容 OpenTelemetry 的外部 Tracing Provider。要在向外部 Provider 发送数据的同时保留 Mastra Studio 访问权限，请参阅[保留 Studio 访问权限](#maintaining-studio-access)。
+
+## 配置
+
+可观测性只需在 Mastra 实例上配置一次，并同时应用于 Trace、日志和指标。
+
+### 基本配置
+
+可观测性配置通常包含：
+
+- `serviceName`：附加到导出可观测性数据的服务标识符。
+- `exporters`：Trace、日志和派生指标的一个或多个目标位置。
+- `spanOutputProcessors`：在导出 span 前运行的转换。
+- `logging`：可观测性存储的日志转发设置。
+
+有关目标位置和 processor，请参阅[集成概览](/docs/observability/integrations/overview)。
+
+### 保留 Studio 访问权限
+
+添加外部 exporter 时，请保留 `MastraStorageExporter` 以使用 Studio 可观测性，和/或保留 `MastraPlatformExporter` 以使用托管的 Mastra 平台可观测性。
+
+以下示例仅展示可观测性配置。请单独配置存储。
+
+```ts title="src/mastra/observability.ts"
+import { Observability, MastraStorageExporter, MastraPlatformExporter } from '@mastra/observability'
+import { ArizeExporter } from '@mastra/arize'
+
+export const observability = new Observability({
+  configs: {
+    production: {
+      serviceName: 'my-service',
+      exporters: [
+        new ArizeExporter({
+          endpoint: process.env.PHOENIX_COLLECTOR_ENDPOINT,
+          apiKey: process.env.PHOENIX_API_KEY,
+        }),
+        new MastraStorageExporter(),
+        new MastraPlatformExporter(),
+      ],
+    },
+  },
+})
+```
+
+### 在 serverless 环境中刷新
+
+在 serverless 环境中，请在运行时暂停或退出前刷新可观测性 exporter：
+
+```ts
+await mastra.observability.flush()
+```
+
+Serverless 环境应使用外部存储，而不是本地文件存储。有关存储选择和路由，请参阅[存储](#storage)。
+
+### 多配置设置
+
+当不同环境或请求类型需要不同的 exporter 或采样行为时，可使用多个配置。通过 `configSelector` 在运行时选择活跃配置。
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+import { LangfuseExporter } from '@mastra/langfuse'
+
+const storageExporter = new MastraStorageExporter()
+const langfuseExporter = new LangfuseExporter()
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      development: {
+        serviceName: 'my-service-dev',
+        exporters: [storageExporter],
+      },
+      production: {
+        serviceName: 'my-service-prod',
+        exporters: [storageExporter, langfuseExporter],
+      },
+    },
+    configSelector: () => process.env.NODE_ENV || 'development',
+  }),
+})
+```
+
+Trace 采样请参阅 [Tracing](/docs/observability/tracing/overview)。
+
+## 存储
+
+存储决定哪些可观测性信号会持久化、可以执行哪些查询，以及指标聚合是否可用。请使用专用可观测性存储，而不是主应用存储。
+
+### 信号支持
+
+存储支持取决于信号和工作负载。`MastraStorageExporter` 可将 Trace 持久化到 ClickHouse、PostgreSQL、MSSQL、MongoDB 和 LibSQL。指标需要支持分析的存储：
+
+- DuckDB：建议用于本地测试和开发。
+- ClickHouse：建议用于高流量生产可观测性。
+- `PostgresStoreVNext`：启用 observability domain 后支持指标。请始终提供时间范围，避免扫描完整分区。
+- Mastra 平台：使用 `MastraPlatformExporter` 获取托管可观测性，无需自行管理后端。
+
+完整 Provider 列表和受支持的 Tracing 策略请参阅 [Mastra Storage exporter](/docs/observability/integrations/exporters/mastra-storage#storage-provider-support)。当主存储不支持可观测性，或工作负载需要独立扩展时，使用 composite storage 单独路由 `observability` domain。
+
+### 本地开发
+
+本地开发请使用：
+
+- `LibSQLStore` 作为主应用存储
+- `DuckDBStore` 用于 `observability` domain
+- `MastraStorageExporter` 用于本地 Studio 访问
+
+### 生产部署
+
+可观测性流量通常比应用的其他流量写入更密集。在生产环境中：
+
+- 如果将可观测性保存在自己的存储中，请为 `observability` domain 使用带 ClickHouse 的 `MastraStorageExporter`。
+- 使用 `MastraPlatformExporter` 获取托管的 Mastra 平台可观测性，无需自行管理后端。
+- 当可观测性需要不同于主应用数据的后端或扩展策略时，请使用 composite storage。
+
+有关后端兼容性和 exporter 批处理行为，请参阅 [Mastra Storage exporter](/docs/observability/integrations/exporters/mastra-storage)。
+
+## Mastra 平台
+
+有关跨项目和部署的托管 Trace、日志和指标，请参阅 [Mastra 平台上的可观测性](/docs/mastra-platform/observability)。
+
+## 后续步骤
+
+- [Tracing](/docs/observability/tracing/overview)
+- [日志](/docs/observability/logging)
+- [指标](/docs/observability/metrics/overview)
+- [反馈](/docs/observability/feedback)
+- [集成概览](/docs/observability/integrations/overview)
+- [Mastra Studio](/docs/studio/observability)
+- [自动指标参考](/reference/observability/metrics/automatic-metrics)
+- [Mastra 平台可观测性](/docs/mastra-platform/observability)

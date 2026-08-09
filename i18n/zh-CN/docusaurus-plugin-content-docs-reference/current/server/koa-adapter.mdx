@@ -1,0 +1,194 @@
+---
+title: "参考：Koa 适配器 | Server"
+description: "@mastra/koa Server 适配器的 API 参考。"
+packages:
+  - "@mastra/koa"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Koa 适配器
+
+`@mastra/koa` 包提供了一个 Server 适配器，用于通过 [Koa](https://koajs.com) 运行 Mastra。有关通用适配器概念（构造函数选项、初始化流程等），请参阅 [Server Adapters](/docs/server/server-adapters)。
+
+## 安装
+
+安装 Koa 适配器和 Koa 框架：
+
+```bash npm2yarn
+npm install @mastra/koa@latest koa koa-bodyparser
+```
+
+## 使用示例
+
+```typescript title="server.ts"
+import Koa from 'koa'
+import bodyParser from 'koa-bodyparser'
+import { MastraServer } from '@mastra/koa'
+import { mastra } from './mastra'
+
+const app = new Koa()
+app.use(bodyParser())
+
+const server = new MastraServer({ app, mastra })
+
+await server.init()
+
+app.listen(3000, () => {
+  console.log('Server running on http://localhost:3000')
+})
+```
+
+## 构造函数参数
+
+<PropertiesTable
+  content={[
+  {
+    name: 'app',
+    type: 'Koa',
+    description: 'Koa app 实例',
+    isOptional: false,
+  },
+  {
+    name: 'mastra',
+    type: 'Mastra',
+    description: 'Mastra 实例',
+    isOptional: false,
+  },
+  {
+    name: 'prefix',
+    type: 'string',
+    description: '路由路径前缀（例如，`/api/v2`）',
+    isOptional: true,
+    defaultValue: "''",
+  },
+  {
+    name: 'openapiPath',
+    type: 'string',
+    description: '提供 OpenAPI 规范的路径（例如，`/openapi.json`）',
+    isOptional: true,
+    defaultValue: "''",
+  },
+  {
+    name: 'bodyLimitOptions',
+    type: 'BodyLimitOptions',
+    typeDescription: '{ maxSize: number, onError: (error: unknown) => unknown }',
+    description: '请求正文大小限制',
+    isOptional: true,
+  },
+  {
+    name: 'streamOptions',
+    type: 'StreamOptions',
+    typeDescription: '{ redact?: boolean }',
+    description:
+      '流脱敏配置。为 true（默认值）时，会在将流块发送给客户端之前，从中删除敏感数据（系统提示词、Tool 定义、API 密钥）。',
+    isOptional: true,
+    defaultValue: '{ redact: true }',
+  },
+  {
+    name: 'customRouteAuthConfig',
+    type: 'Map<string, boolean>',
+    description:
+      '按路由覆盖身份验证。键为 `METHOD:PATH`（例如，`GET:/api/health`）。值为 `false` 时路由公开，值为 `true` 时需要身份验证。',
+    isOptional: true,
+  },
+  {
+    name: 'tools',
+    type: 'ToolsInput',
+    typeDescription: 'Record<string, ToolAction | VercelTool>',
+    description: 'Server 可用的 Tool',
+    isOptional: true,
+  },
+  {
+    name: 'taskStore',
+    type: 'InMemoryTaskStore',
+    description: '用于 A2A（Agent-to-Agent）操作的任务存储',
+    isOptional: true,
+  },
+  {
+    name: 'mcpOptions',
+    type: 'MCPOptions',
+    typeDescription: '{ serverless?: boolean, sessionIdGenerator?: () => string }',
+    description:
+      'MCP 传输选项。对于 Cloudflare Workers 或 Vercel Edge 等无状态环境，请设置 `serverless: true`。',
+    isOptional: true,
+  },
+]}
+/>
+
+## 错误处理
+
+Koa 适配器会沿 Koa 的中间件链向上传播路由处理程序中的错误，并遵循 Koa 的标准错误处理模式。这意味着可以使用常规 Koa 错误处理中间件：
+
+```typescript title="server.ts"
+const app = new Koa()
+app.use(bodyParser())
+
+// Your error middleware catches errors from Mastra route handlers
+app.use(async (ctx, next) => {
+  try {
+    await next()
+  } catch (err) {
+    ctx.status = err.status || 500
+    ctx.body = { error: err.message }
+    // Log, report to Sentry, etc.
+  }
+})
+
+const server = new MastraServer({ app, mastra })
+await server.init()
+```
+
+同样支持 [`server.onError`](/reference/configuration#serveronerror) 钩子。配置后，它会在错误传播至中间件之前调用，并且会直接使用其响应：
+
+```typescript title="src/mastra/index.ts"
+const mastra = new Mastra({
+  server: {
+    onError: (err, c) => {
+      console.error('Unhandled error:', err)
+      return c.json({ error: err.message }, 500)
+    },
+  },
+})
+```
+
+使用 `init()` 时，还会注册全局错误处理中间件作为安全网。到达此中间件的错误会遵循标准 Koa 约定，通过 `ctx.app.emit('error', err, ctx)` 发出。
+
+## 保护原始路由
+
+若要使用 Mastra 管理的身份验证和 `requiresAuth` 等路由元数据，请优先使用 [`registerApiRoute()`](/reference/server/register-api-route)。对于直接挂载在 app 上的原始 Koa 路由，请使用 `createAuthMiddleware()`：
+
+```typescript title="server.ts"
+import Koa from 'koa'
+import { createAuthMiddleware, MastraServer } from '@mastra/koa'
+import { mastra } from './mastra'
+
+const app = new Koa()
+const server = new MastraServer({ app, mastra })
+
+await server.init()
+
+app.use(createAuthMiddleware({ mastra }))
+app.use(async ctx => {
+  if (ctx.path !== '/custom/protected') return
+
+  const user = ctx.state.requestContext.get('user')
+  ctx.body = { user }
+})
+```
+
+## 手动初始化
+
+如需自定义中间件顺序，请分别调用每个方法，而不是调用 `init()`。详见[手动初始化](/docs/server/server-adapters#manual-initialization)。
+
+## 示例
+
+- [Koa Adapter](https://github.com/mastra-ai/mastra/tree/main/examples/server-koa-adapter)：基本 Koa Server 设置
+
+## 相关内容
+
+- [Server Adapters](/docs/server/server-adapters)：共享的适配器概念
+- [MastraServer Reference](/reference/server/mastra-server)：完整 API 参考
+- [createRoute() Reference](/reference/server/create-route)：创建类型安全的自定义路由

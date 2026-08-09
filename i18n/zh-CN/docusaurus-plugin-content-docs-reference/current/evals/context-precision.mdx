@@ -1,0 +1,250 @@
+---
+title: "参考：上下文精确度 Scorer | Evals"
+description: Mastra 上下文精确度 Scorer 的文档。该 Scorer 使用平均精度均值评估检索到的上下文在生成预期输出时的相关性和精确度。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# 上下文精确度 Scorer
+
+`createContextPrecisionScorer()` 函数会创建一个 scorer，用于评估检索到的上下文片段与生成预期输出的相关程度，以及它们的位置是否合理。它使用 **Mean Average Precision (MAP)**，对将相关上下文放在序列前部的系统给予更高分。
+
+它尤其适用于以下用例：
+
+## RAG 系统评估
+
+适合在以下 RAG pipeline 中评估检索到的上下文：
+
+- 上下文顺序会影响模型性能
+- 需要衡量基础相关性之外的检索质量
+- 位于前部的相关上下文比位于后部的更有价值
+
+## 上下文窗口优化
+
+可用于针对以下情况优化上下文选择：
+
+- 有限的上下文窗口
+- token 预算限制
+- 多步推理任务
+
+## 参数
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description: '用于评估上下文相关性的语言模型',
+    required: true,
+  },
+  {
+    name: 'options',
+    type: 'ContextPrecisionMetricOptions',
+    description: 'scorer 的配置选项',
+    required: true,
+    children: [
+      {
+        name: 'context',
+        type: 'string[]',
+        description: '要评估相关性的上下文片段数组',
+        required: false,
+      },
+      {
+        name: 'contextExtractor',
+        type: '(input, output) => string[]',
+        description: '从 run 输入和输出中动态提取上下文的函数',
+        required: false,
+      },
+      {
+        name: 'scale',
+        type: 'number',
+        description: '最终得分所乘的缩放系数（默认值：1）',
+        required: false,
+      },
+    ],
+  },
+]}
+/>
+
+必须提供 `context` 或 `contextExtractor`。如果两者都提供，则优先使用 `contextExtractor`。
+
+## `.run()` 返回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'score',
+    type: 'number',
+    description: '介于 0 和 scale 之间的 Mean Average Precision 得分（默认 0-1）',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description: '便于理解的上下文精确率评估说明',
+  },
+]}
+/>
+
+## 评分详情
+
+### 平均精度均值（MAP）
+
+Context Precision 使用 **Mean Average Precision** 同时评估相关性和位置：
+
+1. **上下文评估**：根据上下文片段是否有助于生成预期输出，将其分类为相关或不相关
+1. **精确率计算**：对于位置 `i` 上的每个相关上下文，precision = `relevant_items_so_far / (i + 1)`
+1. **平均精确率**：将所有 precision 值相加，再除以相关项总数
+1. **最终得分**：乘以缩放系数并四舍五入至小数点后两位
+
+### 评分公式
+
+```
+MAP = (Σ Precision@k) / R
+
+Where:
+- Precision@k = (relevant items in positions 1...k) / k
+- R = total number of relevant items
+- Only calculated at positions where relevant items appear
+```
+
+### 得分解读
+
+- **0.9-1.0**：精确率极佳——所有相关上下文都位于序列前部
+- **0.7-0.8**：精确率良好——大多数相关上下文的位置合理
+- **0.4-0.6**：精确率一般——相关与不相关上下文混杂
+- **0.1-0.3**：精确率较差——相关上下文很少或位置不佳
+- **0.0**：未找到相关上下文
+
+### 原因分析
+
+reason 字段说明：
+
+- 哪些上下文片段被判定为相关或不相关
+- 位置如何影响 MAP 计算
+- 评估中使用的具体相关性标准
+
+### 优化建议
+
+可利用结果：
+
+- **改进检索**：在排序前过滤掉不相关的上下文
+- **优化排序**：确保相关上下文优先出现
+- **调整 chunk 大小**：在上下文细节与相关性精确率之间取得平衡
+- **评估 embedding**：测试不同的 embedding 模型以改善检索效果
+
+### 计算示例
+
+context: `[relevant, irrelevant, relevant, irrelevant]`
+
+- 位置 0：相关 → Precision = 1/1 = 1.0
+- 位置 1：跳过（不相关）
+- 位置 2：相关 → Precision = 2/3 = 0.67
+- 位置 3：跳过（不相关）
+
+MAP = (1.0 + 0.67) / 2 = 0.835 ≈ **0.83**
+
+## Scorer 配置
+
+### 动态上下文提取
+
+```typescript
+const scorer = createContextPrecisionScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract context dynamically based on the query
+      const query = input?.inputMessages?.[0]?.content || ''
+
+      // Example: Retrieve from a vector database
+      const searchResults = vectorDB.search(query, { limit: 10 })
+      return searchResults.map(result => result.content)
+    },
+    scale: 1,
+  },
+})
+```
+
+### 大规模上下文评估
+
+```typescript
+const scorer = createContextPrecisionScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      // Simulate retrieved documents from vector database
+      'Document 1: Highly relevant content...',
+      'Document 2: Somewhat related content...',
+      'Document 3: Tangentially related...',
+      'Document 4: Not relevant...',
+      'Document 5: Highly relevant content...',
+      // ... up to dozens of context pieces
+    ],
+  },
+})
+```
+
+## 示例
+
+评估 RAG 系统对不同查询的上下文检索精确率：
+
+```typescript title="src/example-context-precision.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createContextPrecisionScorer } from '@mastra/evals/scorers/prebuilt'
+import { myAgent } from './agent'
+
+const scorer = createContextPrecisionScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract context from agent's retrieved documents
+      return output.metadata?.retrievedContext || []
+    },
+  },
+})
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'How does photosynthesis work in plants?',
+    },
+    {
+      input: 'What are the mental and physical benefits of exercise?',
+    },
+  ],
+  scorers: [scorer],
+  target: myAgent,
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+有关 `runEvals` 的更多详情，请参阅 [runEvals 参考文档](/reference/evals/run-evals)。
+
+要将此 scorer 添加到 Agent，请参阅 [Scorer 概览](/docs/evals/overview#adding-scorers-to-agents)指南。
+
+## 与 Context Relevance 的比较
+
+根据需要选择合适的 scorer：
+
+| 用例 | Context Relevance | Context Precision |
+| - | - | - |
+| **RAG 评估** | 关注使用情况时 | 关注排序时 |
+| **上下文质量** | 细分等级 | 二元相关性 |
+| **缺失检测** | ✓ 识别缺口 | ✗ 不评估 |
+| **使用情况跟踪** | ✓ 跟踪利用情况 | ✗ 不考虑 |
+| **位置敏感性** | ✗ 与位置无关 | ✓ 奖励靠前的位置 |
+
+## 相关内容
+
+- [Answer Relevancy Scorer](/reference/evals/answer-relevancy)：评估回答是否切中问题
+- [Faithfulness Scorer](/reference/evals/faithfulness)：衡量回答是否基于上下文
+- [Custom Scorer](/docs/evals/custom-scorers)：创建自己的评估指标

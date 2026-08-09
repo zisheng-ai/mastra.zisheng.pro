@@ -1,0 +1,598 @@
+---
+title: "Storage | v1 移行ガイド"
+description: "v1 へのアップグレード時に Storage 関連の変更を移行する方法を説明します。"
+---
+
+# Storage
+
+すべてのメソッドで一貫したページネーションと命名パターンを使用するよう、Storage API が標準化されました。
+
+## データベースの移行
+
+通常の移行プロセス（Prisma Migrate、Drizzle Kit、DBA のレビュープロセスなど）で、以下の SQL 移行を実行してください。
+
+### Scorer テーブルの列を改名
+
+`mastra_scorers` の `runtimeContext` 列が `requestContext` に改名されました。
+
+:::note[この移行が必要なケース]
+Eval/Scoring とともに `@mastra/pg` または `@mastra/libsql` を使用し、`runtimeContext` 列に既存データがある場合のみ必要です。
+:::
+
+:::important[移行しない場合の問題]
+既存の Score レコードに含まれるリクエストコンテキストデータへアクセスできなくなります。
+:::
+
+初期化時に新しい `requestContext` 列を追加する v1 をデプロイした後、データをコピーして以前の列を削除します。
+
+```sql
+UPDATE mastra_scorers SET "requestContext" = "runtimeContext" WHERE "runtimeContext" IS NOT NULL;
+ALTER TABLE mastra_scorers DROP COLUMN "runtimeContext";
+```
+
+### 重複 Span の移行
+
+以前のバージョンの Mastra からアップグレードする場合、`mastra_spans` テーブルに重複する `(traceId, spanId)` エントリが存在する可能性があります。v1 ではデータの整合性を確保するため、これらの列に一意制約を追加しますが、重複があると制約を追加できません。
+
+:::note[この移行が必要なケース]
+v1 より前の Mastra バージョンで作成された既存の Span データがあり、重複キー違反や制約作成の失敗に関するエラーが発生する場合のみ必要です。
+:::
+
+:::important[移行しない場合の問題]
+一意制約の追加時に Storage の初期化が失敗するか、「duplicate key value violates unique constraint」のようなエラーが表示される可能性があります。
+:::
+
+#### 方法 1：CLI を使用する（推奨）
+
+Span の重複を自動的に削除して制約を追加する移行コマンドを実行します。
+
+```bash
+npx mastra migrate
+```
+
+CLI はプロジェクトをバンドルし、設定済みの Storage に接続してから移行を実行します。重複を削除する際は、`endTime` と属性に基づいて最も完全なレコードを保持します。
+
+#### 方法 2：SQL を手動で実行する（PostgreSQL）
+
+移行を手動で実行する場合：
+
+```sql
+-- Remove duplicates, keeping the most complete record
+DELETE FROM mastra_spans a USING mastra_spans b
+WHERE a.ctid < b.ctid
+  AND a."traceId" = b."traceId"
+  AND a."spanId" = b."spanId";
+
+-- Add the unique constraint
+ALTER TABLE mastra_spans ADD CONSTRAINT mastra_spans_trace_span_unique UNIQUE ("traceId", "spanId");
+```
+
+#### 方法 3：手動で移行する（その他のデータベース）
+
+ClickHouse、LibSQL、MongoDB、MSSQL では、プログラム API を使用します。
+
+```typescript
+const storage = mastra.getStorage()
+const observabilityStore = await storage.getStore('observability')
+
+// Check if migration is needed
+const status = await observabilityStore?.checkSpansMigrationStatus()
+console.log(status)
+
+// Run the migration
+const result = await observabilityStore?.migrateSpans()
+console.log(result)
+```
+
+### JSON 列（TEXT → JSONB）
+
+**PostgreSQL のみ。** `mastra_threads` の `metadata` 列と `mastra_workflow_snapshot` の `snapshot` 列が、TEXT から JSONB に変更されました。
+
+:::note[推奨]
+JSONB へ移行すると、PostgreSQL ネイティブの JSON Operator と GIN Index を使用でき、JSON フィールドのクエリパフォーマンスが向上します。
+:::
+
+```sql
+ALTER TABLE mastra_threads
+ALTER COLUMN metadata TYPE jsonb
+USING metadata::jsonb;
+
+ALTER TABLE mastra_workflow_snapshot
+ALTER COLUMN snapshot TYPE jsonb
+USING snapshot::jsonb;
+```
+
+## 追加
+
+### `MastraCompositeStore` で Storage を構成
+
+`MastraCompositeStore` は、異なる Adapter の Storage Domain を組み合わせられるようになりました。目的ごとに別のデータベースが必要な場合に使用します。たとえば、Memory と Workflow には PostgreSQL、Observability には専用データベースを使用できます。
+
+```typescript
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { MemoryPG, WorkflowsPG, ScoresPG } from '@mastra/pg'
+import { MemoryLibSQL } from '@mastra/libsql'
+import { Mastra } from '@mastra/core'
+
+// Compose domains from different stores
+const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite',
+    domains: {
+      memory: new MemoryLibSQL({ url: 'file:./local.db' }),
+      workflows: new WorkflowsPG({ connectionString: process.env.DATABASE_URL }),
+      scores: new ScoresPG({ connectionString: process.env.DATABASE_URL }),
+    },
+  }),
+})
+```
+
+詳しくは、[Storage Composition リファレンス](/reference/storage/composite)を参照してください。
+
+## 変更
+
+### `MastraStorage` を `MastraCompositeStore` へ改名
+
+`MastraStorage` クラスは、異なる Domain を基盤となる別々の Store へ振り分ける Composite Storage 実装としての役割を明確にするため、`MastraCompositeStore` に改名されました。これにより、一般的な「Mastra Storage」の概念（Mastra インスタンスの `storage` プロパティ）との混同を避けられます。
+
+以前の `MastraStorage` という名前も、後方互換性のため非推奨の Alias として利用できますが、今後のバージョンで削除されます。
+
+移行するには、import とインスタンス化を更新します。
+
+```diff
+- import { MastraStorage } from "@mastra/core/storage";
++ import { MastraCompositeStore } from "@mastra/core/storage";
+  import { MemoryLibSQL } from "@mastra/libsql";
+  import { WorkflowsPG } from "@mastra/pg";
+
+  export const mastra = new Mastra({
+-   storage: new MastraStorage({
++   storage: new MastraCompositeStore({
+      id: "composite",
+      domains: {
+        memory: new MemoryLibSQL({ url: "file:./memory.db" }),
+        workflows: new WorkflowsPG({ connectionString: process.env.DATABASE_URL }),
+      },
+    }),
+  });
+```
+
+:::note
+単一の Store 実装（`PostgresStore` や `LibSQLStore` など）を直接使用している場合は、既存の設定を維持してください。この変更は、Composite Storage のために `MastraStorage` を明示的に使用しているコードにのみ影響します。
+:::
+
+### Storage インスタンスで `id` プロパティが必須に
+
+Storage インスタンスでは `id` プロパティが必須になりました。この一意な識別子は、Mastra 内で Storage インスタンスを追跡、管理するために使用されます。`id` には、アプリケーション内の Storage インスタンスごとに、内容を表す一意な文字列を指定してください。
+
+移行するには、Storage のコンストラクターに `id` フィールドを追加します。
+
+```diff
+  const storage = new PostgresStore({
++   id: 'main-postgres-store',
+    connectionString: process.env.POSTGRES_CONNECTION_STRING,
+    schemaName: 'public',
+  });
+
+  const upstashStore = new UpstashStore({
++   id: 'upstash-cache-store',
+    url: process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN,
+  });
+```
+
+### ページネーションを `offset/limit` から `page/perPage` へ変更
+
+すべてのページネーション API は、Web のページベースのページネーションに合わせて、`offset` と `limit` の代わりに `page` と `perPage` を使用するようになりました。
+
+移行するには、すべてのページネーションパラメーターを `offset/limit` から `page/perPage` に更新します。`page` は 0 始まりです。
+
+```diff
+  memoryStore.listMessages({
+    threadId: 'thread-123',
+-   offset: 0,
+-   limit: 20,
++   page: 0,
++   perPage: 20,
+  });
+```
+
+### `getMessagesPaginated` から `listMessages` へ
+
+`getMessagesPaginated()` メソッドは `listMessages()` に置き換えられました。新しいメソッドでは `perPage: false` を指定し、ページネーションなしですべてのレコードを取得できます。この変更により `list*` の命名規則と一致し、全レコードの取得にも柔軟に対応できます。
+
+移行するには、メソッドを改名し、ページネーションパラメーターを更新します。すべてのレコードを取得するには、`perPage: false` を使用できます。
+
+```diff
++ const memoryStore = await storage.getStore('memory');
++
+  // Paginated
+- const result = await storage.getMessagesPaginated({
++ const result = await memoryStore?.listMessages({
+    threadId: 'thread-123',
+-   offset: 0,
+-   limit: 20,
++   page: 0,
++   perPage: 20,
+  });
+
+  // Fetch all records (no pagination limit)
++ const allMessages = await memoryStore?.listMessages({
++   threadId: 'thread-123',
++   page: 0,
++   perPage: false,
++ });
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/storage-get-messages-paginated .
+```
+
+:::
+
+### `getStore()` による Domain 固有の Storage アクセス
+
+Storage 操作は、Storage インスタンスから直接呼び出すのではなく、Domain 固有の Store 経由でアクセスするようになりました。
+
+Domain には以下があります。
+
+- **`memory`** - Thread、Message、Resource
+- **`workflows`** - Workflow Snapshot
+- **`scores`** - 評価 Score
+- **`observability`** - Trace と Span
+- **`agents`** - 保存された Agent データ
+
+移行するには、Domain 名を指定して `getStore()` を呼び出し、返された Store のメソッドを呼び出します。
+
+```diff
+  const storage = mastra.getStorage();
+
+  // Memory operations (threads, messages, resources)
+- const thread = await storage.getThread({ threadId: '123' });
+- await storage.saveThread({ thread });
++ const memoryStore = await storage.getStore('memory');
++ const thread = await memoryStore?.getThreadById({ threadId: '123' });
++ await memoryStore?.saveThread({ thread });
+
+  // Workflow operations (snapshots)
+- const snapshot = await storage.loadWorkflowSnapshot({ runId, workflowName });
+- await storage.persistWorkflowSnapshot({ runId, workflowName, snapshot });
++ const workflowStore = await storage.getStore('workflows');
++ const snapshot = await workflowStore?.loadWorkflowSnapshot({ runId, workflowName });
++ await workflowStore?.persistWorkflowSnapshot({ runId, workflowName, snapshot });
+
+  // Observability operations (traces, spans)
+- const traces = await storage.listTraces({ page: 0, perPage: 20 });
++ const observabilityStore = await storage.getStore('observability');
++ const traces = await observabilityStore?.listTraces({ page: 0, perPage: 20 });
+
+  // Score operations (evaluations)
+- const scores = await storage.listScoresByScorerId({ scorerId: 'helpfulness' });
++ const scoresStore = await storage.getStore('scores');
++ const scores = await scoresStore?.listScoresByScorerId({ scorerId: 'helpfulness' });
+```
+
+### `getThreadsByResourceId` から `listThreads` へ
+
+`getThreadsByResourceId()` メソッドは `listThreads()` に置き換えられました。新しいメソッドはページネーションに対応し、`resourceId`、`metadata`、またはその両方でフィルタリングできます。
+
+:::important
+
+以前の `getThreadsByResourceId()` は、ページネーションなしですべての一致する Thread を返していました。新しい `listThreads()` ではページネーションパラメーターが必須です。すべての Thread を取得する以前の動作を維持するには、`perPage: false` を使用してください。
+
+:::
+
+移行するには、Memory Store と新しい `listThreads()` メソッドを、ページネーションおよび任意の Filter オブジェクトとともに使用します。
+
+```diff
+- const threads = await storage.getThreadsByResourceId({
+-   resourceId: 'res-123',
+- });
++ const memoryStore = await storage.getStore('memory');
++
++ // Paginated (recommended for large datasets)
++ const result = await memoryStore?.listThreads({
++   filter: { resourceId: 'res-123' },
++   page: 0,
++   perPage: 20,
++ });
++ const threads = result?.threads;
++
++ // Or fetch all threads like before (use perPage: false)
++ const allResult = await memoryStore?.listThreads({
++   filter: { resourceId: 'res-123' },
++   perPage: false,
++ });
++ const allThreads = allResult?.threads;
+```
+
+新しいメソッドは、以下にも対応します。
+
+- すべての Thread を一覧表示（Filter を省略）
+- Metadata のみでフィルタリング
+- resourceId と Metadata を組み合わせた Filter
+
+```typescript
+// List all threads
+await memoryStore?.listThreads({ page: 0, perPage: 20 })
+
+// Filter by metadata only
+await memoryStore?.listThreads({
+  filter: { metadata: { status: 'active' } },
+  page: 0,
+  perPage: 20,
+})
+
+// Combined filter
+await memoryStore?.listThreads({
+  filter: {
+    resourceId: 'user-123',
+    metadata: { category: 'support' },
+  },
+  page: 0,
+  perPage: 20,
+})
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/storage-list-threads-by-resource-to-list-threads .
+```
+
+:::
+
+### `getWorkflowRuns` から `listWorkflowRuns` へ
+
+`getWorkflowRuns()` メソッドは `listWorkflowRuns()` に改名されました。この変更は、コレクションを返すメソッドに `list*` を使用する規則に合わせたものです。
+
+移行するには、Workflow Store を使用し、メソッド名とページネーションパラメーターを更新します。
+
+```diff
+- const runs = await storage.getWorkflowRuns({
++ const workflowStore = await storage.getStore('workflows');
++ const runs = await workflowStore?.listWorkflowRuns({
+    fromDate,
+    toDate,
++   page: 0,
++   perPage: 20,
+  });
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/storage-list-workflow-runs .
+```
+
+:::
+
+### `getMessagesById` から `listMessagesById` へ
+
+`getMessagesById()` メソッドは `listMessagesById()` に改名されました。この変更は、コレクションを返すメソッドに `list*` を使用する規則に合わせたものです。
+
+移行するには、Memory Store を使用し、メソッド呼び出しを改名します。
+
+```diff
++ const memoryStore = await storage.getStore('memory');
+- const result = await storage.getMessagesById({
++ const result = await memoryStore?.listMessagesById({
+    messageIds: ['msg-1', 'msg-2'],
+  });
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/storage-list-messages-by-id .
+```
+
+:::
+
+### Storage の `getMessages` と `saveMessages` のシグネチャ
+
+`getMessages()` メソッドと `saveMessages()` メソッドのシグネチャと戻り値の型が変更されました。形式ごとの Overload が削除され、常に `MastraDBMessage` を扱うようになりました。この変更では、形式の違いをなくして API を簡素化しています。
+
+移行するには、Memory Store を使用し、Format パラメーターを削除して、一貫した戻り値の型を扱うようコードを更新します。
+
+```diff
++ const memoryStore = await storage.getStore('memory');
++
+  // Always returns { messages: MastraDBMessage[] }
+- const v1Messages = await storage.getMessages({ threadId, format: 'v1' });
+- const v2Messages = await storage.getMessages({ threadId, format: 'v2' });
++ const result = await memoryStore?.getMessages({ threadId });
++ const messages = result?.messages; // MastraDBMessage[]
+
+  // SaveMessages always uses MastraDBMessage
+- await storage.saveMessages({ messages: v1Messages, format: 'v1' });
+- await storage.saveMessages({ messages: v2Messages, format: 'v2' });
++ const saveResult = await memoryStore?.saveMessages({ messages: mastraDBMessages });
++ const saved = saveResult?.messages; // MastraDBMessage[]
+```
+
+### Vector Store API を位置引数から名前付き引数へ変更
+
+すべての Vector Store メソッドは、位置引数ではなく引数オブジェクトを使用するようになりました。これにより、呼び出し箇所で各値の目的が分かり、引数の順序に依存せずにメソッドシグネチャを拡張できます。
+
+移行するには、すべての Vector Store メソッド呼び出しを、引数オブジェクトを使用するよう更新します。
+
+```diff
+- await vectorDB.createIndex(indexName, 3, 'cosine');
++ await vectorDB.createIndex({
++   indexName: indexName,
++   dimension: 3,
++   metric: 'cosine',
++ });
+
+- await vectorDB.upsert(indexName, [[1, 2, 3]], [{ test: 'data' }]);
++ await vectorDB.upsert({
++   indexName: indexName,
++   vectors: [[1, 2, 3]],
++   metadata: [{ test: 'data' }],
++ });
+
+- await vectorDB.query(indexName, [1, 2, 3], 5);
++ await vectorDB.query({
++   indexName: indexName,
++   queryVector: [1, 2, 3],
++   topK: 5,
++ });
+```
+
+### Vector Store メソッドの改名
+
+`updateIndexById` メソッドと `deleteIndexById` メソッドは、それぞれ `updateVector` と `deleteVector` に改名されました。新しい名前は、これらのメソッドが Vector を操作することを明確にします。
+
+移行するには、メソッドを改名し、引数オブジェクトを渡します。
+
+```diff
+- await vectorDB.updateIndexById(indexName, id, update);
+- await vectorDB.deleteIndexById(indexName, id);
++ await vectorDB.updateVector({ indexName, id, update });
++ await vectorDB.deleteVector({ indexName, id });
+```
+
+### PGVector コンストラクターを接続文字列からオブジェクトへ変更
+
+PGVector コンストラクターは、接続文字列ではなくオブジェクトパラメーターを必須とするようになりました。この変更により、すべての Storage Adapter で API の一貫性が高まります。
+
+移行するには、接続文字列をオブジェクトのプロパティとして渡します。
+
+```diff
+- const pgVector = new PgVector(process.env.POSTGRES_CONNECTION_STRING!);
++ const pgVector = new PgVector({
++   connectionString: process.env.POSTGRES_CONNECTION_STRING,
++ });
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/vector-pg-constructor .
+```
+
+:::
+
+### PGVector の `defineIndex` から `buildIndex` へ
+
+`defineIndex()` メソッドは、Index を構築することが分かる `buildIndex()` に置き換えられ、削除されました。
+
+移行するには、メソッドを改名し、引数オブジェクトを渡します。
+
+```diff
+- await vectorDB.defineIndex(indexName, 'cosine', { type: 'flat' });
++ await vectorDB.buildIndex({
++   indexName: indexName,
++   metric: 'cosine',
++   indexConfig: { type: 'flat' },
++ });
+```
+
+### `PostgresStore`：`schema` から `schemaName` へ
+
+PostgresStore コンストラクターの `schema` パラメーターは `schemaName` に改名されました。新しい名前は、この値がデータベーススキーマの名前であることを明確にします。
+
+移行するには、パラメーターを改名します。
+
+```diff
+  const pgStore = new PostgresStore({
+    connectionString: process.env.POSTGRES_CONNECTION_STRING,
+-   schema: customSchema,
++   schemaName: customSchema,
+  });
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、コードを自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/storage-postgres-schema-name .
+```
+
+:::
+
+### Score の Storage メソッドを `listScoresBy*` パターンへ変更
+
+Score の Storage API は、`listScoresBy*` パターンに従うよう改名されました。この変更により、API 全体の命名規則との一貫性が高まります。
+
+移行するには、メソッド名を `getScores` から `listScoresByScorerId` および関連する形式へ更新します。
+
+```diff
+- const scores = await storage.getScores({ scorerName: 'helpfulness-scorer' });
++ const scores = await storage.listScoresByScorerId({
++   scorerId: 'helpfulness-scorer',
++ });
++ // Also available: listScoresByRunId, listScoresByEntityId, listScoresBySpan
+```
+
+## 削除
+
+### ページネーションなしの Storage 関数
+
+ページネーションなしの Storage 関数は、ページネーション付きの形式を優先して削除されました。すべての List 操作でページネーションを使用しますが、`perPage: false` を指定すると全レコードを取得できます。この変更により API の一貫性が高まり、大規模な Dataset を誤って読み込むのを防げます。
+
+移行するには、Domain Store 経由でページネーション付きメソッドを使用します。すべてのレコードを取得するには、`perPage: false` を使用します。
+
+```diff
+- // Non-paginated direct access
+- const messages = await storage.getMessages({ threadId });
+
++ // Use paginated methods via domain stores
++ const memoryStore = await storage.getStore('memory');
++ const result = await memoryStore?.listMessages({ threadId, page: 0, perPage: 20 });
++ // Or fetch all
++ const allMessages = await memoryStore?.listMessages({
++   threadId,
++   page: 0,
++   perPage: false,
++ });
+```
+
+### `getTraces` と `getTracesPaginated`
+
+`getTraces()` メソッドと `getTracesPaginated()` メソッドが Storage から削除されました。Core Storage ではなく Observability パッケージを使用して Trace へアクセスしてください。
+
+移行するには、Observability の Storage メソッドを使用します。
+
+```diff
+- const traces = await storage.getTraces({ traceId: 'trace-123' });
+- const paginated = await storage.getTracesPaginated({ page: 0, perPage: 20 });
+
++ // Use observability API for traces
++ import { initObservability } from '@mastra/observability';
++ const observability = initObservability({ config: { ... } });
++ // Access traces through observability API
+```
+
+### Eval のテストユーティリティ
+
+Eval Domain のテストユーティリティが `@internal/test-utils` から削除されました。この変更は、レガシー Eval 機能の削除に伴うものです。
+
+移行するには、専用の Eval テストユーティリティではなく、Storage API を直接使用してテストします。
+
+```diff
+- import { createEvalsTests } from '@internal/test-utils/domains/evals';
+- createEvalsTests({ storage });
+
++ // Use storage APIs directly for testing
+```
+
+### MSSQL Storage の TABLE\_EVALS
+
+`TABLE_EVALS` テーブルが MSSQL Storage 実装から削除されました。この変更は、レガシー Eval 機能の削除に伴うものです。
+
+MSSQL Storage と Eval を使用していた場合は、別の Storage Adapter へ移行するか、Eval 機能を削除してください。

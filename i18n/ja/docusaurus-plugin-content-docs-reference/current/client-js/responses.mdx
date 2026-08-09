@@ -1,0 +1,276 @@
+---
+title: "リファレンス：OpenAI Responses API | Client SDK"
+description: Mastra の OpenAI 互換 `/v1/responses` ルートを呼び出す client-js ヘルパーの API リファレンスです。
+packages:
+  - "@mastra/client-js"
+---
+
+# OpenAI Responses API
+
+この OpenAI 互換の Agent ベースインターフェースにより、Mastra Agent を Responses API として使用できます。Mastra Agent を通じてレスポンスを作成、取得、ストリーミング、削除するためのメソッドを提供します。
+
+これらのルートは、Mastra Agent、メモリ、ストレージを利用する Agent ベースのアダプターです。リクエストを処理する Mastra Agent は `agent_id` で選択します。1 回のリクエストに限って Agent に設定されたモデルを上書きするには `model` を渡します。省略すると、Agent に設定済みのモデルが使用されます。
+
+保存されたレスポンスは `conversation_id` も返します。Mastra では、これは未加工のメモリ `threadId` です。
+
+この API は現在、実験的機能です。
+
+## 使用例
+
+```typescript
+import { MastraClient } from '@mastra/client-js'
+
+const client = new MastraClient({
+  baseUrl: 'http://localhost:4111',
+})
+
+const response = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Summarize this ticket',
+  store: true,
+})
+
+console.log(response.output_text)
+```
+
+## メソッド
+
+### ライフサイクル
+
+#### `create(params)`
+
+レスポンスを作成します。
+
+```typescript
+const response = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Summarize this ticket',
+})
+```
+
+**戻り値：** `stream` が省略されているか `false` の場合は `Promise<ResponsesResponse>`。
+
+`stream: true` の場合、`create()` は SSE スタイルのイベントペイロードを生成する非同期 iterable を返します。
+
+```typescript
+const stream = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Summarize this ticket',
+  stream: true,
+})
+
+for await (const event of stream) {
+  if (event.type === 'response.output_text.delta') {
+    process.stdout.write(event.delta)
+  }
+}
+```
+
+ストリーミングレスポンスには Tool イベントが含まれる場合もあります。Tool 呼び出しのストリームでは、`response.output_item.added`、`response.function_call_arguments.delta`、`response.function_call_arguments.done`、`response.output_item.done` イベントが使用されます。Tool の結果は、`<toolCallId>:output` 形式の ID を持つ `function_call_output` アイテムとして現れます。
+
+**戻り値：** `Promise<ResponsesStream>`。
+
+#### `retrieve(responseId, requestContext?)`
+
+保存済みのレスポンスを取得します。
+
+```typescript
+const response = await client.responses.retrieve('msg_123')
+```
+
+**戻り値：** `Promise<ResponsesResponse>`。
+
+#### `delete(responseId, requestContext?)`
+
+保存済みのレスポンスを削除します。
+
+```typescript
+const deleted = await client.responses.delete('msg_123')
+```
+
+**戻り値：** `Promise<{ id: string; object: "response"; deleted: true }>`
+
+#### `stream(params)`
+
+ストリーミングレスポンスを作成します。
+
+```typescript
+const stream = await client.responses.stream({
+  agent_id: 'support-agent',
+  input: 'Say hello',
+})
+
+for await (const event of stream) {
+  console.log(event.type)
+}
+```
+
+**戻り値：** `Promise<ResponsesStream>`。
+
+## 保存済みレスポンスと会話
+
+保存済みのレスポンスには、`response.id` と `conversation_id` の両方が含まれます。
+
+- `response.id` はレスポンス ID です。保存済みの Agent ベースレスポンスでは、永続化された assistant メッセージの ID です。
+- `conversation_id` は未加工の Mastra スレッド ID です。
+
+保存済みの以前のレスポンスから処理を続ける場合は `previous_response_id` を使用します。既知のスレッドを直接指定する場合は `conversation_id` を使用します。
+
+```typescript
+const first = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Start a support thread',
+  store: true,
+})
+
+const second = await client.responses.create({
+  agent_id: 'support-agent',
+  conversation_id: first.conversation_id!,
+  input: 'Add a follow-up to the same thread',
+  store: true,
+})
+```
+
+基盤となる OpenAI Responses API の会話を直接作成、取得、削除、確認する場合は、[`client.conversations`](/reference/client-js/conversations) を使用します。
+
+## 関数呼び出し（Tool）
+
+`response.tools` には、リクエストで利用できる設定済みの関数定義が含まれます。
+
+モデルが関数を呼び出すと、その処理は最終的な assistant `message` とともに、`function_call` および `function_call_output` アイテムとして `response.output` に含まれます。
+
+`stream: true` の場合、関数呼び出しも Responses のストリームイベントとして送出されます。引数の部分的なチャンクは `response.function_call_arguments.delta` イベントから読み取ります。確定した引数のペイロードと Tool 名には `response.function_call_arguments.done` を使用することを推奨します。完了した `function_call` および `function_call_output` アイテムは、`response.output_item.done` イベントから読み取ります。Tool の出力アイテムでは、`<toolCallId>:output` 形式の ID が使用されます。
+
+## 構造化出力
+
+JSON 出力が必要な場合は `text.format` を使用します。
+
+- `json_object` は JSON モードを有効にします。
+- `json_schema` はスキーマ制約付きの構造化出力を有効にします。
+
+どちらの形式でも、assistant メッセージの内容として JSON が返されます。厳密なスキーマ適用が必要な場合は `json_schema` を使用します。有効な JSON 出力だけが必要な場合は `json_object` を使用します。
+
+```typescript
+const response = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Return a structured support ticket summary.',
+  text: {
+    format: {
+      type: 'json_schema',
+      name: 'ticket_summary',
+      schema: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          priority: { type: 'string' },
+        },
+        required: ['summary', 'priority'],
+        additionalProperties: false,
+      },
+    },
+  },
+})
+```
+
+## Provider を利用するリクエスト
+
+Responses レイヤーで Mastra が正規化しない Provider 固有のオプションが必要な場合は、`providerOptions` を使用します。
+
+```typescript
+const response = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Continue this exchange',
+  providerOptions: {
+    openai: {
+      previousResponseId: 'resp_123',
+    },
+  },
+})
+```
+
+## レスポンスの構造
+
+返されるレスポンスオブジェクトには以下が含まれます。
+
+- `id`：レスポンス ID
+- `output`：assistant の `message`、`function_call`、`function_call_output` などの出力アイテム
+- `output_text`：assistant のテキスト出力を結合するための簡易ゲッター
+- `tools`：リクエスト用に設定された Tool 定義
+- `conversation_id`：保存済みレスポンスの未加工のスレッド ID
+- `text`：指定された場合の、要求したテキスト出力形式
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent_id',
+    type: 'string',
+    description:
+      '最初のリクエストでは必須です。リクエストを実行する Mastra Agent を選択します。保存済みの後続ターンでは、`previous_response_id` を使用して続行する場合に省略できます。',
+    isOptional: true,
+  },
+  {
+    name: 'model',
+    type: 'string',
+    description:
+      'このリクエストにのみ適用するモデルの上書き指定（`openai/gpt-5` など）。省略すると、Mastra は選択した Agent に設定されたモデルを使用します。',
+    isOptional: true,
+  },
+  {
+    name: 'input',
+    type: "string | Array<{ role: 'system' | 'developer' | 'user' | 'assistant'; content: string | Array<{ type: 'input_text' | 'text' | 'output_text'; text: string }> }>",
+    description: '必須。レスポンスに使用する入力テキストまたはメッセージ配列。',
+    isOptional: false,
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description: 'このリクエストにのみ適用する命令の上書き指定。',
+    isOptional: true,
+  },
+  {
+    name: 'text',
+    type: "{ format: { type: 'json_object' } | { type: 'json_schema'; name: string; schema: Record<string, unknown>; description?: string; strict?: boolean } }",
+    description:
+      'オプションのテキスト出力形式。JSON モードには `json_object`、スキーマ制約付きの構造化出力には `json_schema` を使用します。',
+    isOptional: true,
+  },
+  {
+    name: 'providerOptions',
+    type: 'Record<string, Record<string, unknown> | undefined>',
+    description: '基盤となるモデル呼び出しに渡す、オプションの Provider 固有設定。',
+    isOptional: true,
+  },
+  {
+    name: 'stream',
+    type: 'boolean',
+    description: 'true の場合、Responses API イベントの非同期 iterable を返します。',
+    isOptional: true,
+  },
+  {
+    name: 'store',
+    type: 'boolean',
+    description: 'true の場合、選択した Agent のメモリを通じてレスポンスを永続化します。',
+    isOptional: true,
+  },
+  {
+    name: 'conversation_id',
+    type: 'string',
+    description: 'オプションの会話識別子。Mastra では、未加工のメモリスレッド ID です。',
+    isOptional: true,
+  },
+  {
+    name: 'previous_response_id',
+    type: 'string',
+    description: '保存済みの以前のレスポンスから、保存済みレスポンスの連鎖を続行します。',
+    isOptional: true,
+  },
+  {
+    name: 'requestContext',
+    type: 'RequestContext | Record<string, any>',
+    description: 'Mastra サーバーに転送するオプションのリクエストコンテキスト。',
+    isOptional: true,
+  },
+]}
+/>

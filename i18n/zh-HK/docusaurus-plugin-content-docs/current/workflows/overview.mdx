@@ -1,0 +1,575 @@
+---
+title: "Workflow 概覽"
+description: "Mastra Workflow 透過分支、平行執行、資源暫停等功能，協助你協調複雜的任務序列。"
+packages:
+  - "@mastra/core"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Workflow 概覽
+
+Workflow 讓你使用清晰而結構化的步驟定義複雜任務序列，毋須依賴單一 Agent 的 reasoning。你可以完全控制如何拆分任務、資料如何在任務之間流動，以及在何時執行哪些內容。Workflow 預設使用內置 execution engine 運行，亦可部署至 Inngest 等 [Workflow runner](/docs/deployment/workflow-runners)，使用 managed infrastructure。
+
+<Inject>
+  **給 AI Agent：** 直接運行 `npx mastra api workflow run start test-workflow '{"inputData":{"message":"Hello, world!"}}'` 啟動此 Workflow，毋須撰寫臨時 script。此命令需要正在運行的 Mastra 伺服器；請使用 `npx mastra dev` 啟動本機伺服器，或透過 `--url` 傳入可連接伺服器的 base URL。建構不同 input 前，請運行 `npx mastra api workflow run start --schema`。使用 `npx skills add mastra-ai/skills --skill mastra` 安裝 Mastra Skill，以取得完整的 API CLI 探索、目標設定、schema、身份驗證及錯誤處理指引。
+</Inject>
+
+## 何時使用 Workflow
+
+對於預先明確定義、涉及多個步驟並具有特定執行次序的任務，請使用 Workflow。你可以精細控制資料如何在步驟之間流動及轉換，以及每個階段呼叫哪些 primitive。
+
+## 核心原則
+
+Mastra Workflow 按以下原則運作：
+
+- 使用 [`createStep`](/reference/workflows/step) 定義**步驟**，指定 input/output schema 和 business logic。
+- 使用 [`createWorkflow`](/reference/workflows/workflow) 組合**步驟**，定義 execution flow。
+- 運行 **Workflow** 以執行整個序列，並內置支援暫停、恢復及串流結果。
+
+## 建立 Workflow 步驟
+
+步驟是 Workflow 的組成部分。使用 `createStep()` 建立步驟，並以 `inputSchema` 和 `outputSchema` 定義接受及傳回的資料。兩個 schema 都可使用 [Standard JSON Schema](https://standardschema.dev/json-schema)（[Zod](https://zod.dev/)、[Valibot](https://valibot.dev/)、[ArkType](https://arktype.io/) 等）定義。
+
+`execute` function 定義步驟執行的操作。使用它呼叫程式碼庫中的 function、外部 API、Agent 或 Tool。
+
+<Tabs>
+  <TabItem value="zod" label="Zod">
+    ```typescript {7,10,16} title="src/mastra/workflows/test-workflow.ts"
+    import { createStep } from '@mastra/core/workflows'
+    import { z } from 'zod'
+
+    const step1 = createStep({
+      id: 'step-1',
+      inputSchema: z.object({
+        message: z.string(),
+      }),
+      outputSchema: z.object({
+        formatted: z.string(),
+      }),
+      execute: async ({ inputData }) => {
+        const { message } = inputData
+
+        return {
+          formatted: message.toUpperCase(),
+        }
+      },
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="valibot" label="Valibot">
+    ```typescript {9,14,21} title="src/mastra/workflows/test-workflow.ts"
+    import { createStep } from '@mastra/core/workflows'
+    import * as v from 'valibot'
+    import { toStandardJsonSchema } from '@valibot/to-json-schema'
+
+    const step1 = createStep({
+      id: 'step-1',
+      inputSchema: toStandardJsonSchema(
+        v.object({
+          message: v.string(),
+        }),
+      ),
+      outputSchema: toStandardJsonSchema(
+        v.object({
+          formatted: v.string(),
+        }),
+      ),
+      execute: async ({ inputData }) => {
+        const { message } = inputData
+
+        return {
+          formatted: message.toUpperCase(),
+        }
+      },
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="arktype" label="ArkType">
+    ```typescript {7,10,16} title="src/mastra/workflows/test-workflow.ts"
+    import { createStep } from '@mastra/core/workflows'
+    import { type } from 'arktype'
+
+    const step1 = createStep({
+      id: 'step-1',
+      inputSchema: type({
+        message: 'string',
+      }),
+      outputSchema: type({
+        formatted: 'string',
+      }),
+      execute: async ({ inputData }) => {
+        const { message } = inputData
+
+        return {
+          formatted: message.toUpperCase(),
+        }
+      },
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+完整設定選項清單請參閱 [`Step`](/reference/workflows/step)。
+
+### 使用 Agent 和 Tool
+
+Workflow 步驟亦可呼叫已註冊 Agent，或直接 import 並執行 Tool。詳情請參閱[使用 Tool](/docs/agents/using-tools) 頁面。
+
+## 建立 Workflow
+
+使用 `createWorkflow()` 建立 Workflow，並以 `inputSchema` 和 `outputSchema` 定義接受及傳回的資料。兩個 schema 都可使用 [Standard JSON Schema](https://standardschema.dev/json-schema)（[Zod](https://zod.dev/)、[Valibot](https://valibot.dev/)、[ArkType](https://arktype.io/) 等）定義。使用 `.then()` 加入步驟，並以 `.commit()` 完成 Workflow。
+
+<Tabs>
+  <TabItem value="zod" label="Zod">
+    ```typescript {9,12,15,16} title="src/mastra/workflows/test-workflow.ts" prettier:false
+    import { createWorkflow, createStep } from "@mastra/core/workflows";
+    import { z } from "zod";
+
+    const step1 = createStep({...});
+
+    export const testWorkflow = createWorkflow({
+      id: "test-workflow",
+      inputSchema: z.object({
+        message: z.string()
+      }),
+      outputSchema: z.object({
+        output: z.string()
+      })
+    })
+      .then(step1)
+      .commit();
+    ```
+  </TabItem>
+
+  <TabItem value="valibot" label="Valibot">
+    ```typescript {10,13,16,17} title="src/mastra/workflows/test-workflow.ts" prettier:false
+    import { createWorkflow, createStep } from "@mastra/core/workflows";
+    import * as v from "valibot";
+    import { toStandardJsonSchema } from "@valibot/to-json-schema";
+
+    const step1 = createStep({...});
+
+    export const testWorkflow = createWorkflow({
+      id: "test-workflow",
+      inputSchema: toStandardJsonSchema(v.object({
+        message: v.string()
+      })),
+      outputSchema: toStandardJsonSchema(v.object({
+        output: v.string()
+      }))
+    })
+      .then(step1)
+      .commit();
+    ```
+  </TabItem>
+
+  <TabItem value="arktype" label="ArkType">
+    ```typescript {9,12,15,16} title="src/mastra/workflows/test-workflow.ts" prettier:false
+    import { createWorkflow, createStep } from "@mastra/core/workflows";
+    import { type } from "arktype";
+
+    const step1 = createStep({...});
+
+    export const testWorkflow = createWorkflow({
+      id: "test-workflow",
+      inputSchema: type({
+        message: "string"
+      }),
+      outputSchema: type({
+        output: "string"
+      })
+    })
+      .then(step1)
+      .commit();
+    ```
+  </TabItem>
+</Tabs>
+
+完整設定選項清單請參閱 [Workflow Class](/reference/workflows/workflow)。
+
+### 了解 Control Flow
+
+Workflow 可以使用多種不同 method 組合。你選擇的 method 會決定每個步驟 schema 的結構。詳情請參閱 [Control Flow](/docs/workflows/control-flow) 頁面。
+
+## Studio
+
+開啟 [Studio](/docs/studio/overview)，然後從 **Workflows** 分頁選擇 Workflow。
+
+- **Graph 檢視**：中央 panel 會顯示 Workflow 的步驟及 execution flow。
+- **Input 表格**：右側 sidebar 會從 Workflow 的 `inputSchema` 產生表格。填寫後開始 run。
+- **即時狀態**：執行期間，graph 會即時更新每個步驟的狀態。Sidebar 會顯示 Workflow 的 input、output、state 和 log。
+- [**Time travel**](/docs/workflows/time-travel)：Run 完成後，重新執行個別步驟以檢查或 retry。
+
+## Workflow state
+
+Workflow state 讓你在步驟之間共享值，毋須透過每個步驟的 inputSchema 和 outputSchema 傳遞。使用 state 追蹤進度、累積結果，或在整個 Workflow 中共享設定。
+
+```typescript title="src/mastra/workflows/test-workflow.ts"
+const step1 = createStep({
+  id: 'step-1',
+  inputSchema: z.object({ message: z.string() }),
+  outputSchema: z.object({ formatted: z.string() }),
+  stateSchema: z.object({ counter: z.number() }),
+  execute: async ({ inputData, state, setState }) => {
+    // Read from state
+    console.log(state.counter)
+
+    // Update state for subsequent steps
+    setState({ ...state, counter: state.counter + 1 })
+
+    return { formatted: inputData.message.toUpperCase() }
+  },
+})
+```
+
+State schema、initial state、跨暫停及恢復保留和巢狀 Workflow 的完整文件，請參閱 [Workflow State](/docs/workflows/workflow-state)。
+
+## 將 Workflow 用作步驟
+
+將 Workflow 用作步驟，以在較大的組合中重用其邏輯。Input 和 output 遵循[核心原則](/docs/workflows/control-flow)所述的相同 schema 規則。
+
+```typescript {26} title="src/mastra/workflows/test-workflow.ts" prettier:false
+const step1 = createStep({...});
+const step2 = createStep({...});
+
+const childWorkflow = createWorkflow({
+  id: "child-workflow",
+  inputSchema: z.object({
+    message: z.string()
+  }),
+  outputSchema: z.object({
+    emphasized: z.string()
+  })
+})
+  .then(step1)
+  .then(step2)
+  .commit();
+
+export const testWorkflow = createWorkflow({
+  id: "test-workflow",
+  inputSchema: z.object({
+    message: z.string()
+  }),
+  outputSchema: z.object({
+    emphasized: z.string()
+  })
+})
+  .then(childWorkflow)
+  .commit();
+```
+
+### Clone Workflow
+
+當你希望重用 Workflow 邏輯，但以新 ID 分開追蹤時，請使用 `cloneWorkflow()` clone Workflow。每個 clone 都會獨立運行，並在 log 和 observability Tool 中顯示為獨立 Workflow。
+
+```typescript prettier:false {6} title="src/mastra/workflows/test-workflow.ts"
+import { cloneWorkflow } from "@mastra/core/workflows";
+
+const step1 = createStep({...});
+
+const parentWorkflow = createWorkflow({...})
+const clonedWorkflow = cloneWorkflow(parentWorkflow, { id: "cloned-workflow" });
+
+export const testWorkflow = createWorkflow({...})
+  .then(step1)
+  .then(clonedWorkflow)
+  .commit();
+```
+
+## 註冊 Workflow
+
+在 Mastra instance 中註冊 Workflow，讓整個應用程式都可使用。註冊後，Agent 或 Tool 可以呼叫它，而且它能存取 log 和 observability 功能等共享資源：
+
+```typescript {5} title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { testWorkflow } from './workflows/test-workflow'
+
+export const mastra = new Mastra({
+  workflows: { testWorkflow },
+})
+```
+
+## 參照 Workflow
+
+你可以從 Agent、Tool、Mastra Client 或命令列運行 Workflow。視乎你的設定，在 `mastra` 或 `mastraClient` instance 上呼叫 `.getWorkflow()` 以取得 reference：
+
+```typescript
+const testWorkflow = mastra.getWorkflow('testWorkflow')
+```
+
+:::info
+基於兩個原因，建議使用 `mastra.getWorkflow()` 而非直接 import：
+
+1. 它可存取 Mastra instance 設定（logger、telemetry、storage、已註冊 Agent 和 vector store）
+1. 它為 Workflow input 及 output schema 提供完整 TypeScript type inference
+
+請將 Workflow 的**註冊 key**（加入 Mastra 時使用的 key）與 `getWorkflow()` 一起使用。雖然 `getWorkflowById()` 可按 Workflow 的 `id` property 擷取 Workflow，但不會提供相同程度的 type inference。
+:::
+
+## 運行 Workflow
+
+Workflow 有兩種運行模式：start 會等待所有步驟完成後才傳回，而 stream 會在執行期間發出事件。請選擇適合你的方式：如只需要最終結果，請使用 start；如要監察進度或在步驟完成時觸發操作，請使用 stream。
+
+<Tabs>
+  <TabItem value="start" label=".start()">
+    使用 `createRun()` 建立 Workflow run instance，然後呼叫 `.start()` 並傳入符合 Workflow `inputSchema` 的 `inputData`。Workflow 會執行所有步驟並傳回最終結果。
+
+    ```typescript
+    const run = await testWorkflow.createRun()
+
+    const result = await run.start({
+      inputData: {
+        message: 'Hello world',
+      },
+    })
+
+    if (result.status === 'success') {
+      console.log(result.result)
+    }
+    ```
+  </TabItem>
+
+  <TabItem value="stream" label=".stream()">
+    使用 `.createRun()` 建立 Workflow run instance，然後呼叫 `.stream()` 並傳入符合 Workflow `inputSchema` 的 `inputData`。Iterate `fullStream` 以追蹤進度，再 await `result` 取得最終 Workflow 結果。
+
+    ```typescript
+    const run = await testWorkflow.createRun()
+
+    const stream = run.stream({
+      inputData: {
+        message: 'Hello world',
+      },
+    })
+
+    for await (const chunk of stream.fullStream) {
+      console.log(chunk)
+    }
+
+    // Get the final result (same type as run.start())
+    const result = await stream.result
+
+    if (result.status === 'success') {
+      console.log(result.result)
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+### Workflow 結果類型
+
+`run.start()` 和 `stream.result` 都會按 `status` property 傳回 discriminated union；可能的值包括 `success`、`failed`、`suspended`、`tripwire` 或 `paused`。不論狀態為何，你都可以安全存取 `result.status`、`result.input`、`result.steps`，以及選用的 `result.state`。
+
+此外，視乎狀態，亦會提供不同的 property：
+
+| 狀態 | 獨有 property | 說明 |
+| - | - | - |
+| `success` | `result` | Workflow 的 output data |
+| `failed` | `error` | 導致失敗的錯誤 |
+| `tripwire` | `tripwire` | 包含 `reason`、`retry?`、`metadata?`、`processorId?` |
+| `suspended` | `suspendPayload`, `suspended` | 暫停資料及已暫停步驟 path array |
+| `paused` | _（無）_ | 只有共用 property |
+
+要存取特定狀態的 property，請先檢查 `status`：
+
+```typescript
+const result = await run.start({ inputData: { message: 'Hello world' } })
+
+if (result.status === 'success') {
+  console.log(result.result) // Only available when status is "success"
+} else if (result.status === 'failed') {
+  console.log(result.error.message)
+} else if (result.status === 'suspended') {
+  console.log(result.suspendPayload)
+}
+```
+
+### Workflow 輸出
+
+以下是成功 Workflow 結果的例子，顯示 `input`、`steps` 和 `result` property：
+
+```json
+{
+  "status": "success",
+  "steps": {
+    "step-1": {
+      "status": "success",
+      "payload": {
+        "message": "Hello world"
+      },
+      "output": {
+        "formatted": "HELLO WORLD"
+      }
+    },
+    "step-2": {
+      "status": "success",
+      "payload": {
+        "formatted": "HELLO WORLD"
+      },
+      "output": {
+        "emphasized": "HELLO WORLD!!!"
+      }
+    }
+  },
+  "input": {
+    "message": "Hello world"
+  },
+  "result": {
+    "emphasized": "HELLO WORLD!!!"
+  }
+}
+```
+
+## 串流
+
+一般 `writer` API 用法請參閱[串流](/guides/concepts/streaming#writer-api)。
+
+### 檢查 Workflow stream payload
+
+寫入 stream 的事件會包含在發出的 chunk 中。檢查這些 chunk，以存取 event type、中間值或步驟專屬資料等自訂 field。
+
+```typescript
+const testWorkflow = mastra.getWorkflow('testWorkflow')
+
+const run = await testWorkflow.createRun()
+
+const stream = await run.stream({
+  inputData: {
+    value: 'initial data',
+  },
+})
+
+for await (const chunk of stream) {
+  console.log(chunk)
+}
+
+if (result!.status === 'suspended') {
+  // if the workflow is suspended, we can resume it with the resumeStream method
+  const resumedStream = await run.resumeStream({
+    resumeData: { value: 'resume data' },
+  })
+
+  for await (const chunk of resumedStream) {
+    console.log(chunk)
+  }
+}
+```
+
+### 恢復中斷的 Workflow stream
+
+如果 Workflow stream 因任何原因關閉或中斷，你可以使用 `resumeStream` method 恢復。它會傳回新的 `ReadableStream`，讓你觀察 Workflow 事件。
+
+```typescript
+const newStream = await run.resumeStream()
+
+for await (const chunk of newStream) {
+  console.log(chunk)
+}
+```
+
+### 使用 Agent 的 Workflow
+
+將 Agent 的 `textStream` pipe 至 Workflow 步驟的 `writer`。這會串流部分 output，而 Mastra 會自動將 Agent 的 usage 彙總至 Workflow run。
+
+```typescript
+import { createStep } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+export const testStep = createStep({
+  execute: async ({ inputData, mastra, writer }) => {
+    const { city } = inputData
+
+    const testAgent = mastra?.getAgent('testAgent')
+    const stream = await testAgent?.stream(`What is the weather in ${city}?`)
+
+    await stream!.textStream.pipeTo(writer!)
+
+    return {
+      value: await stream!.text,
+    }
+  },
+})
+```
+
+## 重新啟動 active Workflow run
+
+當 Workflow run 失去與伺服器的連線時，可以從最後一個 active 步驟重新啟動。這適合伺服器失去連線時可能仍在運行的長時間 Workflow。重新啟動 Workflow run 會從最後一個 active 步驟恢復執行，而 Workflow 會從該處繼續。
+
+### 使用 `restartAllActiveWorkflowRuns()` 重新啟動 Workflow 的所有 active run
+
+使用 `restartAllActiveWorkflowRuns()` 重新啟動某個 Workflow 的所有 active run。這讓你毋須手動 loop 每個 run 並重新啟動。
+
+```typescript
+workflow.restartAllActiveWorkflowRuns()
+```
+
+### 使用 `restart()` 重新啟動 active Workflow run
+
+使用 `restart()` 從最後一個 active 步驟重新啟動 active Workflow run。執行會從最後一個 active 步驟恢復，而 Workflow 會從該處繼續。
+
+```typescript
+const run = await workflow.createRun()
+
+const result = await run.start({ inputData: { value: 'initial data' } })
+
+const restartedResult = await run.restart()
+```
+
+### 識別 active Workflow run
+
+Active Workflow run 的 `status` 為 `running` 或 `waiting`。你可以檢查 Workflow 的 `status` 以確認是否 active，並使用 `active` 識別 active Workflow run。
+
+```typescript
+const activeRuns = await workflow.listActiveWorkflowRuns()
+if (activeRuns.runs.length > 0) {
+  console.log(activeRuns.runs)
+}
+```
+
+:::note
+
+運行本機 Mastra 伺服器時，所有 active Workflow run 都會在伺服器啟動時自動重新啟動。
+
+:::
+
+## 使用 `RequestContext`
+
+使用 [RequestContext](/docs/server/request-context) 存取 request 專屬值。這讓你可以根據 request context 按條件調整行為。
+
+```typescript title="src/mastra/workflows/test-workflow.ts"
+export type UserTier = {
+  'user-tier': 'enterprise' | 'pro'
+}
+
+const step1 = createStep({
+  execute: async ({ requestContext }) => {
+    const userTier = requestContext.get('user-tier') as UserTier['user-tier']
+
+    const maxResults = userTier === 'enterprise' ? 1000 : 50
+
+    return { maxResults }
+  },
+})
+```
+
+詳情請參閱 [Request Context](/docs/server/request-context)。
+
+:::tip
+
+Type-safe request context schema 驗證請參閱 [Schema Validation](/docs/server/request-context#schema-validation)。
+
+:::
+
+## 相關內容
+
+要深入了解 Workflow，請參閱我們的 [Workflow 指南](/guides/guide/ai-recruiter)，當中以實際例子逐步講解核心概念。
+
+- [Workflow State](/docs/workflows/workflow-state)
+- [Control Flow](/docs/workflows/control-flow)
+- [暫停及恢復](/docs/workflows/suspend-and-resume)
+- [錯誤處理](/docs/workflows/error-handling)
+- [Worker](/docs/deployment/workers)：在專用背景 process 中運行 Workflow execution
+- 📹 [Mastra Agentic Workflow 工作坊](https://www.youtube.com/watch?v=HGt8pVPpX9g)

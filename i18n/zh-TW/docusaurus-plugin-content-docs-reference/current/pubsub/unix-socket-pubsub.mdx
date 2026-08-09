@@ -1,0 +1,99 @@
+---
+title: "參考文件：UnixSocketPubSub | PubSub"
+description: UnixSocketPubSub 的 API 參考文件；這是用於同一主機上跨 process 傳遞的 Unix socket pub/sub 實作。
+packages:
+  - "@mastra/core"
+---
+
+# UnixSocketPubSub
+
+`UnixSocketPubSub` 是 [`PubSub`](/reference/pubsub/base) 實作，使用 Unix domain socket 在單一主機的多個 process 之間傳遞 event。它會選出一個 process 作為 broker，其他 process 則以 client 身分連線。broker 結束時，其餘 client 會自動選出新的 broker。
+
+適用於多個本機 process 需要共用串流的情境，例如在 Mastra Code 終端介面中協調 thread stream。單一 process 傳遞請使用 [`EventEmitterPubSub`](/reference/pubsub/event-emitter)。若要在不同主機間進行分散式傳遞，請使用 [`RedisStreamsPubSub`](/reference/pubsub/redis-streams) 或 [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub)。
+
+`UnixSocketPubSub` 是 push transport：event 不需 read loop 即會送達，因此 Mastra 不會為它執行 pull worker。
+
+## 使用範例
+
+傳入每個參與 process 共用的 socket 路徑。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { UnixSocketPubSub } from '@mastra/core/events'
+
+export const mastra = new Mastra({
+  pubsub: new UnixSocketPubSub('/tmp/mastra/events.sock'),
+})
+```
+
+## Constructor 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'socketPath',
+    type: 'string',
+    description: 'Unix domain socket 的路徑。共用串流的所有 process 都必須使用相同路徑。',
+    isOptional: false,
+  },
+  {
+    name: 'options',
+    type: 'UnixSocketPubSubOptions',
+    description: '選填設定。',
+    isOptional: true,
+    properties: [
+      {
+        name: 'maxRemoteClientQueuedBytes',
+        type: 'number',
+        description:
+          '緩慢的遠端 client 在 frame 遭到捨棄前，可使用的最大緩衝位元組數。如此可避免一個卡住的 subscriber 阻塞其他 subscriber。',
+        isOptional: true,
+        defaultValue: '67108864',
+      },
+    ],
+  },
+]}
+/>
+
+## 屬性
+
+<PropertiesTable
+  content={[
+  {
+    name: 'socketPath',
+    type: 'string',
+    description: '傳給 constructor 的 socket 路徑。',
+  },
+  {
+    name: 'supportedModes',
+    type: 'ReadonlyArray<"pull" | "push">',
+    description: '傳回 `["push"]`。',
+  },
+  {
+    name: 'isBroker',
+    type: 'boolean',
+    description: '此 instance 目前是否擔任 broker。',
+  },
+  {
+    name: 'remoteClientCount',
+    type: 'number',
+    description: '連線至此 broker 的遠端 client 數量。此 instance 不是 broker 時一律為 0。',
+  },
+]}
+/>
+
+## 方法
+
+`UnixSocketPubSub` 實作 [`PubSub`](/reference/pubsub/base) contract。以下方法為此實作所特有。
+
+### `close()`
+
+關閉 socket 連線；若此 instance 為 broker，則一併釋出 broker 角色。請在正常關閉期間呼叫此方法。
+
+```typescript
+await pubsub.close()
+```
+
+## Broker 選舉
+
+第一個繫結 socket 的 process 會成為 broker，並在所有已連線 client 之間路由 event。其他 process 會以 client 身分連線。broker 結束後，互斥鎖定檔會依序安排下一次選舉。只會有一個 client 成為新 broker，其餘 client 則重新向它訂閱。這可避免兩個 process 同時擔任 broker 的 split-brain state。

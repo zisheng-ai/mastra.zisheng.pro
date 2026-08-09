@@ -1,0 +1,536 @@
+---
+title: "リファレンス：Feedback | Observability"
+description: "Observability の Feedback レコード、フィルター、クエリメソッドの API リファレンス。"
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Feedback
+
+**追加バージョン：** `@mastra/core@1.18.0`
+
+Feedback API は、評価、賛否、コメント、訂正など、人間が介在する Observability シグナルを保存してクエリします。使用パターンについては、[Feedback ガイド](/docs/observability/feedback)を参照してください。
+
+## 使用例
+
+次の例では、Observability エントリーポイントを介して永続化された Trace の評価を記録します。エントリーポイントの `addFeedback()` は省略可能なため、呼び出す前に、アクティブな Observability 実装が対応していることを確認してください。
+
+```typescript
+if (!mastra.observability.addFeedback) {
+  throw new Error('Feedback is not supported by the active observability implementation')
+}
+
+await mastra.observability.addFeedback({
+  traceId: 'trace-123',
+  spanId: 'span-456',
+  feedback: {
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'Helpful answer.',
+  },
+})
+```
+
+## Feedback の作成
+
+### `addFeedback(args)`
+
+Observability エントリーポイントを介して、永続化された Trace または Span に Feedback を追加します。
+
+```typescript
+await mastra.observability.addFeedback?.({
+  traceId: 'trace-123',
+  spanId: 'span-456',
+  feedback: {
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'Helpful answer.',
+  },
+})
+```
+
+<PropertiesTable
+  content={[
+  { name: 'traceId', type: 'string', description: 'Feedback 対象の基準となる Trace。', isOptional: true },
+  { name: 'spanId', type: 'string', description: 'Feedback 対象の基準となる Span。', isOptional: true },
+  {
+    name: 'correlationContext',
+    type: 'CorrelationContext',
+    description: 'ストレージから対象を復元せずに出力するための、アクティブな Span または Trace のコンテキスト。',
+    isOptional: true,
+  },
+  { name: 'feedback', type: 'FeedbackInput', description: '追加する Feedback payload。' },
+]}
+/>
+
+### `createFeedback(args)`
+
+Observability の storage domain を介して、1件の Feedback レコードを作成します。ストレージレベルの呼び出しはストアへ直接書き込むため、`timestamp` を含めてください。
+
+```typescript
+await observability.createFeedback({
+  feedback: {
+    feedbackId: 'feedback-1',
+    timestamp: new Date(),
+    traceId: 'trace-123',
+    spanId: 'span-456',
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'Helpful answer.',
+  },
+})
+```
+
+HTTP および Client SDK の作成ルートは `CreateFeedbackBody` を受け取り、サーバー側で `timestamp` を設定します。`feedbackId` を省略した場合は生成します。
+
+```typescript
+await mastraClient.createFeedback({
+  feedback: {
+    traceId: 'trace-123',
+    spanId: 'span-456',
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+  },
+})
+```
+
+### `batchCreateFeedback(args)`
+
+Observability の storage domain を介して、複数の Feedback レコードを作成します。このメソッドは HTTP ルートや `@mastra/client-js` では公開されていません。
+
+```typescript
+await observability.batchCreateFeedback({
+  feedbacks: [
+    {
+      feedbackId: 'feedback-1',
+      timestamp: new Date(),
+      traceId: 'trace-123',
+      feedbackSource: 'user',
+      feedbackType: 'rating',
+      value: 1,
+    },
+    {
+      feedbackId: 'feedback-2',
+      timestamp: new Date(),
+      traceId: 'trace-123',
+      feedbackSource: 'qa',
+      feedbackType: 'comment',
+      value: 'Needs a citation before shipping.',
+    },
+  ],
+})
+```
+
+## Feedback の一覧取得
+
+### `listFeedback(args?)`
+
+ページモードまたは差分モードで Feedback レコードを返します。
+
+```typescript
+const response = await mastraClient.listFeedback({
+  filters: {
+    feedbackType: 'rating',
+    feedbackSource: 'studio',
+  },
+  pagination: { page: 0, perPage: 20 },
+  orderBy: { field: 'timestamp', direction: 'DESC' },
+})
+```
+
+<PropertiesTable
+  content={[
+  { name: 'mode', type: "'page' | 'delta'", description: "一覧モード。デフォルトは 'page'。", isOptional: true },
+  { name: 'filters', type: 'FeedbackFilter', description: 'Feedback レコードのフィルター。', isOptional: true },
+  {
+    name: 'pagination',
+    type: '{ page?: number; perPage?: number }',
+    description: 'ページモードのページネーション。`page` はゼロ始まりです。',
+    isOptional: true,
+  },
+  {
+    name: 'orderBy',
+    type: "{ field?: 'timestamp'; direction?: 'ASC' | 'DESC' }",
+    description: 'ページモードの並べ替え設定。',
+    isOptional: true,
+  },
+  {
+    name: 'after',
+    type: 'string',
+    description: '増分ポーリング用の差分カーソル。差分モードでのみ有効です。',
+    isOptional: true,
+  },
+  {
+    name: 'limit',
+    type: 'number',
+    description: '差分モードで返す更新の最大数。',
+    isOptional: true,
+  },
+]}
+/>
+
+## OLAP クエリ
+
+OLAP Feedback クエリは数値の `value` フィールドを対象とします。
+
+### `getFeedbackAggregate(args)`
+
+集計された Feedback 値を1つ返します。
+
+```typescript
+const response = await mastraClient.getFeedbackAggregate({
+  feedbackType: 'rating',
+  feedbackSource: 'user',
+  aggregation: 'avg',
+  comparePeriod: 'previous_day',
+})
+```
+
+<PropertiesTable
+  content={[
+  { name: 'feedbackType', type: 'string', description: '集計する Feedback タイプ。' },
+  { name: 'feedbackSource', type: 'string', description: '集計する Feedback ソース。', isOptional: true },
+  {
+    name: 'aggregation',
+    type: "'sum' | 'avg' | 'min' | 'max' | 'count' | 'count_distinct' | 'last'",
+    description: '適用する集計方法。',
+  },
+  { name: 'filters', type: 'FeedbackFilter', description: '追加のフィルター。', isOptional: true },
+  {
+    name: 'comparePeriod',
+    type: "'previous_period' | 'previous_day' | 'previous_week'",
+    description: '省略可能な前期間比較。',
+    isOptional: true,
+  },
+]}
+/>
+
+### `getFeedbackBreakdown(args)`
+
+ディメンション別にグループ化した Feedback 値を返します。
+
+```typescript
+const response = await mastraClient.getFeedbackBreakdown({
+  feedbackType: 'rating',
+  groupBy: ['entityName'],
+  aggregation: 'avg',
+})
+```
+
+### `getFeedbackTimeSeries(args)`
+
+間隔ごとにバケット化した Feedback 値を返します。
+
+```typescript
+const response = await mastraClient.getFeedbackTimeSeries({
+  feedbackType: 'rating',
+  interval: '1h',
+  aggregation: 'avg',
+  groupBy: ['feedbackSource'],
+})
+```
+
+### `getFeedbackPercentiles(args)`
+
+間隔ごとにバケット化したパーセンタイル値を返します。
+
+```typescript
+const response = await mastraClient.getFeedbackPercentiles({
+  feedbackType: 'rating',
+  percentiles: [0.5, 0.95],
+  interval: '1d',
+})
+```
+
+## 型
+
+### `FeedbackRecord`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'feedbackId',
+    type: 'string | null',
+    description: 'この Feedback イベントの一意な ID。省略した場合、サーバールートが生成します。',
+    isOptional: true,
+  },
+  { name: 'timestamp', type: 'Date', description: 'Feedback が記録された時刻。' },
+  {
+    name: 'traceId',
+    type: 'string | null',
+    description: '利用可能な場合に Feedback 対象の基準となる Trace。',
+    isOptional: true,
+  },
+  {
+    name: 'spanId',
+    type: 'string | null',
+    description: '利用可能な場合に Feedback 対象の基準となる Span。',
+    isOptional: true,
+  },
+  {
+    name: 'feedbackSource',
+    type: 'string | null',
+    description: "'user'、'qa'、'studio'、'system' などの省略可能なソースメタデータ。",
+    isOptional: true,
+  },
+  {
+    name: 'source',
+    type: 'string | null',
+    description: '`feedbackSource` の非推奨エイリアス。',
+    isOptional: true,
+  },
+  {
+    name: 'feedbackType',
+    type: 'string',
+    description: "'rating'、'thumbs'、'comment'、'correction' などの Feedback タイプ。",
+  },
+  {
+    name: 'value',
+    type: 'number | string',
+    description: 'Feedback 値。数値は、集計、内訳、時系列、パーセンタイルのクエリに対応します。',
+  },
+  {
+    name: 'comment',
+    type: 'string | null',
+    description: 'Feedback に関する追加コメントまたはコンテキスト。',
+    isOptional: true,
+  },
+  {
+    name: 'feedbackUserId',
+    type: 'string | null',
+    description: 'Feedback を提供したユーザー。',
+    isOptional: true,
+  },
+  {
+    name: 'sourceId',
+    type: 'string | null',
+    description: 'この Feedback が関連付けられているソースレコードの ID（実験結果 ID など）。',
+    isOptional: true,
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown> | null',
+    description: 'Feedback レコードのユーザー定義メタデータ。',
+    isOptional: true,
+  },
+]}
+/>
+
+### 共有コンテキストフィールド
+
+Feedback レコードには、フィルタリング、グループ化、および Trace、ログ、メトリクス、Score との関連付けに使用する共有 Observability コンテキストフィールドを含められます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'entityType',
+    type: 'EntityType | null',
+    description: 'シグナルを生成した Entity のタイプ。',
+    isOptional: true,
+  },
+  {
+    name: 'entityId',
+    type: 'string | null',
+    description: 'シグナルを生成した Entity の ID。',
+    isOptional: true,
+  },
+  {
+    name: 'entityName',
+    type: 'string | null',
+    description: 'シグナルを生成した Entity の名前。',
+    isOptional: true,
+  },
+  {
+    name: 'parentEntityType',
+    type: 'EntityType | null',
+    description: '親 Entity のタイプ。',
+    isOptional: true,
+  },
+  { name: 'parentEntityId', type: 'string | null', description: '親 Entity の ID。', isOptional: true },
+  { name: 'parentEntityName', type: 'string | null', description: '親 Entity の名前。', isOptional: true },
+  {
+    name: 'rootEntityType',
+    type: 'EntityType | null',
+    description: 'ルート Entity のタイプ。',
+    isOptional: true,
+  },
+  { name: 'rootEntityId', type: 'string | null', description: 'ルート Entity の ID。', isOptional: true },
+  { name: 'rootEntityName', type: 'string | null', description: 'ルート Entity の名前。', isOptional: true },
+  { name: 'userId', type: 'string | null', description: '実行を開始した人間のエンドユーザー。', isOptional: true },
+  {
+    name: 'organizationId',
+    type: 'string | null',
+    description: 'マルチテナントの組織またはアカウント。',
+    isOptional: true,
+  },
+  { name: 'resourceId', type: 'string | null', description: 'より広範なリソースコンテキスト。', isOptional: true },
+  { name: 'runId', type: 'string | null', description: '実行 run 識別子。', isOptional: true },
+  {
+    name: 'sessionId',
+    type: 'string | null',
+    description: 'Trace をグループ化するセッション識別子。',
+    isOptional: true,
+  },
+  { name: 'threadId', type: 'string | null', description: '会話スレッド識別子。', isOptional: true },
+  { name: 'requestId', type: 'string | null', description: '関連付け用の HTTP リクエスト ID。', isOptional: true },
+  { name: 'environment', type: 'string | null', description: 'デプロイ環境。', isOptional: true },
+  { name: 'serviceName', type: 'string | null', description: 'サービス名。', isOptional: true },
+  {
+    name: 'scope',
+    type: 'Record<string, unknown> | null',
+    description: 'パッケージ、アプリバージョン、またはデプロイのメタデータ。',
+    isOptional: true,
+  },
+  {
+    name: 'entityVersionId',
+    type: 'string | null',
+    description: 'シグナルを生成した Entity のバージョン ID。',
+    isOptional: true,
+  },
+  {
+    name: 'parentEntityVersionId',
+    type: 'string | null',
+    description: '親 Entity のバージョン ID。',
+    isOptional: true,
+  },
+  {
+    name: 'rootEntityVersionId',
+    type: 'string | null',
+    description: 'ルート Entity のバージョン ID。',
+    isOptional: true,
+  },
+  { name: 'experimentId', type: 'string | null', description: '実験または Eval run の識別子。', isOptional: true },
+  {
+    name: 'executionSource',
+    type: 'string | null',
+    description: 'local、cloud、CI などの実行元。',
+    isOptional: true,
+  },
+  { name: 'tags', type: 'string[] | null', description: 'フィルタリング用のラベル。', isOptional: true },
+]}
+/>
+
+### `FeedbackInput`
+
+`FeedbackInput` は、`mastra.observability.addFeedback()`、`recordedTrace.addFeedback()`、`recordedSpan.addFeedback()` で使用します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'feedbackSource',
+    type: 'string',
+    description: 'Feedback の省略可能なソースメタデータ。',
+    isOptional: true,
+  },
+  { name: 'source', type: 'string', description: '`feedbackSource` の非推奨エイリアス。', isOptional: true },
+  { name: 'feedbackType', type: 'string', description: '記録する Feedback のタイプ。' },
+  { name: 'value', type: 'number | string', description: '記録する Feedback 値。' },
+  { name: 'comment', type: 'string', description: '追加のコメントまたはコンテキスト。', isOptional: true },
+  { name: 'feedbackUserId', type: 'string', description: 'Feedback を提供したユーザー。', isOptional: true },
+  { name: 'userId', type: 'string', description: '`feedbackUserId` の非推奨エイリアス。', isOptional: true },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown>',
+    description: 'Feedback 固有の追加メタデータ。',
+    isOptional: true,
+  },
+  { name: 'experimentId', type: 'string', description: '実験または Eval run の識別子。', isOptional: true },
+  {
+    name: 'sourceId',
+    type: 'string',
+    description: 'この Feedback が関連付けられているソースレコードの ID。',
+    isOptional: true,
+  },
+]}
+/>
+
+### `FeedbackFilter`
+
+`FeedbackFilter` は、`listFeedback()` および OLAP クエリの `filters` で使用します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'timestamp',
+    type: '{ start?: Date; end?: Date; startExclusive?: boolean; endExclusive?: boolean }',
+    description: 'タイムスタンプ範囲でフィルタリングします。',
+    isOptional: true,
+  },
+  { name: 'traceId', type: 'string', description: 'Trace ID でフィルタリングします。', isOptional: true },
+  { name: 'spanId', type: 'string', description: 'Span ID でフィルタリングします。', isOptional: true },
+  {
+    name: 'feedbackType',
+    type: 'string | string[]',
+    description: '1つ以上の Feedback タイプでフィルタリングします。',
+    isOptional: true,
+  },
+  { name: 'feedbackSource', type: 'string', description: 'Feedback ソースでフィルタリングします。', isOptional: true },
+  { name: 'source', type: 'string', description: '`feedbackSource` の非推奨エイリアス。', isOptional: true },
+  {
+    name: 'feedbackUserId',
+    type: 'string',
+    description: 'Feedback を提供したユーザーでフィルタリングします。',
+    isOptional: true,
+  },
+  { name: 'entityType', type: 'EntityType', description: 'Entity タイプでフィルタリングします。', isOptional: true },
+  { name: 'entityName', type: 'string', description: 'Entity 名でフィルタリングします。', isOptional: true },
+  { name: 'entityVersionId', type: 'string', description: 'Entity バージョン ID でフィルタリングします。', isOptional: true },
+  { name: 'parentEntityType', type: 'EntityType', description: '親 Entity タイプでフィルタリングします。', isOptional: true },
+  { name: 'parentEntityName', type: 'string', description: '親 Entity 名でフィルタリングします。', isOptional: true },
+  {
+    name: 'parentEntityVersionId',
+    type: 'string',
+    description: '親 Entity バージョン ID でフィルタリングします。',
+    isOptional: true,
+  },
+  { name: 'rootEntityType', type: 'EntityType', description: 'ルート Entity タイプでフィルタリングします。', isOptional: true },
+  { name: 'rootEntityName', type: 'string', description: 'ルート Entity 名でフィルタリングします。', isOptional: true },
+  { name: 'rootEntityVersionId', type: 'string', description: 'ルート Entity バージョン ID でフィルタリングします。', isOptional: true },
+  { name: 'userId', type: 'string', description: '人間のエンドユーザー ID でフィルタリングします。', isOptional: true },
+  { name: 'organizationId', type: 'string', description: '組織 ID でフィルタリングします。', isOptional: true },
+  { name: 'resourceId', type: 'string', description: 'リソース ID でフィルタリングします。', isOptional: true },
+  { name: 'runId', type: 'string', description: 'run ID でフィルタリングします。', isOptional: true },
+  { name: 'sessionId', type: 'string', description: 'セッション ID でフィルタリングします。', isOptional: true },
+  { name: 'threadId', type: 'string', description: 'スレッド ID でフィルタリングします。', isOptional: true },
+  { name: 'requestId', type: 'string', description: 'リクエスト ID でフィルタリングします。', isOptional: true },
+  { name: 'serviceName', type: 'string', description: 'サービス名でフィルタリングします。', isOptional: true },
+  { name: 'environment', type: 'string', description: '環境でフィルタリングします。', isOptional: true },
+  { name: 'executionSource', type: 'string', description: '実行元でフィルタリングします。', isOptional: true },
+  {
+    name: 'experimentId',
+    type: 'string',
+    description: '実験または Eval run の識別子でフィルタリングします。',
+    isOptional: true,
+  },
+  {
+    name: 'tags',
+    type: 'string[]',
+    description: 'タグでフィルタリングします。一致するレコードには、指定したすべてのタグが必要です。',
+    isOptional: true,
+  },
+]}
+/>
+
+## HTTP ルート
+
+| メソッド | パス | 用途 | 権限 |
+| - | - | - | - |
+| `GET` | `/api/observability/feedback` | Feedback レコードの一覧取得 | 導出なし |
+| `POST` | `/api/observability/feedback` | Feedback レコードの作成 | 導出なし |
+| `POST` | `/api/observability/feedback/aggregate` | 集計値を1つ返す | `observability:read` |
+| `POST` | `/api/observability/feedback/breakdown` | Feedback をディメンション別にグループ化 | `observability:read` |
+| `POST` | `/api/observability/feedback/timeseries` | Feedback を間隔ごとにバケット化 | `observability:read` |
+| `POST` | `/api/observability/feedback/percentiles` | パーセンタイル系列を返す | `observability:read` |
+
+## 関連項目
+
+- [Feedback ガイド](/docs/observability/feedback)
+- [Client SDK Observability リファレンス](/reference/client-js/observability)
+- [Observability の設定](/reference/observability/tracing/configuration)

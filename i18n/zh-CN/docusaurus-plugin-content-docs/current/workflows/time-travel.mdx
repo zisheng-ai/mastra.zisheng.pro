@@ -1,0 +1,318 @@
+---
+title: "Time Travel | Workflows"
+description: "使用 Mastra 的 Time Travel 调试，从特定位置重新执行 Workflow 步骤"
+packages:
+  - "@mastra/core"
+---
+
+# Time Travel
+
+Time Travel 让你可以从任意指定步骤开始重新执行 Workflow，既可以使用已存储的 Snapshot 数据，也可以使用你提供的自定义上下文。
+
+这适合调试失败的 Workflow、使用不同输入测试单个步骤，或在不重新运行整个 Workflow 的情况下从错误中恢复。你也可以对尚未运行的 Workflow 使用 Time Travel，从任意指定步骤开始执行。
+
+## Time Travel 的工作原理
+
+在 Workflow Run 上调用 `timeTravel()` 时：
+
+1. Workflow 从 Storage 加载现有 Snapshot（如果存在）
+1. 根据 Snapshot 或所提供的上下文重建目标步骤之前的步骤结果
+1. 使用提供或重建的输入数据从指定步骤开始执行
+1. Workflow 从该位置继续运行直至完成
+
+Time Travel 依赖持久化的 Workflow Snapshot，因此必须配置 Storage。
+
+## 基本用法
+
+使用 `run.timeTravel()` 从特定步骤重新执行 Workflow：
+
+```typescript
+import { mastra } from './mastra'
+
+const workflow = mastra.getWorkflow('myWorkflow')
+const run = await workflow.createRun()
+
+const result = await run.timeTravel({
+  step: 'step2',
+  inputData: { previousStepResult: 'custom value' },
+})
+```
+
+## 指定目标步骤
+
+可以使用步骤引用或步骤 ID 指定目标步骤：
+
+### 使用步骤引用
+
+```typescript
+const result = await run.timeTravel({
+  step: step2,
+  inputData: { value: 10 },
+})
+```
+
+### 使用步骤 ID
+
+```typescript
+const result = await run.timeTravel({
+  step: 'step2',
+  inputData: { value: 10 },
+})
+```
+
+### 嵌套 Workflow 步骤
+
+对于嵌套 Workflow 内的步骤，请使用点号表示法、步骤 ID 数组或步骤引用数组：
+
+```typescript
+// Using dot notation
+const result = await run.timeTravel({
+  step: 'nestedWorkflow.step3',
+  inputData: { value: 10 },
+})
+
+// Using array of step IDs
+const result = await run.timeTravel({
+  step: ['nestedWorkflow', 'step3'],
+  inputData: { value: 10 },
+})
+
+// Using array of step references
+const result = await run.timeTravel({
+  step: [nestedWorkflow, step3],
+  inputData: { value: 10 },
+})
+```
+
+## 提供执行上下文
+
+进行 Time Travel 时，可以提供上下文来指定先前步骤的状态：
+
+```typescript {3-13}
+const result = await run.timeTravel({
+  step: 'step2',
+  context: {
+    step1: {
+      status: 'success',
+      payload: { value: 0 },
+      output: { step1Result: 2 },
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+    },
+  },
+})
+```
+
+上下文对象以步骤 ID 为键，包含步骤结果。每个步骤结果包括：
+
+- `status`：步骤执行状态（`success`、`failed`、`suspended`）
+- `payload`：传给步骤的输入数据
+- `output`：步骤输出数据（成功步骤）
+- `startedAt`：步骤开始时间戳
+- `endedAt`：步骤结束时间戳（已完成步骤）
+- `suspendPayload`：传给 `suspend()` 的数据（已挂起步骤）
+- `resumePayload`：传给 `resume()` 的数据（已恢复步骤）
+
+## 重新运行失败的 Workflow
+
+Time Travel 特别适合调试失败的 Workflow 执行并从中恢复：
+
+```typescript
+const workflow = mastra.getWorkflow('myWorkflow')
+const run = await workflow.createRun()
+
+// Initial run fails at step2
+const failedResult = await run.start({
+  inputData: { value: 1 },
+})
+
+if (failedResult.status === 'failed') {
+  // Re-run from step2 with corrected input
+  const recoveredResult = await run.timeTravel({
+    step: 'step2',
+    inputData: { step1Result: 5 }, // Provide corrected input
+  })
+}
+```
+
+## 对已挂起 Workflow 使用 Time Travel
+
+可以通过 Time Travel 从较早的步骤恢复已挂起 Workflow：
+
+```typescript
+const run = await workflow.createRun()
+
+// Start workflow - suspends at promptAgent step
+const initialResult = await run.start({
+  inputData: { input: 'test' },
+})
+
+if (initialResult.status === 'suspended') {
+  // Time travel back to an earlier step with resume data
+  const result = await run.timeTravel({
+    step: 'getUserInput',
+    resumeData: {
+      userInput: 'corrected input',
+    },
+  })
+}
+```
+
+## 以 Stream 形式获取 Time Travel 结果
+
+使用 `timeTravelStream()` 接收 Time Travel 执行期间的 Stream 事件：
+
+```typescript
+const run = await workflow.createRun()
+
+const stream = run.timeTravelStream({
+  step: 'step2',
+  inputData: { value: 10 },
+})
+
+for await (const event of stream.fullStream) {
+  console.log(event.type, event.payload)
+}
+
+const result = await stream.result
+
+if (result.status === 'success') {
+  console.log(result.result)
+}
+```
+
+## 使用初始状态进行 Time Travel
+
+进行 Time Travel 时，可以提供初始状态来设置 Workflow 级状态：
+
+```typescript
+const result = await run.timeTravel({
+  step: 'step2',
+  inputData: { value: 10 },
+  initialState: {
+    counter: 5,
+    metadata: { source: 'time-travel' },
+  },
+})
+```
+
+## 错误处理
+
+Time Travel 会在特定情况下抛出错误：
+
+### Workflow 正在运行
+
+不能对当前正在运行的 Workflow 进行 Time Travel：
+
+```typescript
+try {
+  await run.timeTravel({ step: 'step2' })
+} catch (error) {
+  // "This workflow run is still running, cannot time travel"
+}
+```
+
+### 无效步骤 ID
+
+如果目标步骤不存在于 Workflow 中，Time Travel 会抛出错误：
+
+```typescript
+try {
+  await run.timeTravel({ step: 'nonExistentStep' })
+} catch (error) {
+  // "Time travel target step not found in execution graph: 'nonExistentStep'. Verify the step id/path."
+}
+```
+
+### 无效输入数据
+
+启用 `validateInputs` 时，Time Travel 会根据步骤 Schema 验证输入数据：
+
+```typescript
+try {
+  await run.timeTravel({
+    step: 'step2',
+    inputData: { invalidField: 'value' },
+  })
+} catch (error) {
+  // "Invalid inputData: \n- step1Result: Required"
+}
+```
+
+## 嵌套 Workflow 上下文
+
+通过 Time Travel 进入嵌套 Workflow 时，可以同时为父 Workflow 和嵌套 Workflow 步骤提供上下文：
+
+```typescript
+const result = await run.timeTravel({
+  step: 'nestedWorkflow.step3',
+  context: {
+    step1: {
+      status: 'success',
+      payload: { value: 0 },
+      output: { step1Result: 2 },
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+    },
+    nestedWorkflow: {
+      status: 'running',
+      payload: { step1Result: 2 },
+      startedAt: Date.now(),
+    },
+  },
+  nestedStepsContext: {
+    nestedWorkflow: {
+      step2: {
+        status: 'success',
+        payload: { step1Result: 2 },
+        output: { step2Result: 3 },
+        startedAt: Date.now(),
+        endedAt: Date.now(),
+      },
+    },
+  },
+})
+```
+
+## 使用场景
+
+### 调试失败步骤
+
+使用相同或修改后的输入重新运行失败步骤，以诊断问题：
+
+```typescript
+const result = await run.timeTravel({
+  step: failedStepId,
+  context: originalContext, // Use context from the failed run
+})
+```
+
+### 在新 Workflow Run 中测试步骤逻辑
+
+在新的 Workflow Run 中使用特定输入测试单个步骤，这适合在不从头开始执行 Workflow 的情况下测试步骤逻辑。
+
+```typescript
+const result = await run.timeTravel({
+  step: 'processData',
+  inputData: { testData: 'specific test case' },
+})
+```
+
+### 从临时故障中恢复
+
+重新运行因临时问题（网络错误、速率限制）而失败的步骤：
+
+```typescript
+// After fixing the external service issue
+const result = await run.timeTravel({
+  step: 'callExternalApi',
+  inputData: savedInputData,
+})
+```
+
+## 相关内容
+
+- [Snapshot](/docs/workflows/snapshots)
+- [挂起与恢复](/docs/workflows/suspend-and-resume)
+- [错误处理](/docs/workflows/error-handling)
+- [控制流](/docs/workflows/control-flow)

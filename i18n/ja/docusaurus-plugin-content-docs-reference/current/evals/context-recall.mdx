@@ -1,0 +1,258 @@
+---
+title: "リファレンス：Context recall scorer | Evals"
+description: Mastra の Context Recall Scorer のドキュメントです。取得したコンテキストが正解となる参照回答の主張をどの程度網羅しているかを評価します。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Context recall scorer
+
+`createContextRecallScorer()` 関数は、取得したコンテキストが正解となる参照回答の主張をどの程度網羅しているかを評価するスコアラーを作成します。正解データ内の主張のうち、取得したコンテキストに帰属できる割合を確認し、検索の完全性を測定します。
+
+このスコアラーには正解となる参照回答が必要なため、CI やテスト環境のラベル付きデータセットに適しています。run に `groundTruth` が指定されていない場合、エラーをスローせずスコア0を返します。
+
+## RAG 検索の評価
+
+次のような、RAG パイプラインにおける検索の完全性の評価に適しています。
+
+- Retriever が必要な情報をすべて取得することを検証する必要がある
+- 正解が既知のラベル付きデータセットがある
+- Retriever の戻り値に関するリグレッションを検出したい
+
+## データセットを使用したテスト
+
+精選したテストセットに対して評価を実行する場合に使用します。
+
+- 正解ラベル付きの質問を使用する CI パイプライン
+- 検索戦略の A/B テスト
+- 網羅性に関する Embedding モデルのベンチマーク
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description: '主張の帰属を評価するために使用する言語モデル',
+    required: true,
+  },
+  {
+    name: 'options',
+    type: 'ContextRecallMetricOptions',
+    description: 'スコアラーの設定オプション',
+    required: true,
+    children: [
+      {
+        name: 'context',
+        type: 'string[]',
+        description: '主張と照合する、取得したコンテキスト部分の配列',
+        required: false,
+      },
+      {
+        name: 'contextExtractor',
+        type: '(input, output) => string[]',
+        description: 'run の入力と出力からコンテキストを動的に抽出する関数',
+        required: false,
+      },
+      {
+        name: 'scale',
+        type: 'number',
+        description: '最終スコアに掛ける倍率（デフォルト：1）',
+        required: false,
+      },
+    ],
+  },
+]}
+/>
+
+`context` または `contextExtractor` のいずれかを指定する必要があります。両方を指定した場合、`contextExtractor` は run の入力と出力が Agent 形式（`MastraDBMessage[]`）のときだけ使用されます。それ以外の場合、スコアラーは `context` にフォールバックします。
+
+## `.run()` の戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'score',
+    type: 'number',
+    description:
+      '0から scale までの Recall スコア（デフォルト：0〜1）。コンテキストで網羅された正解データの主張の割合を表します',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description: 'どの正解データの主張がコンテキストで見つかり、どれが見つからなかったかを、人が読める形式で示した説明',
+  },
+]}
+/>
+
+## スコアリングの詳細
+
+### 主張の帰属
+
+Context Recall は、LLM による2段階の評価を行った後、決定論的にスコアを計算します。
+
+1. **主張の抽出**：正解となる回答を原子的な主張に分解します
+1. **帰属の確認**：各主張について、検索コンテキストによる裏付けがあるかを確認します
+
+その後、帰属できた主張数を主張の総数で割り、倍率を掛けてスコアを計算します。
+
+### スコアリング式
+
+```
+Context Recall = attributed_claims / total_claims × scale
+
+Where:
+- attributed_claims = number of ground-truth claims supported by the context
+- total_claims = total number of claims extracted from the ground truth
+- Attribution is binary: a claim is either supported (yes) or not (no)
+```
+
+### スコアの解釈
+
+次の範囲は、デフォルトの `scale` である1を前提としています。カスタム倍率を使用する場合は、それに応じて値を掛けてください。
+
+- **0.9〜1.0**：非常に高い Recall。コンテキストが正解データのほぼすべての主張を網羅している
+- **0.7〜0.8**：高い Recall。小さな不足はあるが、ほとんどの主張を網羅している
+- **0.4〜0.6**：中程度の Recall。コンテキストにかなりの情報が不足している
+- **0.1〜0.3**：低い Recall。正解データの主張の大部分がコンテキストにない
+- **0.0**：Recall なし。正解データの主張が1つもコンテキストにない
+
+### 理由の分析
+
+reason フィールドでは、次の内容を説明します。
+
+- どの正解データの主張がコンテキストで見つかったか
+- どの主張が欠けており、どのような情報不足があるか
+- 帰属した主張を裏付けた具体的なコンテキスト部分
+
+### 最適化のヒント
+
+結果を次の用途に使用できます。
+
+- **検索の改善**：Retriever が見落とす情報の種類を特定する
+- **チャンクサイズの調整**：正解データの主張を網羅できる十分な詳細がチャンクに含まれるようにする
+- **Embedding の評価**：情報の網羅性を改善するため、異なる Embedding モデルをテストする
+- **ナレッジベースの拡張**：頻繁に見落とされる主張を網羅するドキュメントを追加する
+
+### 計算例
+
+正解データ："Einstein was born in 1879. He developed relativity. He won the Nobel Prize."
+
+抽出された主張：3
+
+- "Einstein was born in 1879" → 帰属あり（コンテキストに生年月日の記載がある）
+- "Einstein developed relativity" → 帰属あり（コンテキストが相対性理論を扱っている）
+- "Einstein won the Nobel Prize" → 帰属なし（コンテキストにノーベル賞の記載がない）
+
+Recall = 2/3 = 0.67
+
+## スコアラーの設定
+
+### コンテキストの動的抽出
+
+```typescript
+const scorer = createContextRecallScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      const query = input?.inputMessages?.[0]?.content || ''
+      const searchResults = vectorDB.search(query, { limit: 10 })
+      return searchResults.map(result => result.content)
+    },
+    scale: 1,
+  },
+})
+```
+
+### 静的コンテキストの評価
+
+```typescript
+const scorer = createContextRecallScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Document 1: Einstein was born on 14 March 1879 in Ulm, Germany.',
+      'Document 2: Einstein published the theory of special relativity in 1905.',
+      'Document 3: Einstein moved to the United States in 1933.',
+    ],
+  },
+})
+```
+
+## 例
+
+ラベル付きデータセットを基準に、RAG 検索の完全性を評価します。
+
+```typescript title="src/example-context-recall.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createContextRecallScorer } from '@mastra/evals/scorers/prebuilt'
+import { myAgent } from './agent'
+
+const scorer = createContextRecallScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract context from tool invocation results in the agent output
+      return output
+        .filter(msg => msg?.role === 'assistant')
+        .flatMap(msg => msg?.content?.toolInvocations ?? [])
+        .filter((tool: any) => tool.state === 'result')
+        .map((tool: any) => JSON.stringify(tool.result))
+    },
+  },
+})
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'What are the health benefits of green tea?',
+      groundTruth:
+        'Green tea contains antioxidants that reduce inflammation, L-theanine that improves focus, and catechins that boost metabolism.',
+    },
+    {
+      input: 'How does photosynthesis work?',
+      groundTruth:
+        'Photosynthesis converts sunlight into chemical energy using chlorophyll in chloroplasts, producing glucose and oxygen from carbon dioxide and water.',
+    },
+  ],
+  scorers: [scorer],
+  target: myAgent,
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+`runEvals` の詳細は、[runEvals リファレンス](/reference/evals/run-evals)を参照してください。
+
+このスコアラーを Agent に追加する方法については、[スコアラーの概要](/docs/evals/overview#adding-scorers-to-agents)ガイドを参照してください。
+
+## Context precision との比較
+
+用途に適したスコアラーを選択してください。
+
+| ユースケース | Context Recall | Context Precision |
+| - | - | - |
+| **測定対象** | 正解データの網羅性 | 取得したチャンクの関連性 |
+| **方向** | 正解データ → コンテキスト | コンテキスト → 正解データ |
+| **位置への感度** | なし | あり（前方への配置を高く評価） |
+| **正解データが必要** | はい | はい |
+| **検出する失敗モード** | 情報の欠落 | 無関係なノイズ |
+
+検索品質の全体像を把握するには、両方を併用してください。Precision はコンテキスト内の不要な情報を検出し、Recall は不足を検出します。
+
+## 関連項目
+
+- [Context Precision Scorer](/reference/evals/context-precision)：取得したコンテキストが関連しており、適切にランク付けされているかを評価します
+- [Context Relevance Scorer](/reference/evals/context-relevance)：コンテキストの使用状況と品質を評価します
+- [Faithfulness Scorer](/reference/evals/faithfulness)：回答がコンテキストにどの程度根拠を持つかを測定します
+- [カスタムスコアラー](/docs/evals/custom-scorers)：独自の評価指標を作成します

@@ -1,0 +1,192 @@
+---
+title: "Tool | v1 移行ガイド"
+description: "v1 へのアップグレード時に Tool 関連の変更を移行する方法を説明します。"
+---
+
+# Tool
+
+Tool の実行シグネチャが更新され、入力とコンテキストを個別のパラメーターで受け取り、コンテキストプロパティを再構成するようになりました。
+
+## 変更
+
+### `createTool` の execute シグネチャを `(inputData, context)` 形式へ変更
+
+すべての `createTool` execute 関数は、単一の分割代入オブジェクトではなく、個別の `inputData` パラメーターと `context` パラメーターを使用するようになりました。Tool の入力と実行コンテキストは、別々に渡されます。
+
+このシグネチャ変更は `createTool` にのみ適用されます。Workflow の `createStep` 呼び出しでは、`async (inputData, context)` シグネチャをそのまま使用してください。
+
+移行するには、`createTool` のシグネチャを更新し、第 1 パラメーターに `inputData`（`inputSchema` から型付け）、第 2 パラメーターに `context` を指定します。
+
+```diff
+  createTool({
+    id: 'weather-tool',
+-   execute: async ({ context, requestContext, mastra }) => {
+-     const location = context.location;
+-     const userTier = requestContext.get('userTier');
+-     return getWeather(location, userTier);
+-   },
++   execute: async (inputData, context) => {
++     const location = inputData.location;
++     const userTier = context?.requestContext?.get('userTier');
++     return getWeather(location, userTier);
++   },
+  });
+```
+
+### `createTool` のコンテキストプロパティの構成
+
+`createTool` のコンテキストプロパティは、名前空間にまとめられました。Agent 固有のプロパティは `context.agent`、Workflow 固有のプロパティは `context.workflow`、MCP 固有のプロパティは `context.mcp` の配下にあります。この変更により、構成と API サーフェスがより明確になります。
+
+Agent 内で実行する Tool では、Agent 固有のプロパティへ `context.agent` 経由でアクセスします。
+
+```diff
+  createTool({
+    id: 'suspendable-tool',
+    suspendSchema: z.object({ message: z.string() }),
+    resumeSchema: z.object({ approval: z.boolean() }),
+-   execute: async ({ context, suspend, resumeData }) => {
+-     if (!resumeData) {
+-       return await suspend({ message: 'Waiting for approval' });
+-     }
+-     if (resumeData.approval) {
+-       return { success: true };
+-     }
+-   },
++   execute: async (inputData, context) => {
++     if (!context?.agent?.resumeData) {
++       return await context?.agent?.suspend({
++         message: 'Waiting for approval',
++       });
++     }
++     if (context.agent.resumeData.approval) {
++       return { success: true };
++     }
++   },
+  });
+```
+
+Workflow 内で実行する Tool では、Workflow 固有のプロパティへ `context.workflow` 経由でアクセスします。
+
+```diff
+  createTool({
+    id: 'workflow-tool',
+-   execute: async ({ workflowId, runId, state, setState }) => {
+-     const currentState = state;
+-     setState({ step: 'completed' });
+-     return { result: 'done' };
+-   },
++   execute: async (inputData, context) => {
++     const currentState = context?.workflow?.state;
++     context?.workflow?.setState({ step: 'completed' });
++     return { result: 'done' };
++   },
+  });
+```
+
+Tool の実行時に、`suspendPayload` が `suspendSchema` に対して検証されます。suspendPayload が `suspendSchema` と一致しない場合は警告がログに記録され、エラーが Tool の出力として返されますが、一時停止は続行されます。
+また、Tool の再開時には、`resumeData` が `resumeSchema` に対して検証されます。resumeData が `resumeSchema` と一致しない場合、Tool は `ValidationError` を返し、再開を中止します。
+
+`suspendSchema` または `resumeSchema` の検証を省略するには、Tool の作成時に `suspendSchema` または `resumeSchema` を定義しないでください。
+
+:::note
+MCP 固有の Tool コンテキストの変更については、[MCP 移行ガイド](/guides/migrations/upgrade-to-v1/mcp)を参照してください。
+:::
+
+### `RuntimeContext` から `RequestContext` へ
+
+Tool 実行コンテキスト全体で、`RuntimeContext` クラスは `RequestContext` に改名されました。新しい名前は、このクラスがリクエスト固有のデータであることを明確にします。
+
+移行するには、Tool 実行関数内の参照を `runtimeContext` から `requestContext` に更新します。
+
+```diff
+  createTool({
+    id: 'my-tool',
+    execute: async (inputData, context) => {
+-     const userTier = context?.runtimeContext?.get('userTier');
++     const userTier = context?.requestContext?.get('userTier');
+      return { result: userTier };
+    },
+  });
+```
+
+:::tip[Codemod]
+
+Mastra の codemod CLI を使用すると、import を自動更新できます。
+
+```bash
+npx @mastra/codemod@latest v1/runtime-context .
+```
+
+:::
+
+この変更は、直接呼び出す場合でも Agent や Workflow 経由で呼び出す場合でも、すべての Tool 実行に適用されます。型の絞り込みにより、検証エラーを適切に処理でき、出力プロパティへのアクセス時に実行時エラーが発生するのを防げます。
+
+### `outputSchema` による Tool 出力の検証
+
+`outputSchema` を持つ Tool は、戻り値を実行時に検証するようになりました。以前の `outputSchema` は型推論にのみ使用され、出力は検証されていませんでした。
+
+Tool が `outputSchema` と一致しないデータを返すと、無効なデータではなく `ValidationError` が返されるようになりました。
+
+検証エラーを修正するには、Tool の出力がスキーマ定義と一致するようにしてください。
+
+```diff
+  const getUserTool = createTool({
+    id: "get-user",
+    outputSchema: z.object({
+      id: z.string(),
+      name: z.string(),
+      email: z.string().email(),
+    }),
+    execute: async (inputData) => {
+-     return { id: "123", name: "John" }; // Missing email
++     return { id: "123", name: "John", email: "john@example.com" };
+    },
+  });
+```
+
+検証に失敗すると、Tool は `ValidationError` を返します。
+
+```diff
++ // Before v1 - invalid output would silently pass through
+  await getUserTool.execute({});
+- // { id: "123", name: "John" } - missing email
++ // {
++ //   error: true,
++ //   message: "Tool output validation failed for get-user. The tool returned invalid output:\n- email: Required\n\nReturned output: {...}",
++ //   validationErrors: { ... }
++ // }
+```
+
+### `tool.execute` の戻り値の型に `ValidationError` を追加
+
+検証エラーを処理するため、`tool.execute` の戻り値の型に `ValidationError` が追加されました。TypeScript の型チェックを満たすには、出力スキーマのプロパティへアクセスする前に結果の型を絞り込む必要があります。
+
+`tool.execute` を呼び出す際は、出力プロパティへアクセスする前に結果にエラーが含まれるか確認してください。
+
+```typescript
+const result = await getUserTool.execute({})
+
+// Type-safe check for validation errors
+if ('error' in result && result.error) {
+  console.error('Validation failed:', result.message)
+  console.error('Details:', result.validationErrors)
+  return
+}
+
+// TypeScript knows result is valid here
+console.log(result.id, result.name, result.email)
+```
+
+別の方法として、実際の出力と一致するよう `outputSchema` を更新するか、検証が不要な場合は `outputSchema` 自体を削除します。
+
+### Tool の直接実行
+
+クライアント側で実行ロジックを別途処理する Tool 定義に対応するため、型システム上の `tool.execute` プロパティは任意です。Agent や Workflow を介さず Tool インスタンスの `execute` を直接呼び出す場合は、Optional Chaining または Non-null Assertion を使用してください。
+
+```typescript
+// Optional chaining (recommended)
+const result = await weatherTool.execute?.({ location: 'New York' }, {})
+
+// Non-null assertion (when you know execute exists)
+const result = await weatherTool.execute!({ location: 'New York' }, {})
+```

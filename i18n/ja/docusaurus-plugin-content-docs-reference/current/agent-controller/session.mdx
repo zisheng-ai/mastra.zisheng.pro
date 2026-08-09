@@ -1,0 +1,834 @@
+---
+title: "リファレンス：Session | AgentController"
+description: "ID、Thread、Mode、モデル、実行状態、Grant、表示スナップショットなど、1つの会話に固有の状態を管理する AgentController Session の API リファレンスです。"
+packages:
+  - "@mastra/core"
+toc_max_heading_level: 2
+---
+
+# Session
+
+:::experimental
+
+`AgentController` 機能はベータ段階です。ベータを終了するまでは、マイナーバージョンで破壊的変更が行われる可能性があります。
+
+:::
+
+`Session` は、1つの Resource と省略可能な Scope に対する分離された Runtime です。固有の Event bus、Thread のバインド、状態、Mode とモデルの選択、実行制御、承認、Suspension、フォローアップ、表示状態を管理します。[`AgentController`](/reference/agent-controller/agent-controller-class) は、共有 Agent、設定、ストレージ、Workspace、サービスを提供します。
+
+Session は `controller.createSession()` を通じて作成します。直接構築するためのメソッドや Controller に接続するためのメソッドは、Application API ではありません。
+
+概念の概要については、[AgentController の概要](/docs/harness/agent-controller)を参照してください。
+
+## 使用例
+
+次の例では、サポートされている Controller から Session へのフローを使用します。
+
+```typescript
+await controller.init()
+
+const session = await controller.createSession({ resourceId: 'project-42' })
+const unsubscribe = session.subscribe(event => {
+  if (event.type === 'display_state_changed') {
+    render(event.displayState)
+  }
+})
+
+await session.sendMessage({ content: 'Review the current project.' })
+unsubscribe()
+```
+
+## プロパティ
+
+Session は、会話ごとの状態を各ドメインで管理するサブオブジェクトで構成されます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'identity',
+    type: 'SessionIdentity',
+    description: '会話に対して安定した Session、所有者、Resource の ID。以下の Identity メソッドを参照してください。',
+  },
+  {
+    name: 'thread',
+    type: 'SessionThread',
+    description: 'アクティブな Thread のバインドと、Thread／メッセージの読み取り。以下の Thread メソッドを参照してください。',
+  },
+  {
+    name: 'mode',
+    type: 'SessionMode',
+    description: 'アクティブな Mode の選択。以下の Mode メソッドを参照してください。',
+  },
+  {
+    name: 'model',
+    type: 'SessionModel',
+    description: 'Mode ごとの永続化を含む、アクティブなモデルの選択。以下のモデルメソッドを参照してください。',
+  },
+  {
+    name: 'om',
+    type: 'SessionOM',
+    description: 'Observational Memory の Observer モデルと Reflector モデルの設定。',
+  },
+  {
+    name: 'permissions',
+    type: 'SessionPermissions',
+    description: 'Session 状態で表現される、Tool とカテゴリーの権限ポリシー。',
+  },
+  {
+    name: 'subagents',
+    type: 'SessionSubagents',
+    description: 'グローバルおよび Agent タイプごとのサブ Agent モデル選択。',
+  },
+  {
+    name: 'run',
+    type: 'SessionRun',
+    description: '進行中の実行に対する Run と Trace の ID、および中止状態。以下の Run メソッドを参照してください。',
+  },
+  {
+    name: 'stream',
+    type: 'SessionStream',
+    description: 'Agent Thread の Stream に対するライブサブスクリプション。以下の Stream メソッドを参照してください。',
+  },
+  {
+    name: 'suspensions',
+    type: 'SessionSuspensions',
+    description: '再開を待機している一時停止中の対話型 Tool 呼び出し。以下の Suspension メソッドを参照してください。',
+  },
+  {
+    name: 'followUps',
+    type: 'SessionFollowUps',
+    description: '実行中に送信されたメッセージのキュー。以下のフォローアップメソッドを参照してください。',
+  },
+  {
+    name: 'approval',
+    type: 'SessionApproval',
+    description: '保留中の Tool 承認ゲート。以下の承認メソッドを参照してください。',
+  },
+  {
+    name: 'displayState',
+    type: 'SessionDisplayState',
+    description:
+      'UI がレンダリングに使用する正規の AgentControllerDisplayState スナップショット。以下の表示状態メソッドを参照してください。',
+  },
+  {
+    name: 'state',
+    type: 'AgentControllerRequestState<TState>',
+    description: 'スキーマで検証され、Session が所有する AgentController 状態。以下の State メソッドを参照してください。',
+  },
+  {
+    name: 'browser',
+    type: 'MastraBrowser | undefined',
+    description:
+      'この Session の Browser Automation インスタンス。作成時に createSession を介して設定するか、AgentController 設定のデフォルトから取得します。Browser が設定されていない場合は undefined です。',
+  },
+]}
+/>
+
+## メソッド
+
+### Identity とイベント
+
+#### `getTags()`
+
+Session の作成時に指定したタグのコピーを返します。
+
+```typescript
+const tags = session.getTags()
+```
+
+戻り値：`Record<string, string>`
+
+#### `subscribe(listener)`
+
+この Session の分離された Event bus を購読します。このメソッドは購読解除関数を返します。
+
+```typescript
+const unsubscribe = session.subscribe(event => {
+  console.log(event.type)
+})
+
+unsubscribe()
+```
+
+戻り値：`() => void`
+
+### メッセージと実行制御
+
+#### `sendMessage({ content, files?, requestContext? })`
+
+ユーザーメッセージを送信します。アクティブな Thread がない場合、Session は先に Thread を作成します。
+
+```typescript
+await session.sendMessage({
+  content: 'Summarize this file.',
+  files: [{ data: fileContents, mediaType: 'text/plain', filename: 'notes.txt' }],
+})
+```
+
+#### `steer({ content, requestContext? })`
+
+アクティブな実行にステアリング内容を追加します。
+
+```typescript
+await session.steer({ content: 'Focus on the failing tests.' })
+```
+
+#### `followUp({ content, requestContext? })`
+
+実行中はフォローアップをキューに追加し、アイドル中は即座に送信します。
+
+```typescript
+await session.followUp({ content: 'Then propose a fix.' })
+```
+
+#### `getCurrentRunId()`
+
+アクティブな Stream の Run ID、追跡中の Run ID、またはアイドル中は `null` を返します。
+
+```typescript
+const runId = session.getCurrentRunId()
+```
+
+戻り値：`string | null`
+
+#### `abort()`
+
+アクティブな実行を中止し、保留中の Suspension の表示状態を消去します。
+
+```typescript
+session.abort()
+```
+
+### Workspace
+
+#### `getWorkspace()`
+
+この Session 用に解決された Workspace を返します。Session レベルのオーバーライドと、Session Scope から選択された Workspace は保持されます。
+
+```typescript
+const workspace = session.getWorkspace()
+const skill = await workspace.skills?.get('code-review')
+```
+
+戻り値：`Workspace`
+
+### Session の Grant
+
+Session Scope の Grant を設定すると、プロンプトを表示せず Tool が自動承認されます。Grant は一時的です。Session の再起動時にリセットされ、永続化されません。
+
+#### `grantCategory(category)`
+
+現在の Session に Tool カテゴリーを許可します。このカテゴリーに属する Tool は自動承認されます。
+
+```typescript
+session.grantCategory('edit')
+```
+
+#### `grantTool(toolName)`
+
+現在の Session に特定の Tool を許可します。
+
+```typescript
+session.grantTool('mastra_workspace_execute_command')
+```
+
+#### `getGrants()`
+
+現在許可されているカテゴリーと Tool を返します。
+
+```typescript
+const grants = session.getGrants()
+// { categories: string[], tools: string[] }
+```
+
+#### `hasCategoryGrant(category)`
+
+カテゴリーにインメモリの Session Grant があるかどうかを返します。
+
+```typescript
+const allowed = session.hasCategoryGrant('edit')
+```
+
+戻り値：`boolean`
+
+#### `hasToolGrant(toolName)`
+
+Tool にインメモリの Session Grant があるかどうかを返します。
+
+```typescript
+const allowed = session.hasToolGrant('write_file')
+```
+
+戻り値：`boolean`
+
+### Tool の承認
+
+#### `resolveToolApproval(toolName)`
+
+明示的な Tool ルール、Session Grant、カテゴリールールを適用した後の有効なポリシーを返します。
+
+```typescript
+const policy = session.resolveToolApproval('execute_command')
+```
+
+戻り値：`PermissionPolicy`
+
+#### `respondToToolApproval({ decision, toolCallId?, requestContext?, declineContext? })`
+
+`tool_approval_required` イベントによって発生した、保留中の Tool 承認リクエストに応答します。`always_allow_category` を渡すと、Session の残りの期間について Tool のカテゴリー全体も許可されます。
+
+```typescript
+session.respondToToolApproval({ decision: 'approve' })
+session.respondToToolApproval({ decision: 'decline' })
+session.respondToToolApproval({ decision: 'always_allow_category' })
+```
+
+#### `respondToToolSuspension({ resumeData, toolCallId?, requestContext? })`
+
+Application から提供されたデータで、一時停止中の Tool を再開します。複数の Tool 呼び出しが一時停止している場合は `toolCallId` を指定します。
+
+```typescript
+await session.respondToToolSuspension({
+  toolCallId: event.toolCallId,
+  resumeData: ['src'],
+})
+```
+
+`submit_plan` には、`{ action: 'approved' }` または `{ action: 'rejected', feedback }` を渡します。承認すると、Tool の再開前に `transitionsTo` で設定された Mode に切り替わることがあります。
+
+### Token の使用量
+
+#### `getTokenUsage()`
+
+アクティブな Thread で実行中の Token 使用量集計のコピーを返します。
+
+```typescript
+const usage = session.getTokenUsage()
+// { promptTokens, completionTokens, totalTokens, ... }
+```
+
+## Identity
+
+`session.identity` は会話の安定した識別子（Resource ID、Session の `id`、`ownerId`）を管理します。`id` と `ownerId` は Session の存続中は変わらず、Resource ID を切り替えても変更されません。これらはストレージ内の `SessionRecord` にある `id` フィールドと `ownerId` フィールドに対応します。
+
+### `session.identity.getId()`
+
+安定した Session 識別子を返します。
+
+```typescript
+const sessionId = session.identity.getId()
+```
+
+### `session.identity.getOwnerId()`
+
+Session の安定した所有者識別子を返します。
+
+```typescript
+const ownerId = session.identity.getOwnerId()
+```
+
+### `session.identity.getResourceId()`
+
+現在の Resource ID を返します。
+
+```typescript
+const resourceId = session.identity.getResourceId()
+```
+
+### `session.identity.getDefaultResourceId()`
+
+Session の作成時に使用された Resource ID を返します。
+
+```typescript
+const defaultResourceId = session.identity.getDefaultResourceId()
+```
+
+Resource ID を変更するには、[`controller.setResourceId()`](/reference/agent-controller/agent-controller-class#setresourceidsession--resourceid-) を使用します。このメソッドはアクティブな Thread も解除します。Session の `id` と `ownerId` は Resource の切り替えによる影響を受けません。
+
+## Thread
+
+`session.thread` は、アクティブな Thread のバインドと Resource Scope の Thread 操作を管理します。ストレージが設定されている場合、保存済みの Thread とメッセージは Controller を再作成しても保持できます。ライブ Session とその Event bus は保持されません。
+
+### `session.thread.create({ title?, id? })`
+
+Thread を作成し、Session をバインドして、その Event Stream を開きます。
+
+```typescript
+const thread = await session.thread.create({
+  id: 'thread-7',
+  title: 'Investigate login failure',
+})
+```
+
+戻り値：`Promise<AgentControllerThread>`
+
+### `session.thread.rename({ title })`
+
+アクティブな保存済み Thread の名前を変更します。
+
+```typescript
+await session.thread.rename({ title: 'Fix login failure' })
+```
+
+### `session.thread.clone({ sourceThreadId?, title?, resourceId? })`
+
+所有する Thread とそのメッセージを複製し、Session を複製先にバインドします。
+
+```typescript
+const clone = await session.thread.clone({
+  sourceThreadId: 'thread-7',
+  title: 'Alternative approach',
+})
+```
+
+戻り値：`Promise<AgentControllerThread>`
+
+### `session.thread.switch({ threadId, emitEvent? })`
+
+所有する保存済み Thread に切り替え、その Mode、モデル、Observational Memory の設定を復元します。
+
+```typescript
+await session.thread.switch({ threadId: 'thread-8' })
+```
+
+### `session.thread.delete({ threadId })`
+
+所有する Thread を削除します。アクティブな Thread を削除すると、現在のバインドも解除されます。
+
+```typescript
+await session.thread.delete({ threadId: 'thread-8' })
+```
+
+### `session.thread.getId()`
+
+アクティブな Thread ID を返します。Thread がバインドされていない場合は `null` を返します。
+
+```typescript
+const threadId = session.thread.getId()
+```
+
+### `session.thread.list(options?)`
+
+ストレージの Thread を一覧表示します。デフォルトでは、現在の Resource の Thread だけが返され、一時的な Fork 済みサブ Agent Thread は非表示になります。
+
+```typescript
+const threads = await session.thread.list()
+const allThreads = await session.thread.list({ allResources: true })
+const everything = await session.thread.list({ includeForkedSubagents: true })
+```
+
+### `session.thread.getById({ threadId })`
+
+ID で1つの Thread を返します。存在しない場合は `null` を返します。
+
+```typescript
+const thread = await session.thread.getById({ threadId: 'thread-abc123' })
+```
+
+### `session.thread.listActiveMessages(options?)`
+
+アクティブな Thread のメッセージを取得します。Thread がバインドされていない場合は空の配列を返します。
+
+```typescript
+const messages = await session.thread.listActiveMessages({ limit: 50 })
+```
+
+### `session.thread.listMessages({ threadId, limit? })`
+
+特定の Thread のメッセージを取得します。
+
+```typescript
+const messages = await session.thread.listMessages({ threadId: 'thread-abc123' })
+```
+
+メッセージ読み取りメソッドの `listActiveMessages`、`listMessages`、`firstUserMessage` は `MastraDBMessage` オブジェクトを返します。一方、`firstUserMessages` は Thread ID をキーとする `Map<string, MastraDBMessage>` を返します。各メッセージには、`role`、`id`、`createdAt`、および `content.format` と `content.parts` 配列を持つ `content` オブジェクトがあります。テキスト、推論、Tool 呼び出し、添付ファイルは `content.parts` から読み取ります。System Reminder や通知などの Signal は、`role: 'signal'` を持つ個別のメッセージとして返されます。
+
+### `session.thread.firstUserMessage({ threadId })`
+
+Thread の最初のユーザーメッセージを取得します。存在しない場合は `null` を返します。
+
+```typescript
+const firstMsg = await session.thread.firstUserMessage({
+  threadId: 'thread-abc123',
+})
+```
+
+### `session.thread.firstUserMessages({ threadIds })`
+
+複数の Thread の最初のユーザーメッセージを一度に取得し、Map として返します。
+
+```typescript
+const firstByThread = await session.thread.firstUserMessages({
+  threadIds: ['thread-a', 'thread-b'],
+})
+```
+
+### `session.thread.getSetting({ key })`
+
+アクティブな Thread のメタデータから設定を読み取ります。
+
+```typescript
+const value = await session.thread.getSetting({ key: 'omThreshold' })
+```
+
+### `session.thread.setSetting({ key, value })`
+
+アクティブな Thread のメタデータに設定を書き込みます。
+
+```typescript
+await session.thread.setSetting({ key: 'omThreshold', value: 0.8 })
+```
+
+### `session.thread.deleteSetting({ key })`
+
+アクティブな Thread のメタデータから設定を削除します。
+
+```typescript
+await session.thread.deleteSetting({ key: 'omThreshold' })
+```
+
+## Mode
+
+`session.mode` はアクティブな Mode の選択を管理します。
+
+### `session.mode.get()`
+
+アクティブな Mode ID を返します。
+
+```typescript
+const modeId = session.mode.get()
+```
+
+### `session.mode.resolve()`
+
+アクティブな Mode の完全な `AgentControllerMode` オブジェクトを、Controller に設定された Mode に照らして解決して返します。
+
+```typescript
+const mode = session.mode.resolve()
+```
+
+### `session.mode.switch({ modeId })`
+
+別の Mode に切り替えます。Session はアクティブな Thread に新しい Mode を永続化する前に、切り替え元の Mode のモデルを保存します。その後、切り替え先の Mode で選択済みのモデルまたはデフォルトモデルを復元します。Session は `mode_changed` を直ちに発行し、モデルの解決後に `model_changed` を発行します。
+
+```typescript
+await session.mode.switch({ modeId: 'build' })
+```
+
+## モデル
+
+`session.model` は、Mode ごとのモデル Memory を含む、アクティブなモデルの選択を管理します。
+
+### `session.model.get()`
+
+アクティブなモデル ID を返します。
+
+```typescript
+const modelId = session.model.get()
+```
+
+### `session.model.displayName()`
+
+アクティブなモデル ID の最後のセグメントを短い表示名として返します。モデルが選択されていない場合は `'unknown'` を返します。
+
+```typescript
+const name = session.model.displayName()
+```
+
+### `session.model.hasSelection()`
+
+現在モデルが選択されているかどうかを確認します。
+
+```typescript
+if (session.model.hasSelection()) {
+  // Ready to send messages
+}
+```
+
+### `session.model.switch({ modelId, scope?, modeId? })`
+
+アクティブなモデルを切り替えます。`scope` が `'thread'`（デフォルト）の場合、モデル ID は Mode ごとのモデルとして永続化され、切り替えて戻ったときに復元されます。選択内容を Controller の `modelUseCountTracker` に報告し、`model_changed` イベントを発行します。
+
+```typescript
+// Set for the current session only
+await session.model.switch({
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+  scope: 'global',
+})
+
+// Persist to the current thread (default)
+await session.model.switch({ modelId: '__GATEWAY_ANTHROPIC_MODEL_SONNET__' })
+```
+
+## Observational Memory
+
+Observational Memory のモデル選択は、`session.om.observer` と `session.om.reflector` の Role ごとにグループ化されています。どちらの Role も同じメソッドを公開します。読み取り時は Session 状態に値が設定されていればその値を返し、設定されていなければ Controller の `omConfig` のデフォルト値にフォールバックします。
+
+### `session.om.observer.modelId()` / `session.om.reflector.modelId()`
+
+Role のモデル ID を返します。Session 状態にも `omConfig` にも値がない場合は `undefined` を返します。
+
+```typescript
+const observer = session.om.observer.modelId()
+const reflector = session.om.reflector.modelId()
+```
+
+### `session.om.observer.threshold()` / `session.om.reflector.threshold()`
+
+Role の Token 単位のしきい値（Observer の Observation しきい値、Reflector の Reflection しきい値）を返します。未設定の場合は `undefined` を返します。
+
+```typescript
+const observationThreshold = session.om.observer.threshold()
+const reflectionThreshold = session.om.reflector.threshold()
+```
+
+### `session.om.observer.switchModel({ modelId })` / `session.om.reflector.switchModel({ modelId })`
+
+Role のモデルを切り替えます。設定を Thread メタデータに永続化し、`om_model_changed` イベントを発行します。
+
+```typescript
+await session.om.observer.switchModel({
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_HAIKU__',
+})
+await session.om.reflector.switchModel({
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_HAIKU__',
+})
+```
+
+### `session.om.observer.resolvedModel()` / `session.om.reflector.resolvedModel()`
+
+設定済みのモデル Gateway を介して Role のモデル ID をモデルインスタンスに解決します。モデル ID が設定されていない場合や Resolver が設定されていない場合は `undefined` を返します。
+
+```typescript
+const observerModel = session.om.observer.resolvedModel()
+const reflectorModel = session.om.reflector.resolvedModel()
+```
+
+## 権限
+
+`session.permissions` は、`session.state` で表現される Tool 承認ポリシーを管理します。承認の解決時に参照されるカテゴリーごと、Tool ごとのルールです。これらは [Session の Grant](#session-grants) に記載されているインメモリ Grant とは異なります。Grant はライブ Session とともにリセットされます。ホストが対応する Session 状態を復元しない限り、権限ルールは永続化されません。
+
+### `session.permissions.getRules()`
+
+現在の権限ルールを返します。ルールが設定されていない場合は空のルール（`{ categories: {}, tools: {} }`）を返します。
+
+```typescript
+const rules = session.permissions.getRules()
+// { categories: { execute: 'ask' }, tools: { dangerous_tool: 'deny' } }
+```
+
+### `session.permissions.setForCategory({ category, policy })`
+
+Tool カテゴリーの承認ポリシー（`'allow' | 'ask' | 'deny'`）を設定します。変更が Session 状態に永続化されると解決します。
+
+```typescript
+await session.permissions.setForCategory({ category: 'execute', policy: 'ask' })
+```
+
+### `session.permissions.setForTool({ toolName, policy })`
+
+特定の Tool の承認ポリシーを設定します。Tool ごとのポリシーはカテゴリーポリシーより優先されます。永続化されると解決します。
+
+```typescript
+await session.permissions.setForTool({ toolName: 'dangerous_tool', policy: 'deny' })
+```
+
+## サブ Agent
+
+`session.subagents` はサブ Agent の設定を管理します。現在は `session.subagents.model` でサブ Agent のモデル選択を公開しています。
+
+### `session.subagents.model.get({ agentType? })`
+
+サブ Agent のモデル ID を返します。`agentType` が指定されている場合はその値、次にグローバルなサブ Agent モデルを優先し、どちらも設定されていない場合は `null` を返します。
+
+```typescript
+const modelId = session.subagents.model.get({ agentType: 'explore' })
+```
+
+### `session.subagents.model.set({ modelId, agentType? })`
+
+サブ Agent のモデル ID を設定します。タイプごとのオーバーライドを設定するには `agentType` を渡し、グローバルなデフォルトを設定するには省略します。Thread の設定に永続化し、`subagent_model_changed` イベントを発行します。
+
+```typescript
+// Set the global subagent model
+await session.subagents.model.set({ modelId: '__GATEWAY_ANTHROPIC_MODEL_SONNET__' })
+
+// Set a per-type override
+await session.subagents.model.set({
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_HAIKU__',
+  agentType: 'explore',
+})
+```
+
+## Run
+
+`session.run` は、進行中の実行に対する Run と Trace の ID、および中止状態を管理します。
+
+### `session.run.getRunId()` / `getTraceId()`
+
+現在の実行について保存された Run ID と Trace ID を返します。アイドル中は `null` を返します。
+
+```typescript
+const runId = session.run.getRunId()
+const traceId = session.run.getTraceId()
+```
+
+### `session.run.isRunning()`
+
+現在実行中かどうかを返します。
+
+```typescript
+if (session.run.isRunning()) {
+  // A run is active
+}
+```
+
+## Stream
+
+`session.stream` は、Agent Thread の Stream に対するライブサブスクリプションと、その重複排除キーを管理します。
+
+### `session.stream.activeRunId()`
+
+ライブ Stream でアクティブな Run ID を返します。Stream が開いていない場合は `null` を返します。
+
+```typescript
+const runId = session.stream.activeRunId()
+```
+
+### `session.stream.isActive()`
+
+現在 Stream にアクティブな実行があるかどうかを返します。
+
+```typescript
+if (session.stream.isActive()) {
+  // The current thread's stream is producing output
+}
+```
+
+## Suspension
+
+`session.suspensions` は、再開を待機している一時停止中の対話型 Tool 呼び出し（`ask_user` や `request_access` など）を管理します。
+
+### `session.suspensions.hasPending()`
+
+現在一時停止中の Tool があるかどうかを返します。
+
+```typescript
+if (session.suspensions.hasPending()) {
+  // At least one interactive tool is waiting for a response
+}
+```
+
+### `session.suspensions.has({ toolCallId })`
+
+特定の Tool 呼び出しが一時停止中かどうかを返します。
+
+```typescript
+const waiting = session.suspensions.has({ toolCallId: event.toolCallId })
+```
+
+一時停止中の Tool は [`session.respondToToolSuspension()`](#tool-approvals) で再開します。
+
+## フォローアップ
+
+`session.followUps` は、実行中に送信されたメッセージの FIFO キューを管理します。
+
+### `session.followUps.count()`
+
+キューに入っているフォローアップの数を返します。
+
+```typescript
+const queued = session.followUps.count()
+```
+
+### `session.followUps.isEmpty()`
+
+フォローアップキューが空かどうかを返します。
+
+```typescript
+if (!session.followUps.isEmpty()) {
+  // Messages are waiting to be processed
+}
+```
+
+## 承認
+
+`session.approval` は保留中の Tool 承認ゲートを管理します。
+
+### `session.approval.isArmed()`
+
+現在 Tool が承認の判断を待機しているかどうかを返します。
+
+```typescript
+if (session.approval.isArmed()) {
+  // Show the approval prompt
+}
+```
+
+[`session.respondToToolApproval()`](#tool-approvals) で応答します。
+
+## 表示状態
+
+`session.displayState` は、UI がレンダリングに使用する正規の `AgentControllerDisplayState` スナップショットと、すべての Session イベントに同期させる Reducer を管理します。
+
+### `session.displayState.get()`
+
+UI のレンダリングに使用する現在の `AgentControllerDisplayState` スナップショットを返します。
+
+```typescript
+const displayState = session.displayState.get()
+```
+
+### `session.displayState.restoreTasks(tasks)`
+
+UI が永続化された Task Tool の履歴を再生した後、スナップショットの Task 部分を復元します。これはスナップショットのみを更新し、イベントは発行しません。呼び出した後は明示的に再レンダリングしてください。
+
+```typescript
+session.displayState.restoreTasks(replayedTasks)
+```
+
+各イベントの後、Session は最新のスナップショットを含む `display_state_changed` を発行します。[`session.subscribe()`](#identity-and-events) で購読するか、`session.displayState.get()` から現在の値を読み取ります。
+
+## State
+
+`session.state` は、会話についてスキーマで検証される AgentController 状態を管理します。現在のスナップショットを保持し、AgentController に渡された `stateSchema` に対して更新を検証します。更新は直列化され、変更のたびに `state_changed` イベントが発行されます。
+
+### `session.state.get()`
+
+現在の State スナップショットの読み取り専用コピーを返します。
+
+```typescript
+const state = session.state.get()
+```
+
+### `session.state.set(updates)`
+
+部分的な更新を State に統合します。更新はキューに追加されるため、同時に呼び出しても順番に適用されます。スキーマに対して検証され、変更されたキーを含む `state_changed` が発行されます。
+
+```typescript
+await session.state.set({ yolo: true })
+```
+
+### `session.state.update(updater)`
+
+現在のスナップショットに Updater を適用し、書き込みキュー内で結果をアトミックに反映します。最新の State を参照する必要がある Read-Modify-Write の変更に使用します。Updater は、統合する `updates`、発行する省略可能な `events`、`update()` の解決値となる `result` を返します。
+
+```typescript
+const added = await session.state.update(current => ({
+  updates: { count: (current.count ?? 0) + 1 },
+  result: (current.count ?? 0) + 1,
+}))
+```
+
+## 永続化の境界
+
+`Session` はライブ Runtime オブジェクトです。Event bus、任意の `session.state`、権限ルール、権限 Grant、保留中の承認、Suspension、フォローアップ、Run 状態、Stream 状態は、Controller やプロセスを再作成しても自動では保持されません。Session を再作成する際、必要な状態はホストが復元する必要があります。
+
+ストレージが設定されている場合、Thread、メッセージ、Token 使用量は永続化されます。Thread の設定から Mode とモデルの選択が復元されます。また、Agent タイプごとのオーバーライドを含む、Observational Memory の設定とサブ Agent のモデル選択も復元できます。Chat Channel は保存済み Thread に再度対応付けられますが、`AgentControllerChannels` が保持する Channel と Session の対応付け、および自動承認の状態はメモリ内に残ります。
+
+## 関連情報
+
+- [AgentController クラス](/reference/agent-controller/agent-controller-class)
+- [AgentController の概要](/docs/harness/agent-controller)
+- [Thread と State](/docs/harness/agent-controller#manage-threads-and-state)
+- [Tool の承認](/docs/harness/agent-controller#approve-tools-and-resume-suspensions)

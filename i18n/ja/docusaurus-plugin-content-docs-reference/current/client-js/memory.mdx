@@ -1,0 +1,242 @@
+---
+title: "リファレンス：Memory API | Client SDK"
+description: client-js SDK を使用して、Mastra の会話スレッドとメッセージ履歴を管理する方法を説明します。
+packages:
+  - "@mastra/client-js"
+---
+
+# Memory API
+
+Memory API は、Mastra の会話スレッドとメッセージ履歴を管理するためのメソッドを提供します。
+
+## すべてのスレッドを取得
+
+特定のリソースに属するすべてのメモリスレッドを取得します。
+
+```typescript
+const threads = await mastraClient.listMemoryThreads({
+  resourceId: 'resource-1',
+  agentId: 'agent-1', // Optional - can be omitted if storage is configured
+})
+```
+
+`agentId` を省略し、サーバーにストレージが設定されている場合、スレッドはストレージから直接取得されます。これは、複数の Agent が同じスレッドを共有する場合（複数の Agent ステップを含む Workflow など）に便利です。
+
+## 新しいスレッドを作成
+
+新しいメモリスレッドを作成します。
+
+```typescript
+const thread = await mastraClient.createMemoryThread({
+  title: 'New Conversation',
+  metadata: { category: 'support' },
+  resourceId: 'resource-1',
+  agentId: 'agent-1',
+})
+```
+
+## 特定のスレッドを操作
+
+特定のメモリスレッドのインスタンスを取得します。
+
+```typescript
+const thread = mastraClient.getMemoryThread({ threadId: 'thread-id', agentId: 'agent-id' })
+```
+
+## スレッドのメソッド
+
+### スレッドの詳細を取得
+
+特定のスレッドの詳細を取得します。
+
+```typescript
+const details = await thread.get()
+```
+
+### スレッドを更新
+
+スレッドのプロパティを更新します。
+
+```typescript
+const updated = await thread.update({
+  title: 'Updated Title',
+  metadata: { status: 'resolved' },
+  resourceId: 'resource-1',
+})
+```
+
+### スレッドを削除
+
+スレッドとそのメッセージを削除します。
+
+```typescript
+await thread.delete()
+```
+
+### スレッドを複製
+
+すべてのメッセージを含むスレッドのコピーを作成します。
+
+```typescript
+const { thread: clonedThread, clonedMessages } = await thread.clone()
+```
+
+オプションを指定して複製します。
+
+```typescript
+const { thread: clonedThread, clonedMessages } = await thread.clone({
+  newThreadId: 'custom-clone-id',
+  title: 'Cloned Conversation',
+  metadata: { branch: 'experiment-1' },
+  options: {
+    messageLimit: 10, // Only clone last 10 messages
+  },
+})
+```
+
+メッセージを絞り込んで複製します。
+
+```typescript
+const { thread: clonedThread } = await thread.clone({
+  options: {
+    messageFilter: {
+      startDate: new Date('2024-01-01'),
+      endDate: new Date('2024-01-31'),
+    },
+  },
+})
+```
+
+複製結果には以下が含まれます。
+
+- `thread`：複製メタデータを持つ、新しく作成された複製スレッド
+- `clonedMessages`：新しい ID が付与された複製メッセージの配列
+
+## メッセージ操作
+
+### メッセージを保存
+
+メッセージをメモリに保存します。
+
+```typescript
+const result = await mastraClient.saveMessageToMemory({
+  messages: [
+    {
+      role: 'user',
+      content: 'Hello!',
+      id: '1',
+      threadId: 'thread-1',
+      resourceId: 'resource-1',
+      createdAt: new Date(),
+      format: 2,
+    },
+  ],
+  agentId: 'agent-1',
+})
+
+// result.messages contains the saved messages
+console.log(result.messages)
+```
+
+### スレッドのメッセージを取得
+
+メモリスレッドに関連付けられたメッセージを取得します。
+
+```typescript
+// Get all messages in the thread (paginated)
+const result = await thread.listMessages()
+console.log(result.messages) // Array of messages
+console.log(result.total) // Total count
+console.log(result.hasMore) // Whether more pages exist
+
+// Get messages with pagination
+const result = await thread.listMessages({
+  page: 0,
+  perPage: 20,
+})
+
+// Get messages with ordering
+const result = await thread.listMessages({
+  orderBy: { field: 'createdAt', direction: 'ASC' },
+})
+
+// Get messages with shallow metadata filters
+const result = await thread.listMessages({
+  filter: {
+    metadata: {
+      category: 'billing',
+      escalated: true,
+      priority: 2,
+      archivedAt: null,
+    },
+  },
+})
+```
+
+メタデータフィルターは、`string`、有限の `number`、`boolean`、`null` という浅いスカラー値だけに一致します。すべてのキーと値の組み合わせが AND 条件で一致する必要があります。`null` は、明示的に `null` に設定されたキーだけに一致します。メタデータのキーは英字またはアンダースコアで始まり、英数字またはアンダースコアだけを含む必要があります。上限は 128 文字です。`__proto__`、`constructor`、`prototype` など、プロトタイプで予約されているキーは使用できません。パフォーマンスはサーバー側のストレージバックエンドに依存し、任意のメタデータフィルターによって候補メッセージのスキャンが発生する場合があります。
+
+### メッセージを削除
+
+スレッドから 1 件以上のメッセージを削除します。
+
+```typescript
+// Delete a single message
+const result = await thread.deleteMessages('message-id')
+
+// Delete multiple messages
+const result = await thread.deleteMessages(['message-1', 'message-2', 'message-3'])
+
+// Returns: { success: true, message: "Message deleted successfully" }
+```
+
+## ワーキングメモリ
+
+ワーキングメモリを使用すると、Agent は複数回の対話にわたってユーザーに関する情報を保持できます。特定のスレッドに限定することも、あるリソース（ユーザー）のすべてのスレッドを対象にすることもできます。
+
+### ワーキングメモリを取得
+
+スレッドの現在のワーキングメモリを取得します。
+
+```typescript
+const workingMemory = await mastraClient.getWorkingMemory({
+  agentId: 'agent-1',
+  threadId: 'thread-1',
+  resourceId: 'user-123', // Optional, required for resource-scoped memory
+})
+```
+
+レスポンスには以下が含まれます。
+
+- `workingMemory`：現在のワーキングメモリの内容（文字列または null）
+- `source`：メモリのスコープが `"thread"` と `"resource"` のどちらか
+- `workingMemoryTemplate`：ワーキングメモリに使用するテンプレート（設定されている場合）
+- `threadExists`：スレッドが存在するかどうか
+
+### ワーキングメモリを更新
+
+スレッドのワーキングメモリの内容を更新します。
+
+```typescript
+await mastraClient.updateWorkingMemory({
+  agentId: 'agent-1',
+  threadId: 'thread-1',
+  workingMemory: `# User Profile
+- Name: John Doe
+- Location: New York
+- Preferences: Prefers formal communication
+`,
+  resourceId: 'user-123', // Optional, required for resource-scoped memory
+})
+
+// Returns: { success: true }
+```
+
+リソースをスコープとするワーキングメモリでは、`resourceId` パラメーターを指定する必要があります。これにより、そのユーザーのすべての会話スレッドにわたってメモリを保持できます。
+
+### メモリの状態を取得
+
+メモリシステムの状態を確認します。
+
+```typescript
+const status = await mastraClient.getMemoryStatus('agent-id')
+```

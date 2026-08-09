@@ -1,0 +1,247 @@
+---
+title: "リファレンス: Express アダプター | Server"
+description: "@mastra/express Server アダプターの API リファレンスです。"
+packages:
+  - "@mastra/express"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# Express アダプター
+
+`@mastra/express` パッケージは、[Express](https://expressjs.com) で Mastra を実行するための Server アダプターを提供します。一般的なアダプターの概念（コンストラクターオプション、初期化フローなど）については、[Server アダプター](/docs/server/server-adapters)を参照してください。
+
+## インストール
+
+Express アダプターと Express フレームワークをインストールします。
+
+```bash npm2yarn
+npm install @mastra/express@latest express
+```
+
+## 使用例
+
+```typescript title="server.ts"
+import express from 'express'
+import { MastraServer } from '@mastra/express'
+import { mastra } from './mastra'
+
+const app = express()
+app.use(express.json()) // Required for body parsing
+
+const server = new MastraServer({ app, mastra })
+await server.init()
+
+app.listen(4111, () => {
+  console.log('Server running on port 4111')
+})
+```
+
+:::note
+
+Express で JSON リクエストボディを解析するには、`express.json()` ミドルウェアが必要です。`MastraServer` を作成する前に追加してください。
+
+:::
+
+## コンストラクターパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'app',
+    type: 'Application',
+    description: 'Express アプリのインスタンス',
+    isOptional: false,
+  },
+  {
+    name: 'mastra',
+    type: 'Mastra',
+    description: 'Mastra インスタンス',
+    isOptional: false,
+  },
+  {
+    name: 'prefix',
+    type: 'string',
+    description: 'ルートパスのプレフィックス（例: `/api/v2`）',
+    isOptional: true,
+    defaultValue: "''",
+  },
+  {
+    name: 'openapiPath',
+    type: 'string',
+    description: 'OpenAPI 仕様を配信するパス（例: `/openapi.json`）',
+    isOptional: true,
+    defaultValue: "''",
+  },
+  {
+    name: 'bodyLimitOptions',
+    type: '{ maxSize: number, onError: (err) => unknown }',
+    description: 'リクエストボディのサイズ上限',
+    isOptional: true,
+  },
+  {
+    name: 'streamOptions',
+    type: '{ redact?: boolean }',
+    description: 'Stream の機密情報をマスキングする設定。true の場合、Stream から機密データをマスキングします。',
+    isOptional: true,
+    defaultValue: '{ redact: true }',
+  },
+  {
+    name: 'customRouteAuthConfig',
+    type: 'Map<string, boolean>',
+    description:
+      'ルートごとの認証設定の上書き。キーは `METHOD:PATH`（例: `GET:/api/health`）です。値が `false` の場合はルートを公開し、`true` の場合は認証を必須にします。',
+    isOptional: true,
+  },
+  {
+    name: 'tools',
+    type: 'Record<string, Tool>',
+    description: 'Server で使用できる Tool',
+    isOptional: true,
+  },
+  {
+    name: 'taskStore',
+    type: 'InMemoryTaskStore',
+    description: 'A2A（Agent-to-Agent）操作用のタスクストア',
+    isOptional: true,
+  },
+  {
+    name: 'mcpOptions',
+    type: 'MCPOptions',
+    typeDescription: '{ serverless?: boolean, sessionIdGenerator?: () => string }',
+    description:
+      'MCP トランスポートオプション。Cloudflare Workers や Vercel Edge などのステートレス環境では `serverless: true` を設定します。',
+    isOptional: true,
+  },
+]}
+/>
+
+## Hono との違い
+
+| 項目 | Express | Hono |
+| - | - | - |
+| ボディの解析 | `express.json()` が必要 | フレームワークが処理 |
+| コンテキストの保存 | `res.locals` | `c.get()` / `c.set()` |
+| ミドルウェアのシグネチャ | `(req, res, next)` | `(c, next)` |
+| Streaming | `res.write()` / `res.end()` | `stream()` ヘルパー |
+| AbortSignal | `req.on('close')` から作成 | `c.req.raw.signal` |
+
+## カスタムルートの追加
+
+Express アプリにルートを直接追加します。
+
+```typescript title="server.ts"
+const app = express()
+app.use(express.json())
+
+const server = new MastraServer({ app, mastra })
+
+// Before init - runs before Mastra middleware
+app.get('/early-health', (req, res) => res.json({ status: 'ok' }))
+
+await server.init()
+
+// After init - has access to Mastra context
+app.get('/custom', (req, res) => {
+  const mastraInstance = res.locals.mastra
+  res.json({ agents: Object.keys(mastraInstance.listAgents()) })
+})
+
+app.listen(4111)
+```
+
+:::tip
+
+`init()` より前に追加したルートは、Mastra コンテキストなしで実行されます。Mastra インスタンスとリクエストコンテキストにアクセスするには、`init()` より後にルートを追加してください。
+
+:::
+
+Mastra が管理する認証と `requiresAuth` などのルートメタデータを使用する場合は、[`registerApiRoute()`](/reference/server/register-api-route) を推奨します。`app` に直接マウントする素の Express ルートでは、`createAuthMiddleware()` を使用します。
+
+```typescript title="server.ts"
+import express from 'express'
+import { createAuthMiddleware, MastraServer } from '@mastra/express'
+import { mastra } from './mastra'
+
+const app = express()
+app.use(express.json())
+
+const server = new MastraServer({ app, mastra })
+await server.init()
+
+app.get('/custom/protected', createAuthMiddleware({ mastra }), (req, res) => {
+  const user = res.locals.requestContext.get('user')
+  res.json({ user })
+})
+
+app.get('/custom/public', createAuthMiddleware({ mastra, requiresAuth: false }), (req, res) => {
+  res.json({ ok: true })
+})
+```
+
+## コンテキストへのアクセス
+
+Express のミドルウェアとルートでは、`res.locals` を介して Mastra コンテキストにアクセスします。
+
+```typescript
+app.get('/custom', (req, res) => {
+  const mastra = res.locals.mastra
+  const requestContext = res.locals.requestContext
+  const abortSignal = res.locals.abortSignal
+
+  const agent = mastra.getAgent('myAgent')
+  res.json({ agent: agent.name })
+})
+```
+
+`res.locals` では、次のプロパティを使用できます。
+
+| キー | 説明 |
+| - | - |
+| `mastra` | Mastra インスタンス |
+| `requestContext` | リクエストコンテキストのマップ |
+| `abortSignal` | リクエストのキャンセルシグナル |
+| `tools` | 使用可能な Tool |
+| `taskStore` | A2A 操作用のタスクストア |
+| `customRouteAuthConfig` | ルートごとの認証設定の上書き |
+| `user` | 認証済みユーザー（認証が設定されている場合） |
+
+## ミドルウェアの追加
+
+Express ミドルウェアは、`init()` の前または後に追加します。
+
+```typescript title="server.ts"
+const app = express()
+app.use(express.json())
+
+// Middleware before init
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.url}`)
+  next()
+})
+
+const server = new MastraServer({ app, mastra })
+await server.init()
+
+// Middleware after init has access to Mastra context
+app.use((req, res, next) => {
+  const mastra = res.locals.mastra
+  next()
+})
+```
+
+## 手動初期化
+
+ミドルウェアの順序をカスタマイズするには、`init()` の代わりに各メソッドを個別に呼び出します。詳細については、[手動初期化](/docs/server/server-adapters#manual-initialization)を参照してください。
+
+## 例
+
+- [Express アダプター](https://github.com/mastra-ai/mastra/tree/main/examples/server-express-adapter): Express Server の基本的なセットアップ
+
+## 関連項目
+
+- [Server アダプター](/docs/server/server-adapters): アダプター共通の概念
+- [MastraServer リファレンス](/reference/server/mastra-server): 完全な API リファレンス
+- [createRoute() リファレンス](/reference/server/create-route): 型安全なカスタムルートの作成

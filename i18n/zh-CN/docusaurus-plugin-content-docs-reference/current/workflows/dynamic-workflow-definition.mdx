@@ -1,0 +1,301 @@
+---
+title: "参考：动态 workflow 定义 | Workflows"
+description: "用于持久化和注册动态 workflow 的 JSON 定义格式参考。"
+packages:
+  - "@mastra/core"
+---
+
+# 动态 workflow 定义
+
+:::experimental
+
+动态 workflow 目前处于 beta 阶段。在 API 稳定之前，即使主版本号不变，也可能发生破坏性变更。
+
+:::
+
+动态 workflow 定义是与 JSON 兼容的 `DynamicWorkflowGraph`，可由 [`Mastra.addDynamicWorkflow()`](/reference/core/addDynamicWorkflow)、存储型 workflow 的服务器路由以及 Client SDK workflows API 接受。
+
+完整的设置和使用示例请参阅[动态 workflow](/docs/workflows/dynamic-workflows)。
+
+## 定义字段
+
+| 字段 | 类型 | 必需 | 描述 |
+| - | - | - | - |
+| `id` | `string` | 是 | 唯一的 workflow ID，也是获取和运行 workflow 时使用的 ID。 |
+| `description` | `string` | 否 | 便于阅读的描述 |
+| `inputSchema` | `JsonSchema` | 是 | workflow 输入的 JSON Schema |
+| `outputSchema` | `JsonSchema` | 是 | workflow 输出的 JSON Schema |
+| `stateSchema` | `JsonSchema` | 否 | 共享 workflow 状态的 JSON Schema |
+| `requestContextSchema` | `JsonSchema` | 否 | 从请求上下文中读取的值所使用的 JSON Schema |
+| `metadata` | `Record<string, unknown>` | 否 | 通过存储保留的任意 JSON metadata |
+| `graph` | `SerializedStepFlowEntry[]` | 是 | 构成 workflow 的步骤条目 |
+
+schema 使用 JSON Schema 而不是 Zod，以便定义可以通过 JSON 往返转换。Mastra 注册 workflow 时会将每个 schema 转换为 Zod。
+
+```json
+{
+  "id": "greeting-workflow",
+  "description": "Returns a greeting for the supplied name",
+  "inputSchema": {
+    "type": "object",
+    "properties": { "name": { "type": "string" } },
+    "required": ["name"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": { "message": { "type": "string" } },
+    "required": ["message"]
+  },
+  "graph": [
+    {
+      "type": "mapping",
+      "id": "create-greeting",
+      "mapConfig": "{\"message\":{\"template\":\"Hello, ${initData.name}!\"}}"
+    }
+  ]
+}
+```
+
+## 图条目
+
+`graph` 中的条目按顺序运行。每个条目接收前一个条目的输出，第一个条目接收 workflow 输入。
+
+| 条目类型 | 描述 |
+| - | - |
+| `agent` | 调用已注册的 agent |
+| `tool` | 调用已注册的 tool |
+| `mapping` | 在步骤之间重塑数据 |
+| `workflow` | 以嵌套步骤的形式调用已注册的 workflow |
+| `parallel` | 并发运行多个步骤并合并其输出 |
+| `conditional` | 并发运行谓词为 true 的所有分支 |
+| `foreach` | 针对数组输入的每个项目运行一个步骤 |
+| `loop` | 在满足 while 或 until 谓词的条件下重复步骤 |
+| `sleep` | 暂停固定时长 |
+| `sleepUntil` | 暂停到固定日期 |
+
+使用 [`.agent()`](/reference/workflows/workflow-methods/agent) 和 [`.tool()`](/reference/workflows/workflow-methods/tool) 的代码定义型 workflow 在序列化时会生成相同的声明式条目。
+
+### Agent 步骤
+
+`agent` 条目按 ID 调用已注册的 agent。Agent 步骤接受 `{ prompt: string }` 作为输入，默认返回 `{ text: string }`。
+
+```json
+{
+  "type": "agent",
+  "id": "summarize",
+  "agentId": "support-agent"
+}
+```
+
+`id` 标识 workflow 中的此次调用。后续步骤始终通过 `stepResults.summarize` 访问结果，与 agent 自身的 ID 无关。
+
+添加 `outputSchema` 可请求 agent 返回结构化输出：
+
+```json
+{
+  "type": "agent",
+  "id": "extract-subtopics",
+  "agentId": "support-agent",
+  "outputSchema": {
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": { "title": { "type": "string" } },
+      "required": ["title"]
+    }
+  }
+}
+```
+
+在 agent 之前使用 `mapping` 条目，可以基于 workflow 数据构建其 `{ prompt }` 输入。
+
+Agent 条目接受可选的 `description` 和 `options` 对象：
+
+```json
+{
+  "type": "agent",
+  "id": "summarize",
+  "agentId": "support-agent",
+  "description": "Summarize the incoming request",
+  "options": { "retries": 2, "metadata": { "team": "support" } }
+}
+```
+
+只有 `retries` 和 `metadata` 会持久化。存储代码定义型 workflow 时，值为函数的选项（如 `onFinish` 和值为函数的 `toolChoice`）会被拒绝。其他 agent 调用选项不会持久化。
+
+### Tool 步骤
+
+`tool` 条目通过 `Mastra` 的 `tools` 对象中的注册键调用 tool。Mastra 注册 workflow 时会从注册表中解析该 tool 的输入和输出 schema。
+
+```json
+{
+  "type": "tool",
+  "id": "lookup",
+  "toolId": "lookup-customer"
+}
+```
+
+Tool 条目接受与 agent 条目相同的可选 `description` 和 `options` 字段。只有 `retries` 和 `metadata` 会持久化。
+
+### Mapping 步骤
+
+`mapping` 条目用于重塑数据。其 `mapConfig` 是一个对对象进行编码的 JSON 字符串。每个键都会成为步骤输出中的键，每个描述符定义一个来源。
+
+| 描述符 | 描述 |
+| - | - |
+| `{ "value": ... }` | JSON 常量值 |
+| `{ "template": "..." }` | 使用 `${...}` 占位符构建的字符串 |
+| `{ "initData": true, "path": "a.b" }` | 来自 workflow 输入的值 |
+| `{ "step": "step-id", "path": "a.b" }` | 来自前置步骤输出的值 |
+| `{ "requestContextPath": "a.b" }` | 来自请求上下文的值 |
+
+`step` 来源也接受步骤 ID 数组：
+
+```json
+{ "step": ["escalate", "auto-reply"], "path": "text" }
+```
+
+列表中第一个具有非空结果的步骤提供该值。这可用于选择在 `conditional` 条目之后实际运行的分支。
+
+模板会根据 `initData`、`inputData`、`state`、`requestContext` 和 `stepResults.<step-id>` 解析占位符：
+
+```json
+{
+  "type": "mapping",
+  "id": "build-prompt",
+  "mapConfig": "{\"prompt\":{\"template\":\"Summarize this request: ${initData.request}\"}}"
+}
+```
+
+模板解析出的对象和数组会转换为 JSON 字符串。已有结果中的 `null` 值会呈现为空字符串。如果模板引用的步骤没有成功输出，run 将失败。
+
+Mapping 条目必须是顶层图条目，不能放在 `parallel`、`conditional`、`foreach` 或 `loop` 容器中。
+
+### 嵌套 workflow 步骤
+
+`workflow` 条目调用另一个已注册的 workflow。目标可以由代码定义，也可以来自存储。
+
+```json
+{
+  "type": "workflow",
+  "id": "lookup-first",
+  "workflowId": "lookup-customer-workflow"
+}
+```
+
+`id` 标识此次调用。同一个嵌套 workflow 可以使用不同的调用 ID 出现多次，后续步骤通过 `stepResults.<id>` 访问每个结果。`workflow` 条目也接受可选的 `description`。
+
+### Parallel 条目
+
+`parallel` 条目并发运行多个单一步骤，并将其输出合并为以步骤 ID 为键的对象。
+
+```json
+{
+  "type": "parallel",
+  "steps": [
+    { "type": "tool", "id": "first", "toolId": "lookup-customer" },
+    { "type": "tool", "id": "second", "toolId": "lookup-customer" }
+  ]
+}
+```
+
+每个子项必须是 `agent`、`tool` 或 `workflow` 条目。所有子项都直接接收 parallel 条目的输入。
+
+### Conditional 条目
+
+`conditional` 条目将每个步骤与一个声明式谓词配对，并运行谓词为 true 的所有分支。
+
+```json
+{
+  "type": "conditional",
+  "steps": [
+    { "type": "agent", "id": "escalate", "agentId": "support-agent" },
+    { "type": "agent", "id": "auto-reply", "agentId": "support-agent" }
+  ],
+  "predicates": [
+    { "op": "eq", "left": { "path": "inputData.priority" }, "right": { "literal": "urgent" } },
+    { "op": "ne", "left": { "path": "inputData.priority" }, "right": { "literal": "urgent" } }
+  ]
+}
+```
+
+每个子项必须是 `agent`、`tool` 或 `workflow` 条目，且每个子项都需要一个谓词。所有子项都直接接收 conditional 条目的输入。
+
+### 谓词
+
+Conditional 条目和循环使用 JSON 谓词 DSL。操作数是 `{ "path": "..." }` 引用或 `{ "literal": ... }` 值。路径会基于 `initData`、`inputData`、`stepResults` 和 `state` 解析。
+
+| 操作符 | 形状 |
+| - | - |
+| `eq`, `ne`, `lt`, `lte`, `gt`, `gte` | `{ "op": "eq", "left": ..., "right": ... }` |
+| `in`, `notIn` | `{ "op": "in", "value": ..., "set": [...] }` |
+| `exists`, `notExists` | `{ "op": "exists", "path": "..." }` |
+| `truthy`, `falsy` | `{ "op": "truthy", "value": ... }` |
+| `and`, `or` | `{ "op": "and", "args": [...] }` |
+| `not` | `{ "op": "not", "arg": ... }` |
+
+缺失路径不会抛出错误。无法解析路径时，基于路径的操作符会返回 `false`。使用 `exists` 或 `notExists` 可区分缺失值和 falsy 值。
+
+### Foreach 条目
+
+`foreach` 条目针对数组输入中的每个项目运行一次其主体。前一个条目必须生成原始数组。结果会保持输入顺序，并发数默认为 `1`。
+
+```json
+{
+  "type": "foreach",
+  "step": { "type": "workflow", "id": "write-blurb", "workflowId": "blurb-workflow" },
+  "opts": { "concurrency": 3 }
+}
+```
+
+主体可以是 `agent`、`tool` 或 `workflow` 条目，但不能是 `mapping` 条目。
+
+### Loop 条目
+
+`loop` 会在谓词成立期间（`dowhile`）或直至谓词成立（`dountil`）重复一个步骤。
+
+```json
+{
+  "type": "loop",
+  "loopType": "dountil",
+  "step": { "type": "tool", "id": "poll", "toolId": "check-status" },
+  "predicate": {
+    "op": "eq",
+    "left": { "path": "inputData.status" },
+    "right": { "literal": "done" }
+  }
+}
+```
+
+循环主体必须是单个步骤，存储型循环需要声明式谓词。
+
+### Sleep 条目
+
+`sleep` 条目暂停固定的毫秒数。`sleepUntil` 条目暂停到由 ISO 日期字符串表示的固定日期。存储型定义需要使用字面量值。
+
+```json
+{ "type": "sleep", "id": "wait", "duration": 5000 }
+```
+
+```json
+{ "type": "sleepUntil", "id": "wait-for-launch", "date": "2027-01-01T00:00:00.000Z" }
+```
+
+如果必须在运行时计算时长或日期，请使用代码定义型 workflow。
+
+## 验证
+
+Mastra 会在持久化或注册定义之前对其进行验证：
+
+- 结构：条目的形状和必填字段，包括 mapping 只能位于顶层等放置规则。
+- 引用：每个 `agentId` 和 `workflowId` 必须能在实时注册表或同一个 bundle 中解析。`toolId` 必须与 tool 注册键匹配。
+- Schema 流：每个条目的输入必须与前一个输出兼容，包括推断出的 mapping 输出。
+
+验证错误包含用于标识无效条目的点分路径，例如 `graph.2.steps.0`。
+
+## 相关内容
+
+- [使用动态 workflow](/docs/workflows/dynamic-workflows)
+- [`Mastra.addDynamicWorkflow()`](/reference/core/addDynamicWorkflow)
+- [`Mastra.addDynamicWorkflows()`](/reference/core/addDynamicWorkflows)
+- [Client SDK workflows API](/reference/client-js/workflows)

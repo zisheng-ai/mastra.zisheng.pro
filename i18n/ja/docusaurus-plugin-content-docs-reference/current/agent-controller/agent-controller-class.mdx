@@ -1,0 +1,635 @@
+---
+title: "リファレンス：AgentController | AgentController"
+description: "分離された Session を作成し、Agent、ストレージ、Tool、Workspace、Channel を連携させる共有ホスト、AgentController の API リファレンスです。"
+packages:
+  - "@mastra/core"
+---
+
+# AgentController
+
+:::experimental
+
+`AgentController` 機能はベータ段階です。ベータを終了するまでは、マイナーバージョンで破壊的変更が行われる可能性があります。
+
+:::
+
+`AgentController` クラスは、1つ以上の [`Session`](/reference/agent-controller/session) インスタンスを共有するホストです。Controller を初期化して Session を作成したら、会話の状態と実行制御には `session.*` API を使用します。
+
+手順を追った概要については、[AgentController の概要](/docs/harness/agent-controller)を参照してください。
+
+## 使用例
+
+次の例では、Controller を初期化して Session を作成します。メッセージを送信する前に Session イベントを購読します。
+
+```typescript title="src/mastra/agent-controller.ts"
+import { Agent } from '@mastra/core/agent'
+import { AgentController } from '@mastra/core/agent-controller'
+import { Workspace } from '@mastra/core/workspace'
+
+const agent = new Agent({
+  id: 'coding-agent',
+  name: 'Coding agent',
+  instructions: 'Help with software engineering tasks.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+})
+
+const controller = new AgentController({
+  id: 'coding-controller',
+  agent,
+  workspace: new Workspace({ id: 'coding-workspace' }),
+  modes: [{ id: 'build', name: 'Build', metadata: { default: true } }],
+})
+
+await controller.init()
+
+const session = await controller.createSession({ resourceId: 'project-42' })
+const unsubscribe = session.subscribe(event => {
+  if (event.type === 'message_update') {
+    console.log(event.message)
+  }
+})
+
+await session.sendMessage({ content: 'Review the project structure.' })
+unsubscribe()
+```
+
+## コンストラクターパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'Controller の一意な識別子。Session と Resource のデフォルト識別子としても使用されます。',
+  },
+  {
+    name: 'modes',
+    type: 'AgentControllerMode[]',
+    description: 'すべての Session で使用できる Mode 定義。少なくとも1つの Mode が必要です。',
+    properties: [
+      {
+        type: 'AgentControllerMode',
+        parameters: [
+          { name: 'id', type: 'string', description: 'Mode の一意な識別子。' },
+          { name: 'name', type: 'string', description: '表示名。', isOptional: true },
+          {
+            name: 'defaultModelId',
+            type: 'string',
+            description: '保存済みの選択がない状態で Session がこの Mode に入ったときに選択されるモデル。',
+            isOptional: true,
+          },
+          { name: 'description', type: 'string', description: 'Mode セレクターに表示するテキスト。', isOptional: true },
+          {
+            name: 'instructions',
+            type: 'string',
+            description: 'この Mode で、基盤となる Agent の指示より上位に重ねる指示。',
+            isOptional: true,
+          },
+          {
+            name: 'transitionsTo',
+            type: 'string',
+            description: '承認済みの `submit_plan` Suspension の後に移行する Mode。',
+            isOptional: true,
+          },
+          {
+            name: 'availableTools',
+            type: 'string[]',
+            description: '公開する Tool 名の許可リスト。空の配列にすると、この Mode ではすべての Tool が非表示になります。',
+            isOptional: true,
+          },
+          {
+            name: 'metadata',
+            type: 'Record<string, unknown>',
+            description: 'そのまま渡される Mode メタデータ。`metadata.default: true` でデフォルトの Mode を指定します。',
+            isOptional: true,
+          },
+          {
+            name: 'tools',
+            type: 'ToolsInput',
+            description: 'Mode の Tool。`additionalTools` と同時には指定できません。',
+            isOptional: true,
+          },
+          {
+            name: 'additionalTools',
+            type: 'ToolsInput',
+            description: '基盤となる Agent の Tool に追加する Tool。`tools` と同時には指定できません。',
+            isOptional: true,
+          },
+          {
+            name: 'agent',
+            type: 'Agent',
+            description: '非推奨の Mode 固有 Agent。トップレベルの `agent` パラメーターを使用してください。',
+            isOptional: true,
+          },
+          {
+            name: 'default',
+            type: 'boolean',
+            description: '非推奨のデフォルトマーカー。`metadata.default` または `defaultModeId` を使用してください。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'agent',
+    type: 'Agent',
+    description: '設定済みの Mode が共有する基盤 Agent。',
+    isOptional: true,
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    description: 'Session と Thread のデフォルト Resource 識別子。デフォルトは `id` です。',
+    isOptional: true,
+  },
+  {
+    name: 'storage',
+    type: 'MastraCompositeStore',
+    description: 'Thread、メッセージ、設定、再開可能な実行データの永続化に使用するストレージ。',
+    isOptional: true,
+  },
+  {
+    name: 'stateSchema',
+    type: 'PublicSchema<TState, any>',
+    description: '`session.state` の更新を検証するためのスキーマ。',
+    isOptional: true,
+  },
+  {
+    name: 'initialState',
+    type: 'Partial<TState>',
+    description: '新しい各 Session でスキーマのデフォルト値と統合される初期状態。',
+    isOptional: true,
+  },
+  {
+    name: 'memory',
+    type: 'DynamicArgument<MastraMemory>',
+    description: '独自の Memory を定義していない基盤 Agent と共有する Memory インスタンス。',
+    isOptional: true,
+  },
+  {
+    name: 'defaultModeId',
+    type: 'string',
+    description: 'デフォルトの Mode 識別子。Mode メタデータより優先されます。',
+    isOptional: true,
+  },
+  {
+    name: 'instructions',
+    type: 'string',
+    description: '現在の Mode の指示と重ねて使用する Controller の指示。',
+    isOptional: true,
+  },
+  {
+    name: 'tools',
+    type: 'DynamicArgument<ToolsInput | undefined>',
+    description: 'Controller の実行で共有され、設定済みのサブ Agent で使用できる Tool。',
+    isOptional: true,
+  },
+  {
+    name: 'workspace',
+    type: 'DynamicArgument<Workspace | undefined>',
+    description: '静的 Workspace または Session ごとの Workspace Factory。Session は有効な Workspace を解決する必要があります。',
+    isOptional: true,
+  },
+  {
+    name: 'browser',
+    type: 'DynamicArgument<MastraBrowser | undefined>',
+    description: '静的 Browser または Session ごとの Browser Factory。',
+    isOptional: true,
+  },
+  {
+    name: 'channels',
+    type: 'AgentControllerChannelsConfig',
+    description: 'Channel の Thread を Controller の Session にルーティングするための Chat Channel 設定。',
+    isOptional: true,
+  },
+  {
+    name: 'intervalHandlers',
+    type: 'IntervalHandler[]',
+    description: '`init()` で開始し、`stopIntervals()` または `destroy()` で停止する定期 Handler。',
+    isOptional: true,
+  },
+  {
+    name: 'idGenerator',
+    type: '() => string',
+    description: 'Thread、メッセージ、Signal 用のカスタム識別子 Generator。',
+    isOptional: true,
+  },
+  {
+    name: 'modelUseCountProvider',
+    type: 'ModelUseCountProvider',
+    description: '利用可能なモデルの並べ替えに使用するモデル利用回数を返します。',
+    isOptional: true,
+  },
+  {
+    name: 'modelUseCountTracker',
+    type: 'ModelUseCountTracker',
+    description: '`session.model.switch()` の後にモデルの選択を記録します。',
+    isOptional: true,
+  },
+  {
+    name: 'subagents',
+    type: 'AgentControllerSubagent[]',
+    description: '組み込みの `subagent` Tool を介して公開するサブ Agent タイプ。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'AgentControllerSubagent',
+        parameters: [
+          { name: 'id', type: 'string', description: 'サブ Agent タイプの一意な識別子。' },
+          { name: 'name', type: 'string', description: '表示名。' },
+          { name: 'description', type: 'string', description: '生成される Tool で使用する説明。' },
+          { name: 'instructions', type: 'DynamicArgument<AgentInstructions>', description: 'サブ Agent の指示。' },
+          { name: 'tools', type: 'ToolsInput', description: 'サブ Agent が所有する Tool。', isOptional: true },
+          {
+            name: 'allowedControllerTools',
+            type: 'string[]',
+            description: 'サブ Agent の Tool に追加する Controller Tool ID。',
+            isOptional: true,
+          },
+          {
+            name: 'allowedWorkspaceTools',
+            type: 'string[]',
+            description: 'サブ Agent から参照できる Workspace Tool 名。',
+            isOptional: true,
+          },
+          { name: 'defaultModelId', type: 'string', description: 'サブ Agent のデフォルトモデル。', isOptional: true },
+          { name: 'maxSteps', type: 'number', description: '実行ステップの最大数。', isOptional: true },
+          { name: 'stopWhen', type: 'LoopOptions["stopWhen"]', description: 'ループの停止条件。', isOptional: true },
+          {
+            name: 'forked',
+            type: 'boolean',
+            description: 'サブ Agent がデフォルトで複製された親 Thread を継承するかどうか。',
+            isOptional: true,
+            defaultValue: 'false',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'gateways',
+    type: 'MastraModelGatewayInterface[]',
+    description: '組み込み Gateway と統合するカスタムモデル Gateway。',
+    isOptional: true,
+  },
+  {
+    name: 'omConfig',
+    type: 'AgentControllerOMConfig',
+    description: 'Observational Memory のデフォルトモデルとしきい値。',
+    isOptional: true,
+  },
+  {
+    name: 'disableBuiltinTools',
+    type: 'BuiltinToolId[]',
+    description: '実行から除外する組み込み Controller Tool。',
+    isOptional: true,
+  },
+  {
+    name: 'toolCategoryResolver',
+    type: '(toolName: string) => ToolCategory | null',
+    description: 'Tool 名を権限カテゴリーに対応付けます。',
+    isOptional: true,
+  },
+  {
+    name: 'pubsub',
+    type: 'PubSub',
+    description: '基盤 Agent に伝播する PubSub 実装。',
+    isOptional: true,
+  },
+  {
+    name: 'threadLock',
+    type: '{ acquire: (threadId: string) => void | Promise<void>; release: (threadId: string) => void | Promise<void> }',
+    description: 'Thread の所有権を調整するための Lock 実装。',
+    isOptional: true,
+  },
+  {
+    name: 'observability',
+    type: 'ObservabilityEntrypoint',
+    description: 'スタンドアロンの Controller Mastra インスタンスに使用する Observability 設定。',
+    isOptional: true,
+  },
+]}
+/>
+
+## プロパティ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'コンストラクターに渡された Controller 識別子。',
+  },
+]}
+/>
+
+## メソッド
+
+### Session
+
+#### `createSession(options)`
+
+`(resourceId, scope)` の組に対して登録されたライブ Session を取得または作成します。このメソッドより先に `init()` を呼び出してください。
+
+```typescript
+const session = await controller.createSession({
+  resourceId: 'project-42',
+  scope: 'editor-window-1',
+  threadId: 'thread-7',
+})
+```
+
+同じ `resourceId` と `scope` を指定すると、同じ `Session` インスタンスが返されます。Scope が異なる場合、同じ Resource に対して分離された Session が作成されます。`threadId` を指定すると、キャッシュ済み Session をその Thread に切り替えます。Thread が存在しない場合は作成します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'resourceId',
+    type: 'string',
+    description:
+      'Memory Resource とライブ Session レジストリのキー。デフォルトでは、設定された `resourceId` または Controller の `id` が使用されます。',
+    isOptional: true,
+  },
+  {
+    name: 'scope',
+    type: 'string',
+    description: '1つの Resource に複数のライブ Session を作成できる、省略可能なレジストリ名前空間。',
+    isOptional: true,
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    description: 'バインドする特定の Thread。存在しない Thread はこの識別子で作成されます。',
+    isOptional: true,
+  },
+  {
+    name: 'id',
+    type: 'string',
+    description: '安定した Session 識別子。デフォルトでは Controller の `id` が使用されます。',
+    isOptional: true,
+  },
+  {
+    name: 'ownerId',
+    type: 'string',
+    description: '安定した Session 所有者識別子。デフォルトは `id` です。',
+    isOptional: true,
+  },
+  {
+    name: 'tags',
+    type: 'Record<string, string>',
+    description: 'Session が作成する Thread にコピーされるタグ。',
+    isOptional: true,
+  },
+  { name: 'workspace', type: 'Workspace', description: 'この Session で使用する Workspace のオーバーライド。', isOptional: true },
+  { name: 'browser', type: 'MastraBrowser', description: 'この Session で使用する Browser のオーバーライド。', isOptional: true },
+  {
+    name: 'requestContext',
+    type: 'RequestContext',
+    description: '動的な Workspace Factory と Browser Factory の解決に使用する Context。',
+    isOptional: true,
+  },
+]}
+/>
+
+戻り値：`Promise<Session<TState>>`
+
+#### `getSessionByResource(resourceId, scope?)`
+
+Resource と省略可能な Scope に対して登録されたライブ Session を返します。
+
+```typescript
+const session = await controller.getSessionByResource('project-42', 'editor-window-1')
+```
+
+戻り値：`Promise<Session<TState> | undefined>`
+
+#### `setResourceId(session, { resourceId })`
+
+ライブ Session を別の Resource に移動し、アクティブな Thread のバインドを解除します。
+
+```typescript
+await controller.setResourceId(session, { resourceId: 'project-43' })
+```
+
+#### `getKnownResourceIds(session)`
+
+保存済み Thread に存在する Resource 識別子を一覧表示します。
+
+```typescript
+const resourceIds = await controller.getKnownResourceIds(session)
+```
+
+戻り値：`Promise<string[]>`
+
+### ライフサイクル
+
+#### `init()`
+
+共有ストレージ、Workspace サービス、設定済みの Interval Handler を初期化します。繰り返し呼び出した場合は、同じ初期化 Promise が再利用されます。
+
+```typescript
+await controller.init()
+```
+
+#### `destroy()`
+
+Controller が所有する Interval Handler を停止します。Controller が作成した Session は破棄されません。
+
+```typescript
+await controller.destroy()
+```
+
+### Mode と Agent
+
+#### `listModes()`
+
+設定済みの Mode 定義を返します。
+
+```typescript
+const modes = controller.listModes()
+```
+
+戻り値：`AgentControllerMode[]`
+
+#### `getCurrentAgent(session)`
+
+Session のアクティブな Mode に対応する基盤 Agent を返します。
+
+```typescript
+const agent = controller.getCurrentAgent(session)
+```
+
+戻り値：`Agent`
+
+### Workspace と Browser
+
+#### `hasWorkspace()`
+
+Controller に静的、動的、またはオブジェクトベースの Workspace 設定があるかどうかを返します。
+
+```typescript
+if (controller.hasWorkspace()) {
+  console.log('Workspace configured')
+}
+```
+
+戻り値：`boolean`
+
+#### `isWorkspaceReady()`
+
+Controller レベルの Workspace が準備できているかどうかを返します。
+
+```typescript
+const ready = controller.isWorkspaceReady()
+```
+
+戻り値：`boolean`
+
+#### `getWorkspace()`
+
+Controller の静的 Workspace を返します。動的な Workspace Factory は、解決されるまで `undefined` を返します。
+
+```typescript
+const workspace = controller.getWorkspace()
+```
+
+戻り値：`Workspace | undefined`
+
+#### `resolveWorkspace({ session, requestContext? })`
+
+Session の動的 Workspace を解決し、結果を Controller にキャッシュします。
+
+```typescript
+const workspace = await controller.resolveWorkspace({ session, requestContext })
+```
+
+戻り値：`Promise<Workspace | undefined>`
+
+#### `setBrowser(browser)`
+
+Controller の Browser を置き換え、基盤 Agent に伝播します。
+
+```typescript
+controller.setBrowser(browser)
+```
+
+### Mastra と Channel
+
+#### `getMastra()`
+
+親 Mastra インスタンス、または `init()` が作成した内部インスタンスを返します。
+
+```typescript
+const mastra = controller.getMastra()
+```
+
+戻り値：`Mastra | undefined`
+
+#### `getChannels()`
+
+設定済みの Chat Channel 統合を返します。
+
+```typescript
+const channels = controller.getChannels()
+```
+
+戻り値：`AgentControllerChannels | null`
+
+### モデル
+
+#### `getCurrentModelAuthStatus(session)`
+
+Session で選択されているモデルの認証ステータスを返します。
+
+```typescript
+const status = await controller.getCurrentModelAuthStatus(session)
+```
+
+戻り値：`Promise<ModelAuthStatus>`
+
+#### `listAvailableModels()`
+
+設定済みの Gateway と組み込み Gateway からモデルを一覧表示します。結果は短時間キャッシュされ、`modelUseCountProvider` が設定されている場合は利用状況データを使用して並べ替えられます。
+
+```typescript
+const models = await controller.listAvailableModels()
+```
+
+戻り値：`Promise<AvailableModel[]>`
+
+#### `invalidateAvailableModelsCache()`
+
+利用可能なモデルのキャッシュを消去します。
+
+```typescript
+controller.invalidateAvailableModelsCache()
+```
+
+### Observational Memory と権限
+
+#### `loadOMProgress(session)`
+
+アクティブな Thread について保存されている Observational Memory の進行状況を読み込み、`om_status` イベントを発行します。
+
+```typescript
+await controller.loadOMProgress(session)
+```
+
+#### `getObservationalMemoryRecord(session)`
+
+アクティブな Thread の Observational Memory レコードを返します。
+
+```typescript
+const record = await controller.getObservationalMemoryRecord(session)
+```
+
+戻り値：`Promise<ObservationalMemoryRecord | null>`
+
+#### `getToolCategory({ toolName })`
+
+Tool の権限カテゴリーを解決します。
+
+```typescript
+const category = controller.getToolCategory({ toolName: 'execute_command' })
+```
+
+戻り値：`ToolCategory | null`
+
+### Interval
+
+#### `registerInterval(handler)`
+
+定期 Handler を開始または置き換えます。
+
+```typescript
+controller.registerInterval({
+  id: 'refresh',
+  intervalMs: 60_000,
+  handler: async () => refreshData(),
+})
+```
+
+#### `removeInterval({ id })`
+
+1つの Interval を停止し、省略可能なシャットダウンコールバックを実行します。
+
+```typescript
+await controller.removeInterval({ id: 'refresh' })
+```
+
+#### `stopIntervals()`
+
+すべての Interval を停止し、省略可能なシャットダウンコールバックを実行します。
+
+```typescript
+await controller.stopIntervals()
+```
+
+## 関連情報
+
+- [AgentController ガイド](/docs/harness/agent-controller)
+- [Session リファレンス](/reference/agent-controller/session)
+- [Agent](/docs/agents/overview)
+- [Workspace](/docs/workspace/overview)
+- [Channels](/docs/capabilities/channels/overview)

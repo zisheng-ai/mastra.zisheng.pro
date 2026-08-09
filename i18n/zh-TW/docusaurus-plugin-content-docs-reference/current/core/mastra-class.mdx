@@ -1,0 +1,423 @@
+---
+title: "參考：Mastra 類別 | Core"
+description: "關於 Mastra `Mastra` 類別的說明文件，它是管理 Agent、Workflow、MCP server 和 server endpoint 的核心入口。"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/loggers"
+---
+
+# Mastra 類別
+
+`Mastra` 類別是所有 Mastra 應用中的中央協調器，用於管理 Agent、Workflow、Storage、日誌、可觀測性等。通常，你會建立單一 `Mastra` 實例來協調應用。
+
+可以將 `Mastra` 視為頂層 registry，用於註冊需要在整個應用中存取的 Agent、Workflow、Tool 和其他元件。
+
+## 使用範例
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { PinoLogger } from '@mastra/loggers'
+import { LibSQLStore } from '@mastra/libsql'
+import { weatherWorkflow } from './workflows/weather-workflow'
+import { weatherAgent } from './agents/weather-agent'
+
+export const mastra = new Mastra({
+  workflows: { weatherWorkflow },
+  agents: { weatherAgent },
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: ':memory:',
+  }),
+  logger: new PinoLogger({
+    name: 'Mastra',
+    level: 'info',
+  }),
+})
+```
+
+如果需要透過 Workflow scheduler 自動交付延遲通知記錄和通知摘要，請啟用定時通知分發：
+
+```typescript title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  agents: { supportAgent },
+  storage,
+  notifications: {
+    dispatch: {
+      enabled: true,
+      cron: '*/1 * * * *',
+      batchSize: 100,
+    },
+  },
+})
+```
+
+`notifications.dispatch.enabled` 允許內部 dispatcher Workflow 使用預設 cron `*/1 * * * *` 執行。dispatcher 從 Storage 讀取到期通知記錄，依 `agentId`、`resourceId` 和 `threadId` 對摘要分組，並透過 Agent thread runtime 發出 signal。它不是面向使用者的入口。分發計劃（及其底層 Workflow scheduler）會在出現第一個延遲通知或摘要通知時延遲激活，因此從不延遲通知的應用不會執行 scheduler。
+
+## 建構函式參數
+
+所有可用設定選項的詳細文件，請參閱[設定參考](/reference/configuration)。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agents',
+    type: 'Record<string, Agent>',
+    description: '要註冊的 Agent 實例，以名稱作為鍵',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'tools',
+    type: 'Record<string, ToolApi>',
+    description:
+      '要註冊的 Tool 實例。鍵是 [`getTool()`](/reference/core/getTool) 使用的註冊鍵，值是 Tool 實例。使用 [`getToolById()`](/reference/core/getToolById) 依本身的 ID 尋找，使用 [`listTools()`](/reference/core/listTools) 讀取 registry。',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'storage',
+    type: 'MastraCompositeStore',
+    description: '用於持久儲存資料的 Storage engine 實例',
+    isOptional: true,
+  },
+  {
+    name: 'vectors',
+    type: 'Record<string, MastraVector>',
+    description: '用於語義搜尋和基於 vector 的 Tool 的 vector store 實例（例如 Pinecone、PgVector 或 Qdrant）',
+    isOptional: true,
+  },
+  {
+    name: 'logger',
+    type: 'Logger',
+    description: '使用 new PinoLogger() 建立的 Logger 實例',
+    isOptional: true,
+    defaultValue: 'Console logger with INFO level',
+  },
+  {
+    name: 'idGenerator',
+    type: '(context?: IdGeneratorContext) => string',
+    description:
+      '自訂 ID 產生器函式。供 Agent、Workflow、Memory 和其他元件產生唯一識別碼。接收 idType、source、entityId 和 threadId 等選用情境，以支援情境感知的 ID 格式。',
+    isOptional: true,
+  },
+  {
+    name: 'workflows',
+    type: 'Record<string, Workflow>',
+    description: '要註冊的 Workflow。採用鍵值對結構，鍵為 Workflow 名稱，值為 Workflow 實例。',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'tts',
+    type: 'Record<string, MastraVoice>',
+    isOptional: true,
+    description: '用於語音合成的 text-to-speech Provider',
+  },
+  {
+    name: 'observability',
+    type: 'ObservabilityEntrypoint',
+    isOptional: true,
+    description: '用於 tracing 和監控的可觀測性設定',
+  },
+  {
+    name: 'environment',
+    type: 'string',
+    isOptional: true,
+    description:
+      '部署環境名稱（例如 `production`、`staging`、`development`）。設定後，會自動附加到所有可觀測性 signal，以便依環境篩選，而不必在每次呼叫時傳遞 `tracingOptions.metadata.environment`。未設定時改用 `process.env.NODE_ENV`；兩者均未設定時保持 undefined。每次呼叫傳入的 `tracingOptions.metadata.environment` 始終優先。',
+  },
+  {
+    name: 'deployer',
+    type: 'MastraDeployer',
+    isOptional: true,
+    description: '用於管理部署的 MastraDeployer 實例。',
+  },
+  {
+    name: 'server',
+    type: 'ServerConfig',
+    description:
+      'Server 設定，包括 port、host、timeout、API route、middleware、CORS 設定，以及 Swagger UI、API 請求日誌和 OpenAPI 文件的建置選項。',
+    isOptional: true,
+  },
+  {
+    name: 'mcpServers',
+    type: 'Record<string, MCPServerBase>',
+    isOptional: true,
+    description:
+      '一個物件，其中鍵為註冊鍵（供 getMCPServer() 使用），值為 MCPServer 實例或擴展 MCPServerBase 的類。每個 MCPServer 都必須具有 id 屬性。可使用 getMCPServer() 依註冊鍵取得 server，或使用 getMCPServerById() 依本身的 id 取得。',
+  },
+  {
+    name: 'bundler',
+    type: 'BundlerConfig',
+    description: 'asset bundler 設定，包含 externals、sourcemap、transpilePackages 和 dynamicPackages 選項。',
+    isOptional: true,
+    defaultValue: '{ externals: [], sourcemap: false, transpilePackages: [], dynamicPackages: [] }',
+  },
+  {
+    name: 'scorers',
+    type: 'Record<string, Scorer>',
+    description: '用於評估 Agent 回應和 Workflow 輸出的 Scorer',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'processors',
+    type: 'Record<string, Processor>',
+    description: '用於轉換 Agent 輸入和輸出的輸入/輸出 Processor',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'gateways',
+    type: 'Record<string, MastraModelGateway>',
+    description:
+      '要註冊的自訂模型 gateway，用於透過其他 Provider 或私有部署存取 AI 模型。採用鍵值對結構，鍵為註冊鍵（供 getGateway() 使用），值為 gateway 實例。',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'memory',
+    type: 'Record<string, MastraMemory>',
+    description:
+      '要註冊的 Memory 實例。已儲存的 Agent 可以參照這些實例，並在執行階段解析。採用鍵值對結構，鍵為註冊鍵，值為 Memory 實例。',
+    isOptional: true,
+    defaultValue: '{}',
+  },
+  {
+    name: 'notifications',
+    type: 'object',
+    description: '通知 signal 分發的執行階段設定。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'dispatch',
+            type: 'NotificationDispatchConfig',
+            isOptional: true,
+            description: '延遲通知和通知摘要的定時分發設定。預設啟用分發。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'enabled',
+                    type: 'boolean',
+                    isOptional: true,
+                    defaultValue: 'true',
+                    description: '設為 `false` 可停用自動定時通知分發。',
+                  },
+                  {
+                    name: 'cron',
+                    type: 'string',
+                    isOptional: true,
+                    defaultValue: '`*/1 * * * *`',
+                    description: '內部通知 dispatcher Workflow 使用的 cron 計劃。',
+                  },
+                  {
+                    name: 'batchSize',
+                    type: 'number',
+                    isOptional: true,
+                    defaultValue: '100',
+                    description: '每次分發 run 最多處理的到期通知記錄數。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'versions',
+    type: 'VersionOverrides',
+    description:
+      'sub-agent 委派的全域版本覆寫。當 supervisor Agent 委派給 sub-agent 時，這些覆寫決定使用該 sub-agent 的哪個已儲存版本，而不是程式碼中定義的預設版本。需要設定 Editor package。詳情請參閱 [Editor 版本控制](/docs/editor/overview#versioning)。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'VersionOverrides',
+        parameters: [
+          {
+            name: 'agents',
+            type: 'Record<string, VersionSelector>',
+            isOptional: true,
+            description: 'Agent ID 到版本選擇器的對應。每個選擇器都可以依 ID 或發布狀態指定特定版本。',
+            properties: [
+              {
+                type: 'VersionSelector',
+                parameters: [
+                  {
+                    name: 'versionId',
+                    type: 'string',
+                    isOptional: true,
+                    description: '要使用的特定版本的 ID。',
+                  },
+                ],
+              },
+              {
+                parameters: [
+                  {
+                    name: 'status',
+                    type: "'draft' | 'published'",
+                    isOptional: true,
+                    description: '選擇具有此發布狀態的最新版本。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'workers',
+    type: 'MastraWorker[] | false',
+    description:
+      '設定在此 Mastra 實例中執行哪些 [Worker](/docs/deployment/workers)。省略時，Mastra 會根據 PubSub 和設定自動建立預設 Worker。傳入 `false` 可停用所有事件處理（適用於單獨執行獨立 Worker 的情況）。傳入 `MastraWorker[]` 可新增自訂 Worker；它們會與自動建立的預設值合併，同預設 Worker 具有相同 `name` 的自訂 Worker 會替換該預設 Worker。',
+    isOptional: true,
+  },
+  {
+    name: 'backgroundTasks',
+    type: 'BackgroundTaskManagerConfig',
+    description:
+      '設定 Agent 的[背景任務](/docs/long-running-agents/background-tasks)執行。所有選項請參閱[背景任務設定參考](/reference/configuration#backgroundtasks)。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'BackgroundTaskManagerConfig',
+        parameters: [
+          {
+            name: 'enabled',
+            type: 'boolean',
+            isOptional: true,
+            defaultValue: 'false',
+            description: '啟用背景任務分發。',
+          },
+          {
+            name: 'globalConcurrency',
+            type: 'number',
+            isOptional: true,
+            defaultValue: '10',
+            description: '所有 Agent 的最大併發任務數。',
+          },
+          {
+            name: 'perAgentConcurrency',
+            type: 'number',
+            isOptional: true,
+            defaultValue: '5',
+            description: '每個 Agent 的最大併發任務數。',
+          },
+          {
+            name: 'backpressure',
+            type: "'queue' | 'reject' | 'fallback-sync'",
+            isOptional: true,
+            defaultValue: "'queue'",
+            description: '達到併發限制時的行為。',
+          },
+          {
+            name: 'defaultTimeoutMs',
+            type: 'number',
+            isOptional: true,
+            defaultValue: '300000',
+            description: '預設任務逾時時間（毫秒）。',
+          },
+          {
+            name: 'defaultRetries',
+            type: 'RetryConfig',
+            isOptional: true,
+            description: '預設重試設定。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'scheduler',
+    type: 'object',
+    description:
+      '設定用於 cron 驅動 Workflow 觸發器的 [scheduler Worker](/docs/deployment/workers#scheduler-worker)。當任一 Workflow 宣告 `schedule` 時自動啟用。請參閱[定時 Workflow](/docs/workflows/scheduled-workflows)。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'enabled',
+            type: 'boolean',
+            isOptional: true,
+            description: '顯式啟用或停用 scheduler。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'recovery',
+    type: 'MastraRecoveryConfig',
+    description:
+      '孤立 Agent 和 Workflow run 的啟動時復原行為。請參閱[當機復原](/docs/long-running-agents/durable-agents#crash-recovery)。',
+    isOptional: true,
+    defaultValue: "{ durableAgents: 'off' }",
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'durableAgents',
+            type: "'auto' | 'off'",
+            isOptional: true,
+            defaultValue: "'off'",
+            description:
+              "設為 `'auto'` 後，會在 server 啟動時自動重新驅動孤立的 RUNNING durable Agent run。復原會重新發出 LLM 呼叫並重新執行 Tool 呼叫，因此 Tool 必須具有冪等性。請參閱[當機復原](/docs/long-running-agents/durable-agents#crash-recovery)。",
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 方法
+
+### `recoverAllDurableAgents()`
+
+重新驅動所有已註冊 durable Agent 中的每個孤立 `running` durable-Agent run。當 `recovery.durableAgents` 為 `'auto'` 時，會在啟動時自動呼叫。也可以直接呼叫以手動復原，或從排程任務中呼叫。
+
+需要持久儲存 Storage。使用記憶體 store 時，程序重新啟動後沒有可復原的內容。
+
+```typescript
+const result = await mastra.recoverAllDurableAgents()
+// { agents: 2, recovered: 3, succeeded: 3, failed: 0 }
+```
+
+傳回值：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agents',
+    type: 'number',
+    description: '掃描的 durable Agent 數量。',
+  },
+  {
+    name: 'recovered',
+    type: 'number',
+    description: '重新驅動的 run 總數。',
+  },
+  {
+    name: 'succeeded',
+    type: 'number',
+    description: '成功重新啟動的 run 數量。',
+  },
+  {
+    name: 'failed',
+    type: 'number',
+    description: '重新啟動時擲回錯誤的 run 數量。',
+  },
+]}
+/>

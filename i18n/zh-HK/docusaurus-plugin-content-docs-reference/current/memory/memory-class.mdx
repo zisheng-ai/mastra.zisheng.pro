@@ -1,0 +1,233 @@
+---
+title: "參考：Memory class | Memory"
+description: "Mastra 中 `Memory` class 的文件。此 class 提供可靠的系統，用於管理對話記錄及以 thread 為基礎的訊息儲存。"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+  - "@mastra/pg"
+---
+
+# Memory class
+
+`Memory` class 在 Mastra 中提供可靠的系統，用於管理對話記錄及以 thread 為基礎的訊息儲存。它支援永久儲存對話、語意搜尋功能及高效擷取訊息。你必須設定 storage provider 來儲存對話記錄；如啟用 semantic recall，亦需提供 vector store 及 embedder。
+
+## 使用範例
+
+```typescript title="src/mastra/agents/test-agent.ts"
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+
+export const agent = new Agent({
+  id: 'test-agent',
+  name: 'test-agent',
+  instructions: 'You are an agent with memory.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    options: {
+      workingMemory: {
+        enabled: true,
+      },
+    },
+  }),
+})
+```
+
+:::note
+
+要在 Agent 上啟用 `workingMemory`，你需要在主要 Mastra instance 上設定 storage provider。詳情請參閱 [Mastra class](../core/mastra-class)。
+
+:::
+
+## Constructor 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'storage',
+    type: 'MastraCompositeStore',
+    description:
+      '用於永久保存 memory 資料的 storage implementation。如未提供，預設為 `new DefaultStorage({ config: { url: "file:memory.db" } })`。',
+    isOptional: true,
+  },
+  {
+    name: 'vector',
+    type: 'MastraVector | false',
+    description: '提供語意搜尋功能的 vector store。設為 `false` 可停用向量操作。',
+    isOptional: true,
+  },
+  {
+    name: 'embedder',
+    type: 'EmbeddingModel<string> | EmbeddingModelV2<string>',
+    description: '用於 vector embedding 的 embedder instance。啟用 semantic recall 時必須提供。',
+    isOptional: true,
+  },
+  {
+    name: 'options',
+    type: 'MemoryConfig',
+    description: 'Memory 設定選項。',
+    isOptional: true,
+    properties: [
+      {
+        parameters: [
+          {
+            name: 'lastMessages',
+            type: 'number | false',
+            description:
+              '要加入上下文的最新訊息數目。設為 `false` 可完全停用訊息記錄功能（訊息不會載入上下文，亦不會儲存）。使用 `Number.MAX_SAFE_INTEGER` 可擷取所有訊息而不設上限。要載入訊息但不儲存新訊息，請使用 `readOnly` 選項。',
+            isOptional: true,
+            defaultValue: '10',
+          },
+          {
+            name: 'readOnly',
+            type: 'boolean',
+            description:
+              '設為 true 時，Memory 不會儲存新訊息，並會將 working memory 作為唯讀上下文提供（不包含 updateWorkingMemory tool）。適用於預覽、內部 routing Agent，或只應參考而不應修改 memory 的 sub-agent 等唯讀操作。',
+            isOptional: true,
+            defaultValue: 'false',
+          },
+          {
+            name: 'semanticRecall',
+            type: "boolean | { topK: number; messageRange: number | { before: number; after: number }; scope?: 'thread' | 'resource' }",
+            description:
+              '在訊息記錄中啟用語意搜尋。可以是布林值，亦可以是包含設定選項的物件。啟用後，必須同時設定 vector store 及 embedder。topK 預設為 4，messageRange 預設為 {before: 1, after: 1}。',
+            isOptional: true,
+            defaultValue: 'false',
+          },
+          {
+            name: 'workingMemory',
+            type: 'WorkingMemory',
+            description:
+              "working memory 功能的設定。可以是 `{ enabled: boolean; template?: string; schema?: ZodObject<any> | JSONSchema7; scope?: 'thread' | 'resource' }`，或以 `{ enabled: boolean }` 停用。",
+            isOptional: true,
+            defaultValue:
+              "{ enabled: false, template: '# User Information\\n- **First Name**:\\n- **Last Name**:\\n...' }",
+          },
+          {
+            name: 'observationalMemory',
+            type: 'boolean | ObservationalMemoryOptions',
+            description:
+              '為長上下文 agentic memory 啟用 Observational Memory。設為 `true` 可使用預設值，亦可傳入設定物件來自訂 token budget、model 及 scope。設定詳情請參閱 [Observational Memory 參考](/reference/memory/observational-memory)。',
+            isOptional: true,
+            defaultValue: 'false',
+          },
+          {
+            name: 'generateTitle',
+            type: 'boolean | { model: DynamicArgument<MastraLanguageModel>; instructions?: DynamicArgument<string> }',
+            description:
+              '控制是否根據對話記錄自動產生 thread 標題。可以是布林值，亦可以是包含自訂 model 及指示的物件。',
+            isOptional: true,
+            defaultValue: 'false',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'memory',
+    type: 'Memory',
+    description: '採用指定設定的新 Memory instance。',
+  },
+]}
+/>
+
+## 進階使用範例
+
+```typescript title="src/mastra/agents/test-agent.ts"
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+import { LibSQLStore, LibSQLVector } from '@mastra/libsql'
+
+export const agent = new Agent({
+  name: 'test-agent',
+  instructions: 'You are an agent with memory.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({
+      id: 'test-agent-storage',
+      url: 'file:./working-memory.db',
+    }),
+    vector: new LibSQLVector({
+      id: 'test-agent-vector',
+      url: 'file:./vector-memory.db',
+    }),
+    options: {
+      lastMessages: 10,
+      semanticRecall: {
+        topK: 3,
+        messageRange: 2,
+        scope: 'resource',
+      },
+      workingMemory: {
+        enabled: true,
+      },
+      generateTitle: true,
+    },
+  }),
+})
+```
+
+## PostgreSQL 及索引設定
+
+```typescript title="src/mastra/agents/pg-agent.ts"
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
+import { PgStore, PgVector } from '@mastra/pg'
+
+export const agent = new Agent({
+  name: 'pg-agent',
+  instructions: 'You are an agent with optimized PostgreSQL memory.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new PgStore({
+      id: 'pg-agent-storage',
+      connectionString: process.env.DATABASE_URL,
+    }),
+    vector: new PgVector({
+      id: 'pg-agent-vector',
+      connectionString: process.env.DATABASE_URL,
+    }),
+    embedder: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
+    options: {
+      lastMessages: 20,
+      semanticRecall: {
+        topK: 5,
+        messageRange: 3,
+        scope: 'resource',
+        indexConfig: {
+          type: 'hnsw', // Use HNSW for better performance
+          metric: 'dotproduct', // Optimal for OpenAI embeddings
+          m: 16, // Number of bi-directional links
+          efConstruction: 64, // Construction-time candidate list size
+        },
+      },
+      workingMemory: {
+        enabled: true,
+      },
+    },
+  }),
+})
+```
+
+### 相關內容
+
+- [Memory 入門](/docs/memory/overview)
+- [Semantic Recall](/docs/memory/semantic-recall)
+- [Working Memory](/docs/memory/working-memory)
+- [Observational Memory](/docs/memory/observational-memory)
+- [Memory Processor](/docs/memory/memory-processors)
+- [createThread](/reference/memory/createThread)
+- [recall](/reference/memory/recall)
+- [getThreadById](/reference/memory/getThreadById)
+- [listThreads](/reference/memory/listThreads)
+- [deleteMessages](/reference/memory/deleteMessages)
+- [cloneThread](/reference/memory/cloneThread)
+- [Clone utility method](/reference/memory/clone-utilities)

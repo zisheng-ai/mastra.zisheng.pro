@@ -1,0 +1,248 @@
+---
+title: "Snapshot | Workflow"
+description: "了解如何在 Mastra 使用 snapshot 儲存及恢復 Workflow execution state"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+---
+
+# Snapshot
+
+在 Mastra 中，snapshot 是 Workflow 在特定時間點之完整 execution state 的可 serializable 表示。Snapshot 會擷取從 Workflow 上次停止的位置恢復所需的所有資料，包括：
+
+- Workflow 中每個步驟的目前 state
+- 已完成步驟的 output
+- Workflow 採用的 execution path
+- 任何已暫停步驟及其 metadata
+- 每個步驟剩餘的 retry 次數
+- 恢復執行所需的其他 context 資料
+
+每當 Workflow 暫停時，Mastra 都會自動建立及管理 snapshot，並保留至已設定的 storage 系統。
+
+## Snapshot 在暫停及恢復中的作用
+
+Snapshot 是支援 Mastra 暫停及恢復功能的主要機制。當 Workflow 步驟呼叫 `await suspend()` 時：
+
+1. Workflow 執行會在該確切位置暫停
+1. Workflow 目前的 state 會擷取為 snapshot
+1. Snapshot 會保留至 storage
+1. Workflow 步驟會標記為「已暫停」，狀態為 `'suspended'`
+1. 稍後在已暫停步驟上呼叫 `resume()` 時，會擷取 snapshot
+1. Workflow 執行會從上次停止的確切位置恢復
+
+此機制提供強大的方式，用於實作 human-in-the-loop Workflow、處理 rate limit、等待外部資源，以及實作可能需要長時間暫停的複雜分支 Workflow。
+
+## Snapshot 結構
+
+每個 snapshot 都包括 `runId`、input、步驟狀態（`success`、`suspended` 等）、任何 suspend 和 resume payload，以及最終 output。因此，恢復執行時可以取得完整 context。
+
+```json
+{
+  "runId": "34904c14-e79e-4a12-9804-9655d4616c50",
+  "status": "success",
+  "value": {},
+  "context": {
+    "input": {
+      "value": 100,
+      "user": "Michael",
+      "requiredApprovers": ["manager", "finance"]
+    },
+    "approval-step": {
+      "payload": {
+        "value": 100,
+        "user": "Michael",
+        "requiredApprovers": ["manager", "finance"]
+      },
+      "startedAt": 1758027577955,
+      "status": "success",
+      "suspendPayload": {
+        "message": "Workflow suspended",
+        "requestedBy": "Michael",
+        "approvers": ["manager", "finance"]
+      },
+      "suspendedAt": 1758027578065,
+      "resumePayload": { "confirm": true, "approver": "manager" },
+      "resumedAt": 1758027578517,
+      "output": { "value": 100, "approved": true },
+      "endedAt": 1758027578634
+    }
+  },
+  "activePaths": [],
+  "serializedStepGraph": [
+    {
+      "type": "step",
+      "step": {
+        "id": "approval-step",
+        "description": "Accepts a value, waits for confirmation"
+      }
+    }
+  ],
+  "suspendedPaths": {},
+  "waitingPaths": {},
+  "result": { "value": 100, "approved": true },
+  "requestContext": {},
+  "timestamp": 1758027578740
+}
+```
+
+## Snapshot 如何儲存及擷取
+
+Snapshot 會儲存至已設定的 storage 系統。預設使用 libSQL，但你可以改為設定 Upstash、PostgreSQL 或 OracleDB。每個 snapshot 都會儲存在 `workflow_snapshots` table，並以 Workflow 的 `runId` 識別。
+
+延伸閱讀：
+
+- [libSQL Storage](/reference/storage/libsql)
+- [Upstash Storage](/reference/storage/upstash)
+- [PostgreSQL Storage](/reference/storage/postgresql)
+- [OracleDB Storage](/reference/storage/oracledb)
+
+### 儲存 snapshot
+
+Workflow 暫停時，Mastra 會按以下步驟自動保留 Workflow snapshot：
+
+1. 步驟執行中的 `suspend()` function 會觸發 snapshot process
+1. `WorkflowInstance.suspend()` method 會記錄已暫停的 machine
+1. 呼叫 `persistWorkflowSnapshot()` 以儲存目前 state
+1. Snapshot 會 serialze，並儲存在已設定 database 的 `workflow_snapshots` table
+1. Storage record 包括 Workflow 名稱、run ID 和 serialized snapshot
+
+### 擷取 snapshot
+
+Workflow 恢復時，Mastra 會按以下步驟擷取已保留的 snapshot：
+
+1. 使用特定步驟 ID 呼叫 `resume()` method
+1. 使用 `loadWorkflowSnapshot()` 從 storage 載入 snapshot
+1. Parse snapshot 並準備恢復
+1. 使用 snapshot state 重新建立 Workflow execution
+1. 恢復已暫停步驟，並繼續執行
+
+```typescript
+const storage = mastra.getStorage()
+const workflowStore = await storage?.getStore('workflows')
+
+const snapshot = await workflowStore?.loadWorkflowSnapshot({
+  runId: '<run-id>',
+  workflowName: '<workflow-id>',
+})
+
+console.log(snapshot)
+```
+
+## Snapshot 的 storage 選項
+
+Snapshot 使用在 `Mastra` class 上設定的 `storage` instance 保留。此 storage layer 由註冊至該 instance 的所有 Workflow 共享。Mastra 支援多種 storage 選項，以靈活配合不同環境。
+
+```typescript title="src/mastra/index.ts" 
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+import { approvalWorkflow } from './workflows'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: ':memory:',
+  }),
+  workflows: { approvalWorkflow },
+})
+```
+
+- [libSQL Storage](/reference/storage/libsql)
+- [PostgreSQL Storage](/reference/storage/postgresql)
+- [OracleDB Storage](/reference/storage/oracledb)
+- [MongoDB Storage](/reference/storage/mongodb)
+- [Upstash Storage](/reference/storage/upstash)
+- [Cloudflare D1](/reference/storage/cloudflare-d1)
+- [DynamoDB](/reference/storage/dynamodb)
+- [更多 storage Provider](/docs/storage/overview)
+
+## 最佳做法
+
+1. **確保可 serializable**：任何需要加至 snapshot 的資料都必須可以 serialize（可轉換為 JSON）。
+1. **盡量縮小 snapshot**：避免直接在 Workflow context 中儲存大型資料物件。請改為儲存其 reference（例如 ID），並在需要時擷取資料。
+1. **小心處理 resume context**：恢復 Workflow 時，請仔細考慮要提供的 context，它會與現有 snapshot 資料合併。
+1. **設定適當的監察**：對已暫停（尤其長時間運行）的 Workflow 實施監察，並確保它們妥善恢復。
+1. **考慮 storage 擴展**：如應用程式有大量已暫停 Workflow，請確保 storage 解決方案適當擴展。
+
+## 自訂 snapshot metadata
+
+你可以定義 `suspendSchema`，在暫停 Workflow 時附加自訂 metadata。此 metadata 會儲存在 snapshot，並在 Workflow 恢復時提供。
+
+```typescript {30-34} title="src/mastra/workflows/test-workflow.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+const approvalStep = createStep({
+  id: 'approval-step',
+  description: 'Accepts a value, waits for confirmation',
+  inputSchema: z.object({
+    value: z.number(),
+    user: z.string(),
+    requiredApprovers: z.array(z.string()),
+  }),
+  suspendSchema: z.object({
+    message: z.string(),
+    requestedBy: z.string(),
+    approvers: z.array(z.string()),
+  }),
+  resumeSchema: z.object({
+    confirm: z.boolean(),
+    approver: z.string(),
+  }),
+  outputSchema: z.object({
+    value: z.number(),
+    approved: z.boolean(),
+  }),
+  execute: async ({ inputData, resumeData, suspend }) => {
+    const { value, user, requiredApprovers } = inputData
+    const { confirm } = resumeData ?? {}
+
+    if (!confirm) {
+      return await suspend({
+        message: 'Workflow suspended',
+        requestedBy: user,
+        approvers: [...requiredApprovers],
+      })
+    }
+
+    return {
+      value,
+      approved: confirm,
+    }
+  },
+})
+```
+
+### 提供 resume data
+
+使用 `resumeData` 在恢復已暫停步驟時傳入 structured input。它必須與步驟的 `resumeSchema` 相符。
+
+```typescript {14-20}
+const workflow = mastra.getWorkflow('approvalWorkflow')
+
+const run = await workflow.createRun()
+
+const result = await run.start({
+  inputData: {
+    value: 100,
+    user: 'Michael',
+    requiredApprovers: ['manager', 'finance'],
+  },
+})
+
+if (result.status === 'suspended') {
+  const resumedResult = await run.resume({
+    step: 'approval-step',
+    resumeData: {
+      confirm: true,
+      approver: 'manager',
+    },
+  })
+}
+```
+
+## 相關內容
+
+- [Control Flow](/docs/workflows/control-flow)
+- [暫停及恢復](/docs/workflows/suspend-and-resume)
+- [Time Travel](/docs/workflows/time-travel)
+- [Human-in-the-loop](/docs/workflows/human-in-the-loop)

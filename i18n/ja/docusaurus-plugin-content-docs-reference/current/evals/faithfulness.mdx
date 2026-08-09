@@ -1,0 +1,165 @@
+---
+title: "リファレンス：忠実性スコアラー | Evals"
+description: 提供されたコンテキストと比較して LLM 出力の事実の正確性を評価する、Mastra の忠実性スコアラーのドキュメント。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+# 忠実性スコアラー
+
+`createFaithfulnessScorer()` 関数は、提供されたコンテキストと比較して LLM の出力が事実としてどの程度正確かを評価します。出力から主張を抽出してコンテキストと照合するため、RAG パイプラインの応答の信頼性を測定するうえで不可欠です。
+
+## パラメーター
+
+`createFaithfulnessScorer()` 関数は、次のプロパティを持つ単一の options オブジェクトを受け取ります。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'LanguageModel',
+    required: true,
+    description: '忠実性の評価に使用するモデルの設定。',
+  },
+  {
+    name: 'context',
+    type: 'string[]',
+    required: true,
+    description: '出力内の主張を検証する対象となるコンテキストチャンクの配列。',
+  },
+  {
+    name: 'scale',
+    type: 'number',
+    required: false,
+    defaultValue: '1',
+    description: 'スコアの最大値。最終スコアはこのスケールに正規化されます。',
+  },
+]}
+/>
+
+この関数は MastraScorer クラスのインスタンスを返します。`.run()` メソッドは他のスコアラーと同じ入力を受け取ります（[MastraScorer リファレンス](./mastra-scorer)を参照）。ただし、戻り値には以下に示す LLM 固有のフィールドが含まれます。
+
+## `.run()` の戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'runId',
+    type: 'string',
+    description: '実行 ID（任意）。',
+  },
+  {
+    name: 'preprocessStepResult',
+    type: 'string[]',
+    description: '出力から抽出された主張の配列。',
+  },
+  {
+    name: 'preprocessPrompt',
+    type: 'string',
+    description: 'preprocess ステップで LLM に送信されたプロンプト（任意）。',
+  },
+  {
+    name: 'analyzeStepResult',
+    type: 'object',
+    description: "判定を持つオブジェクト：{ verdicts: Array<{ verdict: 'yes' | 'no' | 'unsure', reason: string }> }",
+  },
+  {
+    name: 'analyzePrompt',
+    type: 'string',
+    description: 'analyze ステップで LLM に送信されたプロンプト（任意）。',
+  },
+  {
+    name: 'score',
+    type: 'number',
+    description:
+      '0 から設定済みの scale までのスコア。コンテキストによって裏付けられた主張の割合を表します。',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description:
+      '裏付けられた主張、矛盾した主張、または不明とされた主張を含む、スコアの詳細な説明。',
+  },
+  {
+    name: 'generateReasonPrompt',
+    type: 'string',
+    description: 'generateReason ステップで LLM に送信されたプロンプト（任意）。',
+  },
+]}
+/>
+
+## スコアリングの詳細
+
+スコアラーは、提供されたコンテキストと主張を照合して忠実性を評価します。
+
+### スコアリング手順
+
+1. 主張とコンテキストを分析します。
+   - すべての主張（事実に関するものと推測的なもの）を抽出する
+   - 各主張をコンテキストと照合する
+   - 次の3つの判定のいずれかを割り当てる
+     - "yes" - 主張がコンテキストによって裏付けられている
+     - "no" - 主張がコンテキストと矛盾している
+     - "unsure" - 主張を検証できない
+1. 忠実性スコアを計算します。
+   - 裏付けられた主張を数える
+   - 主張の総数で割る
+   - 設定した範囲にスケーリングする
+
+最終スコア：`(supported_claims / total_claims) * scale`
+
+### スコアの解釈
+
+0〜1 の忠実性スコアは次のように解釈します。
+
+- **1.0**：すべての主張が正確で、コンテキストによって直接裏付けられている。
+- **0.7〜0.9**：ほとんどの主張は正しいが、軽微な追加や省略がある。
+- **0.4〜0.6**：一部の主張は裏付けられているが、検証できないものもある。
+- **0.1〜0.3**：内容の大半が不正確、または裏付けられていない。
+- **0.0**：すべての主張が誤り、またはコンテキストと矛盾している。
+
+## 例
+
+提供されたコンテキストに対する Agent の応答の忠実性を評価します。
+
+```typescript title="src/example-faithfulness.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createFaithfulnessScorer } from '@mastra/evals/scorers/prebuilt'
+import { myAgent } from './agent'
+
+// Context is typically populated from agent tool calls or RAG retrieval
+const scorer = createFaithfulnessScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'Tell me about the Tesla Model 3.',
+    },
+    {
+      input: 'What are the key features of this electric vehicle?',
+    },
+  ],
+  scorers: [scorer],
+  target: myAgent,
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+`runEvals` の詳細は、[runEvals リファレンス](/reference/evals/run-evals)を参照してください。
+
+このスコアラーを Agent に追加する方法は、[スコアラーの概要](/docs/evals/overview#adding-scorers-to-agents)ガイドを参照してください。
+
+## 関連項目
+
+- [回答関連性スコアラー](./answer-relevancy)
+- [ハルシネーションスコアラー](./hallucination)

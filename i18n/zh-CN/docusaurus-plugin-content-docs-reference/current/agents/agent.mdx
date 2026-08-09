@@ -1,0 +1,1065 @@
+---
+title: "参考：Agent 类 | Agents"
+description: "Mastra 中 `Agent` 类的文档。该类为创建具备各种能力的 AI Agent 提供基础。"
+packages:
+  - "@mastra/core"
+---
+
+# Agent 类
+
+`Agent` 类是使用 Mastra 创建 AI Agent 的基础。它提供生成响应和流式交互的方法，还负责处理语音能力。
+
+## 使用示例
+
+### 基本字符串 instructions
+
+以字符串或字符串数组的形式传入 instructions，是设置 Agent 最简单的方式。这适用于只需提供 prompt、无需额外配置的直接用例。
+
+```typescript title="src/mastra/agents/string-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+// String instructions
+export const agent = new Agent({
+  id: 'test-agent',
+  name: 'Test Agent',
+  // highlight-next-line
+  instructions: 'You are a helpful assistant that provides concise answers.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+// System message object
+export const agent2 = new Agent({
+  id: 'test-agent-2',
+  name: 'Test Agent 2',
+  // highlight-start
+  instructions: {
+    role: 'system',
+    content: 'You are an expert programmer',
+  },
+  // highlight-end
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+// Array of system messages
+export const agent3 = new Agent({
+  id: 'test-agent-3',
+  name: 'Test Agent 3',
+  // highlight-start
+  instructions: [
+    { role: 'system', content: 'You are a helpful assistant' },
+    { role: 'system', content: 'You have expertise in TypeScript' },
+  ],
+  // highlight-end
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+### Provider 专属配置
+
+每个模型 Provider 还会提供一些不同的选项，包括 prompt 缓存和推理配置。你可以在 instruction 层级设置 `providerOptions`，从而为每条 system instruction/prompt 配置不同的缓存策略。
+
+```typescript title="src/mastra/agents/core-message-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const agent = new Agent({
+  id: 'core-message-agent',
+  name: 'Core Message Agent',
+  instructions: {
+    role: 'system',
+    content: 'You are a helpful assistant specialized in technical documentation.',
+    // highlight-start
+    providerOptions: {
+      openai: {
+        reasoningEffort: 'low',
+      },
+    },
+    // highlight-end
+  },
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+### 混合 instruction 格式
+
+```typescript title="src/mastra/agents/multi-message-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+// This could be customizable based on the user
+const preferredTone = {
+  role: 'system',
+  content: 'Always maintain a professional and empathetic tone.',
+}
+
+export const agent = new Agent({
+  id: 'multi-message-agent',
+  name: 'Multi Message Agent',
+  instructions: [
+    { role: 'system', content: 'You are a customer service representative.' },
+    preferredTone,
+    {
+      role: 'system',
+      content: 'Escalate complex issues to human agents when needed.',
+      providerOptions: {
+        anthropic: { cacheControl: { type: 'ephemeral' } },
+      },
+    },
+  ],
+  model: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+})
+```
+
+## 模型字符串
+
+最简单的设置方式是将 `model` 作为 `provider/model` 格式的字符串传入，并用斜杠分隔 Provider 与模型名称。Mastra 会从环境中读取匹配的 Provider 凭据，因此这种格式不需要 Provider 包或 import。
+
+常用的 Provider 字符串及凭据：
+
+- **OpenAI**: `__GATEWAY_OPENAI_MODEL__` 使用 `OPENAI_API_KEY`.
+- **Anthropic**: `__GATEWAY_ANTHROPIC_MODEL_SONNET__` 使用 `ANTHROPIC_API_KEY`.
+- **Google**: `__GATEWAY_GOOGLE_MODEL__` 使用 `GOOGLE_API_KEY` or `GOOGLE_GENERATIVE_AI_API_KEY`.
+
+有关支持的模型 ID，请参阅[模型](/models)；有关完整的 Provider 列表，请参阅[环境变量](/models/environment-variables)。
+
+## Thread signal
+
+使用 Agent signal 可将实时输入和上下文发送到 memory thread。Message API 用于用户输入；`sendSignal()` 则是用于系统生成上下文的底层 API。
+
+目标 thread 运行时，`sendMessage()` 会把消息传入活跃的 Agent 循环。thread 空闲时，Mastra 默认会启动一个 stream，并将该消息作为第一个输入。
+
+```typescript title="src/mastra/signals.ts"
+const subscription = await agent.subscribeToThread({
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+
+void (async () => {
+  for await (const chunk of subscription.stream) {
+    console.log(chunk)
+  }
+})()
+
+agent.sendMessage('Use the latest customer note too.', {
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+  ifIdle: {
+    streamOptions: {
+      maxSteps: 3,
+    },
+  },
+})
+```
+
+使用 `attributes` 标识共享 thread 中的不同用户。attributes 会渲染为 XML，使模型能够区分每条内容的发言者：
+
+```typescript
+agent.sendMessage(
+  {
+    contents: 'Can we simplify the API surface?',
+    attributes: { name: 'Devin', from: 'slack' },
+  },
+  { resourceId: 'user-123', threadId: 'thread-abc' },
+)
+```
+
+模型收到的内容如下：
+
+```xml
+<user name="Devin" from="slack">Can we simplify the API surface?</user>
+```
+
+如果消息需要根据 thread 当前是否运行携带不同上下文，请使用 `ifActive.attributes` 和 `ifIdle.attributes`：
+
+```typescript title="src/mastra/signals.ts"
+agent.sendMessage(
+  {
+    contents: 'Also cover the edge cases.',
+    attributes: { source: 'chat' },
+  },
+  {
+    resourceId: 'user-123',
+    threadId: 'thread-abc',
+    ifActive: { attributes: { delivery: 'while-active' } },
+    ifIdle: { attributes: { delivery: 'new-message' } },
+  },
+)
+```
+
+thread 活跃时，模型看到：
+
+```xml
+<user source="chat" delivery="while-active">Also cover the edge cases.</user>
+```
+
+thread 空闲时，模型看到：
+
+```xml
+<user source="chat" delivery="new-message">Also cover the edge cases.</user>
+```
+
+UI 可以看到消息内容，也可以从 signal 消息中读取 `attributes` 和 `metadata` 进行自定义渲染（例如显示用户名、头像或平台徽章）。
+
+### `sendMessage(message, options)`
+
+向活跃 run 或 memory thread 发送用户消息。当活跃 Agent 应立即收到消息时使用此方法。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'message',
+    type: 'string | Array<TextPart | FilePart> | { contents: string | Array<TextPart | FilePart>; attributes?: Record<string, JSONValue>; metadata?: Record<string, unknown>; providerOptions?: ProviderMetadata }',
+    description:
+      '用户输入。不含 attributes 的裸字符串和 part 会作为普通用户输入发送给模型。存在 `attributes` 时，Mastra 会将消息渲染为包含这些 attributes 的 `<user>` XML 元素。',
+  },
+  {
+    name: 'options',
+    type: 'object',
+    isOptional: true,
+    description: '消息的目标与投递行为。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'runId',
+            type: 'string',
+            isOptional: true,
+            description: '直接指定目标的 run ID。当你已知活跃 run ID 时使用。',
+          },
+          {
+            name: 'resourceId',
+            type: 'string',
+            isOptional: true,
+            description: 'memory thread 的资源 ID。按 thread 指定消息目标时，必须与 `threadId` 一起提供。',
+          },
+          {
+            name: 'threadId',
+            type: 'string',
+            isOptional: true,
+            description: '目标 thread ID。按 thread 指定消息目标时，必须与 `resourceId` 一起提供。',
+          },
+          {
+            name: 'ifActive',
+            type: 'object',
+            isOptional: true,
+            description: '控制目标 thread 活跃时的行为。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'behavior',
+                    type: "'deliver' | 'persist' | 'discard'",
+                    isOptional: true,
+                    description: '控制目标 thread 活跃时的行为。 Defaults to `deliver`.',
+                  },
+                  {
+                    name: 'attributes',
+                    type: 'Record<string, string | number | boolean>',
+                    isOptional: true,
+                    description:
+                      '目标 thread 活跃且 Mastra 接受消息时，合并到消息中的 attributes。',
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            name: 'ifIdle',
+            type: 'object',
+            isOptional: true,
+            description: '控制目标 thread 空闲时的行为。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'behavior',
+                    type: "'wake' | 'persist' | 'discard'",
+                    isOptional: true,
+                    description: '控制目标 thread 空闲时的行为。 Defaults to `wake`.',
+                  },
+                  {
+                    name: 'streamOptions',
+                    type: 'AgentExecutionOptions',
+                    isOptional: true,
+                    description:
+                      '当 `ifIdle.behavior` 为 `wake` 时所启动 stream 的选项。Mastra 使用顶层 `resourceId` 和 `threadId` 作为 memory 上下文。',
+                  },
+                  {
+                    name: 'attributes',
+                    type: 'Record<string, string | number | boolean>',
+                    isOptional: true,
+                    description:
+                      '目标 thread 空闲且 Mastra 接受消息时，合并到消息中的 attributes。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+如果空闲 thread 应使用自定义执行选项启动新 stream，请将 `ifIdle.behavior` 设为 `wake` 并传入 `ifIdle.streamOptions`：
+
+```typescript title="src/mastra/signals.ts"
+agent.sendMessage('Continue with the next step.', {
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+  ifIdle: {
+    behavior: 'wake',
+    streamOptions: {
+      maxSteps: 3,
+    },
+  },
+})
+```
+
+返回 `{ accepted: Promise<SendAgentSignalAccepted>, signal: CreatedAgentSignal, persisted?: Promise<void> }`。Mastra 决定如何处理消息后，`accepted` 会在决策时 resolve：由当前进程运行 Agent（已启动 run 或赢得启动 run 的 lease）时返回 `{ action: 'wake', runId, output }`；消息转发到现有 run 时（包括当前进程在跨进程 wake 竞争中失败）返回 `{ action: 'deliver', runId }`；没有运行任何内容时返回 `{ action: 'persist' }` / `{ action: 'discard' }`。`runId` 是处理该消息的 run 的权威 ID，仅在 `wake` 和 `deliver` 中存在。对于 `persist`/`discard`，请使用 `result.signal.id` 关联已存储的消息。`accepted` 表示路由结果已确定（`wake` run 的生成错误会通过 `output.consumeStream()` 暴露），只有消息完全无法路由或启动时（例如 Agent 配置错误）才会 reject。`persisted` 仅在 `persist` 行为中存在，并在 Mastra 将消息写入 Memory 后 resolve。对于 `wake` 操作，`output` 是可供进程内消费的 Agent stream。
+
+### `queueMessage(message, options)`
+
+将用户消息排入 thread 下一轮的队列。如果 thread 活跃，Mastra 会等待当前 run 完成，再用排队的消息启动新 run；如果 thread 空闲，则立即启动 run。
+
+```typescript
+agent.queueMessage('Also check whether the tests need updates.', {
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+```
+
+`queueMessage()` 接受与 `sendMessage()` 相同结构的 `message` 和 `options`，并返回 `{ accepted: Promise<SendAgentSignalAccepted>, signal: CreatedAgentSignal, persisted?: Promise<void> }`, 其 `accepted` 语义与 `sendMessage()` 相同。
+
+### `sendSignal(signal, options)`
+
+向活跃 run 或 memory thread 发送 signal。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'signal',
+    type: "{ type: 'user' | 'state' | 'reactive' | 'notification' | 'user-message' | 'system-reminder'; tagName?: string; contents: string | Array<TextPart | FilePart>; attributes?: Record<string, JSONValue>; metadata?: Record<string, unknown>; providerOptions?: ProviderMetadata }",
+    description:
+      "发送到 thread 的 signal 上下文。`type` 是语义 signal 类别。`tagName` 控制模型看到的 XML 标签。例如，`{ type: 'notification', tagName: 'github-review' }` 会渲染为 `<github-review>...</github-review>`。旧版 `user-message` 和 `system-reminder` payload 仍会被接受并规范化。未知 `type` 值会被拒绝；自定义 XML 标签请使用 `tagName`。",
+  },
+  {
+    name: 'options',
+    type: 'object',
+    isOptional: true,
+    description: 'signal 的目标与投递行为。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'runId',
+            type: 'string',
+            isOptional: true,
+            description: '直接指定目标的 run ID。当你已知活跃 run ID 时使用。',
+          },
+          {
+            name: 'resourceId',
+            type: 'string',
+            isOptional: true,
+            description: 'memory thread 的资源 ID。按 thread 指定 signal 目标时，必须与 `threadId` 一起提供。',
+          },
+          {
+            name: 'threadId',
+            type: 'string',
+            isOptional: true,
+            description: '目标 thread ID。按 thread 指定 signal 目标时，必须与 `resourceId` 一起提供。',
+          },
+          {
+            name: 'ifActive',
+            type: 'object',
+            isOptional: true,
+            description: '控制目标 thread 活跃时的行为。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'behavior',
+                    type: "'deliver' | 'persist' | 'discard'",
+                    isOptional: true,
+                    description: '控制目标 thread 活跃时的行为。 Defaults to `deliver`.',
+                  },
+                  {
+                    name: 'attributes',
+                    type: 'Record<string, string | number | boolean>',
+                    isOptional: true,
+                    description:
+                      '目标 thread 活跃且 Mastra 接受 signal 时，合并到 signal 中的 attributes。',
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            name: 'ifIdle',
+            type: 'object',
+            isOptional: true,
+            description: '控制目标 thread 空闲时的行为。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'behavior',
+                    type: "'wake' | 'persist' | 'discard'",
+                    isOptional: true,
+                    description: '控制目标 thread 空闲时的行为。 Defaults to `wake`.',
+                  },
+                  {
+                    name: 'streamOptions',
+                    type: 'AgentExecutionOptions',
+                    isOptional: true,
+                    description:
+                      '当 `ifIdle.behavior` 为 `wake` 时所启动 stream 的选项。Mastra 使用顶层 `resourceId` 和 `threadId` 作为 memory 上下文。',
+                  },
+                  {
+                    name: 'attributes',
+                    type: 'Record<string, string | number | boolean>',
+                    isOptional: true,
+                    description:
+                      '目标 thread 空闲且 Mastra 接受 signal 时，合并到 signal 中的 attributes。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+返回 `{ accepted: Promise<SendAgentSignalAccepted>, signal: CreatedAgentSignal, persisted?: Promise<void> }`。Mastra 决定如何处理 signal 后，`accepted` 会在决策时 resolve：由当前进程运行 Agent（已启动 run 或赢得启动 run 的 lease）时返回 `{ action: 'wake', runId, output }`；signal 转发到现有 run 时（包括当前进程在跨进程 wake 竞争中失败）返回 `{ action: 'deliver', runId }`；没有运行任何内容时返回 `{ action: 'persist' }` / `{ action: 'discard' }`。`action` 对应 `ifActive`/`ifIdle` 中最终采用的 `behavior`。`runId` 是处理该 signal 的 run 的权威 ID，仅在 `wake` 和 `deliver` 中存在。对于 `persist`/`discard`，请使用 `result.signal.id` 关联已存储的 signal。`accepted` 表示路由结果已确定（`wake` run 的生成错误会通过 `output.consumeStream()` 暴露），只有 signal 完全无法路由或启动时（例如 Agent 配置错误）才会 reject。`persisted` 仅在 `persist` 行为中存在，并在 Mastra 将 signal 写入 Memory 后 resolve。对于 `wake` 操作，`output` 是可供进程内消费的 Agent stream。
+
+在 serverless handler 中，请等待 `accepted`，并将 `wake` 输出传给平台中等同于 `waitUntil` 的机制，使获胜进程能在 HTTP 响应返回后继续消费 stream。
+
+```typescript
+const result = agent.sendSignal(signal, { resourceId, threadId })
+ctx.waitUntil(
+  result.accepted.then(async accepted => {
+    if (accepted.action === 'wake') {
+      await accepted.output.consumeStream()
+    }
+  }),
+)
+```
+
+### `sendStateSignal(state, options)`
+
+向活跃 run 或 memory thread 发送具名且限定于 thread 的状态上下文。适用于由外部生产者持有会随时间变化的持久上下文，例如浏览器状态、编辑器状态或 watcher 输出。
+
+```typescript
+const result = await agent.sendStateSignal(
+  {
+    id: 'browser',
+    mode: 'snapshot',
+    cacheKey: 'browser:https://example.com:3-tabs',
+    contents: 'Browser is open. Active tab URL: https://example.com. 3 open tabs.',
+    value: {
+      activeUrl: 'https://example.com',
+      tabCount: 3,
+      open: true,
+    },
+  },
+  {
+    resourceId: 'user-123',
+    threadId: 'thread-abc',
+  },
+)
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'state',
+    type: 'object',
+    description: '要发送到 thread 的状态 signal。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          { name: 'id', type: 'string', description: '状态通道名称，例如 `browser` 或 `editor`。' },
+          {
+            name: 'cacheKey',
+            type: 'string',
+            description: '由生产者所有的键，Mastra 用它跳过同一通道和模式下的重复状态。',
+          },
+          {
+            name: 'contents',
+            type: 'string | Array<TextPart | FilePart>',
+            description: '面向 LLM 的状态表示。',
+          },
+          {
+            name: 'mode',
+            type: "'snapshot' | 'delta'",
+            isOptional: true,
+            description: '状态是权威快照还是变更事件。默认为 `snapshot`。',
+          },
+          {
+            name: 'value',
+            type: 'unknown',
+            isOptional: true,
+            description: "`mode: 'snapshot'` 的结构化快照值。",
+          },
+          {
+            name: 'delta',
+            type: 'unknown',
+            isOptional: true,
+            description: "`mode: 'delta'` 的结构化变更值。",
+          },
+          {
+            name: 'attributes',
+            type: 'Record<string, string | number | boolean>',
+            isOptional: true,
+            description: '渲染到状态 signal 标签上的 attributes。',
+          },
+          {
+            name: 'metadata',
+            type: 'Record<string, unknown>',
+            isOptional: true,
+            description: '与状态 signal 一起存储的应用 metadata。',
+          },
+          {
+            name: 'tagName',
+            type: 'string',
+            isOptional: true,
+            description: '向模型显示的 XML 标签名称。默认为 `state`。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'options',
+    type: 'object',
+    description: '状态 signal 的目标与投递行为。接受与 `sendSignal()` 相同的选项。',
+  },
+]}
+/>
+
+Mastra 接受新状态时，返回 `{ accepted: Promise<SendAgentSignalAccepted>, signal: CreatedAgentSignal, persisted?: Promise<void>, skipped?: false }`。如果相同的 `cacheKey` 和 mode 已是当前 state lane 的值，则返回 `{ skipped: true, reason: 'unchanged' }`。Mastra 决定如何处理 signal 后，`accepted` 会在决策时 resolve：由当前进程运行 Agent（已启动 run 或赢得启动 run 的 lease）时返回 `{ action: 'wake', runId, output }`；signal 转发到现有 run 时（包括当前进程在跨进程 wake 竞争中失败）返回 `{ action: 'deliver', runId }`；没有运行任何内容时返回 `{ action: 'persist' }` / `{ action: 'discard' }`。`runId` 是处理该 signal 的 run 的权威 ID，仅在 `wake` 和 `deliver` 中存在。对于 `persist`/`discard`，请使用 `result.signal.id` 关联已存储的 signal。对于 `wake` 操作，`output` 是可供进程内消费的 Agent stream。
+
+### `sendNotificationSignal(notification, options)`
+
+创建或合并 notification inbox 记录，并解析通知投递策略。如果决定立即投递，则发送通知 signal。
+
+```typescript
+const result = await agent.sendNotificationSignal(
+  {
+    source: 'github',
+    kind: 'ci-status',
+    priority: 'high',
+    summary: 'CI failed on main: 3 tests failed.',
+    dedupeKey: 'github:acme/app:main:ci',
+  },
+  {
+    resourceId: 'user-123',
+    threadId: 'thread-abc',
+  },
+)
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'notification',
+    type: 'object',
+    description: '要创建或合并的 notification inbox 记录。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'source',
+            type: 'string',
+            description: '产生通知的外部系统，例如 `github`、`slack` 或 `email`。',
+          },
+          {
+            name: 'kind',
+            type: 'string',
+            description: '来源中的通知类型，例如 `ci-status`、`mention` 或 `direct-message`。',
+          },
+          {
+            name: 'summary',
+            type: 'string',
+            description: '用作通知 signal 内容、面向 LLM 的摘要。',
+          },
+          {
+            name: 'priority',
+            type: "'low' | 'medium' | 'high' | 'urgent'",
+            isOptional: true,
+            description: '通知投递策略使用的优先级。默认为 `medium`。',
+          },
+          {
+            name: 'payload',
+            type: 'unknown',
+            isOptional: true,
+            description: '存储在 inbox 记录中、供 Tool 或应用代码使用的结构化 payload。',
+          },
+          {
+            name: 'dedupeKey',
+            type: 'string',
+            isOptional: true,
+            description: '用于合并来自相同来源和 thread 的重复待处理通知的键。',
+          },
+          {
+            name: 'coalesceKey',
+            type: 'string',
+            isOptional: true,
+            description: '用于组合来自相同来源和 thread 的相关待处理通知的键。',
+          },
+          {
+            name: 'attributes',
+            type: 'Record<string, JSONValue>',
+            isOptional: true,
+            description: '复制到发出的通知 signal 上的额外 attributes。',
+          },
+          {
+            name: 'metadata',
+            type: 'Record<string, unknown>',
+            isOptional: true,
+            description: '存储在 inbox 记录上的应用 metadata。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'options',
+    type: 'object',
+    description: '通知的目标 thread 与唤醒行为。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'resourceId',
+            type: 'string',
+            description: 'notification inbox 和目标 memory thread 的资源 ID。',
+          },
+          {
+            name: 'threadId',
+            type: 'string',
+            description: 'notification inbox 和目标 memory thread 的 thread ID。',
+          },
+          {
+            name: 'ifIdle',
+            type: 'object',
+            isOptional: true,
+            description: '控制目标 thread 空闲时的行为。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'streamOptions',
+                    type: 'AgentExecutionOptions',
+                    isOptional: true,
+                    description:
+                      '即时通知唤醒空闲 thread 时所启动 stream 的选项。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+返回 `{ record: NotificationRecord, decision: NotificationDeliveryDecision, runId?: string, signal?: CreatedAgentSignal, persisted?: Promise<void>, accepted?: Promise<SendAgentSignalAccepted> }`。`record` 是已存储的 inbox 记录，`decision` 是投递策略结果。当 ingress 立即发出 signal 时（包括为活跃的高优先级通知立即发出的摘要），会存在 `signal` 和 `runId`。发出的 signal 被持久化但未唤醒空闲 thread 时，会存在 `persisted`。发出 signal 时会存在 `accepted`；Mastra 决定如何处理 signal 后，它会在决策时 resolve：由当前进程运行 Agent（已启动 run 或赢得启动 run 的 lease）时返回 `{ action: 'wake', runId, output }`；signal 转发到现有 run 时返回 `{ action: 'deliver', runId }`；没有运行任何内容时返回 `{ action: 'persist' }` / `{ action: 'discard' }`。Accepted 结果中的 `runId` 仅在 `wake` 和 `deliver` 中存在。对于 `wake` 操作，`output` 是可供进程内消费的 Agent stream。
+
+默认投递会感知优先级。`urgent` 通知立即投递。`high` 通知在线程空闲时立即投递；线程活跃时，Mastra 会立即发出摘要，并保留 `deliverAt`，以便线程空闲后完整投递。`medium` 通知在空闲时立即投递，在活跃时批量汇总为摘要。`low` 通知在活跃和空闲线程中都会批量汇总为摘要。空闲状态下的低优先级摘要会送达订阅者，但不会唤醒模型循环。完整流程请参阅 [Signal](/docs/long-running-agents/signals#notification-signals)。
+
+如果某些通知应等待不同的调度窗口或摘要汇总，请在 Agent 上配置 `notifications.deliveryPolicy`：
+
+```typescript title="src/mastra/agents/support-agent.ts"
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support Agent',
+  instructions: 'Help the user triage updates.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  notifications: {
+    deliveryPolicy: {
+      priorities: {
+        urgent: 'deliver',
+      },
+      decide: ({ record }) => {
+        if (record.priority === 'low') {
+          return {
+            action: 'summarize',
+            summaryAt: new Date(Date.now() + 30 * 60 * 1000),
+          }
+        }
+      },
+    },
+  },
+})
+```
+
+### `subscribeToThread(options)`
+
+订阅 memory thread 的原始 stream chunk。请在调用 `sendMessage()`、`queueMessage()` 或 `sendSignal()` 前使用。这样可以渲染 stream 输出并观察 signal 回显，包括 signal 中止活跃 run 的情况。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'object',
+    description: 'thread 订阅目标。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'resourceId',
+            type: 'string',
+            isOptional: true,
+            description: 'memory thread 的资源 ID。',
+          },
+          {
+            name: 'threadId',
+            type: 'string',
+            description: '要订阅的 thread ID。',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+返回包含以下成员的 `AgentThreadSubscription` 对象：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'stream',
+    type: 'AsyncIterable<AgentChunkType>',
+    description: '所订阅 thread 的原始 Agent stream chunk。',
+  },
+  {
+    name: 'activeRunId',
+    type: '() => string | null',
+    description: '返回 thread 的活跃 run ID；没有活跃 run 时返回 `null`。',
+  },
+  {
+    name: 'abort',
+    type: '() => boolean',
+    description: '中止 thread 的活跃 run。成功中止时返回 `true`。',
+  },
+  {
+    name: 'unsubscribe',
+    type: '() => void',
+    description: '停止订阅，但不中止活跃 run。',
+  },
+]}
+/>
+
+## 构造函数参数
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: false,
+    description: 'Agent 的唯一标识符。',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    isOptional: false,
+    description: 'Agent 的显示名称。',
+  },
+  {
+    name: 'description',
+    type: 'string',
+    isOptional: true,
+    description: "Agent 用途和能力的可选描述。",
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown> | ({ requestContext: RequestContext }) => Record<string, unknown> | Promise<Record<string, unknown>>',
+    isOptional: true,
+    description:
+      '用于在客户端中对 Agent 分类或筛选的可选 metadata。可以是静态记录，也可以是根据 request context 解析 metadata 的函数。',
+  },
+  {
+    name: 'instructions',
+    type: 'SystemMessage | ({ requestContext: RequestContext }) => SystemMessage | Promise<SystemMessage>',
+    isOptional: false,
+    description: `用于引导 Agent 行为的 instructions。可以是字符串、字符串数组、system message 对象、
+system message 数组，或动态返回上述任一类型的函数。
+SystemMessage 类型：string | string[] | CoreSystemMessage | CoreSystemMessage[] | SystemModelMessage | SystemModelMessage[]`,
+  },
+  {
+    name: 'model',
+    type: 'MastraLanguageModel | ({ requestContext: RequestContext }) => MastraLanguageModel | Promise<MastraLanguageModel>',
+    isOptional: false,
+    description:
+      'Agent 使用的语言模型。可传入 `provider/model` 格式的模型路由字符串、模型配置或 Provider 实例，也可以传入在 runtime 解析模型的函数。常见 Provider 和环境变量请参阅[模型字符串](#model-strings)。',
+  },
+  {
+    name: 'agents',
+    type: 'Record<string, Agent> | ({ requestContext: RequestContext }) => Record<string, Agent> | Promise<Record<string, Agent>>',
+    isOptional: true,
+    description: 'Agent 可访问的 Subagent。可以静态提供，也可以动态解析。',
+  },
+  {
+    name: 'tools',
+    type: 'ToolsInput | ({ requestContext: RequestContext, mastra?: Mastra }) => ToolsInput | Promise<ToolsInput>',
+    isOptional: true,
+    description:
+      'Agent 可访问的 Tool。可以静态提供，也可以在可用时根据 request context 和关联的 Mastra 实例动态解析。',
+  },
+  {
+    name: 'hooks',
+    type: 'ToolHooks',
+    isOptional: true,
+    description:
+      '在此 Agent 每次 Tool 调用前后运行的 hook。传给 `generate()` 或 `stream()` 的单次执行 hook 会覆盖此处匹配的 hook。请参阅下方的 Tool hook。',
+    properties: [
+      {
+        type: 'ToolHooks',
+        parameters: [
+          {
+            name: 'beforeToolCall',
+            type: '(context: ToolHookContext) => void | ToolBeforeHookResult | Promise<void | ToolBeforeHookResult>',
+            isOptional: true,
+            description:
+              '在 Tool 执行前运行。接收 `{ toolName, input, context, metadata }`。返回 `{ proceed: false, output }` 可跳过 Tool 调用，并将 `output` 用作结果。',
+          },
+          {
+            name: 'afterToolCall',
+            type: '(context: ToolAfterHookContext) => void | Promise<void>',
+            isOptional: true,
+            description:
+              '在 Tool 执行后运行。接收 `{ toolName, input, context, metadata, output, error }`。Tool 抛出异常时，`output` 为 undefined，并改为设置 `error`。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'transform',
+    type: 'ToolPayloadTransformPolicy',
+    isOptional: true,
+    description:
+      '在显示 stream 或用户可见的记录消息接收 Tool payload 前对其转换的共享策略。Tool 局部规则请使用 `createTool()` 中每个 Tool 的 `transform`。',
+  },
+  {
+    name: 'workflows',
+    type: 'Record<string, Workflow> | ({ requestContext: RequestContext }) => Record<string, Workflow> | Promise<Record<string, Workflow>>',
+    isOptional: true,
+    description: 'Agent 可执行的 Workflow。可以静态提供，也可以动态解析。',
+  },
+  {
+    name: 'defaultOptions',
+    type: 'AgentExecutionOptions | ({ requestContext: RequestContext }) => AgentExecutionOptions | Promise<AgentExecutionOptions>',
+    isOptional: true,
+    description: '调用 `stream()` 和 `generate()` 时使用的默认选项。',
+  },
+  {
+    name: 'defaultGenerateOptionsLegacy',
+    type: 'AgentGenerateOptions | ({ requestContext: RequestContext }) => AgentGenerateOptions | Promise<AgentGenerateOptions>',
+    isOptional: true,
+    description: '调用 `generateLegacy()` 时使用的默认选项。',
+  },
+  {
+    name: 'defaultStreamOptionsLegacy',
+    type: 'AgentStreamOptions | ({ requestContext: RequestContext }) => AgentStreamOptions | Promise<AgentStreamOptions>',
+    isOptional: true,
+    description: '调用 `streamLegacy()` 时使用的默认选项。',
+  },
+  {
+    name: 'mastra',
+    type: 'Mastra',
+    isOptional: true,
+    description: 'Mastra runtime 实例的引用（自动注入）。',
+  },
+  {
+    name: 'scorers',
+    type: 'MastraScorers | ({ requestContext: RequestContext }) => MastraScorers | Promise<MastraScorers>',
+    isOptional: true,
+    description: 'runtime 评估和遥测的评分配置。可以静态提供，也可以动态提供。',
+  },
+  {
+    name: 'memory',
+    type: 'MastraMemory | ({ requestContext: RequestContext }) => MastraMemory | Promise<MastraMemory>',
+    isOptional: true,
+    description: '用于存储和检索有状态上下文的 Memory 模块。',
+  },
+  {
+    name: 'notifications',
+    type: 'object',
+    isOptional: true,
+    description: '持久通知 signal 的通知投递配置。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'deliveryPolicy',
+            type: 'NotificationDeliveryPolicyConfig',
+            isOptional: true,
+            description:
+              '控制通知记录的投递方式。可配置默认决定、各优先级决定、各来源决定或自定义 `decide()` 函数。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'voice',
+    type: 'CompositeVoice',
+    isOptional: true,
+    description: '语音输入和输出的 Voice 设置。',
+  },
+  {
+    name: 'inputProcessors',
+    type: '(Processor | ProcessorWorkflow)[] | ({ requestContext: RequestContext }) => (Processor | ProcessorWorkflow)[] | Promise<(Processor | ProcessorWorkflow)[]>',
+    isOptional: true,
+    description:
+      '在消息由 Agent 处理前修改或验证消息的输入 Processor。可以是单独的 Processor 对象，也可以是使用 ProcessorStepSchema 通过 `createWorkflow()` 创建的 Workflow。',
+  },
+  {
+    name: 'outputProcessors',
+    type: '(Processor | ProcessorWorkflow)[] | ({ requestContext: RequestContext }) => (Processor | ProcessorWorkflow)[] | Promise<(Processor | ProcessorWorkflow)[]>',
+    isOptional: true,
+    description:
+      '在 Agent 消息发送到客户端前修改或验证消息的输出 Processor。可以是单独的 Processor 对象或 Workflow。',
+  },
+  {
+    name: 'maxProcessorRetries',
+    type: 'number',
+    isOptional: true,
+    description: 'Processor 可以请求重试 LLM 步骤的最大次数。',
+  },
+  {
+    name: 'requestContextSchema',
+    type: 'StandardJSONSchemaV1',
+    isOptional: true,
+    description:
+      '用于验证 request context 值的标准 JSON Schema。提供后，会在 generate() 或 stream() 开始时验证上下文；验证失败会抛出 MastraError。',
+  },
+  {
+    name: 'editor',
+    type: 'false | { instructions?: boolean; tools?: boolean | { description?: boolean } }',
+    isOptional: true,
+    description:
+      '控制 Editor 可以覆盖此代码定义 Agent 的哪些字段。省略时允许编辑 instructions 和 Tool。请参阅下方的 Editor override。',
+  },
+]}
+/>
+
+## `generate()` memory 选项
+
+调用 `agent.generate()` 时传入 `memory`，可选择 run 应读取和写入哪个对话 thread。常见形式为 `memory: { resource: string, thread: string }`，其中 `resource` 标识所有者，`thread` 标识对话。概念模型请参阅 [Thread 和资源](/docs/memory/message-history#threads-and-resources)。
+
+```typescript title="src/mastra/run.ts"
+const response = await agent.generate('What did we decide about retries?', {
+  memory: {
+    resource: 'user-123',
+    thread: 'support-thread-456',
+  },
+})
+```
+
+如果需要在调用期间创建或更新 thread metadata，请使用 thread 对象：
+
+```typescript title="src/mastra/run.ts"
+const response = await agent.generate('Continue the support conversation.', {
+  memory: {
+    resource: 'user-123',
+    thread: {
+      id: 'support-thread-456',
+      title: 'Billing support',
+      metadata: { category: 'billing' },
+    },
+  },
+})
+```
+
+## Tool hook
+
+使用 `hooks` 在 Agent 每次 Tool 调用前后运行逻辑，包括已分配 Tool、memory Tool、toolset、客户端 Tool 和 Workspace Tool。
+
+```typescript title="src/mastra/agents/hooked-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const agent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  instructions: 'Help users with their questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // highlight-start
+  hooks: {
+    beforeToolCall: ({ toolName, input }) => {
+      console.log(`Running ${toolName}`, input)
+    },
+    afterToolCall: ({ toolName, output, error }) => {
+      console.log(`Finished ${toolName}`, { output, error })
+    },
+  },
+  // highlight-end
+})
+```
+
+`beforeToolCall` 可以通过返回 `{ proceed: false, output }` 短路 Tool 调用。Agent 会跳过执行并将 `output` 用作 Tool 结果：
+
+```typescript
+const result = await agent.generate('Clean up old records', {
+  hooks: {
+    beforeToolCall: ({ toolName }) => {
+      if (toolName === 'deleteRecord') {
+        return { proceed: false, output: { blocked: true } }
+      }
+    },
+  },
+})
+```
+
+hook 上下文的 `metadata` 包含 `agentId` 和 `agentName`。传给 `generate()` 或 `stream()` 的单次执行 hook 会覆盖匹配的 Agent 级 hook。当 [Workspace](/reference/workspace/workspace-class) 也定义 `tools.hooks` 时，Workspace hook 会在 Agent hook 包装器内部运行。
+
+## Editor override
+
+注册 [`MastraEditor`](/reference/editor/mastra-editor) 后，`editor` 字段控制代码定义的 Agent 中哪些部分可通过 Editor 更改。由代码所有的字段在 Studio 中为只读，并会从保存的 override 中移除。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'editor',
+    type: 'false | { instructions?: boolean; tools?: boolean | { description?: boolean } }',
+    isOptional: true,
+    description:
+      '省略时允许编辑 instructions 和 Tool。设为 `false` 可锁定 Agent。设为 `instructions: true` 可编辑 instructions。设为 `tools: true` 可编辑 Tool 成员和描述；设为 `tools: { description: true }` 则仅允许编辑描述。',
+  },
+]}
+/>
+
+Agent 的 `id`、`name` 和 `model` 始终来自代码，无法通过 Editor 覆盖。用法请参阅 [Editor](/docs/editor/overview)。
+
+## 返回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'Agent<TAgentId, TTools>',
+    description: '使用指定配置创建的新 Agent 实例。',
+  },
+]}
+/>
+

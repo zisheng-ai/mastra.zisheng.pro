@@ -1,0 +1,243 @@
+---
+title: "參考：TokenLimiterProcessor | 處理器"
+description: "TokenLimiterProcessor 的 Mastra 文件；此處理器會限制訊息中的 token 數量。"
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+---
+
+# TokenLimiterProcessor
+
+`TokenLimiterProcessor` 會限制訊息中的 token 數量。它可作為輸入處理器、逐步輸入處理器與輸出處理器使用：
+
+- **輸入處理器**（`processInput`）：在 Agent 迴圈開始前篩選歷史訊息，使其符合情境視窗限制，並優先保留近期訊息
+- **逐步輸入處理器**（`processInputStep`）：在多步驟 Agent 作業流程的每個步驟刪減訊息，避免 Tool 觸發額外 LLM 呼叫時，token 數量無限制增長
+- **輸出處理器**：透過串流或非串流方式限制產生的回應 token，並可設定超出限制時採用的策略
+
+## 使用範例
+
+```typescript
+import { TokenLimiterProcessor } from '@mastra/core/processors'
+
+const processor = new TokenLimiterProcessor({
+  limit: 1000,
+  strategy: 'truncate',
+  countMode: 'cumulative',
+})
+```
+
+## 建構函式參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'number | Options',
+    description: '可以是代表 token 限制的單一數字，也可以是設定選項物件',
+    isOptional: false,
+    properties: [
+      {
+        type: 'number | Options',
+        parameters: [
+          {
+            name: 'limit',
+            type: 'number',
+            description: '回應允許的 token 數量上限',
+            isOptional: false,
+          },
+          {
+            name: 'encoding',
+            type: 'TiktokenBPE',
+            description: '要使用的選用編碼。預設為 gpt-5.1 所使用的 o200k_base',
+            isOptional: true,
+            default: 'o200k_base',
+          },
+          {
+            name: 'strategy',
+            type: "'truncate' | 'abort'",
+            description:
+              "達到 token 限制時採用的策略：'truncate' 會停止發出區塊；'abort' 會呼叫 abort() 以停止串流",
+            isOptional: true,
+            default: "'truncate'",
+          },
+          {
+            name: 'countMode',
+            type: "'cumulative' | 'part'",
+            description:
+              "是否從串流開頭開始計算 token，或只計算目前部分：'cumulative' 會計算從開頭起的所有 token；'part' 只計算目前部分中的 token",
+            isOptional: true,
+            default: "'cumulative'",
+          },
+          {
+            name: 'trimMode',
+            type: "'best-fit' | 'contiguous'",
+            description:
+              "控制超出 token 限制時刪減訊息的方式：'best-fit' 會盡可能保留較多訊息（可能產生間隔）；'contiguous' 會在第一則無法容納的訊息處停止，確保對話歷史記錄保留連續的結尾部分",
+            isOptional: true,
+            default: "'best-fit'",
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 回傳值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "設為 'token-limiter' 的處理器識別碼",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: '選用的處理器顯示名稱',
+    isOptional: true,
+  },
+  {
+    name: 'processInput',
+    type: '(args: { messages: MastraDBMessage[]; abort: (reason?: string) => never }) => Promise<MastraDBMessage[]>',
+    description:
+      '在 Agent 迴圈開始前篩選輸入訊息，使其符合 token 限制，優先保留近期訊息，同時保留系統訊息',
+    isOptional: false,
+  },
+  {
+    name: 'processInputStep',
+    type: '(args: ProcessInputStepArgs) => Promise<void>',
+    description:
+      '在 Agent 迴圈的每個步驟（包括 Tool 呼叫的後續步驟）刪減訊息，使對話維持在 token 限制內。直接修改 messageList，優先移除最舊的訊息，同時保留系統訊息。',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputStream',
+    type: '(args: ProcessOutputStreamArgs) => Promise<ChunkType | null>',
+    description:
+      '處理串流輸出部分，以在串流期間限制 token 數量。只有文字和物件部分會計入限制並可能被保留不傳；生命週期、推理和 Tool 部分一律會直接傳遞。',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputResult',
+    type: '(args: { messages: MastraDBMessage[]; abort: (reason?: string) => never }) => Promise<MastraDBMessage[]>',
+    description: '處理最終輸出結果，以在非串流情境中限制 token 數量',
+    isOptional: false,
+  },
+  {
+    name: 'getMaxTokens',
+    type: '() => number',
+    description: '取得 token 數量上限',
+    isOptional: false,
+  },
+]}
+/>
+
+## 輸出串流行為
+
+作為輸出處理器時，只有包含所產生輸出的部分會計入限制：`text-delta` 和 `object`。生命週期部分（如 `step-start`）、推理增量、回應中繼資料與 Tool 部分（`tool-call`、`tool-result`）不會計入，也不會被保留不傳，因此 Tool 呼叫一律會送達 Agent 迴圈並執行。
+
+使用預設 `truncate` 策略時，輸出第一次被保留不傳，處理器就會在串流中發出暫時性的 `data-token-limit-reached` 部分：
+
+```typescript
+for await (const part of stream.fullStream) {
+  if (part.type === 'data-token-limit-reached') {
+    console.log('output truncated at', part.data.limit, 'tokens')
+  }
+}
+```
+
+## 錯誤行為
+
+作為輸入處理器（包括 `processInput` 與 `processInputStep`）使用時，`TokenLimiterProcessor` 會在下列情況擲回 `TripWire` 錯誤：
+
+- **訊息為空**：若沒有任何訊息可處理，便會擲回 TripWire，因為無法傳送不含訊息的 LLM 請求。
+- **系統訊息超出限制**：若只有系統訊息就已超過 token 限制，便會擲回 TripWire，因為無法傳送只含系統訊息、不含用戶／assistant 訊息的 LLM 請求。
+
+```typescript
+import { TripWire } from '@mastra/core/agent'
+
+try {
+  await agent.generate('Hello')
+} catch (error) {
+  if (error instanceof TripWire) {
+    console.log('Token limit error:', error.message)
+  }
+}
+```
+
+## 延伸使用範例
+
+### 作為輸入處理器（限制情境視窗）
+
+使用 `inputProcessors` 限制傳送至模型的歷史訊息，有助於維持在情境視窗限制內：
+
+```typescript title="src/mastra/agents/context-limited-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { TokenLimiterProcessor } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'context-limited-agent',
+  name: 'context-limited-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({/* ... */}),
+  inputProcessors: [
+    new TokenLimiterProcessor({ limit: 4000 }), // Limits historical messages to ~4000 tokens
+  ],
+})
+```
+
+### 作為逐步輸入處理器（限制多步驟 token 增長）
+
+當 Agent 跨多個步驟使用 Tool（例如 `maxSteps > 1`）時，每個步驟都會累積先前所有步驟的對話歷史記錄。使用 `inputProcessors` 也能限制 Agent 迴圈每個步驟的 token 數量。`TokenLimiterProcessor` 會自動套用至初始輸入與後續每個步驟：
+
+```typescript title="src/mastra/agents/multi-step-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { TokenLimiterProcessor } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'multi-step-agent',
+  name: 'multi-step-agent',
+  instructions: 'You are a helpful research assistant with access to tools',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [
+    new TokenLimiterProcessor({ limit: 8000 }), // Applied at every step
+  ],
+})
+
+// Each tool call step will be limited to ~8000 input tokens
+const result = await agent.generate('Research this topic using your tools', {
+  maxSteps: 10,
+})
+```
+
+### 作為輸出處理器（限制回應長度）
+
+使用 `outputProcessors` 限制所產生回應的長度：
+
+```typescript title="src/mastra/agents/response-limited-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { TokenLimiterProcessor } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'response-limited-agent',
+  name: 'response-limited-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  outputProcessors: [
+    new TokenLimiterProcessor({
+      limit: 1000,
+      strategy: 'truncate',
+      countMode: 'cumulative',
+    }),
+  ],
+})
+```
+
+## 相關資源
+
+- [防護欄](/docs/agents/guardrails)

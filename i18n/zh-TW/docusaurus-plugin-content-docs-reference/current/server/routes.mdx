@@ -1,0 +1,481 @@
+---
+title: "參考：Server 路由 | Server"
+description: "由 Mastra 伺服器轉接器註冊的 HTTP 路由 API 參考。"
+packages:
+  - "@mastra/server"
+---
+
+# Server 路由
+
+呼叫 `server.init()` 時，伺服器轉接器會註冊這些路由。若已設定，所有路由都會新增 `prefix` 選項指定的前綴。
+
+## Agent
+
+| 方法 | 路徑 | 描述 |
+| - | - | - |
+| `GET` | `/api/agents` | 列出所有 Agent |
+| `GET` | `/api/agents/:agentId` | 依 ID 取得 Agent（支援版本查詢參數） |
+| `POST` | `/api/agents/:agentId/generate` | 產生 Agent 回應 |
+| `POST` | `/api/agents/:agentId/stream` | 串流傳輸 Agent 回應 |
+| `POST` | `/api/agents/:agentId/send-message` | 向活躍或空閒的執行緒傳送使用者訊息 |
+| `POST` | `/api/agents/:agentId/queue-message` | 將使用者訊息排隊到執行緒的下一輪 |
+| `POST` | `/api/agents/:agentId/signals` | 向活躍或空閒的執行緒傳送底層訊號 |
+| `POST` | `/api/agents/:agentId/threads/subscribe` | 訂閱執行緒串流 |
+| `POST` | `/api/agents/:agentId/send-tool-approval` | 核准或拒絕 Tool 呼叫，並透過執行緒訂閱復原執行 |
+| `POST` | `/api/agents/:agentId/resume-stream` | 使用自訂資料復原已暫停的 Agent 串流 |
+| `GET` | `/api/agents/:agentId/tools` | 列出 Agent Tool |
+| `POST` | `/api/agents/:agentId/tools/:toolId/execute` | 執行 Agent Tool |
+
+### 取得 Agent 的查詢參數
+
+`GET /api/agents/:agentId` 接受選用查詢參數，用於控制將哪個已儲存的設定版本作為覆寫項套用於程式碼中定義的 Agent：
+
+| 參數 | 類型 | 預設值 | 描述 |
+| - | - | - | - |
+| `status` | `'draft' \| 'published'` | `'published'` | 要解析的已儲存版本。`draft` 傳回最新版本，`published` 傳回活躍版本。 |
+| `versionId` | `string` | 無 | 要解析的特定版本 ID。其優先順序高於 `status`。 |
+
+```bash
+# Get agent with active published overrides (default)
+GET /api/agents/my-agent
+
+# Get agent with latest draft overrides
+GET /api/agents/my-agent?status=draft
+
+# Get agent with a specific version's overrides
+GET /api/agents/my-agent?versionId=abc123
+```
+
+### 產生請求主體
+
+```typescript prettier:false
+{
+  messages: CoreMessage[] | string;       // Required
+  instructions?: string;                   // System instructions
+  system?: string;                         // System prompt
+  context?: CoreMessage[];                 // Additional context
+  memory?: { key: string } | boolean;      // Memory config
+  resourceId?: string;                     // Resource identifier
+  threadId?: string;                       // Thread identifier
+  runId?: string;                          // Run identifier
+  maxSteps?: number;                       // Max tool steps
+  activeTools?: string[];                  // Tools to enable
+  toolChoice?: ToolChoice;                 // Tool selection mode
+  requestContext?: Record<string, unknown>; // Request context
+  output?: ZodSchema;                      // Structured output schema
+}
+```
+
+### 產生回應
+
+```typescript prettier:false
+{
+  text: string;
+  toolCalls?: ToolCall[];
+  finishReason: string;
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+  };
+}
+```
+
+### Agent 訊息路由
+
+使用 `POST /api/agents/:agentId/send-message` 向執行中的 Agent 循環傳送使用者訊息，或喚醒空閒執行緒。若應在 Mastra 啟動後續執行前完成目前執行，請使用 `POST /api/agents/:agentId/queue-message`。
+
+兩個路由均接受相同的請求主體：
+
+```typescript prettier:false
+{
+  message: string | Array<TextPart | FilePart> | {
+    contents: string | Array<TextPart | FilePart>;
+    attributes?: Record<string, JSONValue>;
+    metadata?: Record<string, unknown>;
+    providerOptions?: ProviderMetadata;
+  };
+  runId?: string;
+  resourceId?: string;
+  threadId?: string;
+  ifActive?: {
+    behavior?: 'deliver' | 'persist' | 'discard';
+    attributes?: Record<string, string | number | boolean>;
+  };
+  ifIdle?: {
+    behavior?: 'wake' | 'persist' | 'discard';
+    streamOptions?: Omit<AgentExecutionOptions, 'messages'>;
+    attributes?: Record<string, string | number | boolean>;
+  };
+}
+```
+
+省略 `runId` 時，必須提供 `resourceId` 和 `threadId`。`ifIdle` 僅適用於以執行緒為目標的請求，不適用於以執行為目標的請求。
+
+#### 傳送訊息
+
+```bash
+curl -X POST http://localhost:4111/api/agents/supportAgent/send-message \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "message": {
+      "contents": "Show the shorter version.",
+      "attributes": { "sentFrom": "web" }
+    },
+    "resourceId": "user_123",
+    "threadId": "thread_456"
+  }'
+```
+
+#### 將訊息加入佇列
+
+```bash
+curl -X POST http://localhost:4111/api/agents/supportAgent/queue-message \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "message": "Also check whether the tests need updates.",
+    "resourceId": "user_123",
+    "threadId": "thread_456"
+  }'
+```
+
+兩個路由均傳回：
+
+```typescript prettier:false
+{
+  accepted: true;
+  runId: string;
+  signal?: CreatedAgentSignal;
+}
+```
+
+### 訂閱 Tool 核准路由
+
+當使用者端已有執行中的執行緒訂閱時，使用 `POST /api/agents/:agentId/send-tool-approval`。該路由會復原執行並傳回 JSON 確認資訊。復原後的串流 chunk 會透過 `POST /api/agents/:agentId/threads/subscribe` 傳送。
+
+該路由接受以下請求主體：
+
+```typescript prettier:false
+{
+  resourceId: string;
+  threadId: string;
+  toolCallId: string;
+  approved: boolean;
+  requestContext?: Record<string, unknown>;
+}
+```
+
+該路由傳回：
+
+```typescript prettier:false
+{
+  accepted: true;
+  runId: string;
+  toolCallId?: string;
+}
+```
+
+## Workflow
+
+| 方法 | 路徑 | 描述 |
+| - | - | - |
+| `GET` | `/api/workflows` | 列出所有 Workflow |
+| `GET` | `/api/workflows/run-counts` | 取得每個 Workflow 的執行中和暫停執行數量 |
+| `GET` | `/api/workflows/:workflowId` | 依 ID 取得 Workflow |
+| `POST` | `/api/workflows/:workflowId/create-run` | 建立新的 Workflow 執行 |
+| `POST` | `/api/workflows/:workflowId/start-async` | 啟動 Workflow 並等待結果 |
+| `POST` | `/api/workflows/:workflowId/stream` | 串流傳輸 Workflow 執行過程 |
+| `POST` | `/api/workflows/:workflowId/resume` | 復原已暫停的 Workflow |
+| `POST` | `/api/workflows/:workflowId/resume-async` | 非同步復原 |
+| `GET` | `/api/workflows/:workflowId/runs` | 列出 Workflow 執行 |
+| `GET` | `/api/workflows/:workflowId/runs/:runId` | 取得特定執行 |
+
+### 執行計數回應
+
+`/api/workflows/run-counts` endpoint 傳回每個已註冊 Workflow 的 `running` 和 [`suspended`](/docs/workflows/suspend-and-resume) 執行數量。該記錄以 Mastra 設定中的 Workflow registry 鍵為鍵，伺服器可能會將回應快取數秒：
+
+```typescript prettier:false
+{
+  [workflowRegistryKey: string]: {
+    running: number;
+    suspended: number;
+  };
+}
+```
+
+### 動態 Workflow
+
+動態 Workflow 定義（beta）是以 JSON 表示的 Workflow，透過 `workflowDefinitions` 儲存域持久儲存，並在執行中的實例上即時註冊。請參閱[動態 Workflow](/docs/workflows/dynamic-workflows)。
+
+| 方法 | 路徑 | 描述 |
+| - | - | - |
+| `GET` | `/api/stored/workflows` | 列出動態 Workflow 定義，可依 `status` 和 `authorId` 篩選 |
+| `GET` | `/api/stored/workflows/:dynamicWorkflowId` | 依 ID 取得動態 Workflow 定義 |
+| `POST` | `/api/stored/workflows` | 插入或更新定義（以及選用的輔助 `dependencies`），並即時註冊它 |
+| `DELETE` | `/api/stored/workflows/:dynamicWorkflowId` | 刪除動態 Workflow 定義並註銷即時 Workflow |
+
+在已認證的伺服器上，讀取路由需要 `stored-workflows:read` 權限，寫入路由需要 `stored-workflows:write` 權限。已註冊的動態 Workflow 透過上方常規的 `/api/workflows/:workflowId` 路由執行。
+
+### 建立執行請求主體
+
+```typescript prettier:false
+{
+  resourceId?: string;     // Associate run with a resource (e.g., user ID)
+  disableScorers?: boolean; // Disable scorers for this run
+}
+```
+
+### `/start-async` 的請求主體
+
+```typescript prettier:false
+{
+  resourceId?: string;     // Associate run with a resource (e.g., user ID)
+  inputData?: unknown;
+  initialState?: unknown;
+  requestContext?: Record<string, unknown>;
+  tracingOptions?: {
+    spanName?: string;
+    attributes?: Record<string, unknown>;
+  };
+}
+```
+
+### 串流傳輸 Workflow 的請求主體
+
+```typescript prettier:false
+{
+  resourceId?: string;     // Associate run with a resource (e.g., user ID)
+  inputData?: unknown;
+  initialState?: unknown;
+  requestContext?: Record<string, unknown>;
+  closeOnSuspend?: boolean;
+}
+```
+
+### 復原請求主體
+
+```typescript prettier:false
+{
+  step?: string | string[];
+  resumeData?: unknown;
+  requestContext?: Record<string, unknown>;
+}
+```
+
+## Tool
+
+| 方法 | 路徑 | 描述 |
+| - | - | - |
+| `GET` | `/api/tools` | 列出所有 Tool |
+| `GET` | `/api/tools/:toolId` | 依 ID 取得 Tool |
+| `POST` | `/api/tools/:toolId/execute` | 執行 Tool |
+
+### 執行 Tool 請求主體
+
+```typescript prettier:false
+{
+  data: unknown;  // Tool input data
+  requestContext?: Record<string, unknown>;
+}
+```
+
+## Memory
+
+| 方法 | 路徑 | 描述 |
+| - | - | - |
+| `GET` | `/api/memory/threads` | 列出執行緒 |
+| `GET` | `/api/memory/threads/:threadId` | 取得執行緒 |
+| `POST` | `/api/memory/threads` | 建立執行緒 |
+| `DELETE` | `/api/memory/threads/:threadId` | 刪除執行緒 |
+| `POST` | `/api/memory/threads/:threadId/clone` | 複製執行緒 |
+| `GET` | `/api/memory/threads/:threadId/messages` | 取得執行緒訊息 |
+| `POST` | `/api/memory/threads/:threadId/messages` | 新增訊息 |
+
+### 建立執行緒請求主體
+
+```typescript prettier:false
+{
+  resourceId: string;
+  title?: string;
+  metadata?: Record<string, unknown>;
+}
+```
+
+### 複製執行緒請求主體
+
+```typescript prettier:false
+{
+  newThreadId?: string;           // Custom ID for cloned thread
+  resourceId?: string;            // Override resource ID
+  title?: string;                 // Custom title for clone
+  metadata?: Record<string, unknown>;  // Additional metadata
+  options?: {
+    messageLimit?: number;        // Max messages to clone
+    messageFilter?: {
+      startDate?: Date;           // Clone messages after this date
+      endDate?: Date;             // Clone messages before this date
+      messageIds?: string[];      // Clone specific messages
+    };
+  };
+}
+```
+
+### 複製執行緒回應
+
+```typescript prettier:false
+{
+  thread: {
+    id: string;
+    resourceId: string;
+    title: string;
+    createdAt: Date;
+    updatedAt: Date;
+    metadata: {
+      clone: {
+        sourceThreadId: string;
+        clonedAt: Date;
+        lastMessageId?: string;
+      };
+      // ... other metadata
+    };
+  };
+  clonedMessages: MastraDBMessage[];
+}
+```
+
+## Vector
+
+| 方法 | 路徑 | 描述 |
+| - | - | - |
+| `POST` | `/api/vectors/:vectorName/upsert` | 插入或更新向量 |
+| `POST` | `/api/vectors/:vectorName/query` | 查詢向量 |
+| `POST` | `/api/vectors/:vectorName/delete` | 刪除向量 |
+
+### 插入或更新請求主體
+
+```typescript
+{
+  vectors: Array<{
+    id: string
+    values: number[]
+    metadata?: Record<string, unknown>
+  }>
+}
+```
+
+### 查詢請求主體
+
+```typescript prettier:false
+{
+  vector: number[];
+  topK?: number;
+  filter?: Record<string, unknown>;
+  includeMetadata?: boolean;
+}
+```
+
+## MCP
+
+| 方法 | 路徑 | 描述 |
+| - | - | - |
+| `GET` | `/api/mcp/servers` | 列出 MCP 伺服器 |
+| `GET` | `/api/mcp/servers/:serverId/tools` | 列出伺服器 Tool |
+| `POST` | `/api/mcp/:serverId` | MCP HTTP 傳輸 |
+| `GET` | `/api/mcp/:serverId/sse` | MCP SSE 傳輸 |
+
+## Responses API
+
+| 方法 | 路徑 | 描述 |
+| - | - | - |
+| `POST` | `/api/v1/responses` | 透過相容 OpenAI 的 Responses API 路由建立回應 |
+| `GET` | `/api/v1/responses/:responseId` | 取得已儲存的回應 |
+| `DELETE` | `/api/v1/responses/:responseId` | 刪除已儲存的回應 |
+
+有關完整的請求和回應契約，請參閱 [Responses API 參考](/reference/client-js/responses)。
+
+## Conversations API
+
+| 方法 | 路徑 | 描述 |
+| - | - | - |
+| `POST` | `/api/v1/conversations` | 建立會話 |
+| `GET` | `/api/v1/conversations/:conversationId` | 取得會話 |
+| `DELETE` | `/api/v1/conversations/:conversationId` | 刪除會話 |
+| `GET` | `/api/v1/conversations/:conversationId/items` | 列出會話的已儲存項目 |
+
+有關完整的請求和回應契約，請參閱 [Conversations API 參考](/reference/client-js/conversations)。
+
+## 日誌
+
+| 方法 | 路徑 | 描述 |
+| - | - | - |
+| `GET` | `/api/logs` | 列出日誌 |
+| `GET` | `/api/logs/:runId` | 依執行 ID 取得日誌 |
+
+### 查詢參數
+
+```typescript prettier:false
+{
+  page?: number;
+  perPage?: number;
+  transportId?: string;
+}
+```
+
+## Telemetry
+
+| 方法 | 路徑 | 描述 |
+| - | - | - |
+| `GET` | `/api/telemetry/traces` | 列出 Trace |
+| `GET` | `/api/telemetry/traces/:traceId` | 取得 Trace |
+| `GET` | `/api/telemetry/traces/:traceId/spans` | 取得 Trace span |
+
+## 常用查詢參數
+
+### 分頁
+
+大多數清單 endpoint 支援：
+
+```typescript prettier:false
+{
+  page?: number;   // Page number (0-indexed)
+  perPage?: number; // Items per page (default: 10)
+}
+```
+
+### 篩選
+
+Workflow 執行支援：
+
+```typescript prettier:false
+{
+  fromDate?: string;  // ISO date string
+  toDate?: string;    // ISO date string
+  status?: string;    // Run status filter
+  resourceId?: string; // Filter by resource
+}
+```
+
+## 錯誤回應
+
+所有路由均以此格式傳回錯誤：
+
+```typescript prettier:false
+{
+  error: string;      // Error message
+  details?: unknown;  // Additional details
+}
+```
+
+常見狀態碼：
+
+| 狀態碼 | 含義 |
+| - | - |
+| 400 | 錯誤請求 - 參數無效 |
+| 401 | 未授權 - 缺少認證或認證無效 |
+| 403 | 禁止存取 - 權限不足 |
+| 404 | 找不到 - 資源不存在 |
+| 500 | 內部伺服器錯誤 |
+
+## 相關內容
+
+- [createRoute()](/reference/server/create-route)：建立自訂路由
+- [伺服器轉接器](/docs/server/server-adapters)：使用轉接器

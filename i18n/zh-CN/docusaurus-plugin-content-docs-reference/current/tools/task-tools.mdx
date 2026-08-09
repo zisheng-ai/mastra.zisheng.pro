@@ -1,0 +1,221 @@
+---
+title: "参考：Task Tools | Tools"
+description: "内置 task Tool（task_write、task_update、task_complete、task_check）的 API 参考文档。这些 Tool 可为任何 Agent 加入结构化任务追踪。"
+packages:
+  - "@mastra/core"
+---
+
+# Task Tools
+
+这四个不限定 Agent 的内置 Tool，可管理 Agent 运行期间的结构化任务清单。任务清单会保存在 thread 范围的 `threadState` 保存网域，并投射至 Agent 的 [state-signal](/docs/long-running-agents/signals) lane，因此即使 [observational-memory](/docs/memory/observational-memory) 截断内容，任务清单仍会保留。
+
+任务追踪需要由 Memory 支持的 thread（`threadId` + `resourceId`）。若没有 Memory，Tool 会返回错误，说明任务追踪需要 Agent Memory。
+
+建议使用 [`TaskSignalProvider`](/reference/signals/task-signal-provider) 进行设置，它会在一次注册中集成四个 Tool 与 `TaskStateProcessor`。概念说明请参阅[内置 Tool](/docs/agents/using-tools#task-tracking)。
+
+## 使用示例
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { TaskSignalProvider } from '@mastra/core/signals'
+
+const agent = new Agent({
+  id: 'coder',
+  name: 'Coder',
+  instructions: 'Track your progress with the task tools.',
+  model,
+  memory: new Memory(),
+  signals: [new TaskSignalProvider()],
+})
+```
+
+或直接导入 Tool：
+
+```typescript title="src/mastra/agents/index.ts"
+import { taskWriteTool, taskUpdateTool, taskCompleteTool, taskCheckTool } from '@mastra/core/tools'
+
+const agent = new Agent({
+  id: 'coder',
+  name: 'Coder',
+  instructions: 'Track your progress with the task tools.',
+  model,
+  memory: new Memory(),
+  tools: { taskWriteTool, taskUpdateTool, taskCompleteTool, taskCheckTool },
+})
+```
+
+## `task_write`
+
+创建或取代整份任务清单。每次调用都会取代先前的清单。
+
+### 输入 schema
+
+<PropertiesTable
+  content={[
+  {
+    name: 'tasks',
+    type: 'TaskItemInput[]',
+    description: '更新后的完整任务清单。',
+    isOptional: false,
+    properties: [
+      {
+        type: 'TaskItemInput',
+        parameters: [
+          {
+            name: 'id',
+            type: 'string',
+            description:
+              "稳定的任务识别码（例如 'task_investigate_tests'）。更新时请保持不变。省略时会自动产生。",
+            isOptional: true,
+          },
+          {
+            name: 'content',
+            type: 'string',
+            description: "使用祈使语气撰写的任务说明（例如 'Fix authentication bug'）。",
+          },
+          {
+            name: 'status',
+            type: "'pending' | 'in_progress' | 'completed'",
+            description: '当前的任务状态。',
+          },
+          {
+            name: 'activeForm',
+            type: 'string',
+            description: "运行期间显示的现在进行式文本（例如 'Fixing authentication bug'）。",
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+### 输出
+
+返回 `TaskToolResult`，其中包含易于阅读的 `content` 摘要、带有已分配 ID 的完整 `tasks` 数组，以及 `isError` 标志。
+
+### 行为
+
+- 同一次调用中的 ID 必须是唯一值。明确提供的重复 ID 会改用产生的备援 ID。
+- 重写现有清单时若省略 ID，只有在恰好有一项明确相符的任务时，才会沿用先前的 ID 以维持稳定性。
+- 同一时间只能有一项任务处于 `in_progress` 状态。提交多项 `in_progress` 任务会返回错误。
+
+## `task_update`
+
+使用稳定 ID 更新一项任务。只需包含已变更的字段。
+
+### 输入 schema
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: '要更新的稳定任务识别码。',
+    isOptional: false,
+  },
+  {
+    name: 'content',
+    type: 'string',
+    description: '使用祈使语气撰写的新任务说明。',
+    isOptional: true,
+  },
+  {
+    name: 'status',
+    type: "'pending' | 'in_progress' | 'completed'",
+    description: '新的任务状态。',
+    isOptional: true,
+  },
+  {
+    name: 'activeForm',
+    type: 'string',
+    description: '新的现在进行式文本。',
+    isOptional: true,
+  },
+]}
+/>
+
+必须至少提供 `content`、`status` 或 `activeForm` 其中一项。
+
+### 行为
+
+- 当更新将某项任务设为 `in_progress` 时，其他处于 `in_progress` 的任务会自动降为 `pending`。
+- 找不到 ID 时，会返回错误以及可用的任务 ID。
+
+## `task_complete`
+
+使用稳定 ID 将一项任务标记为完成。
+
+### 输入 schema
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: '要标记为完成的稳定任务标识符。',
+    isOptional: false,
+  },
+]}
+/>
+
+### 行为
+
+找不到 ID 时，会返回错误以及可用的任务 ID。
+
+## `task_check`
+
+检查任务清单的完成状态。不接受任何输入参数。
+
+### 输出
+
+返回包含下列内容的 `TaskCheckResult`：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'content',
+    type: 'string',
+    description: '便于阅读的摘要，包含任务数量与未完成任务 ID。',
+  },
+  {
+    name: 'tasks',
+    type: 'TaskItem[]',
+    description: '包含稳定 ID 的完整任务清单快照。',
+  },
+  {
+    name: 'summary',
+    type: 'TaskCheckSummary',
+    description: '结构化数量统计。',
+    properties: [
+      {
+        type: 'TaskCheckSummary',
+        parameters: [
+          { name: 'total', type: 'number', description: '追踪的任务总数。' },
+          { name: 'completed', type: 'number', description: '已完成的任务数。' },
+          { name: 'inProgress', type: 'number', description: '进行中的任务数。' },
+          { name: 'pending', type: 'number', description: '待处理的任务数。' },
+          { name: 'incomplete', type: 'number', description: '尚未完成的任务数（进行中 + 待处理）。' },
+          { name: 'hasTasks', type: 'boolean', description: '至少有一项任务时为 true。' },
+          {
+            name: 'allCompleted',
+            type: 'boolean',
+            description: '至少有一项任务且所有任务都已完成时为 true。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'incompleteTasks',
+    type: 'TaskItem[]',
+    description: '仍需处理的任务（进行中与待处理）。',
+  },
+  {
+    name: 'isError',
+    type: 'boolean',
+    description: '检查过程是否发生错误。',
+  },
+]}
+/>

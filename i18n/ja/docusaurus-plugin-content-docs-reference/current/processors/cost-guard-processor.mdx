@@ -1,0 +1,176 @@
+---
+title: "リファレンス：CostGuardProcessor | Processors"
+description: "Agent の実行に金額ベースのコスト上限を適用する Processor、CostGuardProcessor の API リファレンス。"
+packages:
+  - "@mastra/core"
+---
+
+# CostGuardProcessor
+
+`CostGuardProcessor` は Agent ループ全体に金額ベースのコスト上限を適用し、設定可能なしきい値を超えた場合に処理をブロックするか警告します。
+
+各 LLM 呼び出しの前に `processInputStep` でコスト上限を確認します。すべてのスコープで、可観測性ストレージ API（`getMetricAggregate`）からコストデータを取得します。`resource` と `thread` スコープでは、設定可能な期間（デフォルトは7日間）に実行された run のコストを集計します。`run` スコープでは、現在の Trace のコストを取得します。
+
+トークン数に基づく上限には、代わりに `TokenLimiterProcessor` を使用してください。
+
+次の3つのスコープモードをサポートします。
+
+- **Run スコープ**：Trace ID を使い、1回の Agent 実行内のコストを追跡します
+- **Resource スコープ**（デフォルト）：run をまたいで `resourceId` ごとの累積コストを追跡します
+- **Thread スコープ**：run をまたいで `threadId` ごとの累積コストを追跡します
+
+> **コスト制限は概算です。** コストデータは、可観測性パイプラインのバッファリングされた Exporter によって非同期で永続化されます。高速に実行される Agent は、メトリクスを取得できるようになる前に設定上限を超える場合があります。`maxCost` は、高速に実行される Agent が超過する可能性のある概算しきい値として扱ってください。
+
+## 使用例
+
+Resource ごとの累積コストを追跡します（デフォルトスコープ）。
+
+```typescript
+import { CostGuardProcessor } from '@mastra/core/processors'
+
+const costGuard = new CostGuardProcessor({
+  maxCost: 1.0,
+})
+```
+
+24時間の期間を指定して、Thread ごとの累積コストを追跡します。
+
+```typescript
+import { CostGuardProcessor } from '@mastra/core/processors'
+
+const costGuard = new CostGuardProcessor({
+  maxCost: 5.0,
+  scope: 'thread',
+  window: '24h',
+})
+```
+
+`onViolation` コールバックを設定して Agent に追加します。
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { CostGuardProcessor } from '@mastra/core/processors'
+
+const costGuard = new CostGuardProcessor({
+  maxCost: 5.0,
+  scope: 'resource',
+  window: '30d',
+})
+
+costGuard.onViolation = ({ detail }) => {
+  console.log(`Cost exceeded for ${detail.scopeKey}: $${detail.usage}/$${detail.limit}`)
+}
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  model: '__GATEWAY_OPENAI_MODEL_NANO__',
+  processors: {
+    input: [costGuard],
+  },
+})
+```
+
+## コンストラクターパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'maxCost',
+    type: 'number',
+    description:
+      '許可する推定コストの上限（例：0.50米ドルなら 0.50）。正の数である必要があります。可観測性メトリクスのコストデータを使用します。メトリクスの永続化に遅延があるため、これは概算上限です。',
+    isOptional: false,
+  },
+  {
+    name: 'scope',
+    type: "'run' | 'resource' | 'thread'",
+    description:
+      "コストを追跡するスコープ。'run' は Trace ID を使い、現在の Agent 実行内のコストを追跡します。'resource' は run をまたいで resourceId ごとの累積コストを追跡します（デフォルト）。'thread' は run をまたいで threadId ごとの累積コストを追跡します。すべてのスコープで、getMetricAggregate をサポートする可観測性ストレージが必要です。",
+    isOptional: true,
+    defaultValue: "'resource'",
+  },
+  {
+    name: 'window',
+    type: "'1h' | '6h' | '24h' | '7d' | '30d' | '365d'",
+    description:
+      "'resource' または 'thread' スコープでコストを集計する期間。run 以外のスコープにのみ適用されます。",
+    isOptional: true,
+    defaultValue: "'7d'",
+  },
+  {
+    name: 'strategy',
+    type: "'block' | 'warn'",
+    description:
+      "コスト上限を超えた場合の処理方法。'block' は TripWire エラーで中止します。'warn' は警告をログに記録しますが、ステップの続行を許可します。",
+    isOptional: true,
+    defaultValue: "'block'",
+  },
+  {
+    name: 'message',
+    type: 'string',
+    description: '中止理由に使用するカスタムメッセージテンプレート。{usage} と {limit} のプレースホルダーを使用できます。',
+    isOptional: true,
+    defaultValue: "'Cost guard: cost limit exceeded ({usage}/{limit})'",
+  },
+]}
+/>
+
+## インスタンスプロパティ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: "'cost-guard'",
+    description: 'Processor の識別子。',
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: "'Cost Guard'",
+    description: 'Processor の表示名。',
+    isOptional: false,
+  },
+  {
+    name: 'onViolation',
+    type: '(violation: ProcessorViolation) => void | Promise<void>',
+    description:
+      '処理方法にかかわらず、コスト違反を検出したときに呼び出されるコールバック。汎用 Processor インターフェースの一部です。アラート、外部システムへのログ記録、ユーザーへのメール送信などの副作用に使用します。このコールバックがスローしたエラーは通知されずに捕捉されます。',
+    isOptional: true,
+  },
+  {
+    name: 'processInputStep',
+    type: '(args: ProcessInputStepArgs) => Promise<void>',
+    description:
+      '各 LLM 呼び出しの前に、累積推定コストを maxCost と比較します。可観測性ストレージからコストデータを取得します。run スコープでは Trace ID で絞り込み、resource/thread スコープでは期間と各 ID で絞り込みます。上限を超えると abort() を呼び出す（block）か、警告を記録します（warn）。メトリクスの永続化に遅延があるため、コスト確認は概算です。',
+    isOptional: false,
+  },
+]}
+/>
+
+## エラー時の動作
+
+`block` が有効な場合（デフォルト）、コスト上限を超えると `CostGuardProcessor` は `retry: false` を指定して `abort()` を呼び出します。TripWire のメタデータには次の情報が含まれます。
+
+- `processorId`：`'cost-guard'`
+- `usage`：現在の累積使用量（`estimatedCost`、`costUnit`）
+- `maxCost`：設定されたコスト上限
+- `scope`：有効なスコープ（`'run'`、`'resource'`、`'thread'` のいずれか）
+- `scopeKey`：Resource/Thread スコープの識別子（該当する場合）
+
+## スコープ別の動作
+
+| スコープ | run をまたいで追跡 | フィルター | 必要なコンテキスト |
+| - | - | - | - |
+| `run` | いいえ | 現在の Span の `traceId` | Tracing コンテキスト（自動） |
+| `resource` | はい | `resourceId` + 期間 | `RequestContext` の `resourceId` |
+| `thread` | はい | `threadId` + 期間 | `RequestContext` の `threadId` |
+
+すべてのスコープで、`getMetricAggregate` をサポートする可観測性ストレージが必要です。Mastra インスタンスに可観測性ストレージが設定されていない場合は、登録時にエラーがスローされます。
+
+`run` スコープでは、Processor は現在の Span の Tracing コンテキストから Trace ID を読み取ります。Tracing コンテキストを利用できない場合、確認はスキップされます（フェイルオープン）。
+
+`resource` と `thread` スコープでは、実行時に必要なコンテキスト ID がない場合、確認はスキップされます。可観測性クエリの失敗はフェイルオープン方式で処理され、クエリが失敗するとコストはゼロとして扱われます。
+
+> **メトリクス永続化の遅延について。** 可観測性パイプラインは、メトリクスを非同期にフラッシュするバッファリングされた Exporter を使用します。LLM 呼び出しの完了から、そのコストメトリクスを取得できるようになるまでには短い遅延があります。Agent を高頻度で実行している場合、実際のコストがしきい値を超えてから1つ以上のステップが進むまで、コスト制限が超過を検出できないことがあります。

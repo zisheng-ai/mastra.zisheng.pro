@@ -1,0 +1,152 @@
+---
+title: "参考：NestJS 适配器 | Server"
+description: "@mastra/nestjs Server 适配器的 API 参考。"
+packages:
+  - "@mastra/nestjs"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# NestJS 适配器
+
+`@mastra/nestjs` 包提供一个 NestJS 模块，用于通过基于 Express 的 NestJS 平台运行 Mastra。
+
+在 v1 中它有意仅支持 Express。如果使用不同的 HTTP 适配器引导 Nest，`MastraModule` 会在启动期间抛出错误，而非尝试部分集成。有关通用适配器概念，请参阅 [Server Adapters](/docs/server/server-adapters)。
+
+## 安装
+
+安装 NestJS 适配器，并确保 app 使用 Express 平台：
+
+```bash npm2yarn
+npm install @mastra/nestjs@latest
+```
+
+## 使用示例
+
+```typescript title="src/app.module.ts"
+import { Module } from '@nestjs/common'
+import { MastraModule } from '@mastra/nestjs'
+import { mastra } from './mastra'
+
+@Module({
+  imports: [
+    MastraModule.register({
+      mastra,
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+:::note
+
+`MastraModule` 会注册一个捕获所有路由的控制器（`@All('*')`）。如果在 app 模块之前导入它，它可能会拦截无关路由并返回 404。为避免冲突，请最后导入 `MastraModule`，或将其挂载到专用前缀下（例如，`/api/v1/mastra`）。
+
+:::
+
+```typescript title="src/main.ts"
+import { NestFactory } from '@nestjs/core'
+import { AppModule } from './app.module'
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule)
+  await app.listen(3000)
+}
+
+bootstrap()
+```
+
+默认情况下，Mastra 路由挂载在 `/api` 下。使用 `prefix` 进行更改。
+
+## 模块选项
+
+<PropertiesTable
+  content={[
+  { name: 'mastra', type: 'Mastra', description: 'Mastra 实例', isOptional: false },
+  { name: 'prefix', type: 'string', description: '路由路径前缀（例如，`/api/v2`）', isOptional: true, defaultValue: '`/api`' },
+  { name: 'rateLimitOptions', type: '{ enabled?: boolean; defaultLimit?: number; windowMs?: number; generateLimit?: number }', description: '速率限制配置（默认启用）', isOptional: true },
+  { name: 'shutdownOptions', type: '{ timeoutMs?: number; notifyClients?: boolean }', description: '优雅关闭配置', isOptional: true },
+  { name: 'bodyLimitOptions', type: '{ maxSize?: number; maxFileSize?: number; tempDir?: string; allowedMimeTypes?: string[] }', description: '请求正文大小限制', isOptional: true },
+  { name: 'streamOptions', type: '{ redact?: boolean; heartbeatMs?: number }', description: '流配置', isOptional: true },
+  { name: 'tracingOptions', type: '{ enabled?: boolean; serviceName?: string }', description: 'OpenTelemetry Trace 配置', isOptional: true },
+  { name: 'contextOptions', type: '{ strict?: boolean; logWarnings?: boolean }', description: '请求上下文解析配置', isOptional: true },
+  { name: 'customRouteAuthConfig', type: 'Map<string, boolean>', description: '按路由覆盖身份验证。键为 `METHOD:PATH`。', isOptional: true },
+  { name: 'tools', type: 'Record<string, Tool>', description: '为 Server 注册的 Tool', isOptional: true },
+  { name: 'taskStore', type: 'InMemoryTaskStore', description: '用于 A2A（Agent-to-Agent）操作的任务存储', isOptional: true },
+  { name: 'mcpOptions', type: '{ serverless?: boolean; sessionIdGenerator?: () => string }', description: 'MCP 传输选项', isOptional: true },
+  { name: 'auth', type: '{ enabled?: boolean; allowQueryApiKey?: boolean }', description: '启用 Mastra token 身份验证。默认禁用——大多数 NestJS app 使用自己的身份验证守卫。为保持向后兼容性，可选择启用查询字符串 `apiKey` 身份验证。', isOptional: true, defaultValue: '`{ enabled: false }`' },
+]}
+/>
+
+## 异步注册
+
+```typescript title="src/app.module.ts"
+import { Module } from '@nestjs/common'
+import { ConfigModule, ConfigService } from '@nestjs/config'
+import { MastraModule } from '@mastra/nestjs'
+import { Mastra } from '@mastra/core/mastra'
+
+@Module({
+  imports: [
+    ConfigModule.forRoot(),
+    MastraModule.registerAsync({
+      imports: [ConfigModule],
+      useFactory: (config: ConfigService) => ({
+        mastra: new Mastra({
+          agents: {
+            greeter: {
+              name: 'greeter',
+              description: 'Greets the user',
+              model: config.get('MASTRA_MODEL', '__GATEWAY_OPENAI_MODEL_MINI__'),
+            },
+          },
+        }),
+        prefix: config.get('MASTRA_PREFIX', '/api'),
+      }),
+      inject: [ConfigService],
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+## 访问 Mastra
+
+在服务中使用 `MASTRA` token 或 `MastraService`：
+
+```typescript
+import { Injectable, Inject } from '@nestjs/common'
+import { MASTRA, MastraService } from '@mastra/nestjs'
+import type { Mastra } from '@mastra/core/mastra'
+
+@Injectable()
+export class AgentService {
+  constructor(@Inject(MASTRA) private readonly mastra: Mastra) {}
+}
+
+@Injectable()
+export class WorkflowService {
+  constructor(private readonly mastraService: MastraService) {}
+}
+```
+
+## MCP 路由
+
+MCP 端点暴露在 API 前缀下：
+
+- `POST /api/mcp/:serverId/mcp`
+- `GET /api/mcp/:serverId/sse`
+- `POST /api/mcp/:serverId/messages`
+
+## 健康检查路由
+
+为兼容基础设施，运维端点有意不使用前缀：
+
+- `GET /health`
+- `GET /ready`
+- `GET /info`
+
+## 相关内容
+
+- [Server Adapters](/docs/server/server-adapters)
+- [MastraServer Reference](/reference/server/mastra-server)

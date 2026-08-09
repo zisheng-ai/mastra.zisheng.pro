@@ -1,0 +1,145 @@
+---
+title: "リファレンス：自動メトリクス | Observability"
+description: "トレースされた実行から Mastra が自動的に出力するメトリクスの完全なリファレンス。"
+packages:
+  - "@mastra/observability"
+---
+
+# 自動メトリクスのリファレンス
+
+Mastra は、トレースされた実行からパフォーマンスと使用量のメトリクスを自動的に抽出します。このページでは、Mastra が出力するすべてのメトリクス名、ラベル、コンテキストフィールドを説明します。
+
+セットアップ手順については、[メトリクスの概要](/docs/observability/metrics/overview)を参照してください。
+
+## Mastra が自動メトリクスを出力するタイミング
+
+メトリクスは Span の終了時に抽出されます。Observability レイヤーは完了した各 Span を調べて実行時間を計算し、モデル生成 Span の場合は token 使用量データを読み取ります。手動での計装は不要です。
+
+### メトリクスが利用可能かどうかを左右する要因
+
+次の条件を満たすと、メトリクスがストレージに保存されます。
+
+1. `MastraStorageExporter` が exporter として設定されている。
+1. ストレージバックエンドがメトリクスに対応している（ClickHouse、DuckDB、または Observability domain が有効な Postgres v-next）。
+
+メトリクスを利用できない場合は、[トラブルシューティング](#troubleshooting)を参照してください。
+
+## 実行時間メトリクス
+
+実行時間メトリクスは、Span の開始・終了タイムスタンプから算出した実行時間をミリ秒単位で記録します。各メトリクスには `status` ラベルが含まれ、その値は Span のステータスから導出された `ok` または `error` です。
+
+| メトリクス名 | Span タイプ | 説明 |
+| - | - | - |
+| `mastra_agent_duration_ms` | `AGENT_RUN` | Agent 実行の所要時間 |
+| `mastra_tool_duration_ms` | `TOOL_CALL`, `MCP_TOOL_CALL`, `PROVIDER_TOOL_CALL` | MCP および Provider が実行する Tool 呼び出しを含む、Tool 呼び出しの所要時間 |
+| `mastra_workflow_duration_ms` | `WORKFLOW_RUN` | Workflow 実行の所要時間 |
+| `mastra_model_duration_ms` | `MODEL_GENERATION` | モデル生成の所要時間 |
+| `mastra_processor_duration_ms` | `PROCESSOR_RUN` | Processor 実行の所要時間 |
+
+## Token 使用量メトリクス
+
+Token メトリクスは、`MODEL_GENERATION` Span のうち `usage` データを含むものからのみ出力されます。Provider から使用量データが提供される必要があります。
+
+### 入力 token メトリクス
+
+| メトリクス名 | 説明 |
+| - | - |
+| `mastra_model_total_input_tokens` | 入力 token の合計 |
+| `mastra_model_input_text_tokens` | 入力プロンプト内のテキスト token |
+| `mastra_model_input_cache_read_tokens` | プロンプトキャッシュから読み取った token（例：Anthropic） |
+| `mastra_model_input_cache_write_tokens` | プロンプトキャッシュに書き込んだ token |
+| `mastra_model_input_audio_tokens` | 入力内の音声 token（マルチモーダルモデル） |
+| `mastra_model_input_image_tokens` | 入力内の画像 token（視覚モデル） |
+
+### 出力 token メトリクス
+
+| メトリクス名 | 説明 |
+| - | - |
+| `mastra_model_total_output_tokens` | 出力 token の合計 |
+| `mastra_model_output_text_tokens` | モデル出力内のテキスト token |
+| `mastra_model_output_reasoning_tokens` | 推論／思考連鎖 token（例：OpenAI o-series） |
+| `mastra_model_output_audio_tokens` | モデル出力内の音声 token |
+| `mastra_model_output_image_tokens` | 出力画像 token |
+
+### Provider が報告する詳細な token カテゴリ
+
+詳細な内訳メトリクス（`total_input` と `total_output` 以外）は、Provider が報告した場合にのみ出力されます。あるカテゴリの token 数がゼロの場合、その Span では該当メトリクスが省略されます。Provider によって報告される詳細度は異なります。たとえば、すべての Provider がキャッシュや音声 token を報告するわけではありません。
+
+## コスト関連のコンテキスト
+
+### コストコンテキストが付与される条件
+
+完了したすべてのモデルステップについて Provider が有効なコストを報告した場合、または組み込みの料金レジストリに Provider とモデルに一致するエントリがある場合、コストコンテキストが token メトリクスに付与されます。Mastra はステップごとに Provider が報告したコストを合算し、クエリ全体の合計とします。完了したステップのいずれかに有効なコスト報告がない場合、Mastra は部分的な合計を報告せず、料金レジストリを使用します。どちらの情報源も利用できない場合、token メトリクスはコストフィールドなしで出力されます。
+
+呼び出し元が指定した `costContext` は、Provider が報告したコストや料金レジストリの推定値より優先されます。Provider が報告した合計では、`costMetadata.source: 'provider_reported'`、`costMetadata.scope: 'query_total'`、`costMetadata.reportedStepCount` を使用して、情報源、スコープ、合計に含まれる完了済みステップ数を示します。
+
+### 含まれる可能性があるコストフィールド
+
+| フィールド | 説明 |
+| - | - |
+| `provider` | Provider 名（例：`openai`、`anthropic`） |
+| `model` | モデル識別子（例：`gpt-4o`、`claude-sonnet-4-20250514`） |
+| `estimatedCost` | token 数と料金階層から算出した推定コスト、または Provider が報告した合計 |
+| `costUnit` | 通貨単位（例：`USD`） |
+| `costMetadata` | 料金階層情報、エラー詳細、Provider が報告したコストの情報源とスコープを含む追加の料金コンテキスト |
+
+## Trace との関連付け
+
+### メトリクスと Span および Trace コンテキストの関係
+
+各メトリクスには、それを生成した Span の `CorrelationContext` スナップショットが含まれます。このコンテキストはメトリクス値とともに保存され、メトリクスを正確な Span および Trace に関連付けます。
+
+関連付けフィールドは、次のカテゴリに分類されます。
+
+**Trace の関連付け**
+
+- `traceId`：Trace 識別子
+- `spanId`：Span 識別子
+- `tags`：Span のタグ
+
+**Entity 階層**
+
+- `entityType`, `entityId`, `entityName`：メトリクスを生成した Entity（例：Agent、Workflow）
+- `parentEntityType`, `parentEntityId`, `parentEntityName`：親 Entity
+- `rootEntityType`, `rootEntityId`, `rootEntityName`：呼び出しチェーンのルート Entity
+
+**ID 情報**
+
+- `userId`, `organizationId`, `resourceId`：リクエストの ID コンテキスト
+- `runId`, `sessionId`, `threadId`, `requestId`：関連付け ID
+
+**デプロイ**
+
+- `environment`：デプロイ環境（例：`production`、`staging`）
+- `source`：ソース識別子
+- `serviceName`：Observability 設定のサービス名
+- `experimentId`：該当する場合の実験識別子
+
+### 関連付けがデバッグに役立つ理由
+
+Metrics ダッシュボードでレイテンシーや token 使用量の急増を見つけた場合、関連付けコンテキストを使用して、そのメトリクスを生成した Trace を直接掘り下げられます。そこから個々の Span を調査できます。根本原因は、遅い Tool 呼び出しや大きなプロンプトかもしれません。予期しないエラーの可能性もあります。
+
+## トラブルシューティング {#troubleshooting}
+
+### メトリクスを利用できない
+
+- **Observability が設定されている**：`Mastra` インスタンスに、少なくとも1つの exporter を含む `observability` 設定があることを確認します。
+- **`MastraStorageExporter` または `MastraPlatformExporter` が存在する**：その他の exporter（Datadog、Langfuse など）は、Mastra でメトリクスを表示しません。ローカルの Studio ダッシュボードには `MastraStorageExporter` が必要で、Mastra platform でメトリクスを表示するには `MastraPlatformExporter` が必要です。
+- **ストレージがメトリクスに対応している**：メトリクスには、分析対応ストア（ClickHouse、DuckDB、または Observability domain が有効な Postgres v-next）が必要です。その他の行指向データベース（LibSQL、MSSQL）やドキュメントストア（MongoDB）はメトリクスに対応していません。
+- **サンプリングが 0% ではない**：サンプリング確率が `0`、または戦略が `never` の場合、すべての Span が no-op になり、メトリクスは抽出されません。
+
+### 実行時間メトリクスがない
+
+- **Span にタイムスタンプがある**：実行時間は `startTime` と `endTime` から計算されます。どちらか一方でも欠けている場合、そのメトリクスは省略されます。
+- **Span タイプがメトリクスに対応している**：実行時間メトリクスを生成するのは、`AGENT_RUN`、`TOOL_CALL`、`MCP_TOOL_CALL`、`PROVIDER_TOOL_CALL`、`WORKFLOW_RUN`、`MODEL_GENERATION`、`PROCESSOR_RUN` の各 Span のみです。
+
+### Token メトリクスがない
+
+- **Span がモデル生成である**：Token メトリクスは `MODEL_GENERATION` Span からのみ出力されます。
+- **Provider が使用量を報告する**：モデル Provider はレスポンスに `usage` データを含める必要があります。Token メトリクスの出力には使用量データが必要です。
+
+## 関連項目
+
+- [メトリクスの概要](/docs/observability/metrics/overview)
+- [メトリクスのクエリ](/docs/observability/metrics/querying)
+- [Studio Observability](/docs/studio/observability)

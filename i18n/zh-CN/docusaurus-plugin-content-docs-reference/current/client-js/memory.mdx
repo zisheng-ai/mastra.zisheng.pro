@@ -1,0 +1,242 @@
+---
+title: "参考：Memory API | Client SDK"
+description: 了解如何使用 client-js SDK 管理 Mastra 中的对话 thread 和消息历史记录。
+packages:
+  - "@mastra/client-js"
+---
+
+# Memory API
+
+Memory API 提供用于管理 Mastra 中对话 thread 和消息历史记录的方法。
+
+## 获取所有 thread
+
+检索特定资源的所有 memory thread：
+
+```typescript
+const threads = await mastraClient.listMemoryThreads({
+  resourceId: 'resource-1',
+  agentId: 'agent-1', // Optional - can be omitted if storage is configured
+})
+```
+
+如果省略 `agentId` 且服务器配置了存储，则会直接使用存储检索 thread。当多个 Agent 共享相同 thread 时（例如包含多个 Agent 步骤的 Workflow），这会很有用。
+
+## 创建新 thread
+
+创建新的 memory thread：
+
+```typescript
+const thread = await mastraClient.createMemoryThread({
+  title: 'New Conversation',
+  metadata: { category: 'support' },
+  resourceId: 'resource-1',
+  agentId: 'agent-1',
+})
+```
+
+## 使用特定 thread
+
+获取特定 memory thread 的实例：
+
+```typescript
+const thread = mastraClient.getMemoryThread({ threadId: 'thread-id', agentId: 'agent-id' })
+```
+
+## Thread 方法
+
+### 获取 thread 详情
+
+检索特定 thread 的详细信息：
+
+```typescript
+const details = await thread.get()
+```
+
+### 更新 thread
+
+更新 thread 属性：
+
+```typescript
+const updated = await thread.update({
+  title: 'Updated Title',
+  metadata: { status: 'resolved' },
+  resourceId: 'resource-1',
+})
+```
+
+### 删除 thread
+
+删除 thread 及其消息：
+
+```typescript
+await thread.delete()
+```
+
+### 克隆 thread
+
+创建包含 thread 所有消息的副本：
+
+```typescript
+const { thread: clonedThread, clonedMessages } = await thread.clone()
+```
+
+使用选项进行克隆：
+
+```typescript
+const { thread: clonedThread, clonedMessages } = await thread.clone({
+  newThreadId: 'custom-clone-id',
+  title: 'Cloned Conversation',
+  metadata: { branch: 'experiment-1' },
+  options: {
+    messageLimit: 10, // Only clone last 10 messages
+  },
+})
+```
+
+筛选消息后进行克隆：
+
+```typescript
+const { thread: clonedThread } = await thread.clone({
+  options: {
+    messageFilter: {
+      startDate: new Date('2024-01-01'),
+      endDate: new Date('2024-01-31'),
+    },
+  },
+})
+```
+
+克隆响应包含：
+
+- `thread`：新创建的、包含克隆元数据的 thread
+- `clonedMessages`：具有新 ID 的已克隆消息数组
+
+## 消息操作
+
+### 保存消息
+
+将消息保存到 memory：
+
+```typescript
+const result = await mastraClient.saveMessageToMemory({
+  messages: [
+    {
+      role: 'user',
+      content: 'Hello!',
+      id: '1',
+      threadId: 'thread-1',
+      resourceId: 'resource-1',
+      createdAt: new Date(),
+      format: 2,
+    },
+  ],
+  agentId: 'agent-1',
+})
+
+// result.messages contains the saved messages
+console.log(result.messages)
+```
+
+### 检索 thread 消息
+
+获取与 memory thread 关联的消息：
+
+```typescript
+// Get all messages in the thread (paginated)
+const result = await thread.listMessages()
+console.log(result.messages) // Array of messages
+console.log(result.total) // Total count
+console.log(result.hasMore) // Whether more pages exist
+
+// Get messages with pagination
+const result = await thread.listMessages({
+  page: 0,
+  perPage: 20,
+})
+
+// Get messages with ordering
+const result = await thread.listMessages({
+  orderBy: { field: 'createdAt', direction: 'ASC' },
+})
+
+// Get messages with shallow metadata filters
+const result = await thread.listMessages({
+  filter: {
+    metadata: {
+      category: 'billing',
+      escalated: true,
+      priority: 2,
+      archivedAt: null,
+    },
+  },
+})
+```
+
+元数据筛选条件只匹配浅层标量值：`string`、有限的 `number`、`boolean` 和 `null`。每个键值对都必须以 AND 语义匹配。`null` 只匹配明确设为 `null` 的键。元数据键必须以字母或下划线开头，并且只能包含字母数字或下划线字符，长度上限为 128 个字符。不允许使用 `__proto__`、`constructor` 和 `prototype` 等保留的原型键。性能取决于服务器的存储后端，任意元数据筛选条件可能会扫描候选消息。
+
+### 删除消息
+
+从 thread 中删除一条或多条消息：
+
+```typescript
+// Delete a single message
+const result = await thread.deleteMessages('message-id')
+
+// Delete multiple messages
+const result = await thread.deleteMessages(['message-1', 'message-2', 'message-3'])
+
+// Returns: { success: true, message: "Message deleted successfully" }
+```
+
+## 工作记忆
+
+Working memory 让 Agent 能够跨交互持久保留用户相关信息。其作用域既可以限定为特定 thread，也可以覆盖某一资源（用户）的所有 thread。
+
+### 获取 Working memory
+
+检索 thread 当前的 Working memory：
+
+```typescript
+const workingMemory = await mastraClient.getWorkingMemory({
+  agentId: 'agent-1',
+  threadId: 'thread-1',
+  resourceId: 'user-123', // Optional, required for resource-scoped memory
+})
+```
+
+响应包含：
+
+- `workingMemory`：当前 Working memory 内容（字符串或 null）
+- `source`：memory 来自 `"thread"` 还是 `"resource"` 作用域
+- `workingMemoryTemplate`：用于 Working memory 的模板（如果已配置）
+- `threadExists`：thread 是否存在
+
+### 更新 Working memory
+
+更新 thread 的 Working memory 内容：
+
+```typescript
+await mastraClient.updateWorkingMemory({
+  agentId: 'agent-1',
+  threadId: 'thread-1',
+  workingMemory: `# User Profile
+- Name: John Doe
+- Location: New York
+- Preferences: Prefers formal communication
+`,
+  resourceId: 'user-123', // Optional, required for resource-scoped memory
+})
+
+// Returns: { success: true }
+```
+
+对于资源作用域的 Working memory，必须提供 `resourceId` 参数。这样，memory 就能跨该用户的所有对话 thread 持久保留。
+
+### 获取 Memory 状态
+
+检查 memory 系统的状态：
+
+```typescript
+const status = await mastraClient.getMemoryStatus('agent-id')
+```

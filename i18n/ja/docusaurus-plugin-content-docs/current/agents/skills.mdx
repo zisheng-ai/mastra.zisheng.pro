@@ -1,0 +1,208 @@
+---
+title: "Skills | Agents"
+description: "完全な Workspace を用意せず、再利用可能な Skill をコードから Agent に直接追加します。"
+packages:
+  - "@mastra/core"
+---
+
+# Agent Skill
+
+Skill は、特定のタスクの実行方法を Agent に教える再利用可能な指示です。[Agent Skills 仕様](https://agentskills.io)に準拠しています。
+
+Skill は `skills` 設定で Agent に直接追加するか、[Workspace](/docs/workspace/overview) に設定できます。特定の Agent 専用の Skill を Workspace なしでコードに定義する場合は、Agent に追加します。ファイルシステムから Skill を検出し、その Workspace を使用するすべての Agent で共有する場合は Workspace を使用します。このページでは、コードでの定義、ファイルからの読み込み、リクエストごとの解決を含む Agent レベルの方法を説明します。
+
+## Agent レベルの Skill を使用する場面
+
+次の場合に Agent レベルの Skill を使用します。
+
+- Workspace に依存しない自己完結型 Agent が必要な場合
+- Skill をコードで定義し、ファイルシステムで検出する必要がない場合
+- Agent の機能を含むパッケージやライブラリを構築する場合
+- コンテキストに基づいてリクエストごとに Skill を解決する必要がある場合
+
+プロジェクト全体でファイルシステムベースの Skill 検出を行う場合は、代わりに [Workspace Skill](/docs/workspace/skills) を使用してください。
+
+## クイックスタート
+
+Skill をインラインで定義し、Agent に追加します。
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { createSkill } from '@mastra/core/skills'
+
+const codeReview = createSkill({
+  name: 'code-review',
+  description: 'Use when reviewing code changes.',
+  instructions: `
+    When reviewing code:
+    1. Check for correctness and edge cases
+    2. Verify style consistency
+    3. Look for potential bugs
+  `,
+})
+
+export const reviewer = new Agent({
+  id: 'reviewer',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  instructions: 'You are a code review assistant.',
+  // highlight-next-line
+  skills: [codeReview],
+})
+```
+
+Agent には `skill`、`skill_read`、`skill_search` Tool が自動的に追加され、会話中に Skill を検出して読み込めるようになります。
+
+## インライン Skill を定義する
+
+`createSkill()` を使用して、Skill をすべてコード内で作成します。
+
+```typescript title="src/mastra/skills.ts"
+import { createSkill } from '@mastra/core/skills'
+
+export const releaseChecklist = createSkill({
+  name: 'release-checklist',
+  description: 'Use when preparing a release.',
+  instructions: `
+    ## Release Checklist
+    1. Run the full test suite
+    2. Update CHANGELOG.md
+    3. Bump version numbers
+    4. Create a git tag
+  `,
+  references: {
+    'changelog-format.md': '# Changelog Format\nUse Keep a Changelog...',
+  },
+})
+```
+
+`references` フィールドには、ファイルシステム Skill の `references/` ファイルと同様に、Agent が `skill_read` Tool で読める補助ドキュメントをまとめます。API 全体については、[`createSkill()` リファレンス](/reference/agents/createSkill)を参照してください。
+
+## ファイルシステムパスの Skill
+
+Workspace を使用せず、ディスク上の Skill ディレクトリを指定します。
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { createSkill } from '@mastra/core/skills'
+
+export const agent = new Agent({
+  id: 'my-agent',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  skills: [
+    './skills/code-review', // path to a SKILL.md directory
+    './skills/testing', // another filesystem skill
+    createSkill({/* ... */}), // inline skill
+  ],
+})
+```
+
+ファイルシステムパスは内部で `LocalSkillSource` を使用し、[Workspace Skill](/docs/workspace/skills#skillmd-format) と同じ形式の `SKILL.md` ファイルを読み込みます。
+
+## 動的 Skill
+
+リクエストごとに Skill を解決するには、関数を渡します。
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { createSkill } from '@mastra/core/skills'
+
+const devSkill = createSkill({
+  name: 'dev-tools',
+  description: 'Developer productivity tools.',
+  instructions: '...',
+})
+
+const supportSkill = createSkill({
+  name: 'support-guide',
+  description: 'Customer support guidelines.',
+  instructions: '...',
+})
+
+export const agent = new Agent({
+  id: 'dynamic-agent',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // highlight-start
+  skills: ({ requestContext }) => {
+    const role = requestContext.get('userRole')
+    if (role === 'developer') return [devSkill]
+    return [supportSkill]
+  },
+  // highlight-end
+})
+```
+
+リゾルバー関数は `{ requestContext, tracingContext }` を受け取り、`SkillInput[]` 配列または `Promise<SkillInput[]>` を返します。
+
+リゾルバーは `RequestContext` ごとに1回実行されます。Agent の実行中は `resolve-skills` span 内で動作し、Tool と同様に `tracingContext.currentSpan` から独自処理用の子 span を作成できます。リゾルバーは `agent.listSkills()` やサーバーの Agent エンドポイントなど、メタデータの読み取り時にも実行されます。この場合 span は存在せず `tracingContext.currentSpan` は `undefined` になるため、処理を軽量に保ち、span の使用を保護してください。
+
+```typescript title="src/mastra/agents/index.ts"
+skills: async ({ requestContext, tracingContext }) => {
+  const span = tracingContext?.currentSpan?.createChildSpan({
+    type: 'generic',
+    name: 'entitlements-lookup',
+  })
+  const skills = await fetchSkillsFor(requestContext.get('userId'))
+  span?.end()
+  return skills
+}
+```
+
+Agent と Workflow でのリクエストコンテキストの使用方法は、[Request Context](/docs/server/request-context)を参照してください。
+
+## Workspace Skill とのマージ
+
+Agent に `skills` と Skill を設定した Workspace の両方がある場合、それらはマージされます。同名の場合は Agent レベルの Skill が優先されます。
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+import { createSkill } from '@mastra/core/skills'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  skills: ['skills'], // provides "code-review" skill
+})
+
+const customReview = createSkill({
+  name: 'code-review', // same name as workspace skill
+  description: 'Custom review process.',
+  instructions: '...',
+})
+
+export const reviewer = new Agent({
+  id: 'reviewer',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  workspace,
+  skills: [customReview], // agent-level "code-review" wins
+})
+```
+
+## プログラムから Skill にアクセスする
+
+アプリケーションコード（Workflow や API ルートなど）から Skill にアクセスするには、`agent.getSkill()` と `agent.listSkills()` を使用します。
+
+```typescript title="src/routes/skills.ts"
+import { reviewer } from '../mastra/agents'
+
+// Get a specific skill by name
+const skill = await reviewer.getSkill('code-review')
+if (skill) {
+  console.log(skill.instructions)
+}
+
+// List all available skills
+const allSkills = await reviewer.listSkills()
+for (const meta of allSkills) {
+  console.log(`${meta.name}: ${meta.description}`)
+}
+```
+
+API 全体については、[`.getSkill()` リファレンス](/reference/agents/getSkill)と [`.listSkills()` リファレンス](/reference/agents/listSkills)を参照してください。
+
+## 関連項目
+
+- [Workspace Skill](/docs/workspace/skills)
+- [`createSkill()` リファレンス](/reference/agents/createSkill)
+- [`.getSkill()` リファレンス](/reference/agents/getSkill)
+- [`.listSkills()` リファレンス](/reference/agents/listSkills)
+- [Agent Skills 仕様](https://agentskills.io)

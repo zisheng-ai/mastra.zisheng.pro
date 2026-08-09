@@ -1,0 +1,349 @@
+---
+title: "カスタム API ルート | Server"
+description: "Mastra サーバーから追加の HTTP エンドポイントを公開します。"
+packages:
+  - "@mastra/core"
+  - "@mastra/ai-sdk"
+---
+
+# カスタム API ルート
+
+デフォルトでは、Mastra は登録された Agent と Workflow をサーバー経由で自動的に公開します。機能を追加するには、独自の HTTP ルートを定義できます。
+
+ルートは `@mastra/core/server` のヘルパー `registerApiRoute()` で定義します。`Mastra` インスタンスと同じファイルに配置できますが、分離すると設定を簡潔に保てます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/my-custom-route', {
+        method: 'GET',
+        handler: async c => {
+          const mastra = c.get('mastra')
+          const agent = await mastra.getAgent('my-agent')
+
+          return c.json({ message: 'Custom route' })
+        },
+      }),
+    ],
+  },
+})
+```
+
+登録したカスタムルートには、サーバーのルートからアクセスできます。例:
+
+```bash
+curl http://localhost:4111/my-custom-route
+```
+
+各ルートのハンドラーは Hono の `Context` を受け取ります。ハンドラー内では `Mastra` インスタンスにアクセスし、Agent や Workflow を取得または呼び出せます。
+
+## ミドルウェア
+
+ルート固有のミドルウェアを追加するには、`registerApiRoute()` の呼び出し時に `middleware` 配列を渡します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/my-custom-route', {
+        method: 'GET',
+        middleware: [
+          async (c, next) => {
+            console.log(`${c.req.method} ${c.req.url}`)
+            await next()
+          },
+        ],
+        handler: async c => {
+          return c.json({ message: 'Custom route with middleware' })
+        },
+      }),
+    ],
+  },
+})
+```
+
+## OpenAPI ドキュメント
+
+カスタムルートに OpenAPI メタデータを含めると、Mastra サーバーのルートとともに Swagger UI へ表示できます。カスタムルートと組み込みルートの両方を一覧表示する OpenAPI 仕様には、`/api/openapi.json` でアクセスできます。標準の OpenAPI オペレーションフィールドを含む `openapi` オプションを渡します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+import { z } from 'zod'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/items/:itemId', {
+        method: 'GET',
+        openapi: {
+          summary: 'Get item by ID',
+          description: 'Retrieves a single item by its unique identifier',
+          tags: ['Items'],
+          parameters: [
+            {
+              name: 'itemId',
+              in: 'path',
+              required: true,
+              description: 'The item ID',
+              schema: { type: 'string' },
+            },
+          ],
+          responses: {
+            200: {
+              description: 'Item found',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      name: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+            404: {
+              description: 'Item not found',
+            },
+          },
+        },
+        handler: async c => {
+          const itemId = c.req.param('itemId')
+          return c.json({ id: itemId, name: 'Example Item' })
+        },
+      }),
+    ],
+  },
+})
+```
+
+### Zod スキーマの使用
+
+`openapi` 設定内の Zod スキーマは、OpenAPI ドキュメントの生成時に JSON Schema へ変換されます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+import { z } from 'zod'
+
+const ItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  price: z.number(),
+})
+
+const CreateItemSchema = z.object({
+  name: z.string().min(1),
+  price: z.number().positive(),
+})
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/items', {
+        method: 'POST',
+        openapi: {
+          summary: 'Create a new item',
+          tags: ['Items'],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: CreateItemSchema,
+              },
+            },
+          },
+          responses: {
+            201: {
+              description: 'Item created',
+              content: {
+                'application/json': {
+                  schema: ItemSchema,
+                },
+              },
+            },
+          },
+        },
+        handler: async c => {
+          const body = await c.req.json()
+          return c.json({ id: 'new-id', ...body }, 201)
+        },
+      }),
+    ],
+  },
+})
+```
+
+### Swagger UI での表示
+
+開発モード（`mastra dev`）で実行するか、ビルドオプションに `swaggerUI: true` を設定すると、カスタムルートが `/swagger-ui` の Swagger UI に表示されます。
+
+```typescript
+export const mastra = new Mastra({
+  server: {
+    build: {
+      swaggerUI: true, // Enable in production builds
+    },
+    apiRoutes: [
+      // Your routes...
+    ],
+  },
+})
+```
+
+## 認証
+
+Mastra サーバーに認証を設定すると、カスタム API ルートではデフォルトで認証が必要になります。ルートを公開するには、`requiresAuth: false` を設定します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+import { MastraJwtAuth } from '@mastra/auth'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraJwtAuth({
+      secret: process.env.MASTRA_JWT_SECRET,
+    }),
+    apiRoutes: [
+      // Protected route (default behavior)
+      registerApiRoute('/protected-data', {
+        method: 'GET',
+        handler: async c => {
+          // Access authenticated user from request context
+          const user = c.get('requestContext').get('user')
+          return c.json({ message: 'Authenticated user', user })
+        },
+      }),
+
+      // Public route (no authentication required)
+      registerApiRoute('/webhooks/github', {
+        method: 'POST',
+        requiresAuth: false, // Explicitly opt out of authentication
+        handler: async c => {
+          const payload = await c.req.json()
+          // Process webhook without authentication
+          return c.json({ received: true })
+        },
+      }),
+    ],
+  },
+})
+```
+
+### 認証 behavior
+
+- **認証未設定**: すべてのルート（組み込みとカスタム）が公開される
+- **認証設定済み**:
+  - Mastra が提供するルート（`/api/agents/*`、`/api/workflows/*` など）では認証が必要
+  - カスタムルートではデフォルトで認証が必要
+  - カスタムルートは `requiresAuth: false` で認証を無効化できる
+
+### ユーザー情報へのアクセス
+
+リクエストが認証されると、Request Context からユーザーオブジェクトを利用できます。
+
+```typescript
+registerApiRoute('/user-profile', {
+  method: 'GET',
+  handler: async c => {
+    const requestContext = c.get('requestContext')
+    const user = requestContext.get('user')
+
+    return c.json({ user })
+  },
+})
+```
+
+認証 Provider の詳細については、[認証ドキュメント](/docs/server/auth)を参照してください。
+
+## クライアント切断後も生成を継続する
+
+[`chatRoute()`](/reference/ai-sdk/chat-route) などの組み込みストリーミングヘルパーは、受信リクエストの `AbortSignal` を `agent.stream()` に転送します。ブラウザの切断時にモデル呼び出しをキャンセルする場合は、これが適切なデフォルト動作です。
+
+クライアントの切断時に停止するカスタムストリーミングルートでは、`agent.stream()` などの長時間実行処理に `c.req.raw.signal` を渡します。Mastra の Node ベース Adapter は、クライアント接続が閉じた場合、カスタムルートからストリーミングされる `Response` 本文の読み取りも停止します。クライアント切断が原因でないストリーミングレスポンス本文のエラーは、引き続き Adapter の通常のエラー処理へ伝播します。Hono での切断動作は、ホストランタイムが接続の切断を `request.signal` へ転送するかどうかに依存します。
+
+```typescript title="src/mastra/index.ts"
+registerApiRoute('/stream', {
+  method: 'GET',
+  handler: async c => {
+    const stream = await agent.stream(prompt, {
+      abortSignal: c.req.raw.signal,
+    })
+
+    return stream.toTextStreamResponse()
+  },
+})
+```
+
+クライアントが切断した後もサーバーで生成を続け、最終レスポンスを永続化するには、基盤となる `MastraModelOutput` を使ってカスタムルートを構築します。`c.req.raw.signal` を転送せずに Agent ストリームを開始し、バックグラウンドで `consumeStream()` を呼び出してサーバー側の生成を継続します。
+
+```typescript title="src/mastra/index.ts"
+import {
+  createUIMessageStream,
+  createUIMessageStreamResponse,
+  InferUIMessageChunk,
+  UIMessage,
+} from 'ai'
+import { toAISdkStream } from '@mastra/ai-sdk'
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/chat/persist/:agentId', {
+        method: 'POST',
+        handler: async c => {
+          const { messages, memory } = await c.req.json()
+          const mastra = c.get('mastra')
+          const agent = mastra.getAgent(c.req.param('agentId'))
+
+          const stream = await agent.stream(messages, {
+            memory,
+            // Do not pass c.req.raw.signal if this route should keep running
+            // after the client disconnects.
+          })
+
+          void stream.consumeStream().catch(error => {
+            mastra.getLogger()?.error('Background stream consumption failed', { error })
+          })
+
+          const uiStream = createUIMessageStream({
+            originalMessages: messages,
+            execute: async ({ writer }) => {
+              for await (const part of toAISdkStream(stream, { from: 'agent' })) {
+                writer.write(part as InferUIMessageChunk<UIMessage>)
+              }
+            },
+          })
+
+          return createUIMessageStreamResponse({ stream: uiStream })
+        },
+      }),
+    ],
+  },
+})
+```
+
+:::note
+
+HTTP クライアントが切断した後も意図的に処理を継続する場合に限り、このパターンを使用してください。切断時に生成をキャンセルする場合は、引き続き `chatRoute()` を使用するか、リクエストの `AbortSignal` を明示的に転送します。
+
+:::
+
+## 関連項目
+
+- [registerApiRoute() リファレンス](/reference/server/register-api-route): 完全な API リファレンス
+- [サーバーミドルウェア](/docs/server/middleware): グローバルミドルウェアの設定
+- [Mastra Server](/docs/server/mastra-server): サーバーの設定オプション
+

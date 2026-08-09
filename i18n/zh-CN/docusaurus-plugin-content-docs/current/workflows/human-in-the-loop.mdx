@@ -1,0 +1,222 @@
+---
+title: "Human-in-the-loop（HITL）| Workflows"
+description: "Mastra 的 Human-in-the-loop Workflow 允许你暂停执行，等待人工批准、审阅或用户输入后再继续。"
+packages:
+  - "@mastra/core"
+---
+
+# Human-in-the-loop（HITL）
+
+部分 Workflow 需要在继续前暂停并等待人工输入。Workflow [挂起](/docs/workflows/suspend-and-resume#pausing-a-workflow-with-suspend)时，可以返回消息说明暂停原因和继续所需内容。随后，Workflow 可根据收到的输入[恢复](#resuming-workflows-with-human-input)或[退出](#handling-human-rejection-with-bail)。这种方式适合人工批准、拒绝、受控决策或任何需要人工监督的步骤。
+
+## 暂停 Workflow 以等待人工输入
+
+Human-in-the-loop 输入与使用 `suspend()` [暂停 Workflow](/docs/workflows/suspend-and-resume) 的方式非常相似。主要区别在于，需要人工输入时，可以让 `suspend()` 返回一个载荷，为用户提供如何继续的上下文或指导。
+
+![使用 suspend() 暂停 Workflow](/img/workflows/workflows-suspend.jpg)
+
+```typescript {12-17,22-26} title="src/mastra/workflows/test-workflow.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+const step1 = createStep({
+  id: 'step-1',
+  inputSchema: z.object({
+    userEmail: z.string(),
+  }),
+  outputSchema: z.object({
+    output: z.string(),
+  }),
+  resumeSchema: z.object({
+    approved: z.boolean(),
+  }),
+  suspendSchema: z.object({
+    reason: z.string(),
+  }),
+  execute: async ({ inputData, resumeData, suspend }) => {
+    const { userEmail } = inputData
+    const { approved } = resumeData ?? {}
+
+    if (!approved) {
+      return await suspend({
+        reason: 'Human approval required.',
+      })
+    }
+
+    return {
+      output: `Email sent to ${userEmail}`,
+    }
+  },
+})
+
+export const testWorkflow = createWorkflow({
+  id: 'test-workflow',
+  inputSchema: z.object({
+    userEmail: z.string(),
+  }),
+  outputSchema: z.object({
+    output: z.string(),
+  }),
+})
+  .then(step1)
+  .commit()
+```
+
+## 向用户提供反馈
+
+Workflow 挂起时，可以通过识别被挂起步骤并读取其 `suspendPayload`，访问 `suspend()` 返回的载荷。
+
+```typescript {12} title="src/test-workflow.ts"
+const workflow = mastra.getWorkflow('testWorkflow')
+const run = await workflow.createRun()
+
+const result = await run.start({
+  inputData: {
+    userEmail: 'alex@example.com',
+  },
+})
+
+if (result.status === 'suspended') {
+  const suspendStep = result.suspended[0]
+  const suspendedPayload = result.steps[suspendStep[0]].suspendPayload
+
+  console.log(suspendedPayload)
+}
+```
+
+### 示例输出
+
+步骤返回的数据可以包含原因，帮助用户理解恢复 Workflow 需要什么。
+
+```typescript
+{
+  reason: 'Confirm to send email.'
+}
+```
+
+## 使用人工输入恢复 Workflow
+
+与[重新启动 Workflow](/docs/workflows/suspend-and-resume#restarting-a-workflow-with-resume)一样，收到人工输入后，使用带 `resumeData` 的 `resume()` 继续 Workflow。Workflow 会从暂停的步骤恢复。
+
+![使用 resume() 重新启动 Workflow](/img/workflows/workflows-resume.jpg)
+
+```typescript {13}
+const workflow = mastra.getWorkflow('testWorkflow')
+const run = await workflow.createRun()
+
+await run.start({
+  inputData: {
+    userEmail: 'alex@example.com',
+  },
+})
+
+const handleResume = async () => {
+  const result = await run.resume({
+    step: 'step-1',
+    resumeData: { approved: true },
+  })
+}
+```
+
+### 使用 `bail()` 处理人工拒绝
+
+使用 `bail()` 可以在某一步停止 Workflow 执行，而不触发错误。这适合人工明确拒绝某项操作的情况。Workflow 会以 `success` 状态完成，调用 `bail()` 后的所有逻辑都会跳过。
+
+```typescript {6-10}
+const step1 = createStep({
+  execute: async ({ inputData, resumeData, suspend, bail }) => {
+    const { userEmail } = inputData
+    const { approved } = resumeData ?? {}
+
+    if (approved === false) {
+      return bail({
+        reason: 'User rejected the request.',
+      })
+    }
+
+    if (!approved) {
+      return await suspend({
+        reason: 'Human approval required.',
+      })
+    }
+
+    return {
+      message: `Email sent to ${userEmail}`,
+    }
+  },
+})
+```
+
+## 多轮人工输入
+
+如果 Workflow 在多个阶段都需要输入，挂起模式保持不变。每个步骤定义一个 `resumeSchema`，通常还会定义包含原因的 `suspendSchema`，用于提供用户反馈。
+
+```typescript {11-16,21-25} title="src/mastra/workflows/test-workflow.ts" prettier:false
+const step1 = createStep({...});
+
+const step2 = createStep({
+  id: "step-2",
+  inputSchema: z.object({
+    message: z.string()
+  }),
+  outputSchema: z.object({
+    output: z.string()
+  }),
+  resumeSchema: z.object({
+    approved: z.boolean()
+  }),
+  suspendSchema: z.object({
+    reason: z.string()
+  }),
+  execute: async ({ inputData, resumeData, suspend }) => {
+    const { message } = inputData;
+    const { approved } = resumeData ?? {};
+
+    if (!approved) {
+      return await suspend({
+        reason: "Human approval required."
+      });
+    }
+
+    return {
+      output: `${message} - Deleted`
+    };
+  }
+});
+
+export const testWorkflow = createWorkflow({
+  id: "test-workflow",
+  inputSchema: z.object({
+    userEmail: z.string()
+  }),
+  outputSchema: z.object({
+    output: z.string()
+  })
+})
+  .then(step1)
+  .then(step2)
+  .commit();
+```
+
+每个步骤都必须按顺序恢复，并为每个挂起步骤单独调用 `resume()`。这种方式可以管理多步审批，同时在每个阶段提供一致的 UI 反馈和清晰的输入处理。
+
+```typescript {4,11}
+const handleResume = async () => {
+  const result = await run.resume({
+    step: 'step-1',
+    resumeData: { approved: true },
+  })
+}
+
+const handleDelete = async () => {
+  const result = await run.resume({
+    step: 'step-2',
+    resumeData: { approved: true },
+  })
+}
+```
+
+## 相关内容
+
+- [控制流](/docs/workflows/control-flow)
+- [挂起与恢复](/docs/workflows/suspend-and-resume)

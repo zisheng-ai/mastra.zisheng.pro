@@ -1,0 +1,178 @@
+---
+title: "部署 | Mastra platform"
+description: 使用一条命令将 Mastra 应用部署到 Mastra platform。通过 mastra deploy 构建、验证、预配并发布到任意环境。
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# 部署到 Mastra platform
+
+[`mastra deploy`](/reference/cli/mastra#mastra-deploy) 是将 Mastra 应用发布到 [Mastra platform](/docs/mastra-platform/overview) 的统一命令。
+
+一条命令即可构建项目并在包含任何内容前进行验证；首次运行时还会创建 platform 项目和环境，然后完成部署、流式输出构建日志，并在部署开始处理流量后显示公共 URL。
+
+```bash
+mastra deploy
+```
+
+:::note
+本页介绍统一的部署流程。早期拆分的 [`mastra server deploy`](/docs/mastra-platform/server) 和 [`mastra studio deploy`](/docs/mastra-platform/studio) 命令仍可使用，但推荐使用 `mastra deploy`。
+:::
+
+## 开始之前
+
+你需要一个 [Mastra 应用](/guides/getting-started/quickstart)和 [Mastra platform](https://projects.mastra.ai) 账户。如果尚未通过身份验证，首次使用时 CLI 会提示登录。
+
+本地 `.env` 文件是可选的。部署时，存储在 platform 上的环境变量会直接使用，[托管数据库](/docs/mastra-platform/database)等托管资源则会注入自己的变量。只有希望在这些变量之上叠加本地值时，才需要传入 `--env-file`。
+
+## 首次部署
+
+<Steps>
+  <StepItem>
+    在项目目录中运行：
+
+    ```bash
+    mastra deploy
+    ```
+
+    首次运行时，CLI 会提示创建 platform 项目（以 `package.json` 命名）和 `production` 环境。接受提示即可，或传入 `--yes`，无需确认便接受默认值。
+  </StepItem>
+
+  <StepItem>
+    CLI 会在发布任何内容前运行部署前检查。Storage 如果回退到本地文件路径（无法在 platform 临时文件系统中保留），通常会阻止部署：
+
+    ```
+    file:./mastra.db will be used at runtime because TURSO_DATABASE_URL is not set
+    ```
+
+    CLI 不会直接报错，而是询问是否就地修复：
+
+    ```
+    Preflight needs TURSO_DATABASE_URL for the production environment. Create a managed turso database now and attach it? (Y/n)
+    ```
+
+    接受提示后，预配会在几秒内完成，数据库连接变量会自动注入部署，无需向 `.env` 文件复制任何内容。如果拒绝，或在非交互式 shell（CI、`--yes`）中运行，CLI 会回退到之前的行为：输出需要自行运行的确切命令。
+
+    ```bash
+    mastra env db create production --kind turso
+    ```
+
+    环境 slug（上例中的 `production`）与 CLI 原本要部署到的环境一致。这一点很重要：当项目有多个环境时，`mastra env db create` 在非交互式 shell 中需要环境参数。
+
+    :::note
+    如果部署前检查报告硬编码的本地路径（`Build contains a host-local storage URL`），则无法提供就地修复。请先使用环境变量保护该路径，确保仅在本地开发时使用该文件：
+
+    ```ts title="src/mastra/index.ts"
+    new LibSQLStore({
+      id: 'mastra-storage',
+      // Uses the hosted database when deployed, a local file during development
+      url: process.env.TURSO_DATABASE_URL ?? 'file:./mastra.db',
+      authToken: process.env.TURSO_AUTH_TOKEN,
+    })
+    ```
+
+    :::
+  </StepItem>
+
+  <StepItem>
+    再次运行 `mastra deploy`。部署前检查通过后，构建会上传，CLI 会持续输出构建日志，直到部署上线。完整构建和部署通常需要 30 秒到几分钟。只有新版本开始处理流量后，才会显示成功消息。
+  </StepItem>
+
+  <StepItem>
+    使用 CLI 输出的 URL 验证部署。在末尾添加 `/api/agents`，确认它返回 Agent 的 JSON 列表。
+
+    :::warning
+    公开暴露 endpoint 前，请设置[身份验证](/docs/server/auth)。
+    :::
+  </StepItem>
+</Steps>
+
+首次部署会写入 `.mastra-project.json` 文件，将当前目录链接到 platform 项目。请提交该文件，使后续部署、CI 运行和 [`mastra env`](/docs/mastra-platform/environments) 命令无需额外标志即可指向同一项目。
+
+## 部署到其他环境
+
+`mastra deploy` 默认以 `production` 环境为目标。传入 `--env` 可指定其他环境。如果环境尚不存在，CLI 会询问是否创建：
+
+```bash
+mastra deploy --env staging
+```
+
+每个环境都有独立的 URL 和环境变量，也可以拥有自己的[托管数据库](/docs/mastra-platform/database)。
+
+有关完整模型，请参阅[环境](/docs/mastra-platform/environments)。
+
+## 选择区域
+
+部署创建新环境时传入 `--region`，可控制其运行位置。请使用 `us` 或 `eu` 简写：
+
+```bash
+mastra deploy --env production --region eu
+```
+
+区域会在创建环境时固定。与环境关联的数据库会自动放置在该环境区域附近，Observability 数据则会路由到与环境数据驻留区相匹配的 ingest 区域。有关支持区域的完整列表、数据库位置和 Observability 共置，请参阅[区域](/docs/mastra-platform/regions)。
+
+## 部署前检查
+
+部署前检查会在包含任何内容前验证构建输出，并且只标记你自己代码中的问题：
+
+- **本地 Storage 路径**：直接阻止部署。基于文件的 Storage（例如 `file:./mastra.db`）会在每次部署时丢失。如果该路径由本地设置、存储在 platform 上或由托管数据库提供的环境变量保护，检查就会通过：
+
+  ```ts title="src/mastra/storage.ts"
+  import { LibSQLStore } from '@mastra/libsql'
+
+  export const storage = new LibSQLStore({
+    id: 'mastra-storage',
+    // Uses the hosted database when deployed, a local file during development
+    url: process.env.TURSO_DATABASE_URL ?? 'file:./mastra.db',
+    authToken: process.env.TURSO_AUTH_TOKEN,
+  })
+  ```
+
+- **缺失环境变量**：当代码读取的变量没有任何来源提供时发出警告。仅由 library 代码引用的变量会被排除。
+
+建议通过修复根本原因来响应部署前检查阻塞，通常是关联托管数据库，或将变量存储到 platform 上。`--skip-preflight` 是逃生口，但会跳过用于防止部署损坏的检查。
+
+不进行部署，只运行检查：
+
+```bash
+mastra lint --preflight
+```
+
+`mastra lint` 只能看到本地 env 文件，无法看到存储在 platform 上或由托管数据库注入的变量，因此即使 lint 仍报告错误，部署也可能通过部署前检查。
+
+## 环境变量
+
+部署从三个来源解析环境变量：
+
+- **托管变量**：由托管数据库等 platform 资源注入（例如 `TURSO_DATABASE_URL`）。这些变量由 platform 定义，无法编辑。
+- **存储变量**：通过 dashboard 保存在项目或环境中。每次部署时直接使用，不需要本地文件。
+- **本地 env 文件**：部署会在上述变量之上叠加显式指定的 `--env-file`，或当前的 `.env` 和 `.env.local` 文件。
+
+```bash
+mastra deploy --env staging --env-file .env.staging
+```
+
+若要在不重新部署的情况下更改正在运行的服务变量，请在 dashboard 中更新变量，然后运行 [`mastra env restart`](/reference/cli/mastra#mastra-env-restart)。
+
+## 项目解析
+
+每次部署都按以下顺序解析目标项目：
+
+1. `MASTRA_PROJECT_ID` 环境变量
+1. `--project <name|slug|id>` 标志
+1. 当前目录中的 `.mastra-project.json` 文件
+
+在 CI 中设置 `MASTRA_PROJECT_ID` 和 `MASTRA_API_TOKEN`，并传入 `--yes`：
+
+```bash
+mastra deploy --env production --yes
+```
+
+## 相关内容
+
+- [环境](/docs/mastra-platform/environments)
+- [区域](/docs/mastra-platform/regions)
+- [托管数据库](/docs/mastra-platform/database)
+- [`mastra deploy` CLI Reference](/reference/cli/mastra#mastra-deploy)
+- [配置](/docs/mastra-platform/configuration)

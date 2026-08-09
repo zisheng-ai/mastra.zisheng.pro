@@ -1,0 +1,168 @@
+---
+title: "リファレンス: SystemPromptScrubber | Processors"
+description: "AI の応答から system prompt を検出して秘匿化する Mastra の SystemPromptScrubber のドキュメント。"
+packages:
+  - "@mastra/core"
+---
+
+# SystemPromptScrubber
+
+`SystemPromptScrubber` は、セキュリティ脆弱性につながる可能性のある system prompt、指示、その他の機密情報を検出して処理する **output processor** です。system prompt の種類を識別し、機密情報を適切にサニタイズする複数の秘匿化方法など、柔軟な処理戦略を提供してセキュリティの維持に役立ちます。
+
+## 使用例
+
+```typescript
+import { SystemPromptScrubber } from '@mastra/core/processors'
+
+const processor = new SystemPromptScrubber({
+  model: 'openrouter/openai/gpt-oss-safeguard-20b',
+  strategy: 'redact',
+  redactionMethod: 'mask',
+  includeDetections: true,
+  lastMessageOnly: true,
+})
+```
+
+## コンストラクターパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'Options',
+    description: 'system prompt の検出と処理に関する設定オプション',
+    isOptional: false,
+    properties: [
+      {
+        type: 'Options',
+        parameters: [
+          {
+            name: 'model',
+            type: 'MastraModelConfig',
+            description: '検出 Agent のモデル設定',
+            isOptional: false,
+          },
+          {
+            name: 'strategy',
+            type: "'block' | 'warn' | 'filter' | 'redact'",
+            description:
+              "system prompt 検出時の戦略。'block' はエラーで拒否し、'warn' は警告を記録して通過させ、'filter' はフラグ付きメッセージを削除し、'redact' は秘匿化した内容に置き換えます",
+            isOptional: true,
+            default: "'redact'",
+          },
+          {
+            name: 'customPatterns',
+            type: 'string[]',
+            description: 'system prompt の検出に使用するカスタムパターン（正規表現文字列）',
+            isOptional: true,
+            default: '[]',
+          },
+          {
+            name: 'includeDetections',
+            type: 'boolean',
+            description: '警告に検出の詳細を含めるかどうか。デバッグや監視に役立ちます',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'lastMessageOnly',
+            type: 'boolean',
+            description:
+              'すべてのメッセージではなく、バッチ内の最新の出力メッセージだけを検査するかどうか。LLM による scrub を最新の応答だけに限定する場合に使用します。',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'instructions',
+            type: 'string',
+            description: '検出 Agent のカスタム指示。未指定の場合はデフォルトの指示を使用します',
+            isOptional: true,
+            default: 'undefined',
+          },
+          {
+            name: 'redactionMethod',
+            type: "'mask' | 'placeholder' | 'remove'",
+            description:
+              "system prompt の秘匿化方法。'mask' はアスタリスクに、'placeholder' はプレースホルダーテキストに置き換え、'remove' は完全に削除します",
+            isOptional: true,
+            default: "'mask'",
+          },
+          {
+            name: 'placeholderText',
+            type: 'string',
+            description: "redactionMethod が 'placeholder' の場合に使用するカスタムプレースホルダーテキスト",
+            isOptional: true,
+            default: "'[SYSTEM_PROMPT]'",
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "'system-prompt-scrubber' に設定された processor の識別子",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: '任意の processor 表示名',
+    isOptional: true,
+  },
+  {
+    name: 'processOutputStream',
+    type: '(args: { part: ChunkType; streamParts: ChunkType[]; state: Record<string, any>; abort: (reason?: string) => never; tracingContext?: TracingContext }) => Promise<ChunkType | null>',
+    description: 'ストリーミング中に system prompt を検出して処理するため、ストリーミング出力の part を処理します',
+    isOptional: false,
+  },
+  {
+    name: 'processOutputResult',
+    type: '(args: { messages: MastraDBMessage[]; abort: (reason?: string) => never }) => Promise<MastraDBMessage[]>',
+    description: '非ストリーミング時に system prompt を検出して処理するため、最終的な出力結果を処理します',
+    isOptional: false,
+  },
+]}
+/>
+
+## 詳細な使用例
+
+`SystemPromptScrubber` を output processor として使用する場合は、パフォーマンスを最適化するため `BatchPartsProcessor` との併用を推奨します。`BatchPartsProcessor` は scrubber に渡す前にストリームチャンクをまとめ、検出に必要な LLM 呼び出しの回数を減らします。
+
+```typescript title="src/mastra/agents/scrubbed-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { BatchPartsProcessor, SystemPromptScrubber } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'scrubbed-agent',
+  name: 'scrubbed-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  outputProcessors: [
+    // Batch stream parts first to reduce LLM calls
+    new BatchPartsProcessor({
+      batchSize: 10,
+    }),
+    // Then apply system prompt detection on batched content
+    new SystemPromptScrubber({
+      model: 'openrouter/openai/gpt-oss-safeguard-20b',
+      strategy: 'redact',
+      customPatterns: ['system prompt', 'internal instructions'],
+      includeDetections: true,
+      redactionMethod: 'placeholder',
+      placeholderText: '[REDACTED]',
+    }),
+  ],
+})
+```
+
+## 関連情報
+
+- [Guardrails](/docs/agents/guardrails)

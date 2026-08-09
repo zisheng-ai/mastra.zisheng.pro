@@ -1,0 +1,167 @@
+---
+title: "参考：smoothStream() | Streaming"
+description: "smoothStream() 的 API 参考；该函数会缓冲文本和推理增量，并以大小一致的块将其发出。"
+packages:
+  - "@mastra/core"
+  - "@mastra/ai-sdk"
+---
+
+# `smoothStream()`
+
+`smoothStream()` 会创建一个实验性的转换 Stream，在以大小一致的块发出文本和推理增量之前先对其进行缓冲。当模型发出的增量不均匀时，可使用它使流式响应以更稳定的节奏显示。
+
+非文本块会原样通过。在 Tool、控制块或完成块之前，所有已缓冲的内容都会先被发出。
+
+## 用法示例
+
+通过转换管道传递 Agent 的 `fullStream`：
+
+```typescript title="src/stream-agent.ts"
+import { smoothStream } from '@mastra/core/stream'
+
+const result = await agent.stream('Explain how rainbows form')
+
+const stream = result.fullStream.pipeThrough(
+  smoothStream({
+    delayInMs: 20,
+    chunking: 'word',
+  }),
+)
+
+for await (const chunk of stream) {
+  if (chunk.type === 'text-delta') {
+    process.stdout.write(chunk.payload.text)
+  }
+}
+```
+
+该转换只会改变通过管道传递的 Stream。原始 `MastraModelOutput` 上的 Promise 属性和回调（例如 `result.text` 和 `onChunk`）仍保留模型原本的分块时序。
+
+## AI SDK 路由
+
+从 `@mastra/ai-sdk` 导入 `smoothStream()`，以便在 `handleChatStream()` 将 Agent 输出转换为 AI SDK UI 块之前对其进行平滑处理：
+
+```typescript title="app/api/chat/route.ts"
+import { handleChatStream, smoothStream } from '@mastra/ai-sdk'
+import { createUIMessageStreamResponse } from 'ai'
+import { mastra } from '@/src/mastra'
+
+export async function POST(req: Request) {
+  const params = await req.json()
+  const stream = await handleChatStream({
+    mastra,
+    agentId: 'weatherAgent',
+    params,
+    experimentalTransform: smoothStream({
+      delayInMs: 20,
+      chunking: 'word',
+    }),
+  })
+
+  return createUIMessageStreamResponse({ stream })
+}
+```
+
+`@mastra/ai-sdk` 导出会返回一个可复用的转换工厂，因此路由配置会为每个请求创建新的 `TransformStream`。`@mastra/core/stream` 导出则返回一个可直接与 `pipeThrough()` 一起使用的 `TransformStream`。
+
+这个可复用工厂也可以传给 `Agent.stream()`：
+
+```typescript
+import { smoothStream } from '@mastra/ai-sdk'
+
+const result = await agent.stream('Explain how rainbows form', {
+  experimentalTransform: smoothStream({ delayInMs: 20 }),
+})
+
+for await (const chunk of result.fullStream) {
+  // Consume the transformed Mastra chunks.
+}
+```
+
+## 参数
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'SmoothStreamOptions',
+    description: '控制转换后 Stream 的延迟和分块边界。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'SmoothStreamOptions',
+        parameters: [
+          {
+            name: 'delayInMs',
+            type: 'number | null',
+            description: '每个块发出后的延迟时间（毫秒）。将此值设置为 null 可禁用延迟。',
+            isOptional: true,
+            defaultValue: '10',
+          },
+          {
+            name: 'chunking',
+            type: "'word' | 'line' | RegExp | SmoothStreamChunkDetector | Intl.Segmenter",
+            description: '控制如何将缓冲的文本和推理内容划分为块。',
+            isOptional: true,
+            defaultValue: "'word'",
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+`chunking` 选项接受以下值：
+
+- `'word'`：发出完整单词，包括末尾的空白字符。
+- `'line'`：发出截至每个换行符的内容。
+- `RegExp`：发出截至首次匹配位置的内容。
+- `Intl.Segmenter`：使用感知语言区域的分段方式，适用于单词之间没有空格的语言。
+- `SmoothStreamChunkDetector`：使用当前缓冲区调用函数。该函数返回一个非空前缀以供发出，或返回 `null` 或 `undefined` 以等待更多内容。
+
+## 自定义分块
+
+使用正则表达式定义分块边界：
+
+```typescript
+const stream = result.fullStream.pipeThrough(
+  smoothStream({
+    chunking: /[^,]*,\s*/,
+  }),
+)
+```
+
+使用 `Intl.Segmenter` 实现感知语言区域的分段：
+
+```typescript
+const stream = result.fullStream.pipeThrough(
+  smoothStream({
+    chunking: new Intl.Segmenter('ja', { granularity: 'word' }),
+  }),
+)
+```
+
+当分块边界取决于自定义逻辑时，使用检测器函数。返回值必须是缓冲区的前缀：
+
+```typescript
+const stream = result.fullStream.pipeThrough(
+  smoothStream({
+    chunking: buffer => {
+      const boundary = buffer.indexOf('. ')
+      return boundary === -1 ? null : buffer.slice(0, boundary + 2)
+    },
+  }),
+)
+```
+
+## 返回值
+
+`TransformStream<ChunkType<OUTPUT>, ChunkType<OUTPUT>>`
+
+该转换会发出经过平滑处理的 `text-delta` 和 `reasoning-delta` 块，并保留块标识符、运行标识符、来源和元数据。
+
+## 相关内容
+
+- [`MastraModelOutput`](/reference/streaming/agents/MastraModelOutput)
+- [`ChunkType`](/reference/streaming/ChunkType)

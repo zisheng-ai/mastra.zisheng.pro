@@ -1,11 +1,12 @@
 import { useState, useEffect, lazy, Suspense, useMemo } from 'react'
 import { useLocation } from '@docusaurus/router'
+import useBaseUrl from '@docusaurus/useBaseUrl'
 import Head from '@docusaurus/Head'
 import MDXContent from '@theme/MDXContent'
 import { cn } from '@site/src/lib/utils'
-import { course } from '../course'
 import { useLessonProgress } from '../hooks/useLessonProgress'
-import { contentModules } from '../contentIndex'
+import { useLocalizedLearnContent } from '../localization'
+import type { Lesson } from '../types'
 import { LearnLayout } from '../components/LearnLayout'
 import { LessonHeader } from '../components/LessonHeader'
 import { LessonNav } from '../components/LessonNav'
@@ -18,10 +19,11 @@ function PublishedContent({
   lessonNumber,
   totalLessons,
 }: {
-  lesson: (typeof course.lessons)[number]
+  lesson: Lesson
   lessonNumber: number
   totalLessons: number
 }) {
+  const { contentModules, isSimplifiedChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
   const { watched, seconds, setWatched, setSeconds, setLastVisited } = useLessonProgress(lesson.slug)
 
   useEffect(() => {
@@ -32,7 +34,7 @@ function PublishedContent({
     const loader = contentModules[lesson.slug]
     if (!loader) return null
     return lazy(loader)
-  }, [lesson.slug])
+  }, [contentModules, lesson.slug])
 
   return (
     <>
@@ -54,13 +56,32 @@ function PublishedContent({
       {MdxContent && (
         <div className="markdown mt-6">
           <MDXContent>
-            <Suspense fallback={<div className="py-4 text-(--mastra-text-tertiary)">Loading content...</div>}>
+            <Suspense
+              fallback={
+                <div className="py-4 text-(--mastra-text-tertiary)">
+                  {isSimplifiedChinese
+                    ? '正在加载内容……'
+                    : isHongKongChinese
+                      ? '正在載入內容……'
+                      : isJapanese
+                        ? 'コンテンツを読み込んでいます…'
+                        : 'Loading content...'}
+                </div>
+              }
+            >
               <MdxContent />
             </Suspense>
           </MDXContent>
         </div>
       )}
-      <MarkAsCompleteButton watched={watched} onToggle={() => setWatched(!watched)} className="mt-8" />
+      <MarkAsCompleteButton
+        watched={watched}
+        onToggle={() => setWatched(!watched)}
+        isSimplifiedChinese={isSimplifiedChinese}
+        isHongKongChinese={isHongKongChinese}
+        isJapanese={isJapanese}
+        className="mt-8"
+      />
       <CourseSignupCTA className="mt-8" />
     </>
   )
@@ -69,10 +90,16 @@ function PublishedContent({
 function MarkAsCompleteButton({
   watched,
   onToggle,
+  isSimplifiedChinese,
+  isHongKongChinese,
+  isJapanese,
   className,
 }: {
   watched: boolean
   onToggle: () => void
+  isSimplifiedChinese: boolean
+  isHongKongChinese: boolean
+  isJapanese: boolean
   className?: string
 }) {
   const [animating, setAnimating] = useState(false)
@@ -98,14 +125,32 @@ function MarkAsCompleteButton({
       >
         {watched && '✓'}
       </span>
-      {watched ? 'Completed' : 'Mark lesson as complete'}
+      {watched
+        ? isSimplifiedChinese
+          ? '已完成'
+          : isHongKongChinese
+            ? '已完成'
+            : isJapanese
+              ? '完了'
+              : 'Completed'
+        : isSimplifiedChinese
+          ? '将本课标记为已完成'
+          : isHongKongChinese
+            ? '將本課標記為已完成'
+            : isJapanese
+              ? 'このレッスンを完了としてマーク'
+              : 'Mark lesson as complete'}
     </button>
   )
 }
 
 export default function LessonPage() {
+  const { course, isSimplifiedChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
   const location = useLocation()
-  const slug = location.pathname.replace(/^\/learn\//, '').replace(/\/$/, '')
+  const learnBasePath = useBaseUrl('/learn/')
+  const slug = location.pathname.startsWith(learnBasePath)
+    ? location.pathname.slice(learnBasePath.length).replace(/\/$/, '')
+    : ''
   const lessonIndex = getLessonIndex(course.lessons, slug)
 
   if (lessonIndex === -1) return null
@@ -119,7 +164,16 @@ export default function LessonPage() {
 
   const ogImageUrl = new URL('https://mastra.ai/api/og/blog')
   ogImageUrl.searchParams.set('title', lesson.title)
-  ogImageUrl.searchParams.set('author', 'Build Your First AI Agent in TypeScript with Guil')
+  ogImageUrl.searchParams.set(
+    'author',
+    isSimplifiedChinese
+      ? '跟随 Guil 使用 TypeScript 构建你的第一个 AI Agent'
+      : isHongKongChinese
+        ? '跟隨 Guil 使用 TypeScript 建立你的第一個 AI Agent'
+        : isJapanese
+          ? 'Guil と TypeScript で最初の AI Agent を構築'
+          : 'Build Your First AI Agent in TypeScript with Guil',
+  )
 
   return (
     <LearnLayout title={seoTitle} description={seoDescription}>

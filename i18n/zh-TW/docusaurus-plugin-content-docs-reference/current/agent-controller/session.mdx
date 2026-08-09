@@ -1,0 +1,772 @@
+---
+title: "參考文件：Session | AgentController"
+description: AgentController Session 的 API 參考文件；Session 擁有單一對話的各對話 state，包括身分、thread、mode、模型、run state、grant 與顯示 snapshot。
+packages:
+  - "@mastra/core"
+toc_max_heading_level: 2
+---
+
+# Session
+
+:::experimental
+
+`AgentController` 功能目前處於 Beta 階段；在脫離 Beta 狀態前，minor version 仍可能包含 breaking change。
+
+:::
+
+`Session` 是一項 resource 與選填 scope 的隔離 runtime。它擁有自己的 event bus、thread 繫結、state、mode 與模型選擇、run 控制、核准、suspension、follow-up 與顯示 state。[`AgentController`](/reference/agent-controller/agent-controller-class) 則提供共用 Agent、設定、Storage、Workspace 與服務。
+
+請透過 `controller.createSession()` 建立 Session。直接建構及 controller 接線方法不屬於應用程式 API。
+
+概念介紹請參閱 [AgentController 概觀](/docs/harness/agent-controller)。
+
+## 使用範例
+
+以下範例使用支援的 controller 至 Session 流程。
+
+```typescript
+await controller.init()
+
+const session = await controller.createSession({ resourceId: 'project-42' })
+const unsubscribe = session.subscribe(event => {
+  if (event.type === 'display_state_changed') {
+    render(event.displayState)
+  }
+})
+
+await session.sendMessage({ content: 'Review the current project.' })
+unsubscribe()
+```
+
+## 屬性
+
+Session 分成多個子物件，每個子物件各自擁有一個對話 state domain。
+
+<PropertiesTable
+  content={[
+  { name: 'identity', type: 'SessionIdentity', description: '對話的穩定 Session、owner 與 resource 身分。請參閱下方身分方法。' },
+  { name: 'thread', type: 'SessionThread', description: '有效的 thread 繫結與 thread／訊息讀取。請參閱下方 thread 方法。' },
+  { name: 'mode', type: 'SessionMode', description: '有效的 mode 選擇。請參閱下方 mode 方法。' },
+  { name: 'model', type: 'SessionModel', description: '有效的模型選擇，包括各 mode 專用的持久化。請參閱下方模型方法。' },
+  { name: 'om', type: 'SessionOM', description: 'observational Memory 的 observer 與 reflector 模型設定。' },
+  { name: 'permissions', type: 'SessionPermissions', description: '以 Session state 表示的 Tool 與 category 權限政策。' },
+  { name: 'subagents', type: 'SessionSubagents', description: '全域與各 Agent 型別專用的 subagent 模型選擇。' },
+  { name: 'run', type: 'SessionRun', description: '進行中 run 的 run 與 Trace 身分及 abort state。請參閱下方 run 方法。' },
+  { name: 'stream', type: 'SessionStream', description: 'Agent thread stream 的即時 subscription。請參閱下方 stream 方法。' },
+  { name: 'suspensions', type: 'SessionSuspensions', description: '已暫停並等待恢復的互動式 Tool 呼叫。請參閱下方 suspension 方法。' },
+  { name: 'followUps', type: 'SessionFollowUps', description: 'run 進行期間提交的訊息 queue。請參閱下方 follow-up 方法。' },
+  { name: 'approval', type: 'SessionApproval', description: '待處理的 Tool 核准 gate。請參閱下方核准方法。' },
+  { name: 'displayState', type: 'SessionDisplayState', description: 'UI 用於 render 的 canonical AgentControllerDisplayState snapshot。請參閱下方顯示 state 方法。' },
+  { name: 'state', type: 'AgentControllerRequestState<TState>', description: '經 schema 驗證、由 Session 擁有的 AgentController state。請參閱下方 state 方法。' },
+  { name: 'browser', type: 'MastraBrowser | undefined', description: '此 Session 的瀏覽器自動化 instance。在建立時透過 createSession 設定，或來自 AgentController config 預設值。未設定瀏覽器時為 undefined。' },
+]}
+/>
+
+## 方法
+
+### 身分與 event {#identity-and-events}
+
+#### `getTags()`
+
+傳回建立 Session 時提供之 tag 的副本。
+
+```typescript
+const tags = session.getTags()
+```
+
+傳回：`Record<string, string>`
+
+#### `subscribe(listener)`
+
+訂閱此 Session 的隔離 event bus。此方法會傳回取消訂閱函式。
+
+```typescript
+const unsubscribe = session.subscribe(event => {
+  console.log(event.type)
+})
+
+unsubscribe()
+```
+
+傳回：`() => void`
+
+### 訊息與 run 控制
+
+#### `sendMessage({ content, files?, requestContext? })`
+
+傳送使用者訊息。如果沒有有效 thread，Session 會先建立 thread。
+
+```typescript
+await session.sendMessage({
+  content: 'Summarize this file.',
+  files: [{ data: fileContents, mediaType: 'text/plain', filename: 'notes.txt' }],
+})
+```
+
+#### `steer({ content, requestContext? })`
+
+將 steering 內容排入有效 run。
+
+```typescript
+await session.steer({ content: 'Focus on the failing tests.' })
+```
+
+#### `followUp({ content, requestContext? })`
+
+run 進行時將 follow-up 排入 queue；閒置時則立即傳送。
+
+```typescript
+await session.followUp({ content: 'Then propose a fix.' })
+```
+
+#### `getCurrentRunId()`
+
+傳回有效 stream run 識別碼、追蹤的 run 識別碼，或在閒置時傳回 `null`。
+
+```typescript
+const runId = session.getCurrentRunId()
+```
+
+傳回：`string | null`
+
+#### `abort()`
+
+中止有效 run，並清除待處理的 suspension 顯示 state。
+
+```typescript
+session.abort()
+```
+
+### Workspace
+
+#### `getWorkspace()`
+
+傳回為此 Session 解析的 Workspace。此方法會保留 Session 層級的 override，以及從 Session scope 選取的 Workspace。
+
+```typescript
+const workspace = session.getWorkspace()
+const skill = await workspace.skills?.get('code-review')
+```
+
+傳回：`Workspace`
+
+### Session grant {#session-grants}
+
+Session scope 的 grant 會自動核准 Tool，不顯示提示。grant 是暫時的：Session 重新啟動時會重設，且不會持久化。
+
+#### `grantCategory(category)`
+
+為目前 Session 授予 Tool category。此 category 中的 Tool 會自動核准。
+
+```typescript
+session.grantCategory('edit')
+```
+
+#### `grantTool(toolName)`
+
+為目前 Session 授予特定 Tool。
+
+```typescript
+session.grantTool('mastra_workspace_execute_command')
+```
+
+#### `getGrants()`
+
+傳回目前已授予的 category 與 Tool。
+
+```typescript
+const grants = session.getGrants()
+// { categories: string[], tools: string[] }
+```
+
+#### `hasCategoryGrant(category)`
+
+傳回 category 是否具有記憶體內 Session grant。
+
+```typescript
+const allowed = session.hasCategoryGrant('edit')
+```
+
+傳回：`boolean`
+
+#### `hasToolGrant(toolName)`
+
+傳回 Tool 是否具有記憶體內 Session grant。
+
+```typescript
+const allowed = session.hasToolGrant('write_file')
+```
+
+傳回：`boolean`
+
+### Tool 核准 {#tool-approvals}
+
+#### `resolveToolApproval(toolName)`
+
+套用明確 Tool 規則、Session grant 與 category 規則後，傳回有效政策。
+
+```typescript
+const policy = session.resolveToolApproval('execute_command')
+```
+
+傳回：`PermissionPolicy`
+
+#### `respondToToolApproval({ decision, toolCallId?, requestContext?, declineContext? })`
+
+回應由 `tool_approval_required` event 引發的待處理 Tool 核准 request。傳入 `always_allow_category`，也會在 Session 剩餘期間授予整個 Tool category。
+
+```typescript
+session.respondToToolApproval({ decision: 'approve' })
+session.respondToToolApproval({ decision: 'decline' })
+session.respondToToolApproval({ decision: 'always_allow_category' })
+```
+
+#### `respondToToolSuspension({ resumeData, toolCallId?, requestContext? })`
+
+使用應用程式提供的資料恢復 suspended Tool。有多個 Tool 呼叫 suspended 時，請提供 `toolCallId`。
+
+```typescript
+await session.respondToToolSuspension({
+  toolCallId: event.toolCallId,
+  resumeData: ['src'],
+})
+```
+
+對於 `submit_plan`，請傳入 `{ action: 'approved' }` 或 `{ action: 'rejected', feedback }`。核准後，Tool 恢復前可以切換至 `transitionsTo` 所設定的 mode。
+
+### Token 使用量
+
+#### `getTokenUsage()`
+
+傳回有效 thread 持續累計的 token 使用量副本。
+
+```typescript
+const usage = session.getTokenUsage()
+// { promptTokens, completionTokens, totalTokens, ... }
+```
+
+## 身分
+
+`session.identity` 擁有對話的穩定識別碼：resource ID、Session `id` 與 `ownerId`。`id` 與 `ownerId` 在 Session 的整個生命週期中保持穩定，切換 resource ID 時不會改變。它們會反映 Storage 中 `SessionRecord` 上的 `id` 與 `ownerId` 欄位。
+
+### `session.identity.getId()`
+
+傳回穩定的 Session 識別碼。
+
+```typescript
+const sessionId = session.identity.getId()
+```
+
+### `session.identity.getOwnerId()`
+
+傳回 Session 的穩定 owner 識別碼。
+
+```typescript
+const ownerId = session.identity.getOwnerId()
+```
+
+### `session.identity.getResourceId()`
+
+傳回目前的 resource ID。
+
+```typescript
+const resourceId = session.identity.getResourceId()
+```
+
+### `session.identity.getDefaultResourceId()`
+
+傳回建立 Session 時使用的 resource ID。
+
+```typescript
+const defaultResourceId = session.identity.getDefaultResourceId()
+```
+
+若要變更 resource ID，請使用 [`controller.setResourceId()`](/reference/agent-controller/agent-controller-class#setresourceidsession--resourceid-)；此方法也會清除有效 thread。切換 resource 不會影響 Session `id` 與 `ownerId`。
+
+## Thread
+
+`session.thread` 擁有有效 thread 繫結與 resource scope 的 thread 操作。設定 Storage 後，已儲存的 thread 與訊息可在重建 controller 後保留；即時 Session 與其 event bus 則不會保留。
+
+### `session.thread.create({ title?, id? })`
+
+建立 thread、將 Session 繫結至該 thread，並開啟其 event stream。
+
+```typescript
+const thread = await session.thread.create({
+  id: 'thread-7',
+  title: 'Investigate login failure',
+})
+```
+
+傳回：`Promise<AgentControllerThread>`
+
+### `session.thread.rename({ title })`
+
+重新命名有效的已儲存 thread。
+
+```typescript
+await session.thread.rename({ title: 'Fix login failure' })
+```
+
+### `session.thread.clone({ sourceThreadId?, title?, resourceId? })`
+
+複製擁有的 thread 與其中的訊息，再將 Session 繫結至副本。
+
+```typescript
+const clone = await session.thread.clone({
+  sourceThreadId: 'thread-7',
+  title: 'Alternative approach',
+})
+```
+
+傳回：`Promise<AgentControllerThread>`
+
+### `session.thread.switch({ threadId, emitEvent? })`
+
+切換至擁有的已儲存 thread，並 hydrate 其 mode、模型與 observational Memory 設定。
+
+```typescript
+await session.thread.switch({ threadId: 'thread-8' })
+```
+
+### `session.thread.delete({ threadId })`
+
+刪除擁有的 thread。刪除有效 thread 也會清除目前繫結。
+
+```typescript
+await session.thread.delete({ threadId: 'thread-8' })
+```
+
+### `session.thread.getId()`
+
+傳回有效 thread ID；未繫結 thread 時傳回 `null`。
+
+```typescript
+const threadId = session.thread.getId()
+```
+
+### `session.thread.list(options?)`
+
+從 Storage 列出 thread。預設只傳回目前 resource 的 thread，並隱藏暫時 fork 的 subagent thread。
+
+```typescript
+const threads = await session.thread.list()
+const allThreads = await session.thread.list({ allResources: true })
+const everything = await session.thread.list({ includeForkedSubagents: true })
+```
+
+### `session.thread.getById({ threadId })`
+
+依 ID 傳回單一 thread；若不存在則傳回 `null`。
+
+```typescript
+const thread = await session.thread.getById({ threadId: 'thread-abc123' })
+```
+
+### `session.thread.listActiveMessages(options?)`
+
+擷取有效 thread 的訊息。未繫結 thread 時傳回空陣列。
+
+```typescript
+const messages = await session.thread.listActiveMessages({ limit: 50 })
+```
+
+### `session.thread.listMessages({ threadId, limit? })`
+
+擷取特定 thread 的訊息。
+
+```typescript
+const messages = await session.thread.listMessages({ threadId: 'thread-abc123' })
+```
+
+訊息讀取方法 `listActiveMessages`、`listMessages` 與 `firstUserMessage` 會傳回 `MastraDBMessage` 物件，`firstUserMessages` 則傳回以 thread ID 作為 key 的 `Map<string, MastraDBMessage>`。每則訊息都有 `role`、`id`、`createdAt`，以及包含 `content.format` 與 `content.parts` 陣列的 `content` 物件。請從 `content.parts` 讀取文字、reasoning、Tool 呼叫與附件。system reminder 與通知等 signal 會以 `role: 'signal'` 的獨立訊息傳回。
+
+### `session.thread.firstUserMessage({ threadId })`
+
+擷取 thread 的第一則使用者訊息；若沒有則傳回 `null`。
+
+```typescript
+const firstMsg = await session.thread.firstUserMessage({
+  threadId: 'thread-abc123',
+})
+```
+
+### `session.thread.firstUserMessages({ threadIds })`
+
+一次擷取多個 thread 的第一則使用者訊息，並以 map 傳回。
+
+```typescript
+const firstByThread = await session.thread.firstUserMessages({
+  threadIds: ['thread-a', 'thread-b'],
+})
+```
+
+### `session.thread.getSetting({ key })`
+
+從有效 thread metadata 讀取設定。
+
+```typescript
+const value = await session.thread.getSetting({ key: 'omThreshold' })
+```
+
+### `session.thread.setSetting({ key, value })`
+
+將設定寫入有效 thread metadata。
+
+```typescript
+await session.thread.setSetting({ key: 'omThreshold', value: 0.8 })
+```
+
+### `session.thread.deleteSetting({ key })`
+
+從有效 thread metadata 移除設定。
+
+```typescript
+await session.thread.deleteSetting({ key: 'omThreshold' })
+```
+
+## Mode
+
+`session.mode` 擁有有效 mode 選擇。
+
+### `session.mode.get()`
+
+傳回有效 mode ID。
+
+```typescript
+const modeId = session.mode.get()
+```
+
+### `session.mode.resolve()`
+
+傳回有效 mode 的完整 `AgentControllerMode` 物件，並依 controller 所設定的 mode 進行解析。
+
+```typescript
+const mode = session.mode.resolve()
+```
+
+### `session.mode.switch({ modeId })`
+
+切換至其他 mode。Session 會先儲存離開之 mode 的模型，再將新 mode 持久化至有效 thread。接著恢復進入之 mode 已選擇的模型或預設模型。Session 會立即發出 `mode_changed`，並在解析模型後發出 `model_changed`。
+
+```typescript
+await session.mode.switch({ modeId: 'build' })
+```
+
+## 模型
+
+`session.model` 擁有有效模型選擇，包括各 mode 專用的模型 Memory。
+
+### `session.model.get()`
+
+傳回有效模型 ID。
+
+```typescript
+const modelId = session.model.get()
+```
+
+### `session.model.displayName()`
+
+傳回有效模型 ID 的最後一段，作為簡短顯示名稱。未選擇模型時傳回 `'unknown'`。
+
+```typescript
+const name = session.model.displayName()
+```
+
+### `session.model.hasSelection()`
+
+檢查目前是否已選擇模型。
+
+```typescript
+if (session.model.hasSelection()) {
+  // Ready to send messages
+}
+```
+
+### `session.model.switch({ modelId, scope?, modeId? })`
+
+切換有效模型。`scope` 為 `'thread'`（預設）時，模型 ID 會持久化為各 mode 專用模型，以便切回時恢復。此方法會向 controller 的 `modelUseCountTracker` 回報選擇，並發出 `model_changed` event。
+
+```typescript
+// Set for the current session only
+await session.model.switch({
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+  scope: 'global',
+})
+
+// Persist to the current thread (default)
+await session.model.switch({ modelId: '__GATEWAY_ANTHROPIC_MODEL_SONNET__' })
+```
+
+## Observational Memory
+
+Observational Memory 的模型選擇會依角色分組於 `session.om.observer` 與 `session.om.reflector` 下。兩種角色公開相同方法。讀取時會傳回 Session state 中已設定的值，否則改用 controller 的 `omConfig` 預設值。
+
+### `session.om.observer.modelId()` / `session.om.reflector.modelId()`
+
+傳回角色的模型 ID；Session state 與 `omConfig` 都未提供時傳回 `undefined`。
+
+```typescript
+const observer = session.om.observer.modelId()
+const reflector = session.om.reflector.modelId()
+```
+
+### `session.om.observer.threshold()` / `session.om.reflector.threshold()`
+
+以 token 數傳回角色的 threshold（observer 的 observation threshold、reflector 的 reflection threshold）；未設定時傳回 `undefined`。
+
+```typescript
+const observationThreshold = session.om.observer.threshold()
+const reflectionThreshold = session.om.reflector.threshold()
+```
+
+### `session.om.observer.switchModel({ modelId })` / `session.om.reflector.switchModel({ modelId })`
+
+切換角色的模型。將設定持久化至 thread metadata，並發出 `om_model_changed` event。
+
+```typescript
+await session.om.observer.switchModel({
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_HAIKU__',
+})
+await session.om.reflector.switchModel({
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_HAIKU__',
+})
+```
+
+### `session.om.observer.resolvedModel()` / `session.om.reflector.resolvedModel()`
+
+透過設定的模型 gateway，將角色的模型 ID 解析為模型 instance；未設定模型 ID 或 resolver 時傳回 `undefined`。
+
+```typescript
+const observerModel = session.om.observer.resolvedModel()
+const reflectorModel = session.om.reflector.resolvedModel()
+```
+
+## 權限
+
+`session.permissions` 擁有以 `session.state` 表示的 Tool 核准政策：核准解析期間查詢的各 category 與各 Tool 規則。它們與 [Session grant](#session-grants) 中記載的記憶體內 grant 不同。grant 會隨即時 Session 重設。除非 host 恢復對應的 Session state，否則權限規則不會永久保留。
+
+### `session.permissions.getRules()`
+
+傳回目前的權限規則；未設定時傳回空白規則（`{ categories: {}, tools: {} }`）。
+
+```typescript
+const rules = session.permissions.getRules()
+// { categories: { execute: 'ask' }, tools: { dangerous_tool: 'deny' } }
+```
+
+### `session.permissions.setForCategory({ category, policy })`
+
+設定 Tool category 的核准政策（`'allow' | 'ask' | 'deny'`）。變更持久化至 Session state 後完成解析。
+
+```typescript
+await session.permissions.setForCategory({ category: 'execute', policy: 'ask' })
+```
+
+### `session.permissions.setForTool({ toolName, policy })`
+
+設定特定 Tool 的核准政策。各 Tool 政策優先於 category 政策。持久化後完成解析。
+
+```typescript
+await session.permissions.setForTool({ toolName: 'dangerous_tool', policy: 'deny' })
+```
+
+## Subagent
+
+`session.subagents` 擁有 subagent 設定。目前在 `session.subagents.model` 下公開 subagent 模型選擇。
+
+### `session.subagents.model.get({ agentType? })`
+
+傳回 subagent 模型 ID：提供 `agentType` 時優先使用該型別專用值，接著使用全域 subagent 模型；兩者皆未設定時傳回 `null`。
+
+```typescript
+const modelId = session.subagents.model.get({ agentType: 'explore' })
+```
+
+### `session.subagents.model.set({ modelId, agentType? })`
+
+設定 subagent 模型 ID。傳入 `agentType` 可設定各型別 override，省略則設定全域預設值。會持久化至 thread 設定，並發出 `subagent_model_changed` event。
+
+```typescript
+// Set the global subagent model
+await session.subagents.model.set({ modelId: '__GATEWAY_ANTHROPIC_MODEL_SONNET__' })
+
+// Set a per-type override
+await session.subagents.model.set({
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_HAIKU__',
+  agentType: 'explore',
+})
+```
+
+## Run
+
+`session.run` 擁有進行中 run 的 run 與 Trace 身分，以及 abort state。
+
+### `session.run.getRunId()` / `getTraceId()`
+
+傳回目前 run 已儲存的 run ID 與 Trace ID；閒置時傳回 `null`。
+
+```typescript
+const runId = session.run.getRunId()
+const traceId = session.run.getTraceId()
+```
+
+### `session.run.isRunning()`
+
+傳回目前是否有 run 正在進行。
+
+```typescript
+if (session.run.isRunning()) {
+  // A run is active
+}
+```
+
+## Stream
+
+`session.stream` 擁有 Agent thread stream 的即時 subscription 及其 dedup key。
+
+### `session.stream.activeRunId()`
+
+傳回即時 stream 上有效的 run ID；未開啟 stream 時傳回 `null`。
+
+```typescript
+const runId = session.stream.activeRunId()
+```
+
+### `session.stream.isActive()`
+
+傳回 stream 目前是否有有效 run。
+
+```typescript
+if (session.stream.isActive()) {
+  // The current thread's stream is producing output
+}
+```
+
+## Suspension
+
+`session.suspensions` 擁有已暫停並等待恢復的互動式 Tool 呼叫，例如 `ask_user` 與 `request_access`。
+
+### `session.suspensions.hasPending()`
+
+傳回目前是否有任何 Tool suspended。
+
+```typescript
+if (session.suspensions.hasPending()) {
+  // At least one interactive tool is waiting for a response
+}
+```
+
+### `session.suspensions.has({ toolCallId })`
+
+傳回特定 Tool 呼叫是否 suspended。
+
+```typescript
+const waiting = session.suspensions.has({ toolCallId: event.toolCallId })
+```
+
+使用 [`session.respondToToolSuspension()`](#tool-approvals) 恢復 suspended Tool。
+
+## Follow-up
+
+`session.followUps` 擁有 run 進行期間提交之訊息的 FIFO queue。
+
+### `session.followUps.count()`
+
+傳回排入 queue 的 follow-up 數量。
+
+```typescript
+const queued = session.followUps.count()
+```
+
+### `session.followUps.isEmpty()`
+
+傳回 follow-up queue 是否為空。
+
+```typescript
+if (!session.followUps.isEmpty()) {
+  // Messages are waiting to be processed
+}
+```
+
+## 核准
+
+`session.approval` 擁有待處理的 Tool 核准 gate。
+
+### `session.approval.isArmed()`
+
+傳回目前是否有 Tool 正在等待核准決策。
+
+```typescript
+if (session.approval.isArmed()) {
+  // Show the approval prompt
+}
+```
+
+使用 [`session.respondToToolApproval()`](#tool-approvals) 回應。
+
+## 顯示 state
+
+`session.displayState` 擁有 UI 用於 render 的 canonical `AgentControllerDisplayState` snapshot，以及讓它與每個 Session event 保持同步的 reducer。
+
+### `session.displayState.get()`
+
+傳回目前用於 UI render 的 `AgentControllerDisplayState` snapshot。
+
+```typescript
+const displayState = session.displayState.get()
+```
+
+### `session.displayState.restoreTasks(tasks)`
+
+UI 重播持久化的任務 Tool 歷史記錄後，恢復 snapshot 的任務部分。這是 snapshot 的純更新，不會發出 event，因此呼叫後請明確重新 render。
+
+```typescript
+session.displayState.restoreTasks(replayedTasks)
+```
+
+每個 event 後，Session 都會發出包含最新 snapshot 的 `display_state_changed`。請使用 [`session.subscribe()`](#identity-and-events) 訂閱，或從 `session.displayState.get()` 讀取目前值。
+
+## State
+
+`session.state` 擁有對話中經 schema 驗證的 AgentController state。它會保存目前 snapshot，並依傳給 AgentController 的 `stateSchema` 驗證更新。更新會依序執行，每次變更都會發出 `state_changed` event。
+
+### `session.state.get()`
+
+傳回目前 state snapshot 的 readonly 副本。
+
+```typescript
+const state = session.state.get()
+```
+
+### `session.state.set(updates)`
+
+將部分更新合併至 state。更新會排入 queue，讓並行呼叫依序套用；也會依 schema 驗證，並發出包含已變更 key 的 `state_changed`。
+
+```typescript
+await session.state.set({ yolo: true })
+```
+
+### `session.state.update(updater)`
+
+對目前 snapshot 執行 updater，並在 write queue 中以原子方式套用結果。必須取得最新 state 的 read-modify-write 變更請使用此方法。updater 會傳回要合併的 `updates`、要發出的選填 `events`，以及作為 `update()` 解析值的 `result`。
+
+```typescript
+const added = await session.state.update(current => ({
+  updates: { count: (current.count ?? 0) + 1 },
+  result: (current.count ?? 0) + 1,
+}))
+```
+
+## 持久化邊界
+
+`Session` 是即時 runtime 物件。其 event bus、任意 `session.state`、權限規則、權限 grant、待處理核准、suspension、follow-up、run state 與 stream state，不會在 controller 或 process 重建後自動保留。host 必須在重建 Session 時恢復任何需要的 state。
+
+設定 Storage 後，thread、訊息與 token 使用量會持久化。thread 設定會恢復 mode 與模型選擇，也能恢復 observational Memory 設定與 subagent 模型選擇，包括各 Agent 型別專用的 override。聊天 Channel 可重新對應至已儲存的 thread，但 `AgentControllerChannels` 所保存的 Channel 至 Session 及自動核准 state 仍位於記憶體內。
+
+## 相關內容
+
+- [AgentController 類別](/reference/agent-controller/agent-controller-class)
+- [AgentController 概觀](/docs/harness/agent-controller)
+- [Thread 與 state](/docs/harness/agent-controller#manage-threads-and-state)
+- [Tool 核准](/docs/harness/agent-controller#approve-tools-and-resume-suspensions)

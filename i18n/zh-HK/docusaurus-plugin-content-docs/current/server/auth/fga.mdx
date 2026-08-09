@@ -1,0 +1,314 @@
+---
+title: "細粒度授權（FGA）"
+description: "使用 FGA Provider，為 Mastra 應用程式加入資源層級授權。"
+packages:
+  - "@mastra/auth-workos"
+  - "@mastra/core"
+  - "@mastra/mcp"
+---
+
+# 細粒度授權（FGA）
+
+:::note
+細粒度授權是 Mastra Enterprise Edition 的一部分。生產部署需要有效的 EE 授權。詳情請[聯絡銷售團隊](https://mastra.ai/contact)。
+:::
+
+細粒度授權（FGA）為 Mastra 應用程式加入資源層級權限檢查。RBAC 回答「這個角色可否執行這項操作？」，而 FGA 則回答 **「這名用戶可否對這項特定資源執行這項操作？」**
+
+## 何時使用 FGA
+
+FGA 專為權限視乎情境的多租戶 B2B 產品而設：
+
+- 用戶可能是團隊 A 的 **admin**，但只是團隊 B 的 **member**
+- Thread 存取權應限於用戶所屬的機構
+- Workflow 執行範圍應限於特定團隊或項目
+- Tool 存取權視乎用戶與資源的關係
+
+## 配置
+
+在 Mastra 伺服器配置中，將 FGA 與身份驗證及 RBAC 一併配置：
+
+```typescript prettier: false
+import { Mastra } from '@mastra/core/mastra';
+import { MastraFGAPermissions } from '@mastra/core/auth/ee';
+import { MastraAuthWorkos, MastraFGAWorkos } from '@mastra/auth-workos';
+
+const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthWorkos({
+      /* ... */
+      fetchMemberships: true,
+      mapUserToResourceId: user => user.teamId,
+    }),
+    fga: new MastraFGAWorkos({
+      resourceMapping: {
+        agent: { fgaResourceType: 'team', deriveId: (ctx) => ctx.user.teamId },
+        workflow: { fgaResourceType: 'team', deriveId: (ctx) => ctx.user.teamId },
+        thread: { fgaResourceType: 'workspace-thread', deriveId: ({ resourceId }) => resourceId },
+      },
+      permissionMapping: {
+        [MastraFGAPermissions.AGENTS_EXECUTE]: 'manage-workflows',
+        [MastraFGAPermissions.WORKFLOWS_EXECUTE]: 'manage-workflows',
+        [MastraFGAPermissions.MEMORY_READ]: 'read',
+        [MastraFGAPermissions.MEMORY_WRITE]: 'update',
+      },
+    }),
+    storedResources: {
+      scope: true,
+    },
+  },
+});
+```
+
+使用 `MastraFGAWorkos` 時，請設定 `fetchMemberships: true`，並套用至 `MastraAuthWorkos`。WorkOS FGA 檢查需要用戶的機構成員資格，才能解析用於授權的正確 membership ID。
+
+請使用 `thread` 作為記憶體授權的資源對應 key。`MastraFGAWorkos` 仍接受舊有 alias `memory`，但新配置應優先使用 `thread`。
+
+配置 `server.fga` 後，Mastra 會對受保護操作強制執行 FGA。如受保護操作沒有已驗證身份的用戶，Mastra 會拒絕執行。如未配置 `server.fga`，系統會略過這些 FGA 檢查，Mastra 會維持原有行為。
+
+### 資源對應
+
+`resourceMapping` 會指示 Mastra 如何從請求 context 解析 FGA 資源類型及 ID。Key 是 Mastra 資源類型；value 則定義 FGA 資源類型及衍生 ID 的方式：
+
+```typescript prettier: false
+resourceMapping: {
+  // When checking "can user execute agent X?", resolve the FGA resource
+  // as the user's team (type: 'team', id: user.teamId)
+  agent: {
+    fgaResourceType: 'team',
+    deriveId: (ctx) => ctx.user.teamId,
+  },
+}
+```
+
+`deriveId()` 會接收：
+
+- `user`：已驗證身份的用戶
+- `resourceId`：如有提供，即為所屬 Mastra 資源 ID（例如 thread 的 `resourceId`）
+- `requestContext`：目前的請求 context，用於進階租戶解析
+- `metadata`：嘗試執行操作時的 Provider 專用 metadata
+
+傳回 `undefined` 讓 `deriveId()` 回退至原有 Mastra 資源 ID。
+
+進行 thread 及記憶體檢查時，Mastra 仍會把原始 `threadId` 作為所檢查的資源傳入，同時亦會把 thread 所屬的 `resourceId` 轉交至 `deriveId()`。這樣便可把 thread 權限對應至 `userId-teamId-orgId` 等複合租戶 ID。
+
+### 權限對應
+
+`permissionMapping` 會把 Mastra 內部權限字串轉換為 FGA Provider 的權限 slug：
+
+```typescript prettier: false
+import { MastraFGAPermissions } from '@mastra/core/auth/ee';
+
+permissionMapping: {
+  [MastraFGAPermissions.AGENTS_EXECUTE]: 'manage-workflows', // Mastra permission -> WorkOS permission slug
+  [MastraFGAPermissions.MEMORY_READ]: 'read',
+}
+```
+
+如某項權限沒有對應，系統會原樣傳入字串。
+
+使用 `validatePermissions()` 驗證 Mastra 啟動時可能發出的完整權限集合。如 Provider 要求每項 Mastra 權限都有明確的 Provider 權限 slug，請使用此方法。
+
+### 已儲存資源的 scope
+
+FGA 會授權資源的存取權，但不會自動篩選位於共用儲存空間的已儲存記錄。在多租戶應用程式中使用內置已儲存資源 API 時，請啟用已儲存資源 scope。
+
+```typescript prettier: false
+const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthWorkos({
+      /* ... */
+      mapUserToResourceId: user => user.teamId,
+    }),
+    storedResources: {
+      scope: true,
+    },
+  },
+});
+```
+
+設定 `scope: true` 後，Mastra 會從請求 context 讀取 `MASTRA_RESOURCE_ID_KEY`。`mapUserToResourceId()` 會在身份驗證後設定此值。已儲存資源 handler 會把 scope 保存在記錄 metadata 中，並按此 scope 篩選列出、讀取、更新、發佈及刪除操作。
+
+如 scope 需要自訂請求邏輯，請使用物件：
+
+```typescript prettier: false
+storedResources: {
+  scope: {
+    metadataKey: 'teamId',
+    resolve: ({ user }) => user.teamId,
+    requireScope: true,
+  },
+},
+```
+
+如 `requireScope` 是 `true` 或省略此項，系統無法解析 scope 時，設有 scope 的已儲存資源路由便會失敗。
+
+### 路由政策涵蓋範圍
+
+Mastra 為內置資源路由提供路由層級 FGA metadata，包括 Agent、Workflow、Tool、MCP Tool、記憶體 thread、response、conversation 及已儲存資源。已儲存資源路由涵蓋 `/stored/agents`、`/stored/mcp-clients`、`/stored/prompt-blocks`、`/stored/scorers`、`/stored/skills` 及 `/stored/workspaces`。如路由具備路由層級 `fga` metadata、Mastra 可為該路由衍生內置 metadata，或 Provider 透過 `resolveRouteFGA()` 提供 metadata，系統便會檢查該路由。
+
+如要拒絕無法解析 FGA metadata 的受保護路由，請在 FGA Provider 上配置路由政策涵蓋範圍：
+
+```typescript prettier: false
+const fga = new MastraFGAWorkos({
+  resourceMapping: {
+    project: { fgaResourceType: 'project' },
+  },
+  permissionMapping: {
+    'projects:read': 'read',
+  },
+  requireForProtectedRoutes: true,
+  auditProtectedRoutes: 'warn',
+  validatePermissions: async permissions => {
+    // Throw if a Mastra permission is missing from permissionMapping.
+  },
+});
+```
+
+設定 `auditProtectedRoutes: 'error'`，即可在受保護路由缺少內置 FGA metadata 時令啟動失敗。如啟用 `requireForProtectedRoutes`，Mastra 預設會把這項 audit 記錄為警告。
+
+自訂路由應優先使用路由層級 `fga` metadata，讓授權政策與路由放在一起：
+
+```typescript prettier: false
+import { createRoute } from '@mastra/server/server-adapter';
+
+export const getProjectRoute = createRoute({
+  method: 'GET',
+  path: '/projects/:projectId',
+  responseType: 'json',
+  requiresAuth: true,
+  fga: {
+    resourceType: 'project',
+    resourceIdParam: 'projectId',
+    permission: 'projects:read',
+  },
+  handler: async () => {
+    return { project: null };
+  },
+});
+```
+
+只有在必須集中從路由、參數或請求 context 衍生路由 metadata 時，才使用 `resolveRouteFGA()`。路由 map 比字串前綴檢查更容易擴展：
+
+```typescript prettier: false
+import type { FGARouteConfig, FGARouteResolver } from '@mastra/core/auth/ee';
+
+const routeFGA = {
+  'GET /billing/:accountId': {
+    resourceType: 'account',
+    resourceIdParam: 'accountId',
+    permission: 'billing:read',
+  },
+} satisfies Record<string, FGARouteConfig>;
+
+const resolveRouteFGA: FGARouteResolver = ({ route }) => routeFGA[`${route.method} ${route.path}`];
+
+const fga = new MastraFGAWorkos({
+  /* ... */
+  resolveRouteFGA,
+});
+```
+
+## 強制執行點
+
+配置 FGA Provider 後，Mastra 會在以下 lifecycle point 自動檢查授權：
+
+| Lifecycle point | 所檢查權限 | 資源類型 | 資源 ID |
+| - | - | - | - |
+| Agent 執行（`generate`、`stream`） | `agents:execute` | `agent` | `agentId` |
+| 內置 Workflow HTTP 執行路由及 `Workflow.execute()` | `workflows:execute` | `workflow` | `workflowId` |
+| 獨立 Tool 執行 | `tools:execute` | `tool` | `toolName` |
+| Agent Tool 執行 | `tools:execute` | `tool` | `${agentId}:${toolName}` |
+| MCP Tool 執行 | `tools:execute` | 預設為 `tool`，或伺服器層級 `fga.resourceMapping` override | 預設為 `JSON.stringify([serverName, toolName])`，或伺服器層級衍生 ID |
+| Thread 及記憶體存取 | `memory:read`、`memory:write`、`memory:delete` | `thread` | `threadId` |
+| 已儲存資源路由 | 路由操作的已儲存資源權限 | 已儲存資源類型 | 路由記錄 ID，或集合路由的已儲存資源 scope |
+| HTTP 資源路由 | 按路由配置 | 按路由配置 | 按路由配置 |
+
+對於受 OAuth 保護的 MCP 伺服器，HTTP MCP transport 會把已驗證身份的資料以 `extra.authInfo` 傳入。如在啟用 FGA 的 Mastra instance 上註冊 `MCPServer`，請配置 `mapAuthInfoToUser`，讓 Mastra 可先設定 `requestContext.get('user')`，然後檢查 `tools/list` 及 `tools/call`。如 MCP Tool 檢查需要使用與內部 Agent 及 Workflow Tool 檢查不同的資源或權限對應，請使用伺服器層級 `fga` 選項。請參閱 [MCPServer 身份驗證 context](/reference/tools/mcp-server#map-auth-data-for-fga)。
+
+在此版本中，直接呼叫 SDK 的 `createRun().start()`、`resume()` 或 `restart()` 不會由核心 FGA 獨立檢查。請從受保護路由作出這些呼叫，或在應用程式碼中加以保護。直接調用受保護 entry point 時，請傳入包含已驗證身份用戶的 `requestContext`。
+
+核心 Agent、內部 Workflow、Tool 及記憶體檢查亦會把 `requestContext` 及操作 metadata 傳給 FGA Provider。路由檢查會傳入 `requestContext`。如有提供所屬 `resourceId`，thread 檢查亦會傳入此值。
+
+## 自訂 FGA Provider
+
+實作 `IFGAProvider`，即可使用任何 FGA backend：
+
+```typescript
+import { FGADeniedError } from '@mastra/core/auth/ee'
+import type { FGACheckParams, IFGAProvider, MastraFGAPermissionInput } from '@mastra/core/auth/ee'
+
+class MyFGAProvider implements IFGAProvider {
+  async check(user: any, params: FGACheckParams): Promise<boolean> {
+    // Your authorization logic
+    return true
+  }
+
+  async require(user: any, params: FGACheckParams): Promise<void> {
+    const allowed = await this.check(user, params)
+    if (!allowed) {
+      throw new FGADeniedError(user, params.resource, params.permission)
+    }
+  }
+
+  async filterAccessible<T extends { id: string }>(
+    user: any,
+    resources: T[],
+    resourceType: string,
+    permission: MastraFGAPermissionInput,
+  ): Promise<T[]> {
+    // Filter resources the user can access
+    return resources
+  }
+}
+```
+
+:::note
+請參閱 [`IFGAProvider` 參考資料](/reference/auth/fga)，了解每項方法、參數及 `ActorSignal` 類型。
+:::
+
+## System actor
+
+自主及排程 Agent 在沒有終端用戶的情況下運行。請使用 actor signal 標記這些呼叫，讓 FGA 可將其與用戶請求區分：
+
+- `true` 或 `{ actorKind: 'system' }` 代表匿名 system actor。
+- 物件形式亦可帶有 `agentId`、`permissions` 及 `scope`，以識別並限制執行操作的 Agent。
+
+預設情況下，trusted actor 通過租戶 scope 檢查後，會略過以用戶為中心的 `require()` 檢查。如要強制每個 Agent 遵循 least privilege，請在 Provider 上實作選填的 `requireActor` 方法。此方法會接收 actor、`FGACheckParams`（與 `require` 相同），並透過拋出 `FGADeniedError` 拒絕操作。如 Provider 未實作 `requireActor`，系統會保留 trusted actor bypass，因此加入此方法可向後兼容。
+
+```typescript
+import { FGADeniedError } from '@mastra/core/auth/ee'
+import type { ActorSignal, FGACheckParams, IFGAProvider } from '@mastra/core/auth/ee'
+
+class MyFGAProvider implements IFGAProvider {
+  // ...check, require, filterAccessible...
+
+  async requireActor(actor: ActorSignal, params: FGACheckParams): Promise<void> {
+    const agentId = actor === true ? undefined : actor.agentId
+    // Resolve the agent's real grants from a trusted source keyed by agentId.
+    const granted = await this.grantsForAgent(agentId)
+    const required = Array.isArray(params.permission) ? params.permission : [params.permission]
+    if (!required.some(permission => granted.includes(permission))) {
+      throw new FGADeniedError(null, params.resource, params.permission)
+    }
+  }
+}
+```
+
+### 信任要求
+
+Actor signal 是受信任的 input，因此請在伺服器端建立：
+
+- 把 `actor` 視為每次呼叫的 signal。Durable Workflow 會在 run 開始時轉交它，但不會在 resume 時還原初始 actor。每次受信任的 resume 都要明確傳入，或透過 Agent `defaultOptions` 解析新的 actor。如沒有目前 actor，系統會套用用戶授權，而缺少用戶時則以拒絕方式失敗。
+- Mastra 會從內置 Agent HTTP 路由處理的執行選項中移除 `actor`。請在伺服器端程式碼（例如排程 job 或 Workflow）設定，切勿取自 client input。
+- 在伺服器端建立租戶 scope。內置 Agent HTTP 路由會忽略 client 在請求 context 中提供的 `organizationId`，而 trusted actor 路徑要求必須設定 `organizationId`。
+- Durable resume 會保留現有的請求 context 復原及 merge 行為，但這不會令已保存的 actor 在之後的 Workflow segment 中變得可信。
+- 租戶 scope 檢查會確認存在受信任的 `organizationId`，但不會驗證 `actor.agentId` 是否屬於該機構。如這項關係相當重要，請在 `requireActor` 中使用權威 Provider 資料驗證。
+- 把 `actor.permissions` 視為未經驗證的 claim。請從可信來源解析權威 grant。強制執行 least privilege 的 Provider，會從可信來源解析 Agent 的權威權限，例如以 `agentId` 為 key 的 manifest 或 FGA backend，而非信任 inline value。
+- Provider 實作 `requireActor` 後，該方法的錯誤會停止執行。Mastra 不會回退至僅限機構的授權。
+
+## 相關內容
+
+- [`IFGAProvider` 參考資料](/reference/auth/fga)
+- [身份驗證概覽](/docs/server/auth)
+- [WorkOS 身份驗證](/docs/server/auth/workos)

@@ -1,0 +1,329 @@
+---
+title: "リファレンス：ストレージの保持（prune） | ストレージ"
+description: "Mastra ストレージの保持ポリシーと prune() に関する API リファレンスです。"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/pg"
+---
+
+# ストレージの保持
+
+デフォルトでは、ストレージは無制限に増加します。保持機能は、明示的に有効化する経過時間ベースのクリーンアップシステムです。`retention` 設定でテーブルごとの `maxAge` ポリシーを宣言し、`storage.prune()` を呼び出して、設定した期間より古い行を削除します。設定していないデータは永久に保持されるため、明示的に有効化するまで動作は変わりません。
+
+`prune()` は行を削除します。ストレージの増加を抑え、大規模なテーブルに対しても安全に実行できます（バッチ処理、処理量の制限、再開、キャンセルに対応）。ただし、ディスク領域を解放することはありません。SQLite/libSQL では解放されたページが以後の書き込みで再利用されるため、ファイルの増加は止まりますが、ディスク領域を OS に返す処理（`VACUUM` など）は、基盤となるデータベースと運用者が管理する必要があります。
+
+保持機能の対象は、通常の動作に伴って行が無制限に蓄積される **増加テーブル** のみです（会話履歴、テレメトリ、ジョブと実行のレコード、スケジュール起動履歴、イベントフィードなど）。ユーザーが作成する成果物や設定（Agent、Skill、Workspace、プロンプトブロック、データセット、スケジュール定義、チャンネルのインストールなど）は、ユーザーの意図に応じて増加し、明示的に編集または削除されるため、有効な保持キーではありません。
+
+リファレンス実装は [libSQL](/reference/storage/libsql)、[PostgreSQL](/reference/storage/postgresql)、[MongoDB](/reference/storage/mongodb) です。その他のアダプターは、保持機能を実装するまで行を永久に保持します。
+
+## 使用例
+
+任意の `MastraCompositeStore`（または `LibSQLStore` など、それを拡張するアダプター）で `retention` を宣言し、独自のスケジューラーから `prune()` を呼び出します。
+
+```typescript title="src/mastra/index.ts"
+import { LibSQLStore } from '@mastra/libsql'
+
+const storage = new LibSQLStore({
+  id: 'mastra-storage',
+  url: 'file:./mastra.db',
+  retention: {
+    memory: {
+      messages: { maxAge: '30d' },
+      threads: { maxAge: '90d', batchSize: 500 },
+    },
+    observability: {
+      spans: { maxAge: '7d' },
+    },
+  },
+})
+
+// Wire this to your own cron/scheduler: Mastra never runs it for you.
+const results = await storage.prune()
+```
+
+`retention` には完全な型が付いています。キーは実在するドメインキーでなければならず、各テーブルキーは、そのドメインで保持対象として宣言されている必要があります。オブジェクトをストア設定に直接渡すと型チェックされます。単独で構築する場合は `satisfies RetentionConfig` を使用すると、不明なドメインやテーブルがコンパイルエラーになります。
+
+```typescript
+import type { RetentionConfig } from '@mastra/core/storage'
+
+const retention = {
+  memory: {
+    messages: { maxAge: '30d' }, // ok
+    bogus: { maxAge: '30d' }, // Error: not a memory retention table
+  },
+  bogusDomain: {}, // Error: not a storage domain
+} satisfies RetentionConfig
+```
+
+## 保持設定
+
+ストア設定の `retention` フィールドを指定します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'retention',
+    type: 'RetentionConfig',
+    isOptional: true,
+    description: 'ドメインおよびテーブルごとの経過時間ポリシー。未設定のドメインとテーブルは永久に保持されます。',
+    properties: [
+      {
+        type: 'RetentionConfig',
+        parameters: [
+          {
+            name: '[domain]',
+            type: 'Record<TableKey, TableRetentionPolicy>',
+            isOptional: true,
+            description:
+              "実在するストレージドメインキー（`memory`、`observability` など）。そのドメインで保持対象となるテーブルキーを各ポリシーに対応付けます。",
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+### TableRetentionPolicy
+
+<PropertiesTable
+  content={[
+  {
+    name: 'maxAge',
+    type: 'Duration',
+    description:
+      "行を保持する最長期間。基準タイムスタンプが `Date.now() - maxAge` より厳密に古い行は削除対象になります。数値はミリ秒を表します。文字列では単位の接尾辞 `ms`、`s`、`m`、`h`、`d`、`w` を使用できます（例：`'30d'`、`'12h'`）。",
+  },
+  {
+    name: 'batchSize',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '1000',
+    description:
+      'バッチごとに削除する行数。各バッチは個別のトランザクションとして実行されるため、大規模なテーブルでロック時間と WAL の増加を抑えられます。',
+  },
+]}
+/>
+
+### 保持対象テーブル
+
+各ドメインは、経過時間に基づいて prune できるテーブルと、比較の基準となるタイムスタンプ列を宣言します。`maxAge` が対象データに対して直感どおりの意味になるように、基準列が選ばれています。追記専用ログには作成時刻を使用し、現在の状態を表すデータには最終アクティビティ時刻を使用します。ジョブと実行には完了時刻を使用するため、処理中の作業が prune されることはありません。
+
+| ドメイン | テーブルキー | 基準列 | `maxAge` の意味 |
+| - | - | - | - |
+| `memory` | `threads` | `createdAt` | スレッドの経過時間 |
+| `memory` | `messages` | `createdAt` | メッセージの経過時間 |
+| `memory` | `resources` | `createdAt` | リソースの経過時間 |
+| `threadState` | `threadState` | `updatedAt` | 非アクティブ期間：アクティブなスレッドの状態は保持されます |
+| `observability` | `spans` | `startedAt` | Span の経過時間 |
+| `observability` | `metrics` | `timestamp` | メトリクスイベントの経過時間（v-next のみ） |
+| `observability` | `logs` | `timestamp` | ログイベントの経過時間（v-next のみ） |
+| `observability` | `scores` | `timestamp` | スコアイベントの経過時間（v-next のみ） |
+| `observability` | `feedback` | `timestamp` | フィードバックイベントの経過時間（v-next のみ） |
+| `scores` | `scorers` | `createdAt` | スコアレコードの経過時間 |
+| `workflows` | `workflowSnapshot` | `updatedAt` | 非アクティブ期間。一時停止中または長時間実行中の Workflow は保持されます |
+| `backgroundTasks` | `backgroundTasks` | `completedAt` | 完了後の経過時間。処理中のタスク（`NULL`）は prune されません |
+| `experiments` | `experiments` | `completedAt` | 完了後の経過時間。実行中の実験は prune されません |
+| `notifications` | `notifications` | `createdAt` | 通知の経過時間 |
+| `harness` | `sessions` | `createdAt` | セッションレコードの経過時間 |
+| `schedules` | `triggers` | `actual_fire_at` | 起動履歴の経過時間（エポックミリ秒の列） |
+
+:::note
+
+- memory の `observational_memory` テーブルには基準となるタイムスタンプがないため、経過時間に基づく prune はできず、有効な保持キーでもありません。
+- 実験は全体をひとまとまりとして prune します。期間を過ぎた実験の結果行は実験と一緒に削除されるため（結果は親とともにカスケード削除されます）、実行の一部だけが削除された状態にはなりません。保持機能に独立した `results` キーはありません。
+- `schedules` では、起動履歴が増加テーブルです（`schedule_triggers`。起動ごとに 1 行）。スケジュール定義は設定であるため、prune されません。
+- PostgreSQL では、タイムスタンプの基準にタイムゾーン対応のミラー列（`createdAtZ`、`completedAtZ` など）を使用します。
+- LibSQL と PostgreSQL は上記のすべてのドメインに対応していますが、PostgreSQL が実装していない `harness` は除きます。MongoDB は `threadState` と `harness` を除くすべてに対応しています。
+- v-next の PostgreSQL observability ドメインは、シグナルイベントを日単位でパーティション化されたテーブル（`spans`、`metrics`、`logs`、`scores`、`feedback`）に保存します。このドメインでは、`prune()` は行を削除する代わりに、カットオフより完全に古い日単位のパーティション（または TimescaleDB のチャンク）を丸ごと削除します。実質的な粒度は 1 日で、パーティションはその日全体が `maxAge` を過ぎた時点でのみ削除されます。`PruneResult.deleted` は、削除されたパーティション内の行数を報告します。
+
+:::
+
+## メソッド
+
+### 保持
+
+#### `prune(options?)`
+
+`retention` にポリシーが設定されているすべてのドメインで、設定された `maxAge` より古い行を削除します。処理したテーブルごとに 1 つの `PruneResult` を返します。`retention` が設定されていない場合は何もせず、`[]` を返します。
+
+`prune()` は、数百万行あるテーブルでも安全に動作するよう設計されています。処理量を制限したバッチ単位で削除し（各バッチは個別のトランザクション）、長時間のロックやトランザクションログの肥大化を防ぎます。`VACUUM` は実行しません。
+
+`options.retention` を渡すと、その呼び出しに限って設定済みのポリシーを置き換えられます。たとえば、あるドメインをスキップしてチャット履歴を保持したり、通常の設定より積極的に prune したりできます。ストアに設定された `retention` は変更されません。
+
+基準列のインデックスは、ポリシーが設定された各テーブルに対する最初の `prune()` 呼び出し時に遅延作成されます（`init()` 時には作成されません）。そのため、保持機能を設定しないデプロイでは、インデックス書き込みやディスク使用量の追加コストは発生しません。既存の大規模なテーブルで最初に prune するときだけ、インデックス構築のコストが一度発生します。以後の prune では同じインデックスが再利用されます。
+
+```typescript
+const results = await storage.prune({
+  maxRows: 50_000, // cap work this call
+  pauseMs: 50, // breathe between batches
+})
+
+for (const r of results) {
+  console.log(`${r.domain}.${r.table}: deleted ${r.deleted}, done=${r.done}`)
+}
+
+// One-off pass with different policies (configured retention untouched):
+await storage.prune({
+  retention: {
+    observability: { spans: { maxAge: '1d' } },
+  },
+})
+```
+
+戻り値：`Promise<PruneResult[]>`
+
+##### PruneOptions
+
+<PropertiesTable
+  content={[
+  {
+    name: 'maxBatches',
+    type: 'number',
+    isOptional: true,
+    description:
+      "1 回の呼び出しでテーブルごとに実行する削除バッチの最大数。上限に達すると、そのテーブルの結果は `done: false` で返されます。",
+  },
+  {
+    name: 'maxRows',
+    type: 'number',
+    isOptional: true,
+    description:
+      "1 回の呼び出しでテーブルごとに削除する行の最大数。上限に達すると、そのテーブルの結果は `done: false` で返されます。",
+  },
+  {
+    name: 'pauseMs',
+    type: 'number',
+    isOptional: true,
+    description: '稼働中のトラフィックを圧迫しないように、バッチ間に設ける遅延（ミリ秒）。',
+  },
+  {
+    name: 'signal',
+    type: 'AbortSignal',
+    isOptional: true,
+    description:
+      '協調的キャンセル。バッチループがバッチ間でシグナルを確認して正常に停止し、途中までの結果を `done: false` で返します。',
+  },
+  {
+    name: 'retention',
+    type: 'RetentionConfig',
+    isOptional: true,
+    description:
+      "その呼び出しに限って、ストアに設定された保持ポリシーを置き換えます。たとえば、ドメインをスキップしたり、より積極的に prune したりできます。設定済みの `retention` は変更されません。",
+  },
+]}
+/>
+
+##### PruneResult
+
+各結果は、1 つのテーブルの進捗を表します。
+
+```typescript
+interface PruneResult {
+  domain: string // e.g. 'memory'
+  table: string // physical table name, e.g. 'mastra_messages'
+  deleted: number // rows deleted during this call
+  done: boolean // false => eligible rows remain; call prune() again
+}
+```
+
+## スケジュールに従って prune を実行する
+
+`prune()` に組み込みのスケジューラーはなく、実行タイミングはユーザーが決めます。処理量が制限されているため、1 回の呼び出しですべてを削除できない場合があります。いずれかの結果が `done: false` の場合は対象行が残っているため、次の実行タイミングでもう一度呼び出します。これにより、呼び出しを短時間に保ちながら、大量の未処理データを複数回に分けて削除できます。
+
+```typescript
+// Runs on your own cron (node-cron, a workflow schedule, an external job, etc.).
+async function retentionTick() {
+  const results = await storage.prune({ maxRows: 100_000, pauseMs: 25 })
+  const incomplete = results.filter(r => !r.done)
+  if (incomplete.length) {
+    // Rows remain; the next scheduled tick will continue where this one stopped.
+    console.log(
+      'retention still draining:',
+      incomplete.map(r => `${r.domain}.${r.table}`),
+    )
+  }
+}
+```
+
+長時間実行される prune は `AbortSignal` でキャンセルすることもできます。ループはバッチ間で停止し、途中までの結果を `done: false` で返すため、次回の実行で問題なく再開できます。
+
+## MongoDB TTL インデックス（prune の代替手段）
+
+MongoDB には、`prune()` を手動で呼び出さなくても期限切れのドキュメントを自動的に削除する、ネイティブの [TTL（Time-To-Live）インデックス](https://www.mongodb.com/docs/manual/core/index-ttl/)があります。これはバックグラウンドスレッドで動作するデータベースレベルの機能です。
+
+:::note[TTL と prune() の使い分け]
+
+**MongoDB TTL インデックスが適している場合：**
+
+- メンテナンス不要の自動削除が必要な場合
+- 保持期間が固定されている場合（例：「常に 30 日間」）
+- データベースネイティブの解決策を優先する場合
+
+**`prune()` が適している場合：**
+
+- 削除のタイミングを細かく制御する必要がある場合
+- 営業時間中の削除速度を制限したい場合
+- 再開およびキャンセル可能なクリーンアップ処理が必要な場合
+- 複数のデータベースを使用する複合ストレージを利用している場合
+
+どちらの方法も有効です。TTL はよりシンプルで、`prune()` はより細かく制御できます。
+:::
+
+### MongoDB で TTL インデックスを設定する
+
+TTL インデックスは日付フィールドに対して機能します。MongoDB は 60 秒ごとにインデックスを確認し、「日付フィールド + TTL の期間」が現在時刻より前のドキュメントを削除します。
+
+```typescript
+import { MongoDBStore } from '@mastra/mongodb'
+
+const storage = new MongoDBStore({
+  id: 'mongodb-storage',
+  uri: process.env.MONGODB_URI!,
+  dbName: process.env.MONGODB_DB_NAME!,
+  indexes: [
+    // Messages expire after 30 days
+    {
+      collection: 'mastra_messages',
+      keys: { createdAt: 1 },
+      options: { expireAfterSeconds: 30 * 24 * 60 * 60 }, // 30 days
+    },
+    // Threads expire after 90 days
+    {
+      collection: 'mastra_threads',
+      keys: { createdAt: 1 },
+      options: { expireAfterSeconds: 90 * 24 * 60 * 60 }, // 90 days
+    },
+    // Spans expire after 7 days
+    {
+      collection: 'mastra_ai_spans',
+      keys: { startedAt: 1 },
+      options: { expireAfterSeconds: 7 * 24 * 60 * 60 }, // 7 days
+    },
+  ],
+})
+```
+
+:::tip
+TTL インデックスは期限切れ後まもなくドキュメントを削除します（バックグラウンドスレッドは約 60 秒ごとに実行されます）が、正確なタイミングは保証されません。正確かつ即時のクリーンアップが必要な場合は、代わりに `prune()` を使用してください。
+:::
+
+## ディスク領域を解放する
+
+`prune()` は行を削除しますが、データベースファイルを縮小しません。SQLite/libSQL では解放されたページがフリーリストに追加され、以後の書き込みで再利用されるため、ファイルの増加は止まります。ほとんどのユーザーにとっては、これだけで無制限に増加する問題を解決できます。
+
+解放された領域を OS に返す処理は別の問題であり、Mastra は管理しません。ファイルを縮小する必要がある場合は、メンテナンス時間中に、基盤となるデータベースの圧縮処理（セルフホスト型 libSQL の `VACUUM` など）を自分で実行してください。完全な `VACUUM` はファイルをロックし、ファイルサイズのおよそ 2 倍の空きディスク領域を必要とします。PostgreSQL では、autovacuum が使用されなくなったタプルを自動的に回収して再利用します。ディスク領域を OS に返す必要がある場合に限り、手動の `VACUUM FULL` が必要です。
+
+MongoDB では、削除されたドキュメントの領域が以後の挿入で再利用されます。ディスク領域を解放するには、メンテナンス時間中に [`db.runCommand({ compact: "collection_name" })`](https://www.mongodb.com/docs/manual/reference/command/compact/) を実行します。
+
+:::note[libSQL と Turso]
+[Turso Cloud](/reference/storage/libsql) はストレージの圧縮を自動的に管理するため、手動で解放する必要はありません。手動での解放が必要になるのは、セルフホスト型の libSQL ファイルだけです。
+:::
+
+## 関連項目
+
+- [libSQL ストレージ](/reference/storage/libsql)
+- [PostgreSQL ストレージ](/reference/storage/postgresql)
+- [複合ストレージ](/reference/storage/composite)
+- [ストレージの概要](/reference/storage/overview)

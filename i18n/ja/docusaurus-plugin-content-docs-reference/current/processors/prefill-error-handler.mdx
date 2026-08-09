@@ -1,0 +1,97 @@
+---
+title: "リファレンス: PrefillErrorHandler | Processors"
+description: "assistant 応答の prefill エラーに対し、続行メッセージを追加して再試行する Mastra の PrefillErrorHandler processor のドキュメント。"
+packages:
+  - "@mastra/core"
+---
+
+# PrefillErrorHandler
+
+`PrefillErrorHandler` は、assistant 応答の prefill エラーを処理する **error processor** です。このエラーは、会話が assistant メッセージで終わり、モデルがそれを assistant 応答の事前入力と解釈してリクエストを拒否した場合に発生します。
+
+エラーを検出すると、processor は内容が `continue` の非表示 `system-reminder` シグナルを送信し、再試行を要求します。このリマインダーはシグナルのメタデータとして永続化されるため、再試行時の再構築や生の履歴では利用でき、通常の UI 向けメッセージ変換では非表示になります。
+
+assistant の prefill 拒否（たとえば Anthropic の「assistant message prefill」や、Qwen/llama.cpp の「assistant response prefill is incompatible with `enable_thinking`」エラー）から Mastra を復旧させる場合、この processor を `errorProcessors` に追加します。
+
+## 動作の仕組み
+
+1. 既知の assistant-prefill 拒否メッセージにより LLM API 呼び出しが失敗する
+1. `PrefillErrorHandler` が最初の再試行であることを確認する
+1. 内容が `continue` の非表示 `system-reminder` シグナルを送信する
+1. `{ retry: true }` を返し、変更後のメッセージで LLM 呼び出しを再試行するよう指示する
+
+processor は、会話が現在 assistant メッセージで終わっているかを再確認するのではなく、API の拒否自体に反応します。そのため、末尾のメッセージ形式が上流ですでに変換されていても、provider が prefill の意味論に基づいてリクエストを拒否するケースに対応できます。
+
+## 使用例
+
+assistant-prefill の失敗を再試行する Agent の `errorProcessors` に `PrefillErrorHandler` を追加します。
+
+```typescript title="src/mastra/agents/my-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { PrefillErrorHandler } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_OPUS__',
+  errorProcessors: [new PrefillErrorHandler()],
+})
+```
+
+独自の復旧処理が必要な場合は、`processAPIError` メソッドを持つ独自の error processor を指定します。
+
+```typescript title="src/mastra/agents/custom-error-handling.ts"
+import { Agent } from '@mastra/core/agent'
+import type { Processor } from '@mastra/core/processors'
+
+const customErrorHandler: Processor = {
+  id: 'custom-prefill-error-handler',
+  processAPIError({ error, messageList, retryCount }) {
+    // Your custom logic here
+  },
+}
+
+export const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_OPUS__',
+  errorProcessors: [customErrorHandler],
+})
+```
+
+## コンストラクターパラメーター
+
+`PrefillErrorHandler` にコンストラクターパラメーターはありません。
+
+## プロパティ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: "'prefill-error-handler'",
+    description: 'Processor の識別子。',
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: "'Prefill Error Handler'",
+    description: 'Processor の表示名。',
+    isOptional: false,
+  },
+  {
+    name: 'processAPIError',
+    type: '(args: ProcessAPIErrorArgs) => ProcessAPIErrorResult | void',
+    description:
+      '既知の assistant-prefill エラーを、非表示の system reminder シグナルを送信して再試行を要求することで処理します。最初の再試行でのみ実行されます。',
+    isOptional: false,
+  },
+]}
+/>
+
+## 関連情報
+
+- [Processor interface](/reference/processors/processor-interface)
+- [Guardrails](/docs/agents/guardrails)

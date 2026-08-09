@@ -1,0 +1,322 @@
+---
+title: "リファレンス：PubSub | PubSub"
+description: Mastra の pub/sub 規約を定義する抽象基底クラス、PubSub の API リファレンスです。
+packages:
+  - "@mastra/core"
+---
+
+# PubSub
+
+`PubSub` は Mastra のイベントシステムの抽象基底クラスです。すべての pub/sub backend が実装する規約を定義するため、Mastra の他の部分は、使用中の transport を意識せずにイベントを publish および subscribe できます。
+
+Mastra は Workflow のイベント処理、ストリーミング、コンポーネント間通信に pub/sub を内部で使用します。ほとんどのアプリケーションはデフォルトの [`EventEmitterPubSub`](/reference/pubsub/event-emitter) を使用し、`PubSub` を直接構築することはありません。カスタム transport が必要な場合にのみ、このクラスを実装してください。
+
+組み込み実装については、[`EventEmitterPubSub`](/reference/pubsub/event-emitter)、[`UnixSocketPubSub`](/reference/pubsub/unix-socket-pubsub)、[`CachingPubSub`](/reference/pubsub/caching-pubsub)、[`RedisStreamsPubSub`](/reference/pubsub/redis-streams)、[`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub) を参照してください。
+
+## 使用例
+
+カスタム backend を追加するには、`PubSub` を拡張して4つの抽象メソッドを実装します。
+
+```typescript title="src/mastra/pubsub.ts"
+import { PubSub } from '@mastra/core/events'
+import type { Event, EventCallback, SubscribeOptions } from '@mastra/core/events'
+
+export class CustomPubSub extends PubSub {
+  async publish(topic: string, event: Omit<Event, 'id' | 'createdAt'>): Promise<void> {
+    // Deliver the event to subscribers of `topic`.
+  }
+
+  async subscribe(topic: string, cb: EventCallback, options?: SubscribeOptions): Promise<void> {
+    // Register `cb` to receive events published to `topic`.
+  }
+
+  async unsubscribe(topic: string, cb: EventCallback): Promise<void> {
+    // Remove a previously registered callback.
+  }
+
+  async flush(): Promise<void> {
+    // Wait for any in-flight deliveries to settle.
+  }
+}
+```
+
+インスタンスを [Mastra](/reference/core/mastra-class) コンストラクターに渡します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { CustomPubSub } from './pubsub'
+
+export const mastra = new Mastra({
+  pubsub: new CustomPubSub(),
+})
+```
+
+## 配信モード
+
+`PubSub` は、対応する配信モードを `supportedModes` プロパティで宣言します。Mastra はこの値を読み取り、イベントを pull する長時間稼働 worker を実行するかどうかを判断します。
+
+| モード | 説明 |
+| - | - |
+| `pull` | consumer が broker から能動的に読み取ります。たとえば Redis Streams の `XREADGROUP` が該当します。Mastra は読み取り用の orchestration worker を実行します。 |
+| `push` | consumer が要求しなくても、インプロセスまたは HTTP endpoint 経由でイベントが到着します。読み取り loop は不要です。 |
+
+カスタム実装が明示的に push 配信を選択しない限り現在の動作を維持できるよう、デフォルトは `['pull']` です。
+
+## メソッド
+
+### コアメソッド
+
+#### `publish(topic, event)`
+
+イベントをトピックに公開します。`id` フィールドと `createdAt` フィールドは実装によって割り当てられます。
+
+```typescript
+await pubsub.publish('my-topic', {
+  type: 'example',
+  data: { value: 1 },
+  runId: 'run-123',
+})
+```
+
+#### `subscribe(topic, cb, options?)`
+
+トピックに公開されたイベントを受信する callback を登録します。`options.group` を設定すると、同じグループの subscriber がメッセージの取得を競合し、各イベントは1つのメンバーに配信されます。グループを指定しない場合は、すべての subscriber がすべてのイベントを受信します。
+
+バッチ配信を選択するには `options.batch` を渡します。callback のシグネチャは変わりません。N 件のイベントからなるバッチは、publish 順に N 回連続する `cb(event, ack, nack)` 呼び出しとして配信されます。バッチ処理は、backend の [`supportsNativeBatching`](#properties) が `true` の場合にのみ適用されます。それ以外の backend はこのオプションを無視し、イベントを1件ずつ配信します。
+
+```typescript
+await pubsub.subscribe('my-topic', (event, ack, nack) => {
+  console.log(event)
+})
+```
+
+#### `unsubscribe(topic, cb)`
+
+以前に登録した callback をトピックから削除します。
+
+```typescript
+await pubsub.unsubscribe('my-topic', callback)
+```
+
+#### `flush()`
+
+処理中の配信が完了するまで待機します。イベントの欠落を防ぐため、シャットダウン前に呼び出してください。
+
+```typescript
+await pubsub.flush()
+```
+
+#### `clearTopic(topic)`
+
+トピックへのイベント公開がすべて終わった後、保持されているトピックの状態（キャッシュ済み履歴、永続 stream entry、consumer group）をすべて削除します。Mastra の run lifecycle（durable Agent とイベント駆動 Workflow engine）は、run が終了状態に達したときにこのメソッドを自動的に呼び出します。そのため、メッセージを保持する transport に run ごとのトピックが蓄積しません。
+
+デフォルト実装は何もしません。`EventEmitterPubSub` のようにトピックごとの状態を何も保持しない transport には、削除するものがないためです。[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) のようにメッセージを永続化する backend は、このメソッドをオーバーライドします。この規約はベストエフォートです。caller はクリーンアップ境界で fire-and-forget として呼び出すため、実装は失敗をスローせずログに記録します。
+
+```typescript
+await pubsub.clearTopic('workflow.events.v2.run-123')
+```
+
+### リプレイメソッド
+
+これらのメソッドは、切断後のストリーム再開に対応します。デフォルト実装は通常の `subscribe` にフォールバックするため、履歴に対応していない backend は live イベントのみを扱います。[`CachingPubSub`](/reference/pubsub/caching-pubsub) はこれらをオーバーライドし、キャッシュ済みイベントをリプレイします。
+
+#### `getHistory(topic, offset?)`
+
+`offset` から始まるトピックのキャッシュ済みイベントを返します。backend に履歴がない場合は空の配列を返します。
+
+```typescript
+const events = await pubsub.getHistory('my-topic', 0)
+```
+
+戻り値：`Promise<Event[]>`
+
+#### `subscribeWithReplay(topic, cb)`
+
+キャッシュ済みイベントをリプレイしてから、live イベントを購読します。
+
+```typescript
+await pubsub.subscribeWithReplay('my-topic', event => {
+  console.log(event)
+})
+```
+
+#### `subscribeFromOffset(topic, offset, cb)`
+
+既知の位置からキャッシュ済みイベントをリプレイし、その後 live イベントを購読します。クライアントが最後の位置を把握している場合、完全なリプレイより効率的です。
+
+```typescript
+await pubsub.subscribeFromOffset('my-topic', 42, event => {
+  console.log(event)
+})
+```
+
+## プロパティ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'supportedModes',
+    type: 'ReadonlyArray<"pull" | "push">',
+    description: '実装が対応する配信モード。デフォルトは `["pull"]` です。',
+  },
+  {
+    name: 'supportsNativeBatching',
+    type: 'boolean',
+    description:
+      '実装が `options.batch` を `subscribe()` で処理するかどうか。デフォルトは `false` です。バッチ処理を内部に統合する backend はこの値をオーバーライドし、`true` を返します。',
+  },
+]}
+/>
+
+## 型
+
+### `Event`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'type',
+    type: 'string',
+    description: 'イベント型の識別子。',
+  },
+  {
+    name: 'id',
+    type: 'string',
+    description: '一意のイベント ID。publish 時に実装によって割り当てられます。',
+  },
+  {
+    name: 'data',
+    type: 'any',
+    description: 'イベントの payload。',
+  },
+  {
+    name: 'runId',
+    type: 'string',
+    description: 'イベントが属する run。',
+  },
+  {
+    name: 'createdAt',
+    type: 'Date',
+    description: 'publish 時に実装によって割り当てられる timestamp。',
+  },
+  {
+    name: 'index',
+    type: 'number',
+    description: '特定の offset から再開するために使用する連続した位置。',
+    isOptional: true,
+  },
+  {
+    name: 'deliveryAttempt',
+    type: 'number',
+    description:
+      'イベントが配信された回数。1から始まります。backend が再配信を追跡しない場合、デフォルトは1です。',
+    isOptional: true,
+  },
+]}
+/>
+
+### `SubscribeOptions`
+
+<PropertiesTable
+  content={[
+  {
+    name: 'group',
+    type: 'string',
+    description:
+      '設定すると、同じグループの subscriber がメッセージの取得を競合し、各イベントは1つのメンバーに配信されます。省略すると、すべての subscriber がすべてのイベントを受信します。',
+    isOptional: true,
+  },
+  {
+    name: 'batch',
+    type: 'SubscribeBatchOptions',
+    description:
+      'この subscription でバッチ配信を選択します。省略すると、イベントは1件ずつ配信されます。`supportsNativeBatching` が `true` の backend でのみ処理されます。',
+    isOptional: true,
+  },
+]}
+/>
+
+### `SubscribeBatchOptions`
+
+subscription ごとのバッチ処理ポリシーです。callback のシグネチャは変わりません。N 件のイベントからなるバッチは、publish 順に N 回連続する callback 呼び出しになります。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'maxSize',
+    type: 'number',
+    description: '強制的に flush するまでに保持できるイベントの最大数。',
+    isOptional: true,
+  },
+  {
+    name: 'maxWaitMs',
+    type: 'number',
+    description:
+      '最も古いイベントをバッファに保持できる最大時間（ミリ秒）。timer は、バッファが空の状態から空でない状態に変わると開始します。',
+    isOptional: true,
+  },
+  {
+    name: 'minIntervalMs',
+    type: 'number',
+    description:
+      '連続するバッチ配信の最小間隔（ミリ秒）。`maxSize` または `maxWaitMs` の条件を満たした場合でも、前回の配信からこの間隔が経過するまでバッファに保持します。',
+    isOptional: true,
+  },
+  {
+    name: 'isImmediate',
+    type: '(event: Event) => boolean',
+    description:
+      'イベントに対して `true` を返すと、`minIntervalMs` に従い、publish 時にバッファを即座に flush します。イベントごとの escape hatch です。',
+    isOptional: true,
+  },
+  {
+    name: 'coalesce',
+    type: '(events: Event[]) => Event[]',
+    description:
+      '配信前にキュー内のバッチへ適用し、置き換えられたイベントを除外します。入力の部分集合を参照同一性を保ったまま返す必要があります。新しく構築した `Event` オブジェクトを返すと規約違反になり、バッチ全体が破棄されます。保持するイベントの順序は維持されます。',
+    isOptional: true,
+  },
+  {
+    name: 'maxBufferSize',
+    type: 'number',
+    description:
+      'overflow 処理を開始するまでにバッファが保持できるイベントの最大数。immediate と指定されたイベントは、overflow 時にも破棄されません。',
+    isOptional: true,
+    defaultValue: '256',
+  },
+  {
+    name: 'overflow',
+    type: '"drop-oldest" | "drop-newest" | "coalesce-or-drop-oldest"',
+    description:
+      'バッファが `maxBufferSize` を超えた場合の overflow 戦略。`coalesce-or-drop-oldest` は、最初に `coalesce` を実行し、それでも上限を超えている場合は最も古いイベントを破棄します。',
+    isOptional: true,
+    defaultValue: 'coalesce-or-drop-oldest',
+  },
+]}
+/>
+
+### `EventCallback`
+
+subscriber 用 callback のシグネチャ：`(event: Event, ack?: () => Promise<void>, nack?: () => Promise<void>) => void`。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'event',
+    type: 'Event',
+    description: '配信されたイベント。',
+  },
+  {
+    name: 'ack',
+    type: '() => Promise<void>',
+    description: '処理の成功を確認します。イベントはキューから削除されます。',
+    isOptional: true,
+  },
+  {
+    name: 'nack',
+    type: '() => Promise<void>',
+    description: '否定確認応答。イベントは遅延後の再配信のために再度キューに入れられます。',
+    isOptional: true,
+  },
+]}
+/>

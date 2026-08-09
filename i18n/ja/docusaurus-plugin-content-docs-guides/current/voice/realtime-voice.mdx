@@ -1,0 +1,414 @@
+---
+title: 'リアルタイム Voice | Voice'
+description: 'LiveKit を使って Mastra Agent をリアルタイム Voice Agent にする方法を、意味に基づくターン検出や割り込みも含めて説明します。'
+packages:
+  - '@mastra/livekit'
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# リアルタイム Voice
+
+リアルタイム Voice は、Mastra Agent を、ブラウザまたは電話でユーザーが割り込んで話せるライブ通話へ変えます。Mastra は、リアルタイムの音声と映像に対応するオープンソース WebRTC プラットフォーム [LiveKit](https://livekit.io) を基盤にしています。
+
+[`@mastra/livekit`](/reference/voice/livekit) パッケージは、Mastra Agent を [LiveKit Agents framework](https://docs.livekit.io/agents/) に接続します。LiveKit は、音声区間検出、ストリーミング Speech-to-Text、意味に基づくターン検出、割り込み、Text-to-Speech などの音声ループを担います。Mastra Agent は、独自のモデル、Tools、Memory を使って各応答を生成します。
+
+低遅延で割り込み可能な音声会話が必要な場合は、リアルタイム Voice を使用してください。LiveKit を使わない Provider ベースの Speech-to-Speech については、[Speech-to-Speech](/guides/voice/speech-to-speech)を参照してください。
+
+## クイックスタート
+
+ここでは、空のプロジェクトから会話できる Voice Agent を構築します。Voice セッションは 2 つの要素で構成されます。アクセストークンを発行する Mastra サーバー上の API ルートと、音声パイプラインを実行して各ターンで Agent を呼び出す独立したワーカープロセスです。
+
+<Steps>
+  <StepItem>
+    統合パッケージと、音声区間検出およびターン検出用の LiveKit プラグインをインストールします。
+
+    ```bash npm2yarn
+    npm install @mastra/livekit @livekit/agents @livekit/agents-plugin-silero @livekit/agents-plugin-livekit
+    ```
+  </StepItem>
+
+  <StepItem>
+    LiveKit の認証情報を `.env` ファイルに設定します。[LiveKit Cloud](https://cloud.livekit.io) で無料プロジェクトを作成するか、[`livekit-server --dev`](https://docs.livekit.io/home/self-hosting/local/) でローカルサーバーを実行してください。
+
+    ```bash title=".env"
+    LIVEKIT_URL=wss://your-project.livekit.cloud
+    LIVEKIT_API_KEY=your-api-key
+    LIVEKIT_API_SECRET=your-api-secret
+    ```
+  </StepItem>
+
+  <StepItem>
+    Mastra インスタンスに Voice Agent を追加し、接続ルートを公開します。`liveKitConnectionRoute()` ヘルパーは、LiveKit トークンを発行して Agent をルームへディスパッチする `POST /voice/livekit/connection-details` エンドポイントを追加します。
+
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core/mastra'
+    import { Agent } from '@mastra/core/agent'
+    import { liveKitConnectionRoute } from '@mastra/livekit'
+
+    const supportAgent = new Agent({
+      id: 'support',
+      name: 'Support',
+      instructions: 'You are a friendly phone support agent. Keep replies short and conversational.',
+      model: '__GATEWAY_OPENAI_MODEL_MINI__',
+    })
+
+    export const mastra = new Mastra({
+      agents: { support: supportAgent },
+      server: {
+        apiRoutes: [liveKitConnectionRoute({ agentName: 'mastra-voice' })],
+      },
+    })
+    ```
+  </StepItem>
+
+  <StepItem>
+    ワーカーを作成します。ワーカーは独立したプロセスとして実行され、LiveKit セッションに応答し、各ターンで Agent を呼び出します。Worker API は `@mastra/livekit/worker` エントリポイントにあるため、Mastra サーバーが LiveKit Agents ランタイムを読み込むことはありません。この例では、Speech-to-Text と Text-to-Speech に LiveKit Inference のモデル文字列を使うため、Provider プラグインは不要です。
+
+    ```typescript title="src/mastra/voice-worker.ts"
+    import { fileURLToPath } from 'node:url'
+    import { createLiveKitWorker, runLiveKitWorker } from '@mastra/livekit/worker'
+    import { mastra } from './index'
+
+    export default createLiveKitWorker({
+      mastra,
+      agent: 'support',
+      stt: 'deepgram/nova-3',
+      tts: 'cartesia/sonic-3',
+      turnDetection: 'multilingual',
+      greeting: 'Hi! How can I help you today?',
+    })
+
+    if (process.argv[1] === fileURLToPath(import.meta.url)) {
+      runLiveKitWorker({ entry: import.meta.url, agentName: 'mastra-voice' })
+    }
+    ```
+
+    `agent` オプションは、各セッションに応答する Mastra Agent を選択します。例のように固定キーを渡すか、省略してディスパッチメタデータの `agentId` を使用すると、1 つのワーカーで Mastra インスタンス上のすべての Agent に対応できます。
+  </StepItem>
+
+  <StepItem>
+    ターン検出モデルと音声区間検出モデルを一度ダウンロードします。次に、一方のターミナルでワーカーを、もう一方で Mastra サーバーを実行します。
+
+    ```bash
+    npx livekit-agents download-files
+    npx tsx src/mastra/voice-worker.ts dev
+    ```
+
+    ```bash npm2yarn
+    npm run dev
+    ```
+
+    ワーカーは LiveKit サーバーに登録してセッションを待ち、`mastra dev` は接続ルートを提供します。
+  </StepItem>
+
+  <StepItem>
+    Agent と会話します。ホスト型の [LiveKit Agents Playground](https://agents-playground.livekit.io) を開いてプロジェクトに接続すると、フロントエンドを構築せずに通話を開始できます。
+
+    独自のアプリを接続する場合は、接続ルートを呼び出してトークンを取得します。`POST /voice/livekit/connection-details` は、リクエストボディで任意の `agentId`、`threadId`、`resourceId` フィールドを受け取り、次を返します。
+
+    ```json
+    {
+      "serverUrl": "wss://your-project.livekit.cloud",
+      "roomName": "mastra-voice-a1b2c3d4",
+      "participantName": "user-1",
+      "participantToken": "eyJhbGci..."
+    }
+    ```
+
+    このレスポンスは LiveKit のフロントエンドスターターが使用する仕様に準拠しているため、[agent-starter-react](https://github.com/livekit-examples/agent-starter-react) または [LiveKit React components](https://docs.livekit.io/reference/components/react/) で構築したアプリは変更なしで動作します。
+  </StepItem>
+</Steps>
+
+## ターン検出と割り込み
+
+LiveKit は、ユーザーが話し終えたタイミングと Agent が割り込まれたタイミングを判断します。デフォルト設定で十分に動作しますが、`turnHandling` で調整できます。
+
+```typescript title="src/mastra/voice-worker.ts"
+export default createLiveKitWorker({
+  mastra,
+  agent: 'support',
+  stt: 'deepgram/nova-3',
+  tts: 'cartesia/sonic-3',
+  turnDetection: 'multilingual',
+  turnHandling: {
+    endpointing: { mode: 'dynamic', minDelay: 300, maxDelay: 3000 },
+    interruption: { minDuration: 500, resumeFalseInterruption: true },
+  },
+})
+```
+
+- `turnDetection: 'multilingual'`: LiveKit の意味に基づくターン終了モデルをローカルの CPU で実行します。ライブ文字起こしを読み、ユーザーの発話途中で打ち切らないようにします。無音に基づくエンドポイント検出には、代わりに `'vad'` または `'stt'` を使用します。
+- `endpointing`: ユーザーが話し終えてから Agent が待つ時間の範囲を設定します。
+- `interruption`: 割り込みを制御します。ユーザーが Agent の発話中に話すと、LiveKit は再生を停止し、進行中の Mastra ストリームをキャンセルするため、トークン生成も停止します。
+- `preemptiveGeneration`: ユーザーが話し終える前に Mastra Agent の応答生成を開始し、最初のトークンまでの待ち時間を見えにくくします。ワーカーではデフォルトで無効です。先行生成のたびに暫定的な文字起こしで Mastra Agent が実行され、各実行でユーザーメッセージが永続化されるため、スレッド内でメッセージが重複します。正確なスレッド履歴よりレイテンシを優先する場合は、`preemptiveGeneration: { enabled: true }` で再度有効にしてください。
+
+すべてのオプションについては、[LiveKit のターン検出ドキュメント](https://docs.livekit.io/agents/logic/turns/)を参照してください。
+
+## 通話ごとの Voice と文字起こし
+
+トップレベルの `stt` と `tts` オプションは、すべての通話に適用されます。通話ごと、またはテナントごとに Voice や言語を選ぶには、代わりに `configuration.stt` と `configuration.tts` のリゾルバーを設定します。各リゾルバーは、ディスパッチメタデータ、RequestContext、ルーム名、ジョブコンテキストを受け取り、通話ごとに一度実行されます。戻り値は対応するトップレベルオプションで使用できる値で、プラグインインスタンスまたは推論モデル文字列です。`undefined` を返すとトップレベルオプションにフォールバックします。
+
+次の例では、ディスパッチメタデータの `tenant` エントリをキーとして、各テナントに固有の Text-to-Speech Voice を割り当てます。
+
+```typescript title="src/mastra/voice-worker.ts"
+import * as cartesia from '@livekit/agents-plugin-cartesia'
+
+// One voice id per tenant, resolved from the dispatch metadata on each call.
+const tenantVoices: Record<string, string> = {
+  meridian: 'your-cartesia-voice-id-1',
+  coastal: 'your-cartesia-voice-id-2',
+}
+// The resolver runs during call setup, so cache plugin instances across calls.
+const ttsByVoice = new Map<string, cartesia.TTS>()
+
+export default createLiveKitWorker({
+  mastra,
+  agent: 'support',
+  stt: 'deepgram/nova-3',
+  tts: 'cartesia/sonic-3',
+  configuration: {
+    tts: ({ requestContext }) => {
+      const voice = tenantVoices[requestContext?.tenant as string]
+      if (!voice) return undefined // fall back to the top-level `tts`
+      let tts = ttsByVoice.get(voice)
+      if (!tts) {
+        tts = new cartesia.TTS({ voice })
+        ttsByVoice.set(voice, tts)
+      }
+      return tts
+    },
+  },
+})
+```
+
+`configuration.stt` も同様に、テナントごとに異なる文字起こしモデルや言語を使うなど、通話ごとの文字起こしに利用できます。挨拶にも通話ごとの形式があります。`configuration.greeting.text` は同じ通話コンテキストを受け取るリゾルバーに対応しているため、1 つのワーカーでテナントごとに異なる挨拶を使用できます。
+
+## Memory とスレッド
+
+解決された Mastra Agent に Memory が設定されている場合、各通話が 1 つの Memory スレッドになります。
+
+- `thread` は、デフォルトでディスパッチメタデータの `threadId` を使用し、なければルーム名を使用します。
+- `resource` は、デフォルトでディスパッチメタデータの `resourceId` を使用し、なければスレッドを使用します。エンドユーザーの ID をここに渡すと、通話を適切なユーザーのもとにまとめられます。Mastra Studio は Agent ID を渡し、サイドバーのスレッド一覧と対応させます。
+- スレッドがまだ存在しない場合、ワーカーはタイトルを「Voice call」、メタデータを `{ source: 'livekit' }` として作成します。発話した挨拶は最初の assistant メッセージとして保存されるため、スレッドを完全な通話記録として読めます（`persistGreeting: false` で無効化できます）。
+
+各ターンでは新しいユーザー入力だけを送信し、Mastra Memory が履歴、セマンティックリコール、ワーキングメモリを提供します。接続リクエストボディで `threadId` を渡すと、セッションを既存スレッドに固定できます。テキストでの会話を音声で続ける場合に便利です。Studio では、開いているチャットから通話を開始すると、そのスレッドに通話が関連付けられ、やり取りのたびに文字起こしがチャットへ追加されます。
+
+ユーザーが Agent に割り込むと、進行中の生成が中止され、その時点ではそのターンの内容は永続化されません。LiveKit はユーザーが実際に聞いた部分を文字起こしに保持し、次のターンでワーカーがその部分だけを再送して、スレッドを通話内容に合わせて補完します。割り込み直後にユーザーが通話を終了した場合、最後の断片は記録されません。詳細と整合方法については、[割り込まれたターン](/reference/voice/livekit#interrupted-turns)を参照してください。
+
+## Tool の実行中に発話する
+
+時間のかかる Tool の実行中に、音声会話が無音になることは避ける必要があります。Mastra Agent が Tool 呼び出しを開始したときに短いフレーズを発話するには、`toolFeedback` を使用します。
+
+```typescript title="src/mastra/voice-worker.ts"
+export default createLiveKitWorker({
+  mastra,
+  agent: 'support',
+  stt: 'deepgram/nova-3',
+  tts: 'cartesia/sonic-3',
+  toolFeedback: ({ toolName }) =>
+    toolName === 'searchOrders' ? 'Let me look that up.' : undefined,
+})
+```
+
+このフレーズは応答の一部として発話され、文字起こしに記録されます。
+
+## Workflow で応答を生成する
+
+デフォルトでは、ワーカーは Mastra Agent で各応答を生成します。ターンごとに複数ステップのロジックを実行する場合（たとえば、意図の分類、ルーティング、Tool の順次呼び出し、応答の作成）は、代わりに Mastra [Workflow](/docs/workflows/overview) で応答を生成します。`agent` の代わりに `workflow` を設定してください。
+
+音声ループは引き続き LiveKit が担い、ターンごとに一度 Mastra を呼び出すため、Workflow は各ターンで完了まで実行されます。Workflow は一時停止や再開ができず、会話状態はターン間で引き継がれません。Workflow をステートレスに保つため、`workflowInput` から文字起こしを渡します。
+
+```typescript title="src/mastra/voice-worker.ts"
+import { createLiveKitWorker, chatContextToMessages } from '@mastra/livekit/worker'
+import { mastra } from './index'
+
+export default createLiveKitWorker({
+  mastra,
+  workflow: 'phoneConversation',
+  workflowInput: ({ chatCtx }) => ({ history: chatContextToMessages(chatCtx) }),
+  replyStep: 'generateResponse',
+  stt: 'deepgram/nova-3',
+  tts: 'cartesia/sonic-3',
+  turnDetection: 'multilingual',
+})
+```
+
+Workflow はテキストではなく、構造化されたステップイベントをストリーミングします。生成されたトークンを順次発話するには、応答ステップで Agent のテキストをステップの `writer` にパイプします。
+
+```typescript title="src/mastra/workflows/phone-conversation.ts"
+const generateResponse = createStep({
+  id: 'generateResponse',
+  // input and output schemas omitted
+  execute: async ({ inputData, mastra, writer, abortSignal }) => {
+    const stream = await mastra.getAgent('voice').stream(inputData.history, { abortSignal })
+    await stream.textStream.pipeTo(writer)
+    return { assistantMessage: await stream.text }
+  },
+})
+```
+
+- `replyStep`: 発話出力を 1 つのステップに限定します。省略すると、`writer` に書き込むすべてのステップを発話します。
+- `resultText`: どのステップもテキストをストリーミングしない場合に、最終実行結果から応答を導出するフォールバックです。`writer` 経由のストリーミングは最初のトークンまでの時間を短縮できるため、そちらを優先してください。
+- `abortSignal`: 割り込み時に生成をすぐ停止できるよう、ステップの `abortSignal` を `agent.stream()` に渡します。ユーザーが割り込むと、ワーカーは実行をキャンセルします。
+- `generate`: 完全に制御するには、代わりに `generate` 関数を渡します。ターンをテキストストリームに変換する任意の応答ジェネレーターを使用できます。
+
+Workflow を使う場合、Agent の `stream()` のようにワーカーがターンを自動的に永続化することはありません。会話履歴を Workflow 内で永続化するか、LiveKit の文字起こしを信頼できる唯一の情報源として、各ターンで渡してください。
+
+## Mastra を LLM コンポーネントとして使用する
+
+`createLiveKitWorker()` は LiveKit セッションを管理します。セッションを自分で管理するには、代わりに [`MastraLLM`](/reference/voice/livekit#mastrallm) を使用します。これは標準の LiveKit LLM プラグインで、独自の `voice.AgentSession` の `llm` スロットに Mastra Agent を配置します。Mastra アプリ、Agent ループ、Tools、Memory、Observability は Mastra サーバー上で動作し、ワーカーは HTTP 経由で接続します。ワーカープロセスに Mastra アプリ、データベース、モデル Provider のキーは不要です。
+
+```typescript title="src/mastra/voice-worker-plugin.ts"
+import { fileURLToPath } from 'node:url'
+import { defineAgent, voice } from '@livekit/agents'
+import * as silero from '@livekit/agents-plugin-silero'
+import { MastraLLM } from '@mastra/livekit/plugin'
+import { runLiveKitWorker } from '@mastra/livekit/worker'
+
+export default defineAgent({
+  entry: async ctx => {
+    await ctx.connect()
+
+    const session = new voice.AgentSession({
+      llm: new MastraLLM({
+        remote: { baseUrl: process.env.MASTRA_URL!, agentId: 'support' },
+        memory: { thread: ctx.room.name!, resource: 'user-7' },
+      }),
+      stt: 'deepgram/nova-3',
+      tts: 'cartesia/sonic-3',
+      vad: await silero.VAD.load(),
+      // Required with `memory`: LiveKit enables preemptive generation by default.
+      turnHandling: { preemptiveGeneration: { enabled: false } },
+    })
+
+    await session.start({
+      // These instructions never reach the Mastra agent; its own instructions apply.
+      agent: new voice.Agent({ instructions: 'Replies come from the Mastra agent.' }),
+      room: ctx.room,
+    })
+
+    session.say('Hi! How can I help you today?')
+  },
+})
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  runLiveKitWorker({ entry: import.meta.url, agentName: 'mastra-voice' })
+}
+```
+
+どちらも内部では同じ応答パイプラインを共有しています。セッションをどちらが管理するかで選択してください。
+
+| | `createLiveKitWorker()` | `MastraLLM` |
+| - | - | - |
+| セッションの管理 | ワーカーヘルパーが `AgentSession` を構築して管理 | 独自のコードでセッションを構築し、LiveKit のすべてのオプションとフックを制御 |
+| Mastra アプリの実行場所 | ワーカープロセス内 | HTTP 経由で接続する Mastra サーバー上（または `agent` による同一プロセス内） |
+| ワーカープロセスに必要なもの | Mastra アプリ、ストレージ、モデル Provider のキー | LiveKit SDK とサーバーへのネットワークアクセスのみ |
+| 組み込み機能 | 挨拶、同意ゲート、Agent による通話終了、スレッドの初期化、Observability の集計 | [セッションヘルパー](/reference/voice/livekit#runendcall)で必要な機能を構築 |
+| 適した用途 | 動作する Voice Agent をすばやく構築、Studio Voice モード | 既存の LiveKit アプリとセッションの完全な制御 |
+
+Tools は Mastra Agent に保持され、サーバー上で実行されます。セッションに渡した LiveKit 側の Tools は無視されます。Tool の動作は、`toolFeedback`（つなぎの発話）、`onToolCall`（各 Tool 呼び出しの開始時に実行）、`onTurnComplete`（各応答の後にテキスト、Tool 呼び出し、トークン使用量とともに実行）を通じてワーカーに伝わります。Agent による通話終了は数行で実装できます。`onToolCall` と [`runEndCall()`](/reference/voice/livekit#runendcall) を組み合わせてください。
+
+:::warning
+`memory` オプションを、独自に構築したセッションで LiveKit がデフォルトで有効にする `preemptiveGeneration` と組み合わせないでください。LiveKit が破棄する前に先行生成ターンが完了すると、ユーザーメッセージと発話されなかった応答がスレッドに永続化されます。`turnHandling: { preemptiveGeneration: { enabled: false } }` を設定するか、`memory` を使わずに各ターンで完全な文字起こしを渡してください。
+:::
+
+`MastraLLM` は、同一プロセス内の Mastra `agent` インスタンス、別のデプロイを必要としないセッション管理、カスタム `generate` 関数にも対応します。リモート転送は [`createRemoteAgentReplyGenerator()`](/reference/voice/livekit#createremoteagentreplygenerator) として単独でも利用でき、`createLiveKitWorker` の `generate` オプションに接続して、機能一式を備えたワーカーをリモートサーバーに対して実行できます。
+
+## サーバーから開始するセッション
+
+`dispatchVoiceSession()` を使うと、独自のコードから Voice Agent をルームに追加できます。たとえば、既存のルームへの参加や、発信 [SIP 通話](https://docs.livekit.io/sip/)の実行に使用します。
+
+```typescript
+import { dispatchVoiceSession } from '@mastra/livekit'
+
+await dispatchVoiceSession({
+  roomName: 'support-call-42',
+  agentName: 'mastra-voice',
+  metadata: { agentId: 'support', threadId: 'thread-42', resourceId: 'user-7' },
+})
+```
+
+## Observability
+
+Mastra インスタンスに [Observability](/docs/observability/overview) が設定されていると、ワーカーは各通話を Trace します。セッションごとに 1 つの `voice call` Span を開き、その配下にすべてをネストします。
+
+- 各ターンの Mastra Agent 実行。モデル生成、Tool 呼び出し、Memory 操作を含み、テキストチャットと同様に記録されます。
+- LiveKit パイプラインの各メトリクスに対する子 Span。Speech-to-Text、Text-to-Speech、発話終了（ターン検出）、音声区間検出、モデルの最初のトークンまでの時間が含まれます。テキストの Trace では確認できないレイテンシと音声の測定値を保持します。
+- モデルごとの使用量集計。通話全体のトークン数、文字数、音声量の合計が、セッション終了時に Span へ書き込まれます。
+
+ワーカーは独立したプロセスなので、サーバーとワーカーの両方からの同時書き込みに対応するバックエンドをストレージに指定してください。SQLite ベースの [LibSQL](/reference/storage/libsql) は利用できますが、単一 Writer のストアは利用できません。Traces、Memory、スレッドは 1 つのストアを共有できます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { LibSQLStore } from '@mastra/libsql'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({ id: 'voice-agent-storage', url: 'file:./voice-agent.db' }),
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'voice-agent',
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+Tracing はデフォルトで有効です。無効にするには、`createLiveKitWorker` に `observability: false` を渡します。
+
+## デプロイ
+
+ワーカーは Mastra サーバーとは別のプロセスなので、`mastra build` で独立したエントリとして出力する必要があります。[`bundler.entries`](/reference/configuration#bundlerentries) に追加してください。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+
+export const mastra = new Mastra({
+  bundler: {
+    entries: { 'voice-worker': './voice-worker.ts' },
+    // Keep LiveKit's native modules out of the bundle. `mastra build` only applies
+    // this default when you set no other bundler options, so set it explicitly here.
+    externals: true,
+  },
+})
+```
+
+`mastra build` は、1 つの `package.json` と依存関係のインストールを共有する 2 つのプロセスを `.mastra/output` に出力します。
+
+```
+.mastra/output/
+  index.mjs         # Mastra server
+  voice-worker.mjs  # LiveKit worker
+```
+
+このディレクトリを単一のアーティファクトとしてデプロイし、それぞれのコマンドで各プロセスを起動します。
+
+```bash
+node .mastra/output/index.mjs             # server
+node .mastra/output/voice-worker.mjs start # worker
+```
+
+ワーカーには、サーバーと同じ環境変数に加えて、`LIVEKIT_URL`、`LIVEKIT_API_KEY`、`LIVEKIT_API_SECRET` が必要です。
+
+サイズ設定、グレースフルシャットダウン、ホスティングに関する LiveKit のガイドラインはそのまま適用されます。[Agent のデプロイ](https://docs.livekit.io/agents/ops/deployment/)を参照してください。ワーカーは LiveKit へ送信方向で接続するため、受信ポートは不要です。
+
+## 仕組み
+
+LiveKit Voice セッションは、3 つの要素で構成されます。
+
+1. Mastra サーバーが LiveKit アクセストークンを発行し、Agent をルームへディスパッチします。ディスパッチには、Mastra Agent ID、Memory スレッド、リソースなどのメタデータが含まれます。
+1. LiveKit Agent ワーカー（独立して常時稼働するプロセス）がジョブを受け取り、音声パイプラインを実行します。音声は WebRTC を介してブラウザとワーカー間を流れ、Mastra HTTP サーバーを通過しません。
+1. ユーザーがターンを終えるたびに、ワーカーは新しい入力で Mastra Agent の `stream()` を呼び出し、ストリーミングされたテキストを発話します。ユーザーが割り込むと、LiveKit はストリームをキャンセルし、Mastra は生成を停止します。
+
+会話履歴は Mastra Memory に保持されるため、Voice セッションとテキストチャットで 1 つのスレッドを共有できます。
+
+## 関連項目
+
+- [`@mastra/livekit` リファレンス](/reference/voice/livekit)
+- [Speech-to-Speech](/guides/voice/speech-to-speech)
+- [Agent Memory](/docs/memory/overview)
+- [LiveKit Agents ドキュメント](https://docs.livekit.io/agents/)

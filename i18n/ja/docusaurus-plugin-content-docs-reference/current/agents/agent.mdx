@@ -1,0 +1,1064 @@
+---
+title: "リファレンス：Agent クラス | Agents"
+description: "さまざまな機能を持つ AI Agent を作成する基盤となる Mastra の `Agent` クラスに関するドキュメントです。"
+packages:
+  - "@mastra/core"
+---
+
+# Agent クラス
+
+`Agent` クラスは、Mastra で AI Agent を作成するための基盤です。レスポンス生成と対話のストリーミングに使うメソッドを提供し、音声機能も扱います。
+
+## 使用例
+
+### 基本的な文字列 instructions
+
+instructions を文字列または文字列配列で渡す方法が、Agent を設定する最も簡単な方法です。追加設定なしで Prompt を渡す単純なユースケースに適しています。
+
+```typescript title="src/mastra/agents/string-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+// String instructions
+export const agent = new Agent({
+  id: 'test-agent',
+  name: 'Test Agent',
+  // highlight-next-line
+  instructions: 'You are a helpful assistant that provides concise answers.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+// System message object
+export const agent2 = new Agent({
+  id: 'test-agent-2',
+  name: 'Test Agent 2',
+  // highlight-start
+  instructions: {
+    role: 'system',
+    content: 'You are an expert programmer',
+  },
+  // highlight-end
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+// Array of system messages
+export const agent3 = new Agent({
+  id: 'test-agent-3',
+  name: 'Test Agent 3',
+  // highlight-start
+  instructions: [
+    { role: 'system', content: 'You are a helpful assistant' },
+    { role: 'system', content: 'You have expertise in TypeScript' },
+  ],
+  // highlight-end
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+### Provider 固有の設定
+
+各 Model Provider では、Prompt Cache や推論設定などのオプションも利用できます。instructions 単位で `providerOptions` を設定し、System instructions／Prompt ごとに異なる Cache 方式を指定できます。
+
+```typescript title="src/mastra/agents/core-message-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const agent = new Agent({
+  id: 'core-message-agent',
+  name: 'Core Message Agent',
+  instructions: {
+    role: 'system',
+    content: 'You are a helpful assistant specialized in technical documentation.',
+    // highlight-start
+    providerOptions: {
+      openai: {
+        reasoningEffort: 'low',
+      },
+    },
+    // highlight-end
+  },
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+### instructions 形式の混在
+
+```typescript title="src/mastra/agents/multi-message-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+// This could be customizable based on the user
+const preferredTone = {
+  role: 'system',
+  content: 'Always maintain a professional and empathetic tone.',
+}
+
+export const agent = new Agent({
+  id: 'multi-message-agent',
+  name: 'Multi Message Agent',
+  instructions: [
+    { role: 'system', content: 'You are a customer service representative.' },
+    preferredTone,
+    {
+      role: 'system',
+      content: 'Escalate complex issues to human agents when needed.',
+      providerOptions: {
+        anthropic: { cacheControl: { type: 'ephemeral' } },
+      },
+    },
+  ],
+  model: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+})
+```
+
+## モデル文字列
+
+最も簡単に設定するには、`model` を `provider/model` 形式の文字列で渡します。Provider 名とモデル名はスラッシュで区切ります。Mastra が環境から対応する Provider Credential を読み取るため、この形式では Provider Package や import は不要です。
+
+よく使われる Provider 文字列と Credential：
+
+- **OpenAI**：`__GATEWAY_OPENAI_MODEL__` は `OPENAI_API_KEY` を使用します。
+- **Anthropic**：`__GATEWAY_ANTHROPIC_MODEL_SONNET__` は `ANTHROPIC_API_KEY` を使用します。
+- **Google**：`__GATEWAY_GOOGLE_MODEL__` は `GOOGLE_API_KEY` または `GOOGLE_GENERATIVE_AI_API_KEY` を使用します。
+
+対応するモデル ID は[モデル](/models)、Provider の全一覧は[環境変数](/models/environment-variables)を参照してください。
+
+## Thread Signal
+
+Agent Signal を使うと、Memory Thread へリアルタイムの入力とコンテキストを送信できます。Message API はユーザー入力用です。`sendSignal()` はシステム生成コンテキスト向けの低レベル API です。
+
+対象 Thread が実行中の場合、`sendMessage()` はアクティブな Agent Loop へメッセージを配信します。Thread がアイドル状態の場合、Mastra はデフォルトでそのメッセージを最初の入力として Stream を開始します。
+
+```typescript title="src/mastra/signals.ts"
+const subscription = await agent.subscribeToThread({
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+
+void (async () => {
+  for await (const chunk of subscription.stream) {
+    console.log(chunk)
+  }
+})()
+
+agent.sendMessage('Use the latest customer note too.', {
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+  ifIdle: {
+    streamOptions: {
+      maxSteps: 3,
+    },
+  },
+})
+```
+
+共有 Thread 内のユーザーを識別するには `attributes` を使います。属性は XML として表示されるため、モデルは誰が何を発言したかを区別できます。
+
+```typescript
+agent.sendMessage(
+  {
+    contents: 'Can we simplify the API surface?',
+    attributes: { name: 'Devin', from: 'slack' },
+  },
+  { resourceId: 'user-123', threadId: 'thread-abc' },
+)
+```
+
+モデルは次の形式で受け取ります。
+
+```xml
+<user name="Devin" from="slack">Can we simplify the API surface?</user>
+```
+
+Thread が実行中かどうかに応じてメッセージへ異なるコンテキストを付けるには、`ifActive.attributes` と `ifIdle.attributes` を使います。
+
+```typescript title="src/mastra/signals.ts"
+agent.sendMessage(
+  {
+    contents: 'Also cover the edge cases.',
+    attributes: { source: 'chat' },
+  },
+  {
+    resourceId: 'user-123',
+    threadId: 'thread-abc',
+    ifActive: { attributes: { delivery: 'while-active' } },
+    ifIdle: { attributes: { delivery: 'new-message' } },
+  },
+)
+```
+
+Thread がアクティブな場合、モデルは次を受け取ります。
+
+```xml
+<user source="chat" delivery="while-active">Also cover the edge cases.</user>
+```
+
+Thread がアイドル状態の場合、モデルは次を受け取ります。
+
+```xml
+<user source="chat" delivery="new-message">Also cover the edge cases.</user>
+```
+
+UI はメッセージ内容を受け取り、Signal Message の `attributes` と `metadata` も読み取ってカスタム表示できます（例：ユーザー名、Avatar、プラットフォーム Badge の表示）。
+
+### `sendMessage(message, options)`
+
+アクティブな Run または Memory Thread へユーザーメッセージを送信します。アクティブな Agent がメッセージをすぐに受け取る必要がある場合に使います。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'message',
+    type: 'string | Array<TextPart | FilePart> | { contents: string | Array<TextPart | FilePart>; attributes?: Record<string, JSONValue>; metadata?: Record<string, unknown>; providerOptions?: ProviderMetadata }',
+    description:
+      'ユーザーが作成した入力。属性のない文字列や Part は通常のユーザー入力としてモデルへ送られます。`attributes` がある場合、Mastra は属性を含む `<user>` XML 要素としてメッセージを表示します。',
+  },
+  {
+    name: 'options',
+    type: 'object',
+    isOptional: true,
+    description: 'メッセージの送信先と配信動作。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'runId',
+            type: 'string',
+            isOptional: true,
+            description: '直接対象とする Run ID。アクティブな Run ID が既知の場合に使います。',
+          },
+          {
+            name: 'resourceId',
+            type: 'string',
+            isOptional: true,
+            description: 'Memory Thread の Resource ID。Thread を対象とするメッセージでは `threadId` とともに必須です。',
+          },
+          {
+            name: 'threadId',
+            type: 'string',
+            isOptional: true,
+            description: '対象とする Thread ID。Thread を対象とするメッセージでは `resourceId` とともに必須です。',
+          },
+          {
+            name: 'ifActive',
+            type: 'object',
+            isOptional: true,
+            description: '対象 Thread がアクティブな場合の動作を制御します。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'behavior',
+                    type: "'deliver' | 'persist' | 'discard'",
+                    isOptional: true,
+                    description: '対象 Thread がアクティブな場合の動作を制御します。デフォルトは `deliver` です。',
+                  },
+                  {
+                    name: 'attributes',
+                    type: 'Record<string, string | number | boolean>',
+                    isOptional: true,
+                    description:
+                      '対象 Thread がアクティブなときに Mastra がメッセージを受け付けると、メッセージへマージされる属性。',
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            name: 'ifIdle',
+            type: 'object',
+            isOptional: true,
+            description: '対象 Thread がアイドル状態の場合の動作を制御します。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'behavior',
+                    type: "'wake' | 'persist' | 'discard'",
+                    isOptional: true,
+                    description: '対象 Thread がアイドル状態の場合の動作を制御します。デフォルトは `wake` です。',
+                  },
+                  {
+                    name: 'streamOptions',
+                    type: 'AgentExecutionOptions',
+                    isOptional: true,
+                    description:
+                      '`ifIdle.behavior` が `wake` の場合に開始する Stream のオプション。Mastra はトップレベルの `resourceId` と `threadId` を Memory コンテキストに使います。',
+                  },
+                  {
+                    name: 'attributes',
+                    type: 'Record<string, string | number | boolean>',
+                    isOptional: true,
+                    description:
+                      '対象 Thread がアイドル状態のときに Mastra がメッセージを受け付けると、メッセージへマージされる属性。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+アイドル状態の Thread でカスタム実行オプションを使って新しい Stream を開始するには、`ifIdle.behavior` を `wake` に設定し、`ifIdle.streamOptions` を渡します。
+
+```typescript title="src/mastra/signals.ts"
+agent.sendMessage('Continue with the next step.', {
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+  ifIdle: {
+    behavior: 'wake',
+    streamOptions: {
+      maxSteps: 3,
+    },
+  },
+})
+```
+
+`{ accepted: Promise<SendAgentSignalAccepted>, signal: CreatedAgentSignal, persisted?: Promise<void> }` を返します。`accepted` は、Mastra がメッセージの処理方法を決定した時点で解決されます。このプロセスが Agent を実行する場合（Run を開始したか、開始する Lease を取得した場合）は `{ action: 'wake', runId, output }`、メッセージが既存 Run へ転送された場合（このプロセスがプロセス間の Wake 競合に負けた場合を含む）は `{ action: 'deliver', runId }`、何も実行されなかった場合は `{ action: 'persist' }`／`{ action: 'discard' }` です。`runId` はメッセージを処理した Run の正式な ID で、`wake` と `deliver` にのみ存在します。`persist`／`discard` では、保存済みメッセージとの対応付けに `result.signal.id` を使います。`accepted` は Route 決定時に解決され（`wake` Run の生成エラーは `output.consumeStream()` から表面化）、メッセージをまったく Routing または開始できなかった場合（例：Agent の設定不備）だけ Reject されます。`persisted` は `persist` 動作の場合にのみ存在し、Mastra が Memory へのメッセージ書き込みを終えると解決されます。`wake` Action の `output` は、プロセス内で消費できる Agent Stream です。
+
+### `queueMessage(message, options)`
+
+Thread の次の Turn に向けてユーザーメッセージを Queue へ追加します。Thread がアクティブな場合、Mastra はアクティブ Run の完了を待ち、Queue 内のメッセージで新しい Run を開始します。Thread がアイドル状態の場合は、すぐに Run を開始します。
+
+```typescript
+agent.queueMessage('Also check whether the tests need updates.', {
+  resourceId: 'user-123',
+  threadId: 'thread-abc',
+})
+```
+
+`queueMessage()` は `sendMessage()` と同じ形式の `message` と `options` を受け取り、`{ accepted: Promise<SendAgentSignalAccepted>, signal: CreatedAgentSignal, persisted?: Promise<void> }` を返します。`accepted` の意味も `sendMessage()` と同じです。
+
+### `sendSignal(signal, options)`
+
+アクティブな Run または Memory Thread へ Signal を送信します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'signal',
+    type: "{ type: 'user' | 'state' | 'reactive' | 'notification' | 'user-message' | 'system-reminder'; tagName?: string; contents: string | Array<TextPart | FilePart>; attributes?: Record<string, JSONValue>; metadata?: Record<string, unknown>; providerOptions?: ProviderMetadata }",
+    description:
+      "Thread へ送る Signal Context。`type` は Signal の意味上のカテゴリです。`tagName` はモデルに見せる XML Tag を制御します。たとえば、`{ type: 'notification', tagName: 'github-review' }` は `<github-review>...</github-review>` として表示されます。従来の `user-message` と `system-reminder` Payload も引き続き受け付け、正規化されます。未知の `type` 値は拒否されるため、カスタム XML Tag には `tagName` を使います。",
+  },
+  {
+    name: 'options',
+    type: 'object',
+    isOptional: true,
+    description: 'Signal の送信先と配信動作。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'runId',
+            type: 'string',
+            isOptional: true,
+            description: '直接対象とする Run ID。アクティブな Run ID が既知の場合に使います。',
+          },
+          {
+            name: 'resourceId',
+            type: 'string',
+            isOptional: true,
+            description: 'Memory Thread の Resource ID。Thread を対象とする Signal では `threadId` とともに必須です。',
+          },
+          {
+            name: 'threadId',
+            type: 'string',
+            isOptional: true,
+            description: '対象とする Thread ID。Thread を対象とする Signal では `resourceId` とともに必須です。',
+          },
+          {
+            name: 'ifActive',
+            type: 'object',
+            isOptional: true,
+            description: '対象 Thread がアクティブな場合の動作を制御します。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'behavior',
+                    type: "'deliver' | 'persist' | 'discard'",
+                    isOptional: true,
+                    description: '対象 Thread がアクティブな場合の動作を制御します。デフォルトは `deliver` です。',
+                  },
+                  {
+                    name: 'attributes',
+                    type: 'Record<string, string | number | boolean>',
+                    isOptional: true,
+                    description:
+                      '対象 Thread がアクティブなときに Mastra が Signal を受け付けると、Signal へマージされる属性。',
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            name: 'ifIdle',
+            type: 'object',
+            isOptional: true,
+            description: '対象 Thread がアイドル状態の場合の動作を制御します。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'behavior',
+                    type: "'wake' | 'persist' | 'discard'",
+                    isOptional: true,
+                    description: '対象 Thread がアイドル状態の場合の動作を制御します。デフォルトは `wake` です。',
+                  },
+                  {
+                    name: 'streamOptions',
+                    type: 'AgentExecutionOptions',
+                    isOptional: true,
+                    description:
+                      '`ifIdle.behavior` が `wake` の場合に開始する Stream のオプション。Mastra はトップレベルの `resourceId` と `threadId` を Memory コンテキストに使います。',
+                  },
+                  {
+                    name: 'attributes',
+                    type: 'Record<string, string | number | boolean>',
+                    isOptional: true,
+                    description:
+                      '対象 Thread がアイドル状態のときに Mastra が Signal を受け付けると、Signal へマージされる属性。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+`{ accepted: Promise<SendAgentSignalAccepted>, signal: CreatedAgentSignal, persisted?: Promise<void> }` を返します。`accepted` は、Mastra が Signal の処理方法を決定した時点で解決されます。このプロセスが Agent を実行する場合（Run を開始したか、開始する Lease を取得した場合）は `{ action: 'wake', runId, output }`、Signal が既存 Run へ転送された場合（このプロセスがプロセス間の Wake 競合に負けた場合を含む）は `{ action: 'deliver', runId }`、何も実行されなかった場合は `{ action: 'persist' }`／`{ action: 'discard' }` です。`action` は `ifActive`／`ifIdle` で採用された `behavior` と一致します。`runId` は Signal を処理した Run の正式な ID で、`wake` と `deliver` にのみ存在します。`persist`／`discard` では、保存済み Signal との対応付けに `result.signal.id` を使います。`accepted` は Route 決定時に解決され（`wake` Run の生成エラーは `output.consumeStream()` から表面化）、Signal をまったく Routing または開始できなかった場合（例：Agent の設定不備）だけ Reject されます。`persisted` は `persist` 動作の場合にのみ存在し、Mastra が Memory への Signal 書き込みを終えると解決されます。`wake` Action の `output` は、プロセス内で消費できる Agent Stream です。
+
+サーバーレス Handler では `accepted` を await し、`wake` の出力をプラットフォームの `waitUntil` 相当へ渡します。これにより、HTTP レスポンスを返した後も、採用されたプロセスが Stream を最後まで消費できます。
+
+```typescript
+const result = agent.sendSignal(signal, { resourceId, threadId })
+ctx.waitUntil(
+  result.accepted.then(async accepted => {
+    if (accepted.action === 'wake') {
+      await accepted.output.consumeStream()
+    }
+  }),
+)
+```
+
+### `sendStateSignal(state, options)`
+
+名前付きで Thread Scope の State Context を、アクティブな Run または Memory Thread へ送信します。ブラウザ状態、Editor 状態、Watcher 出力など、時間とともに変化する永続 Context を外部 Producer が所有する場合に使います。
+
+```typescript
+const result = await agent.sendStateSignal(
+  {
+    id: 'browser',
+    mode: 'snapshot',
+    cacheKey: 'browser:https://example.com:3-tabs',
+    contents: 'Browser is open. Active tab URL: https://example.com. 3 open tabs.',
+    value: {
+      activeUrl: 'https://example.com',
+      tabCount: 3,
+      open: true,
+    },
+  },
+  {
+    resourceId: 'user-123',
+    threadId: 'thread-abc',
+  },
+)
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'state',
+    type: 'object',
+    description: 'Thread へ送る State Signal。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          { name: 'id', type: 'string', description: '`browser` や `editor` などの State Lane 名。' },
+          {
+            name: 'cacheKey',
+            type: 'string',
+            description: '同じ Lane と Mode の重複 State をスキップするために Mastra が使う、Producer 所有のキー。',
+          },
+          {
+            name: 'contents',
+            type: 'string | Array<TextPart | FilePart>',
+            description: 'LLM 向けの State 表現。',
+          },
+          {
+            name: 'mode',
+            type: "'snapshot' | 'delta'",
+            isOptional: true,
+            description: 'State が正式な Snapshot か変更イベントかを指定します。デフォルトは `snapshot` です。',
+          },
+          {
+            name: 'value',
+            type: 'unknown',
+            isOptional: true,
+            description: "`mode: 'snapshot'` で使う構造化 Snapshot 値。",
+          },
+          {
+            name: 'delta',
+            type: 'unknown',
+            isOptional: true,
+            description: "`mode: 'delta'` で使う構造化変更値。",
+          },
+          {
+            name: 'attributes',
+            type: 'Record<string, string | number | boolean>',
+            isOptional: true,
+            description: 'State Signal Tag に表示する属性。',
+          },
+          {
+            name: 'metadata',
+            type: 'Record<string, unknown>',
+            isOptional: true,
+            description: 'State Signal とともに保存するアプリケーションメタデータ。',
+          },
+          {
+            name: 'tagName',
+            type: 'string',
+            isOptional: true,
+            description: 'モデルに見せる XML Tag 名。デフォルトは `state` です。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'options',
+    type: 'object',
+    description: 'State Signal の送信先と配信動作。`sendSignal()` と同じオプションを受け取ります。',
+  },
+]}
+/>
+
+Mastra が新しい State を受け付けると `{ accepted: Promise<SendAgentSignalAccepted>, signal: CreatedAgentSignal, persisted?: Promise<void>, skipped?: false }` を返します。同じ `cacheKey` と Mode が State Lane の現在値である場合は `{ skipped: true, reason: 'unchanged' }` を返します。`accepted` は、Mastra が Signal の処理方法を決定した時点で解決されます。このプロセスが Agent を実行する場合（Run を開始したか、開始する Lease を取得した場合）は `{ action: 'wake', runId, output }`、Signal が既存 Run へ転送された場合（このプロセスがプロセス間の Wake 競合に負けた場合を含む）は `{ action: 'deliver', runId }`、何も実行されなかった場合は `{ action: 'persist' }`／`{ action: 'discard' }` です。`runId` は Signal を処理した Run の正式な ID で、`wake` と `deliver` にのみ存在します。`persist`／`discard` では、保存済み Signal との対応付けに `result.signal.id` を使います。`wake` Action の `output` は、プロセス内で消費できる Agent Stream です。
+
+### `sendNotificationSignal(notification, options)`
+
+Notification Inbox Record を作成または統合し、通知配信 Policy を解決します。即時配信が決定された場合は Notification Signal を送信します。
+
+```typescript
+const result = await agent.sendNotificationSignal(
+  {
+    source: 'github',
+    kind: 'ci-status',
+    priority: 'high',
+    summary: 'CI failed on main: 3 tests failed.',
+    dedupeKey: 'github:acme/app:main:ci',
+  },
+  {
+    resourceId: 'user-123',
+    threadId: 'thread-abc',
+  },
+)
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'notification',
+    type: 'object',
+    description: '作成または統合する Notification Inbox Record。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'source',
+            type: 'string',
+            description: '`github`、`slack`、`email` など、通知を生成した外部システム。',
+          },
+          {
+            name: 'kind',
+            type: 'string',
+            description: '`ci-status`、`mention`、`direct-message` など、Source 内の通知種別。',
+          },
+          {
+            name: 'summary',
+            type: 'string',
+            description: 'Notification Signal の内容として使う LLM 向け要約。',
+          },
+          {
+            name: 'priority',
+            type: "'low' | 'medium' | 'high' | 'urgent'",
+            isOptional: true,
+            description: '通知配信 Policy が使う優先度。デフォルトは `medium` です。',
+          },
+          {
+            name: 'payload',
+            type: 'unknown',
+            isOptional: true,
+            description: 'Tool またはアプリケーションコード向けに Inbox Record へ保存する構造化 Payload。',
+          },
+          {
+            name: 'dedupeKey',
+            type: 'string',
+            isOptional: true,
+            description: '同じ Source と Thread にある重複した保留中通知を統合するためのキー。',
+          },
+          {
+            name: 'coalesceKey',
+            type: 'string',
+            isOptional: true,
+            description: '同じ Source と Thread にある関連した保留中通知をまとめるためのキー。',
+          },
+          {
+            name: 'attributes',
+            type: 'Record<string, JSONValue>',
+            isOptional: true,
+            description: '送出する Notification Signal へコピーする追加属性。',
+          },
+          {
+            name: 'metadata',
+            type: 'Record<string, unknown>',
+            isOptional: true,
+            description: 'Inbox Record へ保存するアプリケーションメタデータ。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'options',
+    type: 'object',
+    description: '通知の対象 Thread と Wake-up 動作。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'resourceId',
+            type: 'string',
+            description: 'Notification Inbox と対象 Memory Thread の Resource ID。',
+          },
+          {
+            name: 'threadId',
+            type: 'string',
+            description: 'Notification Inbox と対象 Memory Thread の Thread ID。',
+          },
+          {
+            name: 'ifIdle',
+            type: 'object',
+            isOptional: true,
+            description: '対象 Thread がアイドル状態の場合の動作を制御します。',
+            properties: [
+              {
+                type: 'object',
+                parameters: [
+                  {
+                    name: 'streamOptions',
+                    type: 'AgentExecutionOptions',
+                    isOptional: true,
+                    description:
+                      '即時通知によってアイドル状態の Thread が Wake したときに開始する Stream のオプション。',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+`{ record: NotificationRecord, decision: NotificationDeliveryDecision, runId?: string, signal?: CreatedAgentSignal, persisted?: Promise<void>, accepted?: Promise<SendAgentSignalAccepted> }` を返します。`record` は保存済み Inbox Record、`decision` は配信 Policy の結果です。Ingress が Signal を即時送出した場合は、アクティブな高優先度通知で即時送出される要約も含め、`signal` と `runId` が存在します。アイドル状態の Thread を Wake させずに送出 Signal を永続化した場合は `persisted` が存在します。Signal を送出した場合は `accepted` が存在し、Mastra が処理方法を決定した時点で解決されます。このプロセスが Agent を実行する場合（Run を開始したか、開始する Lease を取得した場合）は `{ action: 'wake', runId, output }`、Signal が既存 Run へ転送された場合は `{ action: 'deliver', runId }`、何も実行されなかった場合は `{ action: 'persist' }`／`{ action: 'discard' }` です。解決結果の `runId` は `wake` と `deliver` にのみ存在します。`wake` Action の `output` は、プロセス内で消費できる Agent Stream です。
+
+デフォルト配信は優先度を考慮します。`urgent` 通知は即時配信されます。`high` 通知は Thread がアイドル状態なら即時配信されます。Thread がアクティブな場合、Mastra は要約をすぐに送出し、Thread がアイドル状態になった後の完全配信用に `deliverAt` を維持します。`medium` 通知はアイドル時に即時配信され、アクティブ時には要約へまとめられます。`low` 通知はアクティブ時もアイドル時も要約へまとめられます。アイドル時の低優先度要約は、Model Loop を Wake させずに購読者へ届きます。処理全体は [Signal](/docs/long-running-agents/signals#notification-signals)を参照してください。
+
+一部の通知を別の Dispatch Window や要約 Rollup まで待機させるには、Agent に `notifications.deliveryPolicy` を設定します。
+
+```typescript title="src/mastra/agents/support-agent.ts"
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support Agent',
+  instructions: 'Help the user triage updates.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  notifications: {
+    deliveryPolicy: {
+      priorities: {
+        urgent: 'deliver',
+      },
+      decide: ({ record }) => {
+        if (record.priority === 'low') {
+          return {
+            action: 'summarize',
+            summaryAt: new Date(Date.now() + 30 * 60 * 1000),
+          }
+        }
+      },
+    },
+  },
+})
+```
+
+### `subscribeToThread(options)`
+
+Memory Thread の生 Stream チャンクを購読します。`sendMessage()`、`queueMessage()`、`sendSignal()` を呼び出す前に使います。Signal がアクティブ Run を中止した場合も含め、Stream 出力の表示と Signal Echo の監視が可能です。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'object',
+    description: 'Thread の購読対象。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'resourceId',
+            type: 'string',
+            isOptional: true,
+            description: 'Memory Thread の Resource ID。',
+          },
+          {
+            name: 'threadId',
+            type: 'string',
+            description: '購読する Thread ID。',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+次のメンバーを持つ `AgentThreadSubscription` オブジェクトを返します。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'stream',
+    type: 'AsyncIterable<AgentChunkType>',
+    description: '購読した Thread の生 Agent Stream チャンク。',
+  },
+  {
+    name: 'activeRunId',
+    type: '() => string | null',
+    description: 'Thread のアクティブ Run ID を返します。アクティブな Run がない場合は `null` です。',
+  },
+  {
+    name: 'abort',
+    type: '() => boolean',
+    description: 'Thread のアクティブ Run を中止します。Run を中止した場合は `true` を返します。',
+  },
+  {
+    name: 'unsubscribe',
+    type: '() => void',
+    description: 'アクティブ Run を中止せずに購読を停止します。',
+  },
+]}
+/>
+
+## コンストラクターのパラメータ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: false,
+    description: 'Agent の一意な識別子。',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    isOptional: false,
+    description: 'Agent の表示名。',
+  },
+  {
+    name: 'description',
+    type: 'string',
+    isOptional: true,
+    description: "Agent の目的と機能に関する任意の説明。",
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown> | ({ requestContext: RequestContext }) => Record<string, unknown> | Promise<Record<string, unknown>>',
+    isOptional: true,
+    description:
+      'クライアントで Agent を分類または Filter するための任意のメタデータ。静的 Record、またはリクエストコンテキストからメタデータを解決する関数を指定できます。',
+  },
+  {
+    name: 'instructions',
+    type: 'SystemMessage | ({ requestContext: RequestContext }) => SystemMessage | Promise<SystemMessage>',
+    isOptional: false,
+    description: `Agent の動作を導く instructions。文字列、文字列配列、System Message オブジェクト、
+System Message 配列、またはこれらの型を動的に返す関数を指定できます。
+SystemMessage の型：string | string[] | CoreSystemMessage | CoreSystemMessage[] | SystemModelMessage | SystemModelMessage[]`,
+  },
+  {
+    name: 'model',
+    type: 'MastraLanguageModel | ({ requestContext: RequestContext }) => MastraLanguageModel | Promise<MastraLanguageModel>',
+    isOptional: false,
+    description:
+      'Agent が使う言語モデル。`provider/model` 形式の Model Router 文字列、モデル設定または Provider インスタンス、あるいは Runtime でモデルを解決する関数を渡します。一般的な Provider と環境変数は[モデル文字列](#model-strings)を参照してください。',
+  },
+  {
+    name: 'agents',
+    type: 'Record<string, Agent> | ({ requestContext: RequestContext }) => Record<string, Agent> | Promise<Record<string, Agent>>',
+    isOptional: true,
+    description: 'Agent がアクセスできる Sub-agent。静的に指定することも、動的に解決することもできます。',
+  },
+  {
+    name: 'tools',
+    type: 'ToolsInput | ({ requestContext: RequestContext, mastra?: Mastra }) => ToolsInput | Promise<ToolsInput>',
+    isOptional: true,
+    description:
+      'Agent がアクセスできる Tool。静的に指定するか、リクエストコンテキストと、利用可能な場合は関連する Mastra インスタンスから動的に解決できます。',
+  },
+  {
+    name: 'hooks',
+    type: 'ToolHooks',
+    isOptional: true,
+    description:
+      'この Agent による各 Tool 呼び出しの前後で実行される Hook。`generate()` または `stream()` へ渡す実行単位の Hook は、ここで設定した対応する Hook を上書きします。以下の「Tool Hook」を参照してください。',
+    properties: [
+      {
+        type: 'ToolHooks',
+        parameters: [
+          {
+            name: 'beforeToolCall',
+            type: '(context: ToolHookContext) => void | ToolBeforeHookResult | Promise<void | ToolBeforeHookResult>',
+            isOptional: true,
+            description:
+              'Tool の実行前に実行されます。`{ toolName, input, context, metadata }` を受け取ります。Tool 呼び出しをスキップし、`output` を結果として使うには `{ proceed: false, output }` を返します。',
+          },
+          {
+            name: 'afterToolCall',
+            type: '(context: ToolAfterHookContext) => void | Promise<void>',
+            isOptional: true,
+            description:
+              'Tool の実行後に実行されます。`{ toolName, input, context, metadata, output, error }` を受け取ります。Tool がエラーをスローすると `output` は undefined になり、代わりに `error` が設定されます。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'transform',
+    type: 'ToolPayloadTransformPolicy',
+    isOptional: true,
+    description:
+      '表示用 Stream やユーザー向け Transcript Message が受け取る前に Tool Payload を変換する共通 Policy。Tool 固有の規則には `createTool()` の Tool 単位の `transform` を使います。',
+  },
+  {
+    name: 'workflows',
+    type: 'Record<string, Workflow> | ({ requestContext: RequestContext }) => Record<string, Workflow> | Promise<Record<string, Workflow>>',
+    isOptional: true,
+    description: 'Agent が実行できる Workflow。静的または動的に解決できます。',
+  },
+  {
+    name: 'defaultOptions',
+    type: 'AgentExecutionOptions | ({ requestContext: RequestContext }) => AgentExecutionOptions | Promise<AgentExecutionOptions>',
+    isOptional: true,
+    description: '`stream()` と `generate()` の呼び出しで使うデフォルトオプション。',
+  },
+  {
+    name: 'defaultGenerateOptionsLegacy',
+    type: 'AgentGenerateOptions | ({ requestContext: RequestContext }) => AgentGenerateOptions | Promise<AgentGenerateOptions>',
+    isOptional: true,
+    description: '`generateLegacy()` の呼び出しで使うデフォルトオプション。',
+  },
+  {
+    name: 'defaultStreamOptionsLegacy',
+    type: 'AgentStreamOptions | ({ requestContext: RequestContext }) => AgentStreamOptions | Promise<AgentStreamOptions>',
+    isOptional: true,
+    description: '`streamLegacy()` の呼び出しで使うデフォルトオプション。',
+  },
+  {
+    name: 'mastra',
+    type: 'Mastra',
+    isOptional: true,
+    description: 'Mastra Runtime インスタンスへの参照（自動注入）。',
+  },
+  {
+    name: 'scorers',
+    type: 'MastraScorers | ({ requestContext: RequestContext }) => MastraScorers | Promise<MastraScorers>',
+    isOptional: true,
+    description: 'Runtime 評価と Telemetry の Scoring 設定。静的または動的に指定できます。',
+  },
+  {
+    name: 'memory',
+    type: 'MastraMemory | ({ requestContext: RequestContext }) => MastraMemory | Promise<MastraMemory>',
+    isOptional: true,
+    description: 'Stateful Context の保存と取得に使う Memory Module。',
+  },
+  {
+    name: 'notifications',
+    type: 'object',
+    isOptional: true,
+    description: 'Durable Notification Signal の通知配信設定。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'deliveryPolicy',
+            type: 'NotificationDeliveryPolicyConfig',
+            isOptional: true,
+            description:
+              'Notification Record の配信方法を制御します。デフォルトの決定、優先度ごとの決定、Source ごとの決定、またはカスタム `decide()` 関数を設定できます。',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'voice',
+    type: 'CompositeVoice',
+    isOptional: true,
+    description: '音声入出力の Voice 設定。',
+  },
+  {
+    name: 'inputProcessors',
+    type: '(Processor | ProcessorWorkflow)[] | ({ requestContext: RequestContext }) => (Processor | ProcessorWorkflow)[] | Promise<(Processor | ProcessorWorkflow)[]>',
+    isOptional: true,
+    description:
+      'Agent が処理する前にメッセージを変更または検証できる Input Processor。個別の Processor オブジェクト、または ProcessorStepSchema を使って `createWorkflow()` で作成した Workflow を指定できます。',
+  },
+  {
+    name: 'outputProcessors',
+    type: '(Processor | ProcessorWorkflow)[] | ({ requestContext: RequestContext }) => (Processor | ProcessorWorkflow)[] | Promise<(Processor | ProcessorWorkflow)[]>',
+    isOptional: true,
+    description:
+      'クライアントへ送信する前に Agent からのメッセージを変更または検証できる Output Processor。個別の Processor オブジェクトまたは Workflow を指定できます。',
+  },
+  {
+    name: 'maxProcessorRetries',
+    type: 'number',
+    isOptional: true,
+    description: 'Processor が LLM Step の再試行を要求できる最大回数。',
+  },
+  {
+    name: 'requestContextSchema',
+    type: 'StandardJSONSchemaV1',
+    isOptional: true,
+    description:
+      'リクエストコンテキスト値を検証する Standard JSON Schema。指定すると generate() または stream() の開始時にコンテキストが検証され、失敗した場合は MastraError がスローされます。',
+  },
+  {
+    name: 'editor',
+    type: 'false | { instructions?: boolean; tools?: boolean | { description?: boolean } }',
+    isOptional: true,
+    description:
+      'コードで定義したこの Agent について、Editor が上書きできるフィールドを制御します。instructions と Tool の編集を許可するには省略します。以下の「Editor による上書き」を参照してください。',
+  },
+]}
+/>
+
+## `generate()` の Memory オプション
+
+`agent.generate()` の呼び出し時に `memory` を渡し、Run が読み書きする会話 Thread を選びます。一般的な形式は `memory: { resource: string, thread: string }` で、`resource` は所有者、`thread` は会話を識別します。概念モデルは [Thread と Resource](/docs/memory/message-history#threads-and-resources)を参照してください。
+
+```typescript title="src/mastra/run.ts"
+const response = await agent.generate('What did we decide about retries?', {
+  memory: {
+    resource: 'user-123',
+    thread: 'support-thread-456',
+  },
+})
+```
+
+呼び出し中に Thread メタデータを作成または更新する場合は、Thread オブジェクトを使います。
+
+```typescript title="src/mastra/run.ts"
+const response = await agent.generate('Continue the support conversation.', {
+  memory: {
+    resource: 'user-123',
+    thread: {
+      id: 'support-thread-456',
+      title: 'Billing support',
+      metadata: { category: 'billing' },
+    },
+  },
+})
+```
+
+## Tool Hook
+
+`hooks` を使うと、割り当て済み Tool、Memory Tool、Toolset、クライアント Tool、Workspace Tool を含め、Agent によるすべての Tool 呼び出しの前後でロジックを実行できます。
+
+```typescript title="src/mastra/agents/hooked-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const agent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  instructions: 'Help users with their questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // highlight-start
+  hooks: {
+    beforeToolCall: ({ toolName, input }) => {
+      console.log(`Running ${toolName}`, input)
+    },
+    afterToolCall: ({ toolName, output, error }) => {
+      console.log(`Finished ${toolName}`, { output, error })
+    },
+  },
+  // highlight-end
+})
+```
+
+`beforeToolCall` は `{ proceed: false, output }` を返して Tool 呼び出しを短絡できます。Agent は実行をスキップし、`output` を Tool の結果として使います。
+
+```typescript
+const result = await agent.generate('Clean up old records', {
+  hooks: {
+    beforeToolCall: ({ toolName }) => {
+      if (toolName === 'deleteRecord') {
+        return { proceed: false, output: { blocked: true } }
+      }
+    },
+  },
+})
+```
+
+Hook Context の `metadata` には `agentId` と `agentName` が含まれます。`generate()` または `stream()` へ渡す実行単位の Hook は、対応する Agent レベルの Hook を上書きします。[Workspace](/reference/workspace/workspace-class) でも `tools.hooks` が定義されている場合、Workspace Hook は Agent Hook Wrapper の内側で実行されます。
+
+## Editor による上書き
+
+[`MastraEditor`](/reference/editor/mastra-editor) を登録すると、`editor` フィールドによって、コードで定義した Agent のどの部分を Editor から変更できるかを制御できます。コードが所有するフィールドは Studio で読み取り専用になり、保存する上書き値から除外されます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'editor',
+    type: 'false | { instructions?: boolean; tools?: boolean | { description?: boolean } }',
+    isOptional: true,
+    description:
+      'instructions と Tool の編集を許可するには省略します。Agent をロックするには `false` を設定します。instructions の編集を許可するには `instructions: true` を設定します。Tool の所属と説明の編集を許可するには `tools: true`、説明の編集だけを許可するには `tools: { description: true }` を設定します。',
+  },
+]}
+/>
+
+Agent の `id`、`name`、`model` は常にコードから取得され、Editor では上書きできません。使い方は [Editor](/docs/editor/overview)を参照してください。
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'agent',
+    type: 'Agent<TAgentId, TTools>',
+    description: '指定した設定を持つ新しい Agent インスタンス。',
+  },
+]}
+/>

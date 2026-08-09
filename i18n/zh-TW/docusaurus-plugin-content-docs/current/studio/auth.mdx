@@ -1,0 +1,167 @@
+---
+title: "驗證 | Studio"
+description: 使用登入畫面、角色型存取控制與依權限顯示的 UI，保護你的 Studio 部署。
+packages:
+  - "@mastra/core"
+---
+
+# Studio 驗證
+
+在 Mastra 伺服器上設定[驗證](/docs/server/auth/)後，Studio 會自動顯示登入畫面並強制執行存取控制。只需一份設定，即可同時保護 Studio UI 與 API 路由。
+
+若未設定驗證，Studio 與所有 API 路由都可由公開網路存取。
+
+## 何時使用 Studio Auth
+
+- 多位團隊成員需要透過共用的 Studio 部署與 Agent、Workflow 和 Tool 互動。
+- 必須透過權限限制誰能執行 Agent、編輯 Workflow 或刪除資料集。
+- Studio 部署應以登入畫面（SSO、電子郵件／密碼，或兩者）限制存取。
+
+## 快速開始
+
+在 Mastra 伺服器設定中加入驗證 Provider。以下範例使用 [Simple Auth](/docs/server/auth/simple-auth) 建立最精簡的設定：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { SimpleAuth } from '@mastra/core/server'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new SimpleAuth({
+      users: {
+        'my-api-key': {
+          id: 'user-1',
+          name: 'Alice',
+          role: 'admin',
+        },
+      },
+    }),
+  },
+})
+```
+
+設定完成後，Studio 會顯示登入畫面，且所有 API 請求都必須通過驗證。請參閱[驗證文件](/docs/server/auth)，瞭解完整的支援 Provider 清單。
+
+## 運作方式
+
+設定 [`server.auth`](/reference/configuration#serverauth) 會同時完成兩件事：
+
+- **Studio UI**：顯示登入畫面。依 Provider 而定，使用者可透過 SSO、電子郵件／密碼，或兩者登入。
+- **API 路由**：所有內建路由（`/api/agents/*`、`/api/workflows/*` 等）與自訂路由都必須通過驗證。無論請求來自 Studio 或直接呼叫 API，皆適用此規則。
+
+Studio 會呼叫 `GET /api/auth/capabilities` 端點來偵測可用功能。回應會告訴 Studio 應顯示哪些登入方式；若使用者已通過驗證，也會包含其使用者資訊與權限。
+
+## 透過 URL 傳遞權杖
+
+其他應用程式嵌入或連結至 Studio 時，可透過 `auth_header` URL 參數交付授權權杖。若外部主機已持有權杖，並希望直接開啟已驗證的 Studio 工作階段而不顯示登入畫面，此方式便很實用。
+
+`auth_header` 的值一律會填入 `Authorization` 請求標頭。此參數只會設定這一個標頭，因此值中必須包含伺服器預期的配置前綴，例如 `Bearer`。
+
+以查詢字串中的權杖開啟 Studio：
+
+```
+https://your-studio-host/?auth_header=Bearer%20your-token
+```
+
+Studio 會依下列方式處理權杖：
+
+- 載入時讀取一次 `auth_header`，並在該工作階段的每個 API 請求中，將其值當作 `Authorization` 標頭傳送。
+- 從網址列移除 `auth_header`，同時保留其他查詢參數與雜湊。
+- 權杖只保留在記憶體中，絕不寫入本機儲存空間，因此權杖是暫時性的，重新載入頁面後不會保留。
+
+權杖會經由 URL 參數傳遞，因此主機應用程式必須負責該 URL 的產生與傳輸方式。URL 參數可能透過瀏覽器歷程記錄、referrer 標頭與伺服器存取記錄曝光。
+
+## 角色型存取控制
+
+RBAC 可控制每位使用者能在 Studio 中查看及執行哪些操作。它與驗證分開：`server.auth` 負責確認使用者身分，`server.rbac` 則負責控制其可執行的操作。
+
+### 預設角色
+
+Mastra 內建四種預設角色，可從 `@mastra/core/auth/ee` 匯入：
+
+| 角色 | 權限 |
+| - | - |
+| `owner` | 完整存取權（`*`） |
+| `admin` | 讀取、寫入與執行 |
+| `member` | 讀取與執行 |
+| `viewer` | 唯讀 |
+
+### 啟用 RBAC
+
+搭配預設角色使用 `StaticRBACProvider`，或自行定義角色：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { SimpleAuth } from '@mastra/core/server'
+import { StaticRBACProvider, DEFAULT_ROLES } from '@mastra/core/auth/ee'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new SimpleAuth({
+      users: {
+        'admin-key': { id: 'user-1', name: 'Alice', role: 'admin' },
+        'viewer-key': { id: 'user-2', name: 'Bob', role: 'viewer' },
+      },
+    }),
+    rbac: new StaticRBACProvider({
+      roles: DEFAULT_ROLES,
+      getUserRoles: user => [user.role],
+    }),
+  },
+})
+```
+
+啟用 RBAC 後，Studio 會隱藏使用者無權執行的操作。`viewer` 看不到刪除按鈕，`member` 無法修改 Agent 設定。
+
+### 權限格式
+
+權限採用 `{resource}:{action}` 格式，並可選擇將範圍限定至特定資源：
+
+| 格式 | 意義 |
+| - | - |
+| `*` | 可完整存取所有項目 |
+| `*:read` | 可讀取所有資源 |
+| `agents:*` | 可對 Agent 執行所有操作 |
+| `agents:execute` | 只能執行 Agent |
+| `agents:read:my-id` | 依 ID 讀取特定 Agent |
+
+資源包括 `agents`、`workflows`、`tools`、`datasets`、`memory`、`scores`、`observability` 等；操作則包括 `read`、`write`、`execute` 與 `delete`。
+
+### 對應外部 Provider 角色
+
+若身分識別 Provider 已定義角色（例如 Clerk 組織或 WorkOS 群組），可使用 `roleMapping` 將其對應至 Mastra 權限：
+
+```typescript title="src/mastra/index.ts"
+import { StaticRBACProvider } from '@mastra/core/auth/ee'
+
+const rbac = new StaticRBACProvider({
+  roleMapping: {
+    'org:admin': ['*'],
+    'org:member': ['*:read', '*:execute'],
+    'org:viewer': ['*:read'],
+  },
+  getUserRoles: user => user.providerRoles,
+})
+```
+
+## 登入方式
+
+Studio 會依驗證 Provider 調整登入畫面：
+
+| Provider 類型 | 登入 UI |
+| - | - |
+| 僅 SSO | SSO 按鈕（例如「Sign in with WorkOS」） |
+| 僅認證資訊 | 電子郵件與密碼表單 |
+| 兩者 | SSO 按鈕與電子郵件／密碼表單 |
+
+每個 Provider 都能啟用或停用註冊。停用時，Studio 會隱藏註冊連結並強制顯示登入表單。
+
+## EE 授權
+
+Studio Auth 功能（SSO 登入、RBAC、依權限顯示的 UI）屬於 Mastra Enterprise Edition。使用 Simple Auth 或在本機執行時不一定需要授權；搭配第三方 Provider 的正式環境部署，則必須向 [Mastra 業務團隊](https://mastra.ai/contact)取得有效的 EE 授權。
+
+## 相關內容
+
+- [驗證概觀](/docs/server/auth)：完整的支援驗證 Provider 清單。
+- [Studio 部署](/docs/studio/deployment)：將 Studio 部署至正式環境。
+- [自訂 API 路由](/docs/server/custom-api-routes#authentication)：控制個別端點的驗證。

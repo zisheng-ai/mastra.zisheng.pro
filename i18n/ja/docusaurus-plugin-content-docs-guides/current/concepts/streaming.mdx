@@ -1,0 +1,338 @@
+---
+title: "ストリーミング"
+description: "Mastra のストリーミングでは、Agent と Workflow の両方からリアルタイムに増分レスポンスを受け取り、AI 生成コンテンツの作成中に即座にフィードバックを得られます。"
+packages:
+  - "@mastra/core"
+  - "@mastra/ai-sdk"
+---
+
+# ストリーミング
+
+Mastra は Agent と Workflow からのリアルタイムな増分レスポンスをサポートしており、完了を待たずに生成中の出力を確認できます。チャット、長文コンテンツ、複数 Step の Workflow など、即時のフィードバックが重要な場面で便利です。
+
+## はじめに
+
+Mastra のストリーミング API はモデルのバージョンに応じて変わります。
+
+- **`.stream()`**：V2 モデル向けで、**AI SDK v5** 以降（`LanguageModelV2`）をサポートします。
+- **`.streamLegacy()`**：V1 モデル向けで、**AI SDK v4**（`LanguageModelV1`）をサポートします。
+
+## Agent からストリーミングする
+
+基本的なプロンプトには単一の文字列、複数のコンテキストを渡す場合には文字列の配列、ロールや会話フローを細かく制御する場合には `role` と `content` を持つメッセージオブジェクトの配列を渡せます。
+
+### `Agent.stream()` を使用する
+
+`textStream` は生成中のレスポンスをチャンクに分割し、全体が一度に届くのではなく段階的にストリーミングできるようにします。各ストリームチャンクを確認するには、`for await` ループで `textStream` を反復処理します。
+
+```typescript
+const testAgent = mastra.getAgent('testAgent')
+
+const stream = await testAgent.stream([{ role: 'user', content: 'Help me organize my day' }])
+
+for await (const chunk of stream.textStream) {
+  process.stdout.write(chunk)
+}
+```
+
+詳しくは [Agent.stream()](/reference/streaming/agents/stream) を参照してください。
+
+:::tip
+
+[バックグラウンドタスク](/docs/long-running-agents/background-tasks)を実行する Agent では、[`Agent.streamUntilIdle()`](/reference/streaming/agents/streamUntilIdle) を使用すると、それらのタスクが完了して Agent が結果に応答するまでストリームを開いたままにできます。
+
+:::
+
+### `Agent.stream()` の出力
+
+出力には、Agent が生成したレスポンスがストリーミングされます。
+
+```text
+Of course!
+To help you organize your day effectively, I need a bit more information.
+Here are some questions to consider:
+...
+```
+
+### Agent ストリームのプロパティ
+
+Agent ストリームでは、次のレスポンスプロパティにアクセスできます。
+
+- **`stream.textStream`**：テキストチャンクを送出する読み取り可能なストリーム。
+- **`stream.text`**：完全なテキストレスポンスに解決される Promise。
+- **`stream.finishReason`**：Agent がストリーミングを停止した理由。
+- **`stream.usage`**：トークン使用量の情報。
+
+### AI SDK v5 以降との互換性
+
+AI SDK v5 以降では、モデル Provider に `LanguageModelV2` を使用します。AI SDK v4 モデルを使用しているというエラーが発生した場合は、モデルパッケージを次のメジャーバージョンにアップグレードする必要があります。
+
+AI SDK v5 以降と統合するには、`@mastra/ai-sdk` の `toAISdkV5Stream()` ユーティリティを使って Mastra ストリームを AI SDK 互換形式に変換します。
+
+```typescript
+import { toAISdkV5Stream } from '@mastra/ai-sdk'
+
+const testAgent = mastra.getAgent('testAgent')
+
+const stream = await testAgent.stream([{ role: 'user', content: 'Help me organize my day' }])
+
+// Convert to AI SDK v5+ compatible stream
+const aiSDKStream = toAISdkV5Stream(stream, { from: 'agent' })
+```
+
+メッセージを AI SDK v5 以降の形式に変換するには、`@mastra/ai-sdk/ui` の `toAISdkV5Messages()` ユーティリティを使用します。
+
+```typescript
+import { toAISdkV5Messages } from '@mastra/ai-sdk/ui'
+
+const messages = [{ role: 'user', content: 'Hello' }]
+const aiSDKMessages = toAISdkV5Messages(messages)
+```
+
+## Workflow からストリーミングする
+
+Workflow からのストリーミングでは、増分テキストチャンクではなく、実行ライフサイクルを表す一連の構造化イベントが返されます。このイベントベースの形式により、`.createRun()` で Run を作成した後、その進行状況をリアルタイムで追跡して応答できます。
+
+### `Run.stream()` を使用する
+
+`stream()` メソッドは、イベントの `ReadableStream` を直接返します。
+
+```typescript
+const run = await testWorkflow.createRun()
+
+const stream = await run.stream({
+  inputData: {
+    value: 'initial data',
+  },
+})
+
+for await (const chunk of stream) {
+  console.log(chunk)
+}
+```
+
+詳しくは [Run.stream()](/reference/streaming/workflows/stream) を参照してください。
+
+### `Run.stream()` の出力
+
+イベント構造のトップレベルには `runId` と `from` が含まれるため、ペイロードを調べなくても Workflow の Run を簡単に識別して追跡できます。
+
+```typescript prettier:false
+{
+  type: 'workflow-start',
+  runId: '1eeaf01a-d2bf-4e3f-8d1b-027795ccd3df',
+  from: 'WORKFLOW',
+  payload: {
+    stepName: 'step-1',
+    args: { value: 'initial data' },
+    stepCallId: '8e15e618-be0e-4215-a5d6-08e58c152068',
+    startedAt: 1755121710066,
+    status: 'running'
+  }
+}
+```
+
+### Workflow ストリームのプロパティ
+
+Workflow ストリームでは、次のレスポンスプロパティにアクセスできます。
+
+- **`stream.status`**：Workflow の Run のステータス。
+- **`stream.result`**：Workflow の Run の結果。
+- **`stream.usage`**：Workflow の Run の合計トークン使用量。
+
+Agent または Workflow からストリーミングすると、LLM の出力や Workflow の Run のステータスをリアルタイムで確認できます。このフィードバックをユーザーに直接渡したり、アプリケーションで Workflow のステータス変化を表示したりできます。
+
+Agent または Workflow から送出されるイベントは、Run の開始、テキストの生成、Tool の呼び出しなど、生成や実行のさまざまな段階を表します。
+
+## イベントタイプ
+
+`.stream()` から送出されるイベントの完全な一覧を以下に示します。
+**Agent** と **Workflow** のどちらからストリーミングするかに応じて、発生するイベントはこのうちの一部に限られます。
+
+- **start**：Agent または Workflow の Run の開始を示します。
+- **step-start**：Workflow の Step が実行を開始したことを示します。
+- **text-delta**：LLM の生成に応じて送出される増分テキストチャンク。
+- **tool-call**：Agent が Tool の使用を決定したときに、Tool 名と引数を含めて送出されます。
+- **tool-result**：Tool の実行から返された結果。
+- **step-finish**：特定の Step が完全に終了したことを示し、その Step の終了理由などのメタデータを含む場合があります。
+- **finish**：使用統計を含む、Agent または Workflow の完了イベント。
+
+## Agent ストリームを確認する
+
+送出されたすべてのイベントチャンクを確認するには、`for await` ループで `stream` を反復処理します。
+
+```typescript
+const testAgent = mastra.getAgent('testAgent')
+
+const stream = await testAgent.stream([{ role: 'user', content: 'Help me organize my day' }])
+
+for await (const chunk of stream) {
+  console.log(chunk)
+}
+```
+
+詳しくは [Agent.stream()](/reference/streaming/agents/stream) を参照してください。
+
+### Agent 出力の例
+
+送出される可能性があるイベントの例を次に示します。各イベントには必ず `type` が含まれ、`from` や `payload` などの追加フィールドが含まれる場合があります。
+
+```typescript {2,7,15} prettier:false
+{
+  type: 'start',
+  from: 'AGENT',
+  // ..
+}
+{
+  type: 'step-start',
+  from: 'AGENT',
+  payload: {
+    messageId: 'msg-cdUrkirvXw8A6oE4t5lzDuxi',
+    // ...
+  }
+}
+{
+  type: 'tool-call',
+  from: 'AGENT',
+  payload: {
+    toolCallId: 'call_jbhi3s1qvR6Aqt9axCfTBMsA',
+    toolName: 'testTool'
+    // ..
+  }
+}
+```
+
+## Writer API
+
+`writer` API は Tool と Workflow の Step で共通です。機能別の例については、Tool と Workflow のドキュメントを参照してください。
+
+## Tool を使用する Agent
+
+Agent のストリーミングは Tool 呼び出しと組み合わせることができ、Tool の出力を Agent のストリーミングレスポンスに直接書き込めます。これにより、やり取りの一部として Tool の動作を確認できます。
+
+```typescript {2,9}
+import { Agent } from '@mastra/core/agent'
+import { testTool } from '../tools/test-tool'
+
+export const testAgent = new Agent({
+  id: 'test-agent',
+  name: 'Test Agent',
+  instructions: 'You are a weather agent.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { testTool },
+})
+```
+
+### `context.writer` を使用する
+
+`context.writer` オブジェクトは Tool の `execute()` 関数で使用でき、カスタムイベント、データ、値をアクティブなストリームに送出できます。Tool はこれらのイベントを使って、実行中の中間結果やステータス更新を提供します。
+
+:::warning
+
+`writer.write()` の呼び出しは必ず `await` してください。そうしないとストリームがロックされ、`WritableStream is locked` エラーが発生します。
+
+:::
+
+```typescript {4,7,14}
+import { createTool } from '@mastra/core/tools'
+
+export const testTool = createTool({
+  execute: async (inputData, context) => {
+    const { value } = inputData
+
+    await context?.writer?.write({
+      type: 'custom-event',
+      status: 'pending',
+    })
+
+    const response = await fetch()
+
+    await context?.writer?.write({
+      type: 'custom-event',
+      status: 'success',
+    })
+
+    return {
+      value: '',
+    }
+  },
+})
+```
+
+トップレベルのストリームチャンクを送出するには、`writer.custom()` も使用できます。UI フレームワークと統合する場合に便利です。
+
+```typescript {4,7,14}
+import { createTool } from '@mastra/core/tools'
+
+export const testTool = createTool({
+  execute: async (inputData, context) => {
+    const { value } = inputData
+
+    await context?.writer?.custom({
+      type: 'data-tool-progress',
+      status: 'pending',
+    })
+
+    const response = await fetch()
+
+    await context?.writer?.custom({
+      type: 'data-tool-progress',
+      status: 'success',
+    })
+
+    return {
+      value: '',
+    }
+  },
+})
+```
+
+### 一時データチャンク
+
+デフォルトでは、`writer.custom()` で送出された `data-*` チャンクは、メッセージ履歴の一部としてストレージに永続化されます。進行状況の更新や詳細なログ出力など、ライブストリーミング中にのみ必要なチャンクでは、`transient: true` を設定してストレージへの永続化を省略します。一時チャンクもクライアントにはリアルタイムでストリーミングされますが、データベースには保存されません。
+
+```typescript {4}
+await context?.writer?.custom({
+  type: 'data-build-log',
+  data: { line: 'Compiling module 3 of 12...' },
+  transient: true,
+})
+```
+
+データ量が多い場合や頻繁に発生し、ライブセッション中にのみ必要な場合は、一時チャンクを使用してください。ページを再読み込みすると、一時チャンクは利用できなくなります。Tool の戻り値と一時設定されていないチャンクだけがストレージから読み込まれます。
+
+## `writer` 引数を使用する
+
+`writer` 引数は Workflow Step の `execute` 関数に渡され、カスタムイベント、データ、値をアクティブなストリームに送出できます。Workflow Step はこれらのイベントを使って、実行中の中間結果やステータス更新を提供します。
+
+:::warning
+
+`writer.write(...)` の呼び出しは必ず `await` してください。そうしないとストリームがロックされ、`WritableStream is locked` エラーが発生します。
+
+:::
+
+```typescript {5,7,14} prettier:false
+import { createStep } from "@mastra/core/workflows";
+
+export const testStep = createStep({
+  execute: async ({ inputData, writer }) => {
+    const { value } = inputData;
+
+    await writer?.write({
+      type: "custom-event",
+      status: "pending"
+    });
+
+    const response = await fetch(...);
+
+    await writer?.write({
+      type: "custom-event",
+      status: "success"
+    });
+
+    return {
+      value: ""
+    };
+  },
+});
+```

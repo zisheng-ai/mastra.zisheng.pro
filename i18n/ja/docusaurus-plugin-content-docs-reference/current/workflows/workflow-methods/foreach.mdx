@@ -1,0 +1,192 @@
+---
+title: "リファレンス: Workflow.foreach() | Workflows"
+description: 配列内の各要素に対してステップを実行するループを作成する、Workflow の `Workflow.foreach()` メソッドのドキュメント。
+packages:
+  - "@mastra/core"
+---
+
+# Workflow\.foreach()
+
+`.foreach()` メソッドは、配列内の各要素に対してステップを実行するループを作成します。常に各反復の出力を含む配列を、元の順序を維持して返します。
+
+## 使用例
+
+```typescript
+workflow.foreach(step1, { concurrency: 2 })
+```
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'step',
+    type: 'Step',
+    description: 'ループ内で実行するステップインスタンス。前のステップは配列型を返す必要があります。',
+    isOptional: false,
+  },
+  {
+    name: 'opts',
+    type: 'object',
+    description:
+      'ループの任意の設定。concurrency オプションは、並列実行できる反復数を制御します（デフォルト: 1）',
+    isOptional: true,
+    properties: [
+      {
+        name: 'concurrency',
+        type: 'number',
+        description: '許可する同時反復数（デフォルト: 1）',
+        isOptional: true,
+      },
+    ],
+  },
+]}
+/>
+
+## 戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'workflow',
+    type: 'Workflow',
+    description: 'メソッドチェーンに使用する Workflow インスタンス。出力型は、ステップの出力型の配列です。',
+  },
+]}
+/>
+
+## 動作
+
+### 実行と待機
+
+`.foreach()` メソッドは、次のステップを実行する前にすべての要素を処理します。並行処理の設定にかかわらず、`.foreach()` の後に続くステップは、すべての反復が完了してから実行されます。`concurrency: 1`（デフォルト）では、要素は順番に処理されます。より高い concurrency を指定すると、要素は並列バッチで処理されますが、次のステップは引き続きすべてのバッチの完了を待ちます。
+
+要素ごとに複数の処理を実行する必要がある場合は、ネストされた Workflow をステップとして使用します。これにより、各要素に対するすべての処理がまとまり、複数の `.foreach()` 呼び出しをチェーンするよりも明確になります。例については、[foreach 内にネストされた Workflow を配置する](/docs/workflows/control-flow#nested-workflows-inside-foreach)を参照してください。
+
+### 出力構造
+
+`.foreach()` は常に配列を出力します。出力配列の各要素は、入力配列内の同じインデックスにある要素を処理した結果に対応します。
+
+```typescript
+// Input: [{ value: 1 }, { value: 2 }, { value: 3 }]
+// Step adds 10 to each value
+// Output: [{ value: 11 }, { value: 12 }, { value: 13 }]
+```
+
+### `.foreach()` の後に `.then()` を使用する
+
+`.foreach()` の後に `.then()` をチェーンすると、次のステップは出力配列全体を入力として受け取ります。すべての結果をまとめて集約または処理できます。
+
+```typescript
+workflow
+  .foreach(processItemStep) // Output: array of processed items
+  .then(aggregateStep) // Input: the entire array
+  .commit()
+```
+
+### `.foreach()` の後に `.map()` を使用する
+
+次のステップに渡す前に配列の出力を変換するには、`.map()` を使用します。
+
+```typescript
+workflow
+  .foreach(processItemStep)
+  .map(async ({ inputData }) => ({
+    total: inputData.reduce((sum, item) => sum + item.value, 0),
+    count: inputData.length,
+  }))
+  .then(nextStep)
+  .commit()
+```
+
+### 複数の `.foreach()` 呼び出しをチェーンする
+
+複数の `.foreach()` 呼び出しをチェーンすると、それぞれが前のステップから受け取った配列を処理します。
+
+```typescript
+workflow
+  .foreach(stepA) // If input is [a, b, c], output is [A, B, C]
+  .foreach(stepB) // Operates on [A, B, C], output is [A', B', C']
+  .commit()
+```
+
+`.foreach()` 内のステップが配列を返す場合、出力は配列の配列になります。平坦化するには、`.map()` で `.flat()` を使用します。
+
+```typescript
+workflow
+  .foreach(chunkStep) // Output: [[chunk1, chunk2], [chunk3, chunk4]]
+  .map(async ({ inputData }) => inputData.flat()) // Output: [chunk1, chunk2, chunk3, chunk4]
+  .foreach(embedStep)
+  .commit()
+```
+
+### ストリーミング中の進捗イベント
+
+`run.stream()` を使用すると、foreach ステップは各反復の完了後に `workflow-step-progress` イベントを発行します。foreach 全体の完了を待たずに、リアルタイムの進捗を追跡できます。
+
+```typescript
+const run = await workflow.createRun()
+const stream = run.stream({ inputData })
+
+for await (const chunk of stream) {
+  if (chunk.type === 'workflow-step-progress') {
+    console.log(`${chunk.payload.completedCount}/${chunk.payload.totalCount}`)
+    // e.g. "1/3", "2/3", "3/3"
+  }
+}
+```
+
+各進捗イベントのペイロードには、次の値が含まれます。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'foreach ステップのステップ ID',
+  },
+  {
+    name: 'completedCount',
+    type: 'number',
+    description: '現時点で完了した反復数',
+  },
+  {
+    name: 'totalCount',
+    type: 'number',
+    description: '反復の総数',
+  },
+  {
+    name: 'currentIndex',
+    type: 'number',
+    description: '直前に完了した反復のインデックス',
+  },
+  {
+    name: 'iterationStatus',
+    type: "'success' | 'failed' | 'suspended'",
+    description: '直前に完了した反復のステータス',
+  },
+  {
+    name: 'iterationOutput',
+    type: 'Record<string, any>',
+    description: "反復の出力（iterationStatus が 'success' の場合に存在）",
+    isOptional: true,
+  },
+]}
+/>
+
+### 単一の反復を再開する
+
+`.foreach()` 内のステップが中断すると、各反復は個別に中断されます。反復ごとに固有の `resumeData` を指定して 1 つずつ再開するには、[`run.resume()`](../run-methods/resume) に `forEachIndex` を渡します。`forEachIndex` を省略すると、中断されているすべての反復が同じデータで再開されます。
+
+```typescript
+await run.resume({
+  step: 'approve',
+  resumeData: { ok: true },
+  forEachIndex: 1,
+})
+```
+
+## 関連項目
+
+- [foreach によるループ](/docs/workflows/control-flow#looping-with-foreach)
+- [run.resume()](../run-methods/resume)

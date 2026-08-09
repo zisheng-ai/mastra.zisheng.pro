@@ -1,0 +1,191 @@
+---
+title: "リファレンス：回答類似度 Scorer | Evals"
+description: "Agent の出力を正解と比較して CI/CD テストを行う、Mastra の回答類似度 Scorer に関するドキュメントです。"
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+# 回答類似度 Scorer
+
+`createAnswerSimilarityScorer()` 関数は、Agent の出力が正解とどの程度類似しているかを評価する Scorer を作成します。この Scorer は、期待する回答があり、長期的な一貫性を確保したい CI/CD テストシナリオ向けに設計されています。
+
+## パラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'LanguageModel',
+    required: true,
+    description: '出力と正解の意味的類似性を評価するために使用する言語モデル。',
+  },
+  {
+    name: 'options',
+    type: 'AnswerSimilarityOptions',
+    required: false,
+    description: 'Scorer の設定オプション。',
+    properties: [
+      {
+        type: 'AnswerSimilarityOptions',
+        parameters: [
+          {
+            name: 'requireGroundTruth',
+            type: 'boolean',
+            required: false,
+            defaultValue: 'true',
+            description:
+              '評価に正解を必須とするかどうか。false の場合、正解がなければスコア 0 を返します。',
+          },
+          {
+            name: 'semanticThreshold',
+            type: 'number',
+            required: false,
+            defaultValue: '0.8',
+            description: '完全一致に対する意味的一致の重み（0～1）。',
+          },
+          {
+            name: 'exactMatchBonus',
+            type: 'number',
+            required: false,
+            defaultValue: '0.2',
+            description: '完全一致に対する追加スコアボーナス（0～1）。',
+          },
+          {
+            name: 'missingPenalty',
+            type: 'number',
+            required: false,
+            defaultValue: '0.15',
+            description: '正解に含まれる重要な概念が欠けるごとに適用するペナルティ。',
+          },
+          {
+            name: 'contradictionPenalty',
+            type: 'number',
+            required: false,
+            defaultValue: '1.0',
+            description: '矛盾する情報に対するペナルティ。値を大きくすると、誤った回答のスコアが 0 に近づきます。',
+          },
+          {
+            name: 'extraInfoPenalty',
+            type: 'number',
+            required: false,
+            defaultValue: '0.05',
+            description: '正解にない追加情報に対する軽微なペナルティ（上限 0.2）。',
+          },
+          {
+            name: 'scale',
+            type: 'number',
+            required: false,
+            defaultValue: '1',
+            description: 'スコアのスケーリング係数。',
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+この関数は MastraScorer クラスのインスタンスを返します。`.run()` メソッドは他の Scorer と同じ入力を受け取ります（[MastraScorer リファレンス](./mastra-scorer)を参照）が、Run オブジェクトに**正解を指定する必要があります**。
+
+## `.run()` の戻り値
+
+<PropertiesTable
+  content={[
+  {
+    name: 'runId',
+    type: 'string',
+    description: 'Run の ID（任意）。',
+  },
+  {
+    name: 'score',
+    type: 'number',
+    description:
+      '0～1 の類似度スコア（カスタムスケールを使用する場合は 0～scale）。スコアが高いほど正解との類似度が高いことを示します。',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description: '実行可能な Feedback を含む、人が読めるスコアの説明。',
+  },
+  {
+    name: 'preprocessStepResult',
+    type: 'object',
+    description: '出力と正解から抽出した意味単位。',
+  },
+  {
+    name: 'analyzeStepResult',
+    type: 'object',
+    description: '一致、矛盾、追加情報の詳細な分析。',
+  },
+  {
+    name: 'preprocessPrompt',
+    type: 'string',
+    description: '意味単位の抽出に使用した Prompt。',
+  },
+  {
+    name: 'analyzePrompt',
+    type: 'string',
+    description: '類似性の分析に使用した Prompt。',
+  },
+  {
+    name: 'generateReasonPrompt',
+    type: 'string',
+    description: '説明の生成に使用した Prompt。',
+  },
+]}
+/>
+
+## スコアリングの詳細
+
+Scorer は複数の Step で処理します。
+
+1. **抽出**：出力と正解を意味単位に分解します
+1. **分析**：意味単位を比較し、一致、矛盾、欠落を特定します
+1. **スコア**：矛盾に対するペナルティを適用して、重み付き類似度を計算します
+1. **理由**：人が読める説明を生成します
+
+スコアの計算：`max(0, base_score - contradiction_penalty - missing_penalty - extra_info_penalty) × scale`
+
+## 使用例
+
+さまざまなシナリオで、Agent の回答と正解の類似度を評価します。
+
+```typescript title="src/example-answer-similarity.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createAnswerSimilarityScorer } from '@mastra/evals/scorers/prebuilt'
+import { myAgent } from './agent'
+
+const scorer = createAnswerSimilarityScorer({ model: '__GATEWAY_OPENAI_MODEL__' })
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'What is 2+2?',
+      groundTruth: '4',
+    },
+    {
+      input: 'What is the capital of France?',
+      groundTruth: 'The capital of France is Paris',
+    },
+    {
+      input: 'What are the primary colors?',
+      groundTruth: 'The primary colors are red, blue, and yellow',
+    },
+  ],
+  scorers: [scorer],
+  target: myAgent,
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+`runEvals` の詳細は、[runEvals リファレンス](/reference/evals/run-evals)を参照してください。
+
+この Scorer を Agent に追加する方法は、[Scorer の概要](/docs/evals/overview#adding-scorers-to-agents)ガイドを参照してください。

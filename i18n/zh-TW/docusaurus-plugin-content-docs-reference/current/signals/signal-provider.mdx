@@ -1,0 +1,526 @@
+---
+title: "參考文件：SignalProvider | Signal"
+description: SignalProvider 的 API 參考文件；這是用於建立 Signal Provider 的抽象基底類別，可監控外部來源並將 event push 至 Agent thread。
+packages:
+  - "@mastra/core"
+---
+
+# SignalProvider
+
+**新增於：** `@mastra/core@1.39.0`
+
+用於建立 Signal Provider 的抽象基底類別。Signal Provider 會監控外部來源（API、webhook、event stream），並透過內建的 subscription registry，將 notification signal push 至 Agent thread。
+
+Signal Provider 預設不是 processor。需要攔截 Agent 執行的 Provider 會從 `getInputProcessors()` 或 `getOutputProcessors()` 傳回 processor。公開 Agent 可呼叫 Tool 的 Provider 則會從 `getTools()` 傳回 Tool。
+
+可直接使用的 webhook 型 Provider 請參閱 [`WebhookSignalProvider`](/reference/signals/webhook-signal-provider)。
+
+## 使用範例
+
+每 30 秒檢查 API 的 polling Provider：
+
+```typescript title="src/signals/slack-signals.ts"
+import { SignalProvider } from '@mastra/core/signals'
+import type { SignalSubscription } from '@mastra/core/signals'
+
+class SlackSignals extends SignalProvider<'slack-signals'> {
+  readonly id = 'slack-signals'
+  readonly pollInterval = 30_000
+
+  async poll(subscriptions: SignalSubscription[]) {
+    for (const sub of subscriptions) {
+      const messages = await fetchSlackMessages(sub.externalResourceId)
+      if (messages.length > 0) {
+        await this.notify(
+          {
+            source: 'slack',
+            kind: 'new-messages',
+            summary: `${messages.length} new messages in ${sub.externalResourceId}`,
+          },
+          { threadId: sub.threadId, resourceId: sub.resourceId },
+        )
+      }
+    }
+  }
+}
+```
+
+向 Agent 註冊：
+
+```typescript title="src/mastra/index.ts"
+import { Agent } from '@mastra/core/agent'
+
+const agent = new Agent({
+  id: 'agent',
+  signals: [new SlackSignals()],
+})
+```
+
+Agent 會呼叫 `connect(this)`，並註冊 Provider 傳回的所有 processor 或 Tool，接著開始 polling。
+
+## Constructor 參數
+
+`SignalProvider` 是抽象類別。子類別呼叫不含引數的 `super()`。
+
+## 屬性
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'TId extends string',
+    description: '此 Provider 的不重複識別碼。子類別必須將它實作為 readonly 屬性。',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: 'Provider 方便閱讀的顯示名稱。',
+    isOptional: true,
+  },
+  {
+    name: 'pollInterval',
+    type: 'number',
+    description: 'poll 間隔，以毫秒為單位。設定後，framework 會依此間隔呼叫 `poll()`。只使用 webhook 的 Provider 請保留為 `undefined` 或 `0`。',
+    isOptional: true,
+  },
+  {
+    name: 'isConnected',
+    type: 'boolean',
+    description: '此 Provider 是否已連線至 Agent。呼叫 `connect()` 後傳回 `true`。內部用於在 `Agent.__fork()` 期間略過重複接線。',
+  },
+]}
+/>
+
+## 方法
+
+### 連線
+
+#### `connect(agent)`
+
+由 Agent constructor 呼叫。建立雙向連結，讓 Provider 能將 signal 傳回 Agent。若要在建立連結後進行其他設定，請覆寫此方法。務必呼叫 `super.connect(agent)`。
+
+```typescript prettier:false
+class MySignals extends SignalProvider<'my-signals'> {
+  readonly id = 'my-signals'
+
+  override connect(agent) {
+    super.connect(agent)
+    // additional setup after agent link is established
+  }
+}
+```
+
+#### `__registerMastra(mastra)`
+
+Provider 的 Agent 註冊至 Mastra instance 時呼叫。若要存取 Storage 或其他 Mastra 服務，請覆寫此方法。務必呼叫 `super.__registerMastra(mastra)`。
+
+```typescript prettier:false
+override __registerMastra(mastra) {
+  super.__registerMastra(mastra)
+  // this.mastra is now available
+}
+```
+
+### Processor 與 Tool 整合
+
+#### `getInputProcessors()`
+
+傳回此 Provider 需要向 Agent 註冊的輸入 processor。Provider 會攔截 Agent 輸入 step 時，請覆寫此方法，例如插入 context 提示或偵測 Tool 呼叫。
+
+```typescript prettier:false
+getInputProcessors() {
+  return [this]
+}
+```
+
+傳回：`InputProcessorOrWorkflow[]`
+
+#### `getOutputProcessors()`
+
+傳回此 Provider 需要向 Agent 註冊的輸出 processor。Provider 會攔截 Agent 輸出 step 時，請覆寫此方法。
+
+```typescript prettier:false
+getOutputProcessors() {
+  return [this]
+}
+```
+
+傳回：`OutputProcessorOrWorkflow[]`
+
+#### `getTools()`
+
+傳回此 Provider 公開給 Agent 的 Tool。Provider 會新增 Agent 可呼叫的 Tool（例如訂閱或取消訂閱指令）時，請覆寫此方法。
+
+```typescript prettier:false
+getTools() {
+  return {
+    subscribe_pr: createTool({ /* ... */ }),
+    unsubscribe_pr: createTool({ /* ... */ }),
+  }
+}
+```
+
+傳回：`Record<string, unknown>`
+
+### Subscription 追蹤
+
+#### `subscribe(target, externalResourceId, metadata?)`
+
+讓 thread 訂閱外部資源。這是 protected 方法，請從 Provider 實作內部呼叫。
+
+```typescript prettier:false
+const sub = this.subscribe(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'github:mastra-ai/mastra#123',
+  { pr: 123 },
+)
+```
+
+傳回：`SignalSubscription`：新建的 subscription，或 metadata 合併後的現有 subscription。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'target',
+    type: 'SignalProviderTarget',
+    description: '要訂閱的 thread。必須包含 `threadId` 與 `resourceId`。',
+  },
+  {
+    name: 'externalResourceId',
+    type: 'string',
+    description: 'Provider 專用的外部資源識別碼，例如 `"github:owner/repo#123"`。',
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown>',
+    description: '與 subscription 一起儲存的其他資料。重複訂閱時，會合併至現有 metadata。',
+    isOptional: true,
+  },
+]}
+/>
+
+#### `unsubscribe(target, externalResourceId)`
+
+移除 subscription。
+
+```typescript prettier:false
+const removed = this.unsubscribe(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'github:mastra-ai/mastra#123',
+)
+```
+
+傳回：`boolean`：已移除時為 `true`，沒有符合的 subscription 時為 `false`。
+
+#### `getSubscriptions()`
+
+傳回此 Provider 的所有有效 subscription。
+
+```typescript prettier:false
+const allSubs = this.getSubscriptions()
+```
+
+傳回：`SignalSubscription[]`
+
+#### `getSubscriptionsForResource(externalResourceId)`
+
+傳回特定外部資源的所有 subscription。
+
+```typescript prettier:false
+const subs = this.getSubscriptionsForResource('github:mastra-ai/mastra#123')
+for (const sub of subs) {
+  await this.notify(
+    { source: 'my-provider', kind: 'update', summary: 'Resource updated' },
+    { threadId: sub.threadId, resourceId: sub.resourceId },
+  )
+}
+```
+
+傳回：`SignalSubscription[]`
+
+#### `getSubscriptionsForThread(target)`
+
+傳回特定 thread 的所有 subscription。
+
+```typescript prettier:false
+const subs = this.getSubscriptionsForThread({
+  threadId: 'thread-1',
+  resourceId: 'user-1',
+})
+```
+
+傳回：`SignalSubscription[]`
+
+#### `hasSubscription(target, externalResourceId)`
+
+檢查 subscription 是否存在。
+
+```typescript prettier:false
+if (this.hasSubscription(target, 'github:mastra-ai/mastra#123')) {
+  // already subscribed
+}
+```
+
+傳回：`boolean`
+
+#### `unsubscribeAll(target)`
+
+移除 thread 的所有 subscription。
+
+```typescript prettier:false
+const removed = this.unsubscribeAll({
+  threadId: 'thread-1',
+  resourceId: 'user-1',
+})
+```
+
+傳回：`number`：已移除的 subscription 數量。
+
+#### `subscriptionCount`
+
+此 Provider 的有效 subscription 總數。
+
+```typescript prettier:false
+if (this.subscriptionCount === 0) {
+  // nothing to poll
+}
+```
+
+傳回：`number`
+
+### Polling
+
+#### `poll(subscriptions)`
+
+每次 poll cycle 都會呼叫，並傳入所有有效 subscription。請覆寫此方法以檢查外部來源並發出通知。framework 會避免 poll cycle 重疊：如果一次 `poll()` 呼叫耗時超過 `pollInterval`，便會略過下一個 cycle。
+
+```typescript prettier:false
+async poll(subscriptions: SignalSubscription[]) {
+  for (const sub of subscriptions) {
+    const events = await checkExternalSource(sub.externalResourceId)
+    for (const event of events) {
+      await this.notify(
+        { source: 'my-provider', kind: event.type, summary: event.message },
+        { threadId: sub.threadId, resourceId: sub.resourceId },
+      )
+    }
+  }
+}
+```
+
+#### `startPolling()`
+
+啟動 polling timer。Agent 會在 `connect()` 後呼叫。此方法具冪等性，多次呼叫不會產生影響。
+
+```typescript prettier:false
+provider.startPolling()
+```
+
+#### `stopPolling()`
+
+停止 polling timer。
+
+```typescript prettier:false
+provider.stopPolling()
+```
+
+### Webhook
+
+#### `handleWebhook(request)`
+
+處理傳入的 webhook request。請覆寫此方法以解析 payload 並比對 subscription，接著發出 notification signal。可直接使用的實作請參閱 [`WebhookSignalProvider`](/reference/signals/webhook-signal-provider)。
+
+驗證 webhook request 後，請從應用程式定義的 HTTP endpoint 呼叫此方法。
+
+```typescript prettier:false
+async handleWebhook(request) {
+  const payload = request.body as { repo: string, event: string }
+  const subs = this.getSubscriptionsForResource(payload.repo)
+
+  for (const sub of subs) {
+    await this.notify(
+      { source: 'github', kind: payload.event, summary: `Event on ${payload.repo}` },
+      { threadId: sub.threadId, resourceId: sub.resourceId },
+    )
+  }
+
+  return { status: 200, body: { matched: subs.length } }
+}
+```
+
+傳回：`Promise<{ status?: number; body?: unknown }>`
+
+### 生命週期
+
+#### `start()`
+
+在 `connect()` 後呼叫，以執行 async 初始化。設定需要 Agent 或 Mastra instance 才能進行時，請覆寫此方法。
+
+```typescript prettier:false
+async start() {
+  await this.loadInitialState()
+}
+```
+
+#### `stop()`
+
+在關閉時呼叫。預設實作會停止 polling，並清除所有 subscription。
+
+```typescript prettier:false
+provider.stop()
+```
+
+### 通知
+
+#### `notify(notification, target)`
+
+向已連線 Agent 傳送 notification signal。這是 `agent.sendNotificationSignal()` 的 protected 便利 wrapper。
+
+```typescript prettier:false
+await this.notify(
+  {
+    source: 'my-provider',
+    kind: 'pr-updated',
+    summary: 'PR #123 was updated',
+    priority: 'high',
+    payload: { prNumber: 123 },
+  },
+  { threadId: 'thread-1', resourceId: 'user-1' },
+)
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'notification',
+    type: 'object',
+    description: '通知 payload。',
+    properties: [
+      {
+        type: 'object',
+        parameters: [
+          {
+            name: 'source',
+            type: 'string',
+            description: '通知來源的識別碼。',
+          },
+          {
+            name: 'kind',
+            type: 'string',
+            description: 'Event 型別，例如 `"pr-updated"`、`"new-message"`。',
+          },
+          {
+            name: 'summary',
+            type: 'string',
+            description: '方便閱讀的 event 摘要。',
+          },
+          {
+            name: 'priority',
+            type: '"high" | "medium" | "low"',
+            description: '通知優先順序。',
+            isOptional: true,
+          },
+          {
+            name: 'payload',
+            type: 'unknown',
+            description: '附加至通知的任意資料。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'target',
+    type: 'SignalProviderTarget',
+    description: '要通知的 thread。必須包含 `threadId` 與 `resourceId`。',
+  },
+]}
+/>
+
+## 型別
+
+### `SignalSubscription`
+
+`subscribe()` 傳回的 subscription 物件。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'Subscription 的不重複識別碼。',
+  },
+  {
+    name: 'providerId',
+    type: 'string',
+    description: '擁有此 subscription 的 Provider。',
+  },
+  {
+    name: 'threadId',
+    type: 'string',
+    description: '接收 signal 的 thread。',
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    description: '擁有 thread 的資源。',
+  },
+  {
+    name: 'externalResourceId',
+    type: 'string',
+    description: 'Provider 專用的外部資源識別碼，例如 `"github:owner/repo#123"`。',
+  },
+  {
+    name: 'subscribedAt',
+    type: 'Date',
+    description: '建立 subscription 的時間。',
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, unknown>',
+    description: '與 subscription 一起儲存的 Provider 專用 metadata。',
+  },
+]}
+/>
+
+### `SignalProviderTarget`
+
+識別特定 Agent thread。
+
+<PropertiesTable
+  content={[
+  {
+    name: 'threadId',
+    type: 'string',
+    description: '目標 thread。',
+  },
+  {
+    name: 'resourceId',
+    type: 'string',
+    description: '擁有 thread 的資源。',
+  },
+  {
+    name: 'agentId',
+    type: 'string',
+    description: 'Agent 識別碼。',
+    isOptional: true,
+  },
+]}
+/>
+
+## Type guard
+
+### `isSignalProvider(obj)`
+
+對 `SignalProvider` instance 執行 runtime 檢查。
+
+```typescript prettier:false
+import { isSignalProvider } from '@mastra/core/signals'
+
+if (isSignalProvider(obj)) {
+  obj.connect(agent)
+}
+```
+
+傳回：`boolean`

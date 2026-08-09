@@ -1,0 +1,367 @@
+---
+title: "参考：ToolSearchProcessor | Processors"
+description: "Mastra 中 ToolSearchProcessor 的文档。该 Processor 使拥有大型 Tool 库的 Agent 能够发现并加载运行时定义的 Tool。"
+packages:
+  - "@mastra/core"
+---
+
+# ToolSearchProcessor
+
+`ToolSearchProcessor` 是一个**输入 Processor**，支持发现并加载运行时定义的 Tool。它不会预先向 Agent 提供所有 Tool，而是为 Agent 提供两个元 Tool（`search_tools` 和 `load_tool`），使其能够按需查找和加载 Tool。使用大型 Tool 库时，这可以减少上下文 token 用量。
+
+## 使用示例
+
+```typescript
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: {
+    createIssue: githubTools.createIssue,
+    sendEmail: emailTools.send,
+    getWeather: weatherTools.forecast,
+    // ... many more tools
+  },
+  search: {
+    topK: 5,
+    minScore: 0.1,
+  },
+})
+```
+
+## 构造函数参数
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options',
+    type: 'ToolSearchProcessorOptions',
+    description: 'Tool 搜索 Processor 的配置选项',
+    isOptional: false,
+    properties: [
+      {
+        type: 'ToolSearchProcessorOptions',
+        parameters: [
+          {
+            name: 'tools',
+            type: 'Record<string, Tool>',
+            description:
+              '所有可动态搜索和加载的 Tool。这些 Tool 不会立即提供给 Agent，必须先通过搜索发现，再按需加载。',
+            isOptional: false,
+          },
+          {
+            name: 'includeResolvedTools',
+            type: 'boolean',
+            description:
+              '同时允许搜索 Agent 为此请求解析的 Tool（需要调用方凭证的 MCP Tool，或动态 tools 函数返回的任何内容），并在 Agent 加载它们之前不将其放入提示词。元 Tool 永远不会被隐藏。为请求解析的 Tool 会按请求分别建立索引，因此每个请求都会搜索并加载自己的 Tool 实例。',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'search',
+            type: '{ topK?: number; minScore?: number; autoLoad?: boolean }',
+            description: '搜索行为的配置。',
+            isOptional: true,
+          },
+          {
+            name: 'search.topK',
+            type: 'number',
+            description: '搜索结果中返回的最大 Tool 数量。',
+            isOptional: true,
+            default: '5',
+          },
+          {
+            name: 'search.minScore',
+            type: 'number',
+            description: 'Tool 要包含在搜索结果中所需的最低相关性分数（0-1）。',
+            isOptional: true,
+            default: '0',
+          },
+          {
+            name: 'search.autoLoad',
+            type: 'boolean',
+            description:
+              '为 true 时，search_tools 返回的 Tool 会立即作为搜索的一部分激活。不会暴露 load_tool 元 Tool，从而将先搜索再加载的两步流程合并为一个搜索步骤。发现的 Tool 会在下一轮可用。由于每个匹配项都会被激活，请谨慎设置 topK。',
+            isOptional: true,
+            default: 'false',
+          },
+          {
+            name: 'storage',
+            type: "'in-memory' | 'context'",
+            description:
+              "已加载 Tool 状态的存储位置。'in-memory'（默认）使用内存映射按线程跟踪已加载的 Tool，并通过 TTL 清理（参见 ttl）；重启后状态会丢失，匿名请求共享一个 'default' 条目。'context' 从对话消息中推导已加载状态：只要命名某个 Tool 的 search_tools/load_tool 结果仍在消息中，该 Tool 就处于已加载状态；这种方式可安全重启、无需 memory，并会在该结果不再出现在消息中时自动卸载 Tool。'context' 存储需选择启用。",
+            isOptional: true,
+            default: "'in-memory'",
+          },
+          {
+            name: 'ttl',
+            type: 'number',
+            description:
+              "内存中线程状态的存活时间，以毫秒为单位。仅适用于默认的 'in-memory' 存储；线程状态在此时长内无活动后会被清理。设为 0 可禁用清理。'context' 存储会忽略此选项。",
+            isOptional: true,
+            default: '3600000',
+          },
+          {
+            name: 'filter',
+            type: '(args: ToolSearchFilterArgs) => boolean | Promise<boolean>',
+            description:
+              '可选的请求感知 hook，用于从搜索结果中隐藏 Tool、阻止加载 Tool，或为当前请求隐藏已加载的 Tool。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+## 返回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: "设为 'tool-search' 的 Processor 标识符",
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: "设为 'Tool Search Processor' 的 Processor 显示名称",
+    isOptional: false,
+  },
+  {
+    name: 'processInputStep',
+    type: '(args: ProcessInputStepArgs) => Promise<ProcessInputStepResult>',
+    description:
+      '处理每个步骤，将搜索或加载元 Tool 以及此前加载的所有 Tool 注入 Agent 的 Tool 集合。',
+    isOptional: false,
+  },
+]}
+/>
+
+## 方法
+
+### 状态检查（旧版 `'in-memory'` 存储）
+
+这些方法仅对默认的 `'in-memory'` 存储生效。对于状态保存在对话消息而非进程内映射中的 `'context'` 存储，它们不会执行任何操作。
+
+#### `clearState(threadId)`
+
+清除单个线程的已加载 Tool 状态。
+
+```typescript
+processor.clearState('thread-123')
+```
+
+#### `clearAllState()`
+
+清除所有线程的已加载 Tool 状态。
+
+```typescript
+processor.clearAllState()
+```
+
+#### `getStateStats()`
+
+返回所跟踪的线程数和最早的访问时间，用于调试内存增长。
+
+```typescript
+const { threadCount, oldestAccessTime } = processor.getStateStats()
+```
+
+返回：`{ threadCount: number; oldestAccessTime: number | null }`
+
+#### `cleanupNow()`
+
+立即运行 TTL 清理，而不等待定时清理。
+
+```typescript
+const cleaned = processor.cleanupNow()
+```
+
+返回：`number`：已清理的线程数。
+
+## 请求感知过滤
+
+使用 `filter` 将请求特定的策略应用于运行时定义的 Tool。此 hook 会接收解析后的 Tool ID（作为 `toolName`）、Tool、请求上下文和阶段。`toolName` 是 `search_tools` 返回的 ID，可能与 `tools` 对象中使用的键不同。
+
+```typescript
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: allTools,
+  filter: ({ toolName, requestContext, phase }) => {
+    const plan = requestContext?.get('plan')
+
+    if (phase === 'search') {
+      return true
+    }
+
+    return plan === 'pro' || !toolName.startsWith('premium_')
+  },
+})
+```
+
+`phase` 值描述过滤器的应用位置：
+
+- `search`：过滤 `search_tools` 返回的结果。
+- `load`：阻止 `load_tool` 加载不允许的 Tool。
+- `active`：如果已加载的 Tool 不再被允许，则为当前请求隐藏它们。
+
+如果 hook 抛出错误或 Promise 被拒绝，`ToolSearchProcessor` 会将该 Tool 视为不允许用于此请求。此 hook 可能会针对每个匹配的搜索候选项运行，因此应确保异步策略检查成本较低或使用缓存。`search_tools` 元 Tool 始终可用。除非启用了 `search.autoLoad`，否则 `load_tool` 可用。直接通过 Agent 或 `processInputStep` 传递的 Tool 会保持可用，除非你在 `ToolSearchProcessor` 外部将其过滤，或启用 `includeResolvedTools`。
+
+## 搜索为请求解析的 Tool
+
+`tools` 选项在构造时固定，因此无法列出仅针对每个请求存在的 Tool（例如需要调用方凭证的 MCP Tool，或动态 `tools` 函数返回的任何内容）。默认情况下，这些 Tool 会绕过搜索，并在每一轮占用提示词空间。
+
+设置 `includeResolvedTools: true` 可为这些 Tool 按请求建立索引，并在 Agent 加载它们之前不将其放入提示词：
+
+```typescript title="src/mastra/agents/mcp-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: staticTools,
+  includeResolvedTools: true,
+})
+
+const agent = new Agent({
+  id: 'mcp-agent',
+  name: 'mcp-agent',
+  instructions: 'Search for a tool when you need a capability you do not have.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // Resolved per request, then searchable alongside staticTools
+  tools: async ({ requestContext }) => mcpClient.getTools(requestContext.get('userToken')),
+  inputProcessors: [toolSearch],
+})
+```
+
+每个请求都会单独建立索引，因此一个调用方加载的 Tool 绝不会解析为另一个调用方同名 Tool 的实例。
+
+此选项适用于为请求解析的每个 Tool，包括 memory、workspace、skill 和 browser Tool。只有 `search_tools` 和 `load_tool` 元 Tool 会留在提示词中，因此 Agent 隐式依赖的任何 Tool 都必须先通过搜索找到，之后才能调用。
+
+## 扩展使用示例
+
+```typescript title="src/mastra/agents/dynamic-tools-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+// Tools from various integrations
+import { githubTools } from './tools/github'
+import { slackTools } from './tools/slack'
+import { dbTools } from './tools/database'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: {
+    ...githubTools, // createIssue, listPRs, mergePR, ...
+    ...slackTools, // sendMessage, createChannel, ...
+    ...dbTools, // query, insert, update, ...
+  },
+  search: {
+    topK: 5,
+    minScore: 0.1,
+  },
+})
+
+const agent = new Agent({
+  id: 'dynamic-tools-agent',
+  name: 'dynamic-tools-agent',
+  instructions:
+    'You are a helpful assistant with access to many tools. Use search_tools to find relevant tools, then load_tool to make them available.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [toolSearch],
+})
+```
+
+Agent 工作流如下：
+
+1. Agent 接收用户消息
+1. Agent 使用关键词调用 `search_tools`（例如“github issue”）
+1. Agent 查看结果，并使用 Tool 名称调用 `load_tool`
+1. 加载的 Tool 会在下一轮可用
+1. Agent 正常使用加载的 Tool
+
+## 使用 `autoLoad` 进行单步骤发现
+
+将 `search.autoLoad` 设为 `true` 可跳过单独的加载步骤。`search_tools` 返回的 Tool 会立即激活，并且不会暴露 `load_tool` 元 Tool。这样每次发现过程可减少一轮模型交互，从而降低 token 用量和延迟，并且在各 Provider 中行为一致。
+
+```typescript
+const toolSearch = new ToolSearchProcessor({
+  tools: allTools,
+  search: {
+    topK: 3,
+    autoLoad: true,
+  },
+})
+```
+
+使用 `autoLoad` 后，工作流变为：
+
+1. Agent 接收用户消息
+1. Agent 使用关键词调用 `search_tools`
+1. 匹配的 Tool 会自动激活，并在下一轮可用
+1. Agent 正常使用 Tool
+
+每个匹配项都会被激活，因此请保持较小的 `topK`（例如 `3`），以免添加 Agent 不需要的 Tool。激活的 Tool 会追加到现有 Tool 之后，这能为支持提示词缓存的 Provider 保持稳定的缓存提示词前缀。
+
+## 已加载 Tool 的存储
+
+`storage` 选项控制在哪里跟踪已加载的 Tool 集合。默认值为 `'in-memory'`。`'context'` 存储需选择启用。
+
+### `'in-memory'`（默认）
+
+已加载的 Tool 会在内存映射中按线程跟踪，并由 `ttl` 选项控制基于 TTL 的清理（默认为一小时）。这是原有行为：
+
+- 无需配置 memory。
+- 进程重启后状态会丢失。
+- 没有线程 ID 的请求共享一个 `'default'` 条目。
+
+使用 `clearState`、`clearAllState`、`getStateStats` 和 `cleanupNow` 检查或重置此存储。
+
+### `'context'`
+
+已加载状态从对话消息中推导：只要命名某个 Tool 的 `search_tools` 或 `load_tool` 结果仍在消息中，该 Tool 就处于已加载状态。此模式：
+
+- 无需配置 memory。
+- 可安全重启：持久化的消息历史记录就是耐久记录。
+- 一旦该结果不再出现在消息中，就会自动卸载 Tool。
+
+```typescript
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: allTools,
+  storage: 'context',
+})
+```
+
+两种模式下加载 Tool 都有利于缓存：加载操作只会追加，因此对于支持提示词缓存的 Provider，缓存的提示词前缀会保持稳定。
+
+卸载 Tool 会改变发送给模型的 Tool 定义，从而导致缓存前缀发生偏移，使下一轮需要写入缓存而无法命中缓存。在 `'in-memory'` 模式下，当线程状态因 `ttl` 被逐出时会发生这种情况。在 `'context'` 模式下，当 Tool 的发现结果不再出现在消息中时（例如裁剪较早的消息时）会发生这种情况。Tool 会被卸载，模型必须重新搜索后才能再次使用。这是预期行为：移除未使用的 Tool 会以一次缓存写入为代价，换取后续轮次中更小的前缀。
+
+## 与其他 Processor 结合使用
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { ToolSearchProcessor, TokenLimiter } from '@mastra/core/processors'
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [
+    new ToolSearchProcessor({
+      tools: allTools,
+      search: { topK: 5 },
+    }),
+    // Place TokenLimiter last to ensure context fits
+    new TokenLimiter(127000),
+  ],
+})
+```
+
+## 相关内容
+
+- [Processors](/docs/agents/processors)
+- [使用 Tool](/docs/agents/using-tools)

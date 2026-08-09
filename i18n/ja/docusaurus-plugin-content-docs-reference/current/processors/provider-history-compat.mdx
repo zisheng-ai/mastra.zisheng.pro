@@ -1,0 +1,206 @@
+---
+title: "リファレンス：ProviderHistoryCompat | Processors"
+description: "Provider 固有の履歴互換性修正を適用する Mastra の ProviderHistoryCompat Processor の API リファレンス。"
+packages:
+  - "@mastra/core"
+---
+
+# ProviderHistoryCompat
+
+`ProviderHistoryCompat` Processor は、Provider 固有の履歴非互換性を処理します。Provider を呼び出す前に送信する言語モデルのプロンプトを書き換えたり、API エラーに応じてメッセージ履歴を修復して再試行したりできます。
+
+Agent がモデル Provider を切り替える可能性がある場合や、複数の Provider 間でメッセージ履歴を再利用する場合に使用します。別の Provider が出力したフィールドを拒否する Provider にも対応します。
+
+## 使用例
+
+Agent ですべての組み込み互換性ルールを利用するには、`ProviderHistoryCompat` を `inputProcessors` に追加します。
+
+```typescript title="src/mastra/agents/my-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { ProviderHistoryCompat } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  instructions: 'You are a helpful assistant.',
+  model: 'anthropic/claude-sonnet-4-5',
+  inputProcessors: [new ProviderHistoryCompat()],
+})
+```
+
+Mastra Agent は、この Processor を自動では追加しません。Provider 履歴の互換性ルール、リアクティブな API エラー復旧、カスタムルール、予測可能な Processor の実行順序が必要な場合は、明示的に追加してください。
+
+## コンストラクターパラメーター
+
+<PropertiesTable
+  content={[
+  {
+    name: 'opts',
+    type: '{ additionalRules?: CompatRule[] }',
+    description: 'Provider 履歴の互換性ルールに関する設定オプション。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'Options',
+        parameters: [
+          {
+            name: 'additionalRules',
+            type: 'CompatRule[]',
+            description:
+              '組み込みルールの後に実行するカスタム互換性ルール。送信プロンプトを書き換えたり、API エラーとの一致後に永続化済みメッセージを修復したりできます。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}/>
+
+## プロパティ
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: "'provider-history-compat'",
+    description: 'Processor の識別子。',
+    isOptional: false,
+  },
+  {
+    name: 'name',
+    type: "'Provider History Compat'",
+    description: 'Processor の表示名。',
+    isOptional: false,
+  },
+  {
+    name: 'processLLMRequest',
+    type: '(args: ProcessLLMRequestArgs) => ProcessLLMRequestResult',
+    description:
+      'Provider の呼び出し直前に、変換済みの LanguageModelV2Prompt に対して事前互換性ルールを実行します。返されたプロンプトの変更は一時的なもので、Memory やメッセージ履歴には永続化されません。',
+    isOptional: false,
+  },
+  {
+    name: 'processAPIError',
+    type: '(args: ProcessAPIErrorArgs) => Promise<ProcessAPIErrorResult | void>',
+    description:
+      'Provider がリクエストを拒否したときに、リアクティブな互換性ルールを実行します。一致したルールはメッセージリストを変更し、最初の再試行時に retry: true を返せます。',
+    isOptional: false,
+  },
+]}/>
+
+## 組み込みルール
+
+`ProviderHistoryCompat` には、次の互換性ルールが組み込まれています。
+
+| ルール | Provider | タイミング | 動作 |
+| - | - | - | - |
+| `anthropic-tool-id-format` | Anthropic | リアクティブな API エラー復旧 | `[a-zA-Z0-9_-]` 以外の文字を含む Tool 呼び出し ID を書き換え、リクエストを再試行します。 |
+| `cerebras-strip-reasoning-content` | Cerebras | 事前プロンプト書き換え | 送信プロンプトから Assistant の `reasoning` part を削除し、未対応の `reasoning_content` フィールドとしてシリアライズされないようにします。 |
+| `anthropic-strip-foreign-reasoning-content` | Anthropic | 事前プロンプト書き換え | 送信プロンプトから Anthropic 以外の Assistant の `reasoning` part を削除します。Anthropic ネイティブの思考履歴は保持されます。 |
+
+事前ルールは、Mastra がメッセージをモデルのプロンプト形式に変換した後、プロンプトを Provider に送信する前に `processLLMRequest` を通じて実行されます。この書き換えは現在の Provider 呼び出しだけに影響します。
+
+リアクティブルールは、Provider がリクエストを拒否した後に `processAPIError` を通じて実行されます。永続化される `messageList` を更新し、再試行を要求できます。
+
+## `CompatRule`
+
+`CompatRule` は、Provider 履歴の互換性修正を1つ定義します。
+
+```typescript
+import type { CompatRule } from '@mastra/core/processors'
+
+const removeUnsupportedPromptParts: CompatRule = {
+  name: 'remove-unsupported-prompt-parts',
+  applyToPrompt({ prompt, model }) {
+    // Return a modified LanguageModelV2Prompt, or undefined to leave it unchanged.
+    return undefined
+  },
+}
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'name',
+    type: 'string',
+    description: 'ログとデバッグに使用する、人が読めるルール識別子。',
+    isOptional: false,
+  },
+  {
+    name: 'errorPatterns',
+    type: 'RegExp[]',
+    description:
+      'Provider の API エラーメッセージおよびレスポンス本文と照合するパターン。fix を実装するリアクティブルールでは必須です。',
+    isOptional: true,
+  },
+  {
+    name: 'fix',
+    type: '(messages: MastraDBMessage[]) => boolean',
+    description:
+      '一致する API エラーの発生後に、永続化済みのデータベースメッセージを変更するリアクティブな修正。ルールがメッセージを変更し、リクエストを再試行する必要がある場合は true を返します。',
+    isOptional: true,
+  },
+  {
+    name: 'applyToPrompt',
+    type: '(args: { prompt: LanguageModelV2Prompt; model: unknown }) => LanguageModelV2Prompt | undefined',
+    description:
+      '現在の Provider 呼び出しで送信するプロンプトを書き換える事前修正。プロンプトを変更する必要がない場合は undefined を返します。',
+    isOptional: true,
+  },
+]}/>
+
+## カスタムルール
+
+カスタムルールは `additionalRules` で渡します。カスタムルールは組み込みルールの後に実行されます。
+
+```typescript title="src/mastra/agents/custom-provider-compat.ts"
+import { Agent } from '@mastra/core/agent'
+import { ProviderHistoryCompat, type CompatRule } from '@mastra/core/processors'
+
+const stripUnsupportedAssistantMetadata: CompatRule = {
+  name: 'strip-unsupported-assistant-metadata',
+  applyToPrompt({ prompt, model }) {
+    if (typeof model !== 'string' || !model.startsWith('example-provider/')) {
+      return undefined
+    }
+
+    let changed = false
+    const nextPrompt = prompt.map(message => {
+      if (message.role !== 'assistant' || typeof message.content === 'string') {
+        return message
+      }
+
+      const nextContent = message.content.map(part => {
+        if (!('providerOptions' in part)) return part
+        changed = true
+        const { providerOptions: _providerOptions, ...rest } = part
+        return rest
+      })
+
+      return { ...message, content: nextContent }
+    })
+
+    return changed ? nextPrompt : undefined
+  },
+}
+
+export const agent = new Agent({
+  id: 'custom-provider-agent',
+  name: 'custom-provider-agent',
+  instructions: 'You are a helpful assistant.',
+  model: 'example-provider/model',
+  inputProcessors: [
+    new ProviderHistoryCompat({
+      additionalRules: [stripUnsupportedAssistantMetadata],
+    }),
+  ],
+})
+```
+
+Memory に保存すべきでない Provider 固有の書き換えには `applyToPrompt` を使用します。Provider が永続化済みのメッセージ履歴を拒否し、修復した履歴を今後のターンでも再利用する必要がある場合は、`errorPatterns` とともに `fix` を使用します。
+
+## 関連情報
+
+- [Processor インターフェース](/reference/processors/processor-interface)
+- [Processors](/docs/agents/processors)
+- [PrefillErrorHandler](/reference/processors/prefill-error-handler)

@@ -1,0 +1,257 @@
+---
+title: "參考：上下文召回率評分器 | Evals"
+description: Mastra 上下文召回率評分器的文件。評估擷取到的上下文涵蓋標準參考答案中主張的程度。
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# 上下文召回率評分器
+
+`createContextRecallScorer()` 函式會建立一個評分器，用來評估擷取到的上下文涵蓋標準參考答案中主張的程度。此評分器會檢查標準答案中有多少比例的主張可歸因於擷取到的上下文，以衡量擷取完整性。
+
+此評分器需要標準參考答案，因此適合用於 CI 或測試環境中已標記的資料集。若執行時未提供 `groundTruth`，評分器會傳回 0 分，而不會擲回錯誤。
+
+## RAG 擷取評估
+
+適合在下列 RAG 管線中評估擷取完整性：
+
+- 需要驗證擷取器是否取得所有必要資訊
+- 擁有含已知正確答案的標記資料集
+- 希望找出擷取器傳回內容的迴歸問題
+
+## 以資料集為基礎的測試
+
+適合對精心整理的測試集執行評估：
+
+- CI 管線中含標準答案標籤的問題
+- 對擷取策略進行 A/B 測試
+- 以涵蓋率為嵌入模型進行基準測試
+
+## 參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'model',
+    type: 'MastraModelConfig',
+    description: '用於評估主張歸因的語言模型',
+    required: true,
+  },
+  {
+    name: 'options',
+    type: 'ContextRecallMetricOptions',
+    description: '評分器的設定選項',
+    required: true,
+    children: [
+      {
+        name: 'context',
+        type: 'string[]',
+        description: '用來檢查主張的擷取上下文片段陣列',
+        required: false,
+      },
+      {
+        name: 'contextExtractor',
+        type: '(input, output) => string[]',
+        description: '從執行輸入與輸出中動態擷取上下文的函式',
+        required: false,
+      },
+      {
+        name: 'scale',
+        type: 'number',
+        description: '乘以最終分數的縮放係數（預設：1）',
+        required: false,
+      },
+    ],
+  },
+]}
+/>
+
+必須提供 `context` 或 `contextExtractor` 其中之一。同時提供兩者時，`contextExtractor` 只會在執行輸入與輸出採用 Agent 結構（`MastraDBMessage[]`）時使用；否則評分器會改用 `context`。
+
+## `.run()` 傳回值
+
+<PropertiesTable
+  content={[
+  {
+    name: 'score',
+    type: 'number',
+    description: '介於 0 與 scale 之間的召回率分數（預設為 0-1），表示上下文涵蓋標準答案主張的比例',
+  },
+  {
+    name: 'reason',
+    type: 'string',
+    description: '便於閱讀的說明，指出哪些標準答案主張有在上下文中找到，哪些沒有',
+  },
+]}
+/>
+
+## 評分詳情
+
+### 主張歸因
+
+上下文召回率會進行兩步驟的 LLM 評估，接著以確定性方式計算分數：
+
+1. **主張擷取**：將標準答案拆解為不可再分的主張
+1. **歸因檢查**：根據擷取上下文，檢查每項主張是否獲得支援
+
+接著以可歸因主張數除以主張總數，再乘以 scale 來計算分數。
+
+### 評分公式
+
+```
+Context Recall = attributed_claims / total_claims × scale
+
+Where:
+- attributed_claims = number of ground-truth claims supported by the context
+- total_claims = total number of claims extracted from the ground truth
+- Attribution is binary: a claim is either supported (yes) or not (no)
+```
+
+### 分數解讀
+
+下列範圍假設使用預設 `scale` 1。使用自訂 scale 時，請依比例相乘。
+
+- **0.9-1.0**：召回率極佳，上下文幾乎涵蓋所有標準答案主張
+- **0.7-0.8**：召回率良好。涵蓋大多數主張，只有少量缺漏
+- **0.4-0.6**：召回率中等，上下文缺少大量資訊
+- **0.1-0.3**：召回率不佳，上下文中找不到大多數標準答案主張
+- **0.0**：完全沒有召回，標準答案主張全都不在上下文中
+
+### 理由分析
+
+reason 欄位會說明：
+
+- 在上下文中找到哪些標準答案主張
+- 缺少哪些主張，以及存在哪些資訊缺口
+- 哪些具體上下文片段支援可歸因的主張
+
+### 最佳化建議
+
+使用結果來：
+
+- **改善擷取**：找出擷取器遺漏哪些類型的資訊
+- **調整區塊大小**：確保區塊包含足夠細節，可涵蓋標準答案主張
+- **評估嵌入模型**：測試不同的嵌入模型，以改善資訊涵蓋率
+- **擴充知識庫**：加入涵蓋經常遺漏主張的文件
+
+### 計算範例
+
+標準答案："Einstein was born in 1879. He developed relativity. He won the Nobel Prize."
+
+擷取的主張：3
+
+- "Einstein was born in 1879" → 可歸因（上下文提到出生日期）
+- "Einstein developed relativity" → 可歸因（上下文涵蓋相對論）
+- "Einstein won the Nobel Prize" → 無法歸因（上下文未提及諾貝爾獎）
+
+召回率 = 2/3 = 0.67
+
+## 評分器設定
+
+### 動態擷取上下文
+
+```typescript
+const scorer = createContextRecallScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      const query = input?.inputMessages?.[0]?.content || ''
+      const searchResults = vectorDB.search(query, { limit: 10 })
+      return searchResults.map(result => result.content)
+    },
+    scale: 1,
+  },
+})
+```
+
+### 靜態上下文評估
+
+```typescript
+const scorer = createContextRecallScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Document 1: Einstein was born on 14 March 1879 in Ulm, Germany.',
+      'Document 2: Einstein published the theory of special relativity in 1905.',
+      'Document 3: Einstein moved to the United States in 1933.',
+    ],
+  },
+})
+```
+
+## 範例
+
+根據已標記的資料集，評估 RAG 擷取的完整性：
+
+```typescript title="src/example-context-recall.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createContextRecallScorer } from '@mastra/evals/scorers/prebuilt'
+import { myAgent } from './agent'
+
+const scorer = createContextRecallScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract context from tool invocation results in the agent output
+      return output
+        .filter(msg => msg?.role === 'assistant')
+        .flatMap(msg => msg?.content?.toolInvocations ?? [])
+        .filter((tool: any) => tool.state === 'result')
+        .map((tool: any) => JSON.stringify(tool.result))
+    },
+  },
+})
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'What are the health benefits of green tea?',
+      groundTruth:
+        'Green tea contains antioxidants that reduce inflammation, L-theanine that improves focus, and catechins that boost metabolism.',
+    },
+    {
+      input: 'How does photosynthesis work?',
+      groundTruth:
+        'Photosynthesis converts sunlight into chemical energy using chlorophyll in chloroplasts, producing glucose and oxygen from carbon dioxide and water.',
+    },
+  ],
+  scorers: [scorer],
+  target: myAgent,
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+如需 `runEvals` 的更多詳細資訊，請參閱 [runEvals 參考文件](/reference/evals/run-evals)。
+
+若要將此評分器加入 Agent，請參閱[評分器概觀](/docs/evals/overview#adding-scorers-to-agents)指南。
+
+## 與上下文精確率比較
+
+依需求選擇適合的評分器：
+
+| 使用案例 | 上下文召回率 | 上下文精確率 |
+| - | - | - |
+| **衡量項目** | 標準答案的涵蓋率 | 擷取區塊的相關性 |
+| **方向** | 標準答案 → 上下文 | 上下文 → 標準答案 |
+| **是否受位置影響** | 否 | 是（獎勵前置排列） |
+| **是否需要標準答案** | 是 | 是 |
+| **可發現的失敗模式** | 資訊缺漏 | 無關雜訊 |
+
+兩者搭配使用，即可完整掌握擷取品質：精確率可找出上下文中的無用內容，召回率則可找出缺漏。
+
+## 相關資源
+
+- [上下文精確率評分器](/reference/evals/context-precision)：評估擷取到的上下文是否相關且排序良好
+- [上下文相關性評分器](/reference/evals/context-relevance)：評估上下文的使用情況與品質
+- [忠實度評分器](/reference/evals/faithfulness)：衡量答案是否以系統上下文為依據
+- [自訂評分器](/docs/evals/custom-scorers)：建立自己的評估指標

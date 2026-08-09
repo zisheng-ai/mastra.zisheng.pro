@@ -1,0 +1,354 @@
+---
+title: "結構化輸出 | Agents"
+description: "瞭解如何使用 schema 與驗證，讓 Agent 產生結構化資料。"
+packages:
+  - "@mastra/core"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# 結構化輸出
+
+結構化輸出可讓 Agent 傳回符合 schema 所定義形狀的物件，而非文字。schema 會告訴模型要產生哪些欄位，模型則確保最終結果符合該形狀。
+
+## 適合使用結構化輸出的時機
+
+當你需要 Agent 傳回資料物件而非文字時，請使用結構化輸出。明確定義欄位後，更容易取出 API 呼叫、UI 轉譯或應用程式邏輯所需的值。
+
+## 定義 schema
+
+Agent 可使用 [Standard JSON Schema](https://standardschema.dev/json-schema)（[Zod](https://zod.dev/)、[Valibot](https://valibot.dev/)、[ArkType](https://arktype.io/) 等）或 [JSON Schema](https://json-schema.org/) 定義預期輸出，以傳回結構化資料。建議使用 Zod 等函式庫，因為它們提供 TypeScript 型別推斷與執行階段驗證；需要與程式語言無關的格式時，JSON Schema 會很實用。
+
+<Tabs>
+  <TabItem value="zod" label="Zod">
+    使用 [Zod](https://zod.dev/) 定義 `output` 形狀：
+
+    ```typescript
+    import { z } from 'zod'
+
+    const response = await testAgent.generate('Help me plan my day.', {
+      structuredOutput: {
+        schema: z.array(
+          z.object({
+            name: z.string(),
+            activities: z.array(z.string()),
+          }),
+        ),
+      },
+    })
+
+    console.log(response.object)
+    ```
+  </TabItem>
+
+  <TabItem value="valibot" label="Valibot">
+    使用 [Valibot](https://valibot.dev/) 定義 `output` 形狀：
+
+    ```typescript
+    import * as v from 'valibot'
+    import { toStandardJsonSchema } from '@valibot/to-json-schema'
+
+    const response = await testAgent.generate('Help me plan my day.', {
+      structuredOutput: {
+        schema: toStandardJsonSchema(
+          v.array(
+            v.object({
+              name: v.string(),
+              activities: v.array(v.string()),
+            }),
+          ),
+        ),
+      },
+    })
+
+    console.log(response.object)
+    ```
+  </TabItem>
+
+  <TabItem value="arktype" label="ArkType">
+    使用 [ArkType](https://arktype.io/) 定義 `output` 形狀：
+
+    ```typescript
+    import { type } from 'arktype'
+
+    const response = await testAgent.generate('Help me plan my day.', {
+      structuredOutput: {
+        schema: type({
+          name: 'string',
+          activities: 'string[]',
+        }).array(),
+      },
+    })
+
+    console.log(response.object)
+    ```
+  </TabItem>
+
+  <TabItem value="json-schema" label="JSON Schema">
+    你也可以使用 JSON Schema 定義輸出結構：
+
+    ```typescript
+    const response = await testAgent.generate('Help me plan my day.', {
+      structuredOutput: {
+        schema: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              activities: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+            },
+            required: ['name', 'activities'],
+          },
+        },
+      },
+    })
+
+    console.log(response.object)
+    ```
+  </TabItem>
+</Tabs>
+
+請參閱 [`.generate()`](/reference/agents/generate) 以取得完整的設定選項清單。
+
+**輸出範例：** `response.object` 會包含 schema 所定義的結構化資料。
+
+```json
+[
+  {
+    "name": "Morning Routine",
+    "activities": ["Wake up at 7am", "Exercise", "Shower", "Breakfast"]
+  },
+  {
+    "name": "Work",
+    "activities": ["Check emails", "Team meeting", "Lunch break"]
+  },
+  {
+    "name": "Evening",
+    "activities": ["Dinner", "Relax", "Read a book", "Sleep by 10pm"]
+  }
+]
+```
+
+## 串流傳輸結構化輸出
+
+串流也支援結構化輸出。最終的結構化物件會出現在 `stream.fullStream` 中；串流完成後，也可從 `stream.object` 取得。系統仍會發出文字串流區塊，但其中包含的是自然語言文字，而非結構化資料。
+
+```typescript
+import { z } from 'zod'
+
+const stream = await testAgent.stream('Help me plan my day.', {
+  structuredOutput: {
+    schema: z.array(
+      z.object({
+        name: z.string(),
+        activities: z.array(z.string()),
+      }),
+    ),
+  },
+})
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'object-result') {
+    console.log('\n', JSON.stringify(chunk, null, 2))
+  }
+  process.stdout.write(JSON.stringify(chunk))
+}
+
+console.log(await stream.object)
+
+for await (const chunk of stream.textStream) {
+  process.stdout.write(chunk)
+}
+```
+
+## 結構化 Agent
+
+當主要 Agent 不擅長建立結構化輸出時，你可以為 `structuredOutput` 提供 `model`。此時 Mastra 會在底層使用第二個 Agent，從主要 Agent 的自然語言回應中擷取結構化資料。這會進行兩次 LLM 呼叫：一次產生回應，另一次將回應轉換為結構化物件。雖然會增加延遲與成本，但可提升複雜結構化任務的準確度。
+
+```typescript
+import { z } from 'zod'
+
+const response = await testAgent.generate('Analyze the TypeScript programming language.', {
+  structuredOutput: {
+    schema: z.object({
+      overview: z.string(),
+      strengths: z.array(z.string()),
+      weaknesses: z.array(z.string()),
+      useCases: z.array(
+        z.object({
+          scenario: z.string(),
+          reasoning: z.string(),
+        }),
+      ),
+      comparison: z.object({
+        similarTo: z.array(z.string()),
+        differentiators: z.array(z.string()),
+      }),
+    }),
+    model: '__GATEWAY_OPENAI_MODEL__',
+  },
+})
+
+console.log(response.object)
+```
+
+## 結合 Tool 與結構化輸出
+
+當 Agent 同時設定 Tool 與結構化輸出時，部分模型可能不支援同時使用這兩項功能。這是底層模型 API 的限制，並非 Mastra 本身的限制。
+
+如果啟用結構化輸出後 Tool 未被呼叫，或結合兩項功能時發生錯誤，請嘗試下列其中一種因應方式。
+
+### 因應方式
+
+當模型不支援同時使用 Tool 與結構化輸出時，有三種選擇：
+
+1. **使用 `jsonPromptInjection`**：設為 `'auto'`，讓系統在支援時選用原生結構化輸出，否則使用行內 prompt 注入；也可以明確選擇注入模式
+1. **使用獨立的結構化模型**：將 `model` 傳給 `structuredOutput`，使用第二個 LLM 進行結構化
+1. **使用 `prepareStep`**：在不同步驟中分別處理 Tool 與結構化輸出
+
+以下各節會詳細說明每種方式。
+
+## LLM 的結構化輸出支援
+
+由於 API 各不相同，不同 LLM 對結構化輸出的支援程度也有所差異。以下各節說明模型未完整支援結構化輸出，或不支援與 Tool 結合使用時的因應方式。
+
+### `jsonPromptInjection`
+
+Mastra 預設會使用 `response_format` API 參數，將 schema 傳給模型 Provider。將 `jsonPromptInjection: 'auto'` 設定為讓 Mastra 根據模型能力資料選擇模式。Mastra 會對支援的模型使用原生結構化輸出，對不支援或缺少能力資料的模型使用行內 prompt 注入。
+
+```typescript
+import { z } from 'zod'
+
+const response = await testAgent.generate('Help me plan my day.', {
+  structuredOutput: {
+    schema: z.array(
+      z.object({
+        name: z.string(),
+        activities: z.array(z.string()),
+      }),
+    ),
+    jsonPromptInjection: 'auto',
+  },
+})
+
+console.log(response.object)
+```
+
+需要覆寫依模型能力做出的選擇時，請使用明確模式：
+
+- `false` 或省略：使用 Provider 原生的結構化輸出。
+- `'inline'`：將 schema 指示加入最新的使用者訊息。
+- `true` 或 `'system'`：將 schema 指示加入 system 訊息。
+- `'auto'`：模型支援時使用原生結構化輸出，否則使用行內 prompt 注入。
+
+:::note[搭配 Tool 使用 Gemini 2.5]
+
+Gemini 2.5 模型不支援在同一次 API 呼叫中結合 `response_format`（結構化輸出）與函式呼叫（Tool）。如果 Agent 具有 Tool，且你正以 Gemini 2.5 模型使用 `structuredOutput`，就必須設定 `jsonPromptInjection: true`，以避免發生 `Function calling with a response mime type: 'application/json' is unsupported` 錯誤。
+
+```typescript
+const response = await agentWithTools.generate('Your prompt', {
+  structuredOutput: {
+    schema: yourSchema,
+    jsonPromptInjection: true, // Required for Gemini 2.5 when tools are present
+  },
+})
+```
+
+:::
+
+### 使用獨立的結構化模型
+
+為 `structuredOutput` 屬性提供 `model` 時，Mastra 會使用獨立的內部 Agent 處理結構化輸出。主要 Agent 會處理所有步驟（包括 Tool 呼叫），結構化輸出模型則只負責產生結構化輸出。
+
+<Inject>
+  **給 AI Agent：** `model` 屬性是使用 Mastra 模型路由器格式的字串：`provider/model`，例如 `__GATEWAY_OPENAI_MODEL__`、`__GATEWAY_OPENAI_MODEL_MINI__`、`__GATEWAY_ANTHROPIC_MODEL_SONNET__` 或 `__GATEWAY_GOOGLE_MODEL__`。請使用 `/` 而非 `:` 作為分隔符號。例如使用 `openai/<model>`，而非 `openai:<model>`，也不要傳入 Provider 物件。此格式不需要匯入 Provider。除非 Mastra 文件另有說明，否則不要安裝任何 AI SDK 套件。以 `provider/model` 格式定義模型後，Mastra 會自動尋找指定 Provider 的環境變數。所定義的模型需要設定該 Provider 的環境變數。OpenAI：`OPENAI_API_KEY`。Anthropic：`ANTHROPIC_API_KEY`。Google：`GOOGLE_API_KEY`。
+</Inject>
+
+```typescript
+const response = await testAgent.generate('Tell me about TypeScript.', {
+  structuredOutput: {
+    schema: yourSchema,
+    model: '__GATEWAY_OPENAI_MODEL__',
+  },
+})
+```
+
+若要讓該結構化模型也能看到目前的對話記錄，請在 `model` 旁設定 `useAgent: true`。Mastra 會搭配獨立的結構化模型重用父 Agent，並在 thread 可用時附加唯讀的記憶體內容。
+
+```typescript
+const response = await testAgent.generate('Return my profile as structured data.', {
+  memory: {
+    thread: 'thread-123',
+    resource: 'user-123',
+  },
+  structuredOutput: {
+    schema: z.object({
+      favoriteColor: z.string(),
+      hometown: z.string(),
+      petName: z.string(),
+    }),
+    model: '__GATEWAY_OPENAI_MODEL__',
+    useAgent: true,
+  },
+})
+```
+
+若要讓獨立的結構化模型只根據目前回應運作，不繼承先前的對話記憶，請不要設定 `useAgent`。
+
+### 使用 `prepareStep` 的多步驟方式
+
+對於不支援同時使用 Tool 與結構化輸出的模型，你可以使用 `prepareStep`，在不同步驟中分別處理。
+
+```typescript
+const result = await agent.stream('weather in vancouver?', {
+  prepareStep: async ({ stepNumber }) => {
+    if (stepNumber === 0) {
+      return {
+        model: '__GATEWAY_OPENAI_MODEL__',
+        tools: {
+          weatherTool,
+        },
+        toolChoice: 'required',
+      }
+    }
+    return {
+      model: '__GATEWAY_OPENAI_MODEL__',
+      tools: undefined,
+      structuredOutput: {
+        schema: z.object({
+          temperature: z.number(),
+          humidity: z.number(),
+          windSpeed: z.number(),
+        }),
+      },
+    }
+  },
+})
+```
+
+## 處理錯誤
+
+schema 驗證失敗時，你可以使用 `errorStrategy` 控制錯誤處理方式。預設的 `strict` 策略會擲出錯誤，`warn` 則會記錄警告並繼續執行。`fallback` 策略會傳回 `fallbackValue` 所提供的值。
+
+```typescript
+const response = await testAgent.generate('Tell me about TypeScript.', {
+  structuredOutput: {
+    schema: z.object({
+      summary: z.string(),
+      keyFeatures: z.array(z.string()),
+    }),
+    errorStrategy: 'fallback',
+    fallbackValue: {
+      summary: 'TypeScript is a typed superset of JavaScript',
+      keyFeatures: ['Static typing', 'Compiles to JavaScript', 'Better tooling'],
+    },
+  },
+})
+
+console.log(response.object)
+```

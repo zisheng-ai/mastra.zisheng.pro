@@ -1,0 +1,394 @@
+---
+title: "記憶處理器 | 記憶"
+description: "了解如何在 Mastra 中使用記憶處理器，在訊息傳送至語言模型前篩選、刪減及轉換訊息，以管理上下文視窗限制。"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+  - "@mastra/openai"
+  - "@mastra/pinecone"
+---
+
+# 記憶處理器
+
+訊息通過已啟用記憶的 Agent 時，記憶處理器會轉換及篩選訊息。它們會管理上下文視窗限制、移除不必要的內容，並最佳化傳送至語言模型的資訊。
+
+在 Agent 上啟用記憶後，Mastra 會將記憶處理器加到 Agent 的處理器管線。這些處理器會擷取訊息歷史、工作記憶及語義相關訊息，然後在模型回應後持久儲存新訊息。
+
+記憶處理器是專門處理記憶相關訊息及狀態的[處理器](/docs/agents/processors)。
+
+## 內置記憶處理器
+
+啟用記憶後，Mastra 會自動加入以下處理器：
+
+### `MessageHistory`
+
+擷取訊息歷史並持久儲存新訊息。
+
+**當你設定：**
+
+```typescript
+memory: new Memory({
+  lastMessages: 10,
+})
+```
+
+**Mastra 內部操作：**
+
+1. 建立使用 `limit: 10` 的 `MessageHistory` 處理器
+1. 將它加到 Agent 的輸入處理器（在 LLM 之前運行）
+1. 將它加到 Agent 的輸出處理器（在 LLM 之後運行）
+
+**功能：**
+
+- **輸入**：從儲存空間擷取最後 10 則訊息，並將它們加到對話開頭
+- **輸出**：模型回應後，將新訊息持久儲存至儲存空間
+
+**範例：**
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+import { openai } from '@ai-sdk/openai'
+
+const agent = new Agent({
+  id: 'test-agent',
+  name: 'Test Agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({
+      id: 'memory-store',
+      url: 'file:memory.db',
+    }),
+    lastMessages: 10, // MessageHistory processor automatically added
+  }),
+})
+```
+
+### `SemanticRecall`
+
+根據目前輸入擷取語義相關的訊息，並為新訊息建立嵌入。
+
+**當你設定：**
+
+```typescript
+memory: new Memory({
+  semanticRecall: { enabled: true },
+  vector: myVectorStore,
+  embedder: myEmbedder,
+})
+```
+
+**Mastra 內部操作：**
+
+1. 建立 `SemanticRecall` 處理器
+1. 將它加到 Agent 的輸入處理器（在 LLM 之前運行）
+1. 將它加到 Agent 的輸出處理器（在 LLM 之後運行）
+1. 必須已設定向量儲存空間及 embedder
+
+**功能：**
+
+- **輸入**：執行向量相似度搜尋以尋找相關的過往訊息，並將它們加到對話開頭
+- **輸出**：為新訊息建立嵌入，並將它們儲存在向量儲存空間，供日後擷取
+
+**範例：**
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+import { PineconeVector } from '@mastra/pinecone'
+import { OpenAIEmbedder } from '@mastra/openai'
+import { openai } from '@ai-sdk/openai'
+
+const agent = new Agent({
+  name: 'semantic-agent',
+  instructions: 'You are a helpful assistant with semantic memory',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({
+      id: 'memory-store',
+      url: 'file:memory.db',
+    }),
+    vector: new PineconeVector({
+      id: 'memory-vector',
+      apiKey: process.env.PINECONE_API_KEY!,
+    }),
+    embedder: new OpenAIEmbedder({
+      model: 'text-embedding-3-small',
+      apiKey: process.env.OPENAI_API_KEY!,
+    }),
+    semanticRecall: { enabled: true }, // SemanticRecall processor automatically added
+  }),
+})
+```
+
+### `WorkingMemory`
+
+管理跨對話的工作記憶狀態。
+
+**當你設定：**
+
+```typescript
+memory: new Memory({
+  workingMemory: { enabled: true },
+})
+```
+
+**Mastra 內部操作：**
+
+1. 建立 `WorkingMemory` 處理器
+1. 將它加到 Agent 的輸入處理器（在 LLM 之前運行）
+1. 必須已設定儲存配接器
+
+**功能：**
+
+- **輸入**：擷取目前執行緒的工作記憶狀態，並將它加到對話開頭
+- **輸出**：不進行輸出處理
+
+**範例：**
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+import { openai } from '@ai-sdk/openai'
+
+const agent = new Agent({
+  name: 'working-memory-agent',
+  instructions: 'You are an assistant with working memory',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({
+      id: 'memory-store',
+      url: 'file:memory.db',
+    }),
+    workingMemory: { enabled: true }, // WorkingMemory processor automatically added
+  }),
+})
+```
+
+## 手動控制及去除重複項目
+
+如果你手動將記憶處理器加到 `inputProcessors` 或 `outputProcessors`，Mastra **不會**再自動加入。這讓你可以完全控制處理器次序：
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { MessageHistory } from '@mastra/core/processors'
+import { TokenLimiter } from '@mastra/core/processors'
+import { LibSQLStore } from '@mastra/libsql'
+import { openai } from '@ai-sdk/openai'
+
+// Custom MessageHistory with different configuration
+const customMessageHistory = new MessageHistory({
+  storage: new LibSQLStore({ id: 'memory-store', url: 'file:memory.db' }),
+  lastMessages: 20,
+})
+
+const agent = new Agent({
+  name: 'custom-memory-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({ id: 'memory-store', url: 'file:memory.db' }),
+    lastMessages: 10, // This would normally add MessageHistory(10)
+  }),
+  inputProcessors: [
+    customMessageHistory, // Your custom one is used instead
+    new TokenLimiter({ limit: 4000 }), // Runs after your custom MessageHistory
+  ],
+})
+```
+
+## 處理器執行次序
+
+結合防護機制與記憶時，了解執行次序十分重要：
+
+### 輸入處理器
+
+```
+[Memory Processors] → [Your inputProcessors]
+```
+
+1. **記憶處理器首先運行**：`WorkingMemory`、`MessageHistory`、`SemanticRecall`
+1. **你的輸入處理器隨後運行**：防護機制、篩選器、驗證器
+
+因此，記憶會先載入訊息歷史，你的處理器之後才可驗證或篩選輸入。
+
+### 輸出處理器
+
+```
+[Your outputProcessors] → [Memory Processors]
+```
+
+1. **你的輸出處理器首先運行**：防護機制、篩選器、驗證器
+1. **記憶處理器隨後運行**：`SemanticRecall`（嵌入）、`MessageHistory`（持久儲存）
+
+這個次序設計為**預設安全**：如果輸出防護機制呼叫 `abort()`，記憶處理器便不會運行，而且**不會儲存任何訊息**。
+
+## 防護機制與記憶
+
+預設執行次序提供安全的防護機制行為：
+
+### 輸出防護機制（建議）
+
+輸出防護機制會在記憶處理器儲存訊息**之前**運行。如果防護機制中止：
+
+- 觸發 tripwire
+- 跳過記憶處理器
+- **不會將任何訊息持久儲存至儲存空間**
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { openai } from '@ai-sdk/openai'
+
+// Output guardrail that blocks inappropriate content
+const contentBlocker = {
+  id: 'content-blocker',
+  processOutputResult: async ({ messages, abort }) => {
+    const hasInappropriateContent = messages.some(msg => containsBadContent(msg))
+    if (hasInappropriateContent) {
+      abort('Content blocked by guardrail')
+    }
+    return messages
+  },
+}
+
+const agent = new Agent({
+  id: 'safe-agent',
+  name: 'safe-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({ lastMessages: 10 }),
+  // Your guardrail runs BEFORE memory saves
+  outputProcessors: [contentBlocker],
+})
+
+// If the guardrail aborts, nothing is saved to memory
+const result = await agent.generate('Hello')
+if (result.tripwire) {
+  console.log('Blocked:', result.tripwire.reason)
+  // Memory is empty - no messages were persisted
+}
+```
+
+### 輸入防護機制
+
+輸入防護機制會在記憶處理器載入歷史**之後**運行。如果防護機制中止：
+
+- 觸發 tripwire
+- 永不呼叫 LLM
+- 跳過輸出處理器（包括記憶持久儲存）
+- **不會將任何訊息持久儲存至儲存空間**
+
+```typescript
+// Input guardrail that validates user input
+const inputValidator = {
+  id: 'input-validator',
+  processInput: async ({ messages, abort }) => {
+    const lastUserMessage = messages.findLast(m => m.role === 'user')
+    if (isInvalidInput(lastUserMessage)) {
+      abort('Invalid input detected')
+    }
+    return messages
+  },
+}
+
+const agent = new Agent({
+  id: 'validated-agent',
+  name: 'validated-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({ lastMessages: 10 }),
+  // Your guardrail runs AFTER memory loads history
+  inputProcessors: [inputValidator],
+})
+```
+
+### 摘要
+
+| 防護機制類型 | 運行時間 | 中止時 |
+| - | - | - |
+| 輸入 | 記憶載入歷史後 | 不呼叫 LLM，不儲存任何內容 |
+| 輸出 | 記憶儲存內容前 | 不將任何內容儲存至儲存空間 |
+
+兩種情況都很安全——防護機制會阻止不當內容持久儲存至記憶。
+
+## 處理大型附件
+
+部分儲存 Provider 會實施記錄大小限制，而以 base64 編碼的檔案附件可能超出限制：
+
+| Provider | 記錄大小限制 |
+| - | - |
+| [DynamoDB](/reference/storage/dynamodb) | 400 KB |
+| [Convex](/reference/storage/convex) | 1 MiB |
+| [Cloudflare D1](/reference/storage/cloudflare-d1) | 1 MiB |
+
+PostgreSQL、MongoDB 及 libSQL 的限制較高，通常不受影響。
+
+請使用輸入處理器將附件上載至外部儲存空間，然後在訊息持久儲存前，以 URL 參照取代附件。
+
+```typescript title="src/mastra/processors/attachment-uploader.ts"
+import type { Processor } from '@mastra/core/processors'
+import type { MastraDBMessage } from '@mastra/core/memory'
+
+export class AttachmentUploader implements Processor {
+  id = 'attachment-uploader'
+
+  async processInput({ messages }: { messages: MastraDBMessage[] }) {
+    return Promise.all(messages.map(message => this.processMessage(message)))
+  }
+
+  async processMessage(message: MastraDBMessage) {
+    const attachments = message.content.experimental_attachments
+    if (!attachments?.length) return message
+
+    const uploaded = await Promise.all(
+      attachments.map(async attachment => {
+        if (!attachment.url?.startsWith('data:')) return attachment
+
+        const url = await this.upload(attachment.url, attachment.contentType)
+        return { ...attachment, url }
+      }),
+    )
+
+    return { ...message, content: { ...message.content, experimental_attachments: uploaded } }
+  }
+
+  async upload(dataUri: string, contentType?: string): Promise<string> {
+    const base64 = dataUri.split(',')[1]
+    const buffer = Buffer.from(base64, 'base64')
+
+    throw new Error('Implement upload() with your storage provider')
+  }
+}
+```
+
+將處理器用於你的 Agent：
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { AttachmentUploader } from '../processors/attachment-uploader'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support agent',
+  instructions: 'Answer customer support questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({ lastMessages: 10 }),
+  inputProcessors: [new AttachmentUploader()],
+})
+```
+
+## 相關文件
+
+- [處理器](/docs/agents/processors)：一般處理器概念及自訂處理器建立方法
+- [防護機制](/docs/agents/guardrails)：保安及驗證處理器
+- [記憶概覽](/docs/memory/overview)：記憶類型及設定
+
+建立自訂處理器時，請避免直接改動輸入 `messages` 陣列或其中的物件。

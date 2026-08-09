@@ -100,6 +100,7 @@ const sidebars = {
               type: 'doc',
               id: 'rag/overview',
               label: 'Overview',
+              key: 'rag-overview',
             },
             {
               type: 'doc',
@@ -131,6 +132,7 @@ const sidebars = {
               type: 'doc',
               id: 'voice/overview',
               label: 'Overview',
+              key: 'voice-overview',
             },
             {
               type: 'doc',
@@ -184,6 +186,7 @@ const sidebars = {
               type: 'doc',
               id: 'build-your-ui/copilotkit/overview',
               label: 'Overview',
+              key: 'copilotkit-overview',
             },
             {
               type: 'doc',
@@ -408,6 +411,7 @@ const sidebars = {
               id: 'migrations/upgrade-to-v1/overview',
               type: 'doc',
               label: 'Overview',
+              key: 'upgrade-to-v1-overview',
             },
             {
               id: 'migrations/upgrade-to-v1/agent',

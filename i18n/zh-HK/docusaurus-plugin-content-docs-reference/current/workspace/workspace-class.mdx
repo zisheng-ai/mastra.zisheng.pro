@@ -1,0 +1,798 @@
+---
+title: "參考：Workspace class | Workspace"
+description: "Workspace class 的文件；這是 Mastra 中存取檔案系統、執行 Sandbox 及搜尋的核心 API。"
+packages:
+  - "@mastra/core"
+---
+
+# Workspace class
+
+**新增於：** `@mastra/core@1.1.0`
+
+`Workspace` class 結合檔案系統與 Sandbox，為 Agent 提供檔案儲存及指令執行功能。它亦支援對已建立索引的內容進行 BM25 和向量搜尋。
+
+## 使用範例
+
+```typescript
+import { Workspace, LocalFilesystem, LocalSandbox } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  id: 'my-workspace',
+  name: 'My Workspace',
+  filesystem: new LocalFilesystem({
+    basePath: './workspace',
+  }),
+  sandbox: new LocalSandbox({
+    workingDirectory: './workspace',
+  }),
+  bm25: true,
+  autoIndexPaths: ['docs'],
+})
+```
+
+## 建構函數參數
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'Workspace 的唯一識別碼',
+    isOptional: true,
+    defaultValue: '自動產生',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: '方便使用者閱讀的名稱',
+    isOptional: true,
+    defaultValue: 'workspace-{id}',
+  },
+  {
+    name: 'filesystem',
+    type: 'WorkspaceFilesystem | WorkspaceFilesystemResolver',
+    description:
+      '檔案系統 Provider 實例，或接收 `requestContext` 並為每個請求傳回檔案系統的 resolver 函數。請參閱[動態檔案系統](/docs/workspace/filesystem#dynamic-filesystem)。',
+    isOptional: true,
+  },
+  {
+    name: 'sandbox',
+    type: 'WorkspaceSandbox | WorkspaceSandboxResolver',
+    description:
+      'Sandbox Provider 實例，或接收 `requestContext` 並為每個請求傳回 Sandbox 的 resolver 函數。請參閱[動態 Sandbox](/docs/workspace/sandbox#dynamic-sandbox)。',
+    isOptional: true,
+  },
+  {
+    name: 'instructions.dynamicSandbox',
+    type: "'placeholder' | 'resolve' | (({ requestContext }) => string)",
+    description:
+      "控制由 resolver 支援的 `sandbox` 如何提供 Workspace 指示。`'placeholder'`（預設值）會輸出固定文字，而不呼叫 resolver。`'resolve'` 會呼叫 resolver，並使用 Sandbox 本身的指示。函數則會傳回自訂文字，而不進行解析。此設定不影響靜態 Sandbox。",
+    isOptional: true,
+    defaultValue: "'placeholder'",
+  },
+  {
+    name: 'sandboxCacheKey',
+    type: '({ requestContext }) => string | undefined',
+    description:
+      '由 resolver 支援的 `sandbox` 所使用的固定快取鍵。設定後，已解析的 Sandbox 會按鍵記憶，而非按 `RequestContext` 實例記憶，讓背景程序 Tool 可在後續請求中連接至同一個 Sandbox。此設定不影響靜態 Sandbox。',
+    isOptional: true,
+  },
+  {
+    name: 'bm25',
+    type: 'boolean | BM25Config',
+    description: '啟用 BM25 關鍵字搜尋。傳入 true 以使用預設值，或傳入設定物件。',
+    isOptional: true,
+    defaultValue: 'undefined',
+  },
+  {
+    name: 'vectorStore',
+    type: 'MastraVector',
+    description: '用於語意搜尋的向量儲存',
+    isOptional: true,
+  },
+  {
+    name: 'embedder',
+    type: 'Embedder',
+    description:
+      '將文字轉換為向量的函數。設定 `vectorStore` 時必須提供。可接收處理單一文字的函數 `(text: string) => Promise<number[]>`，或具備 `batch: true` 屬性及可選 `maxBatchSize`、支援批次處理的函數 `(texts: string[]) => Promise<number[][]>`。請參閱[批次 embedding](/docs/workspace/search#batch-embedding)。',
+    isOptional: true,
+  },
+  {
+    name: 'autoIndexPaths',
+    type: 'string[]',
+    description:
+      "在 init() 時自動建立索引的路徑或 glob 模式。支援以 '**/*.md' 之類的 glob 模式選擇要建立索引的檔案。",
+    isOptional: true,
+  },
+  {
+    name: 'skills',
+    type: 'string[] | ((context: SkillsContext) => string[] | Promise<string[]>)',
+    description:
+      "SKILL.md 檔案所在的路徑。可以是靜態陣列，或動態解析路徑的非同步函數。支援以 './**/skills' 之類的 glob 模式進行探索。",
+    isOptional: true,
+  },
+  {
+    name: 'skillSource',
+    type: 'SkillSource',
+    description:
+      '用於探索 Skill 的自訂 Skill 來源。提供後，系統會使用此來源取代 Workspace 檔案系統。使用 VersionedSkillSource，可從內容定址的 blob store 提供已發佈的 Skill 版本。',
+    isOptional: true,
+  },
+  {
+    name: 'onMount',
+    type: 'OnMountHook',
+    description:
+      '將每個檔案系統掛載至 Sandbox 前呼叫的預先掛載 hook。傳回 false 可略過掛載；如 hook 已處理掛載，則傳回 { success: true }。傳回 undefined 可使用預設掛載行為。',
+    isOptional: true,
+  },
+  {
+    name: 'searchIndexName',
+    type: 'string',
+    description:
+      "向量儲存的自訂索引名稱。必須是有效的 SQL 識別碼（以英文字母或底線開頭，只包含英文字母、數字或底線，最多 63 個字元）。預設為經清理的 '{id}_search' 版本。",
+    isOptional: true,
+  },
+  {
+    name: 'tools',
+    type: 'WorkspaceToolsConfig',
+    description: '用於啟用 Tool 及設定安全選項的個別 Tool 設定',
+    isOptional: true,
+    properties: [
+      {
+        type: 'WorkspaceToolsConfig',
+        parameters: [
+          {
+            name: 'enabled',
+            type: 'boolean',
+            description: 'Agent 是否可使用此 Tool',
+            isOptional: true,
+            defaultValue: 'true',
+          },
+          {
+            name: 'requireApproval',
+            type: 'boolean',
+            description: 'Tool 執行前是否需要使用者批准',
+            isOptional: true,
+            defaultValue: 'false',
+          },
+          {
+            name: 'name',
+            type: 'string',
+            description:
+              '向外提供此 Tool 時使用的自訂名稱。取代預設的 `mastra_workspace_*` 名稱。設定鍵仍必須使用原有的 `WORKSPACE_TOOLS` 常數。',
+            isOptional: true,
+          },
+          {
+            name: 'requireReadBeforeWrite',
+            type: 'boolean',
+            description: '寫入 Tool：要求先讀取檔案，以防止覆寫',
+            isOptional: true,
+            defaultValue: 'false',
+          },
+          {
+            name: 'maxOutputTokens',
+            type: 'number',
+            description: 'Tool 輸出的 token 上限。超出此限制的輸出會使用 tiktoken 截斷。',
+            isOptional: true,
+            defaultValue: '2000',
+          },
+          {
+            name: 'writeLockTimeoutMs',
+            type: 'number',
+            description:
+              '寫入 Tool 在失敗前等待取得個別檔案寫入鎖的最長時間（毫秒）。如檔案系統較慢或需要冷啟動（例如遠端 Sandbox），可提高此值。',
+            isOptional: true,
+            defaultValue: '30000',
+          },
+          {
+            name: 'hooks',
+            type: 'WorkspaceToolHooks',
+            description: '每次呼叫已啟用的 Workspace Tool 前後執行的 hook。請參閱下方的 Tool hook。',
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'operationTimeout',
+    type: 'number',
+    description: '操作逾時時間（毫秒）',
+    isOptional: true,
+  },
+]}
+/>
+
+## Tool 設定
+
+`tools` 選項接受 `WorkspaceToolsConfig` 物件，用來控制啟用哪些 Workspace Tool 及其安全設定。
+
+```typescript {2,7-16}
+import { Workspace } from '@mastra/core/workspace'
+import { WORKSPACE_TOOLS } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  id: 'my-workspace',
+  name: 'My Workspace',
+  tools: {
+    // Global defaults (apply to all tools)
+    enabled: true,
+    requireApproval: false,
+
+    // Per-tool overrides using WORKSPACE_TOOLS constants
+    [WORKSPACE_TOOLS.FILESYSTEM.WRITE_FILE]: {
+      requireApproval: true,
+    },
+  },
+})
+```
+
+設定物件分為兩部分：
+
+- **全域預設值**（`enabled`、`requireApproval`）：除非被覆寫，否則套用至所有 Tool
+- **個別 Tool 覆寫設定**：使用 `WORKSPACE_TOOLS` 常數作為鍵，設定個別 Tool
+
+更多範例請參閱 [Workspace 概覽](/docs/workspace/overview#tool-configuration)。
+
+### Tool 名稱重新對應
+
+在個別 Tool 設定中設定 `name` 屬性，即可重新命名 Workspace Tool。設定鍵仍為原有常數，只有向 Agent 提供的名稱會變更。
+
+```typescript {8,9}
+import { Workspace } from '@mastra/core/workspace'
+import { WORKSPACE_TOOLS } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  id: 'my-workspace',
+  name: 'My Workspace',
+  tools: {
+    [WORKSPACE_TOOLS.FILESYSTEM.READ_FILE]: { name: 'view' },
+    [WORKSPACE_TOOLS.FILESYSTEM.GREP]: { name: 'search_content' },
+  },
+})
+```
+
+所有 Workspace Tool 的名稱都必須獨一無二。如果自訂名稱與另一個 Tool 的預設或自訂名稱衝突，系統便會擲回錯誤。
+
+### Tool hook
+
+設定 `tools.hooks`，即可在每次呼叫已啟用的 Workspace Tool 前後執行邏輯。Hook 會在名稱重新對應後執行，因此 context 同時包含向外提供的 `toolName` 及原有的 `workspaceToolName`。
+
+```typescript {6-14}
+import { Workspace } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  id: 'my-workspace',
+  tools: {
+    hooks: {
+      beforeToolCall: ({ toolName, workspaceToolName, input }) => {
+        console.log(`Running ${toolName} (${workspaceToolName})`, input)
+      },
+      afterToolCall: ({ toolName, output, error }) => {
+        console.log(`Finished ${toolName}`, { output, error })
+      },
+    },
+  },
+})
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'beforeToolCall',
+    type: '(context: WorkspaceToolHookContext) => void | WorkspaceToolBeforeHookResult | Promise<void | WorkspaceToolBeforeHookResult>',
+    isOptional: true,
+    description:
+      '在 Workspace Tool 執行前運行。接收 `{ toolName, workspaceToolName, input, context }`。傳回 `{ proceed: false, output }` 可略過 Tool 呼叫，並使用 `output` 作為結果。',
+  },
+  {
+    name: 'afterToolCall',
+    type: '(context: WorkspaceToolAfterHookContext) => void | Promise<void>',
+    isOptional: true,
+    description:
+      '在 Workspace Tool 執行後運行。接收 `{ toolName, workspaceToolName, input, context, output, error }`。當 Tool 擲回錯誤時，`output` 為 undefined，並會改為設定 `error`。',
+  },
+]}
+/>
+
+如果所屬 Agent 亦定義了 [Tool hook](/reference/agents/agent#tool-hooks)，Workspace hook 會在 Agent hook wrapper 內執行。順序為 Agent `beforeToolCall` → Workspace `beforeToolCall` → Tool → Workspace `afterToolCall` → Agent `afterToolCall`。
+
+## 屬性
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'Workspace 識別碼',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: 'Workspace 名稱',
+  },
+  {
+    name: 'status',
+    type: 'WorkspaceStatus',
+    description: "'pending' | 'initializing' | 'ready' | 'paused' | 'error' | 'destroying' | 'destroyed'",
+  },
+  {
+    name: 'filesystem',
+    type: 'WorkspaceFilesystem | undefined',
+    description:
+      '靜態檔案系統 Provider。設定 resolver 函數時傳回 `undefined`；請使用 `hasFilesystemConfig()` 檢查是否可用。',
+  },
+  {
+    name: 'sandbox',
+    type: 'WorkspaceSandbox | undefined',
+    description:
+      '靜態 Sandbox Provider。設定 resolver 函數時傳回 `undefined`；請使用 `hasSandboxConfig()` 檢查是否可用。',
+  },
+  {
+    name: 'skills',
+    type: 'WorkspaceSkills | undefined',
+    description: '用於存取 SKILL.md 檔案的 Skill 介面',
+  },
+  {
+    name: 'canBM25',
+    type: 'boolean',
+    description: '是否可使用 BM25 搜尋',
+  },
+  {
+    name: 'canVector',
+    type: 'boolean',
+    description: '是否可使用向量搜尋',
+  },
+  {
+    name: 'canHybrid',
+    type: 'boolean',
+    description: '是否可使用混合搜尋',
+  },
+]}
+/>
+
+## 方法
+
+### 生命週期
+
+#### `init()`
+
+初始化 Workspace 並準備資源。
+
+```typescript
+await workspace.init()
+```
+
+在大部分情況下，呼叫 `init()` 並非必要：
+
+- **Sandbox**：首次呼叫 `executeCommand()` 時自動啟動。使用 `init()` 可避免第一個指令出現延遲。
+- **檔案系統**：建立基礎目錄，並執行任何 Provider 特定的設定。部分 Provider 會在首次操作時自動建立目錄。
+- **搜尋**：只有使用 `autoIndexPaths` 自動建立索引時才需要。
+
+初始化會執行以下操作：
+
+- 啟動檔案系統 Provider（按需要建立基礎目錄）
+- 啟動 Sandbox Provider（建立工作目錄，並按設定設置隔離環境）
+- 為 `autoIndexPaths` 中的檔案建立搜尋索引
+
+#### `destroy()`
+
+銷毀 Workspace 並清理資源。
+
+```typescript
+await workspace.destroy()
+```
+
+`destroy()` 會依次關閉 Workspace 擁有的資源：language server、瀏覽器、Sandbox Provider 及檔案系統 Provider。它亦會清除已快取的 Sandbox 參考。
+
+應用程式不再使用 Workspace 時，請呼叫 `destroy()`。關閉期間，`mastra.shutdown()` 會為已註冊的 Workspace 呼叫此方法。如要從 Mastra registry 移除 Workspace，請使用 [`mastra.removeWorkspace()`](/reference/core/removeWorkspace)。
+
+`LocalFilesystem.destroy()` 不會刪除磁碟上的檔案。由 resolver 支援的檔案系統及 Sandbox Provider 由應用程式擁有，必須由應用程式清理。
+
+### 搜尋操作
+
+#### `index(path, content, options?)`
+
+為內容建立搜尋索引。
+
+```typescript
+await workspace.index('/docs/guide.md', 'Guide content...')
+```
+
+#### `search(query, options?)`
+
+搜尋已建立索引的內容。
+
+```typescript
+const results = await workspace.search('password reset', {
+  topK: 10,
+  mode: 'hybrid',
+})
+```
+
+### 實用方法
+
+#### `getInfo()`
+
+取得 Workspace 資訊。
+
+```typescript
+const info = await workspace.getInfo()
+// { id, name, status, createdAt, lastAccessedAt, filesystem?, sandbox? }
+```
+
+傳入 `resolveDynamicProviders: false`，即可將由 resolver 支援的 Provider 報告為執行階段定義，而不呼叫其 resolver。
+
+```typescript
+const info = await workspace.getInfo({ resolveDynamicProviders: false })
+```
+
+**參數：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'options.includeFileCount',
+    type: 'boolean',
+    description: '是否計算檔案總數。大型 Workspace 可能需時較長。',
+    isOptional: true,
+  },
+  {
+    name: 'options.requestContext',
+    type: 'RequestContext',
+    description: '啟用 `resolveDynamicProviders` 時，傳遞至動態 Provider resolver。',
+    isOptional: true,
+  },
+  {
+    name: 'options.resolveDynamicProviders',
+    type: 'boolean',
+    description:
+      '是否呼叫動態 Provider resolver。如只需要 metadata，並希望將由 resolver 支援的 Provider 報告為 `dynamic`，請設為 `false`。',
+    isOptional: true,
+    defaultValue: 'true',
+  },
+]}
+/>
+
+#### `getInstructions(opts?)`
+
+傳回檔案系統與 Sandbox Provider 的合併指示。這些指示會注入 Agent 的 system message，協助其理解執行 context。
+
+```typescript
+const instructions = workspace.getInstructions()
+```
+
+當 Provider 的 `instructions` 選項是函數時，傳入 `requestContext` 可啟用按請求自訂：
+
+```typescript
+const instructions = workspace.getInstructions({ requestContext })
+```
+
+**參數：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'opts.requestContext',
+    type: 'RequestContext',
+    description:
+      '如果檔案系統或 Sandbox Provider 設定了 `instructions` 函數，便會轉交給該函數。',
+    isOptional: true,
+  },
+]}
+/>
+
+**傳回：** `string`
+
+#### `getInstructionsAsync(opts?)`
+
+傳回合併後的 Workspace 指示。當 Workspace 使用由 resolver 支援的 Provider 時，請使用此方法。執行階段定義的檔案系統會按請求解析；除非將 `instructions.dynamicSandbox` 設為 `'resolve'`，否則執行階段定義的 Sandbox 會提供固定的 placeholder 文字。
+
+```typescript
+const instructions = await workspace.getInstructionsAsync({ requestContext })
+```
+
+**參數：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'opts.requestContext',
+    type: 'RequestContext',
+    description:
+      "傳遞至動態檔案系統 resolver；當 `instructions.dynamicSandbox` 為 `'resolve'` 時，亦會傳遞至動態 Sandbox resolver。",
+    isOptional: true,
+  },
+]}
+/>
+
+**傳回：** `Promise<string>`
+
+如要覆寫預設輸出，請向 [LocalFilesystem](/reference/workspace/local-filesystem#constructor-parameters) 或 [LocalSandbox](/reference/workspace/local-sandbox#constructor-parameters) 傳入 `instructions` 選項。
+
+#### `getToolsConfig()`
+
+取得目前的 Tool 設定。
+
+```typescript
+const config = workspace.getToolsConfig()
+```
+
+**傳回：** `WorkspaceToolsConfig | undefined`
+
+#### `setToolsConfig(config?)`
+
+在執行階段取代個別 Tool 的設定。此操作會完整取代設定，不會與先前的設定合併。傳入 `undefined` 可重設為預設值。變更會在下一次 Agent 互動（下一次呼叫 `createWorkspaceTools()`）時生效。
+
+```typescript
+import { WORKSPACE_TOOLS } from '@mastra/core/workspace'
+
+// Disable write tools for read-only mode
+workspace.setToolsConfig({
+  [WORKSPACE_TOOLS.FILESYSTEM.WRITE_FILE]: { enabled: false },
+  [WORKSPACE_TOOLS.FILESYSTEM.EDIT_FILE]: { enabled: false },
+})
+
+// Reset to defaults
+workspace.setToolsConfig(undefined)
+```
+
+**參數：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'config',
+    type: 'WorkspaceToolsConfig | undefined',
+    isOptional: true,
+    description: '要套用的新 Tool 設定。傳入 undefined 可重設為預設值。',
+  },
+]}
+/>
+
+### 動態檔案系統
+
+#### `hasFilesystemConfig()`
+
+檢查是否已將檔案系統設定為靜態實例或 resolver 函數。請使用此方法，而非直接檢查 `workspace.filesystem`，因為使用 resolver 的 Workspace 會從 `filesystem` 屬性傳回 `undefined`。
+
+```typescript
+if (workspace.hasFilesystemConfig()) {
+  // Filesystem tools are available
+}
+```
+
+**傳回：** `boolean`
+
+#### `resolveFilesystem({ requestContext })`
+
+為請求 context 解析檔案系統。設定 resolver 函數時，會使用所提供的 `requestContext` 呼叫該函數。設定靜態檔案系統時，會直接傳回該檔案系統。如未設定檔案系統，則傳回 `undefined`。
+
+```typescript
+import { RequestContext } from '@mastra/core/request-context'
+
+const ctx = new RequestContext([['agent-role', 'admin']])
+const fs = await workspace.resolveFilesystem({ requestContext: ctx })
+```
+
+**參數：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'requestContext',
+    type: 'RequestContext',
+    description: '要傳遞至 resolver 函數的請求 context。',
+  },
+]}
+/>
+
+**傳回：** `Promise<WorkspaceFilesystem | undefined>`
+
+### 動態 Sandbox
+
+#### `hasSandboxConfig()`
+
+檢查是否已將 Sandbox 設定為靜態實例或 resolver 函數。請使用此方法，而非直接檢查 `workspace.sandbox`，因為使用 resolver 的 Workspace 會從 `sandbox` 屬性傳回 `undefined`。
+
+```typescript
+if (workspace.hasSandboxConfig()) {
+  // Sandbox tools are available
+}
+```
+
+**傳回：** `boolean`
+
+#### `resolveSandbox({ requestContext })`
+
+為請求 context 解析 Sandbox。設定 resolver 函數時，會使用所提供的 `requestContext` 呼叫該函數。設定靜態 Sandbox 時，會直接傳回該 Sandbox。如未設定 Sandbox，則傳回 `undefined`。
+
+```typescript
+import { RequestContext } from '@mastra/core/request-context'
+
+const ctx = new RequestContext([['user-id', 'alice']])
+const sandbox = await workspace.resolveSandbox({ requestContext: ctx })
+```
+
+**參數：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'requestContext',
+    type: 'RequestContext',
+    description: '要傳遞至 resolver 函數的請求 context。',
+  },
+]}
+/>
+
+**傳回：** `Promise<WorkspaceSandbox | undefined>`
+
+#### `clearSandboxCache(cacheKey?)`
+
+清除由 `sandboxCacheKey` 快取、並由 resolver 支援的 Sandbox。傳入快取鍵可清除一個項目；省略快取鍵則可清除所有以鍵識別的 Sandbox 項目。
+
+此方法不會清除個別 `RequestContext` 的 weak cache。這些項目由垃圾收集機制管理。
+
+Workspace 並不擁有 resolver 傳回的 Sandbox。此方法只會移除 Workspace 的參考。請在你自己的生命週期程式碼中銷毀 Sandbox。
+
+```typescript
+workspace.clearSandboxCache('thread-123')
+workspace.clearSandboxCache()
+```
+
+**參數：**
+
+<PropertiesTable
+  content={[
+  {
+    name: 'cacheKey',
+    type: 'string',
+    description: '要清除的快取鍵。省略此值可清除所有以鍵識別的 Sandbox 項目。',
+    isOptional: true,
+  },
+]}
+/>
+
+**傳回：** `void`
+
+## Agent Tool
+
+Workspace 會根據設定向 Agent 提供 Tool。
+
+### 檔案系統 Tool
+
+設定檔案系統後加入：
+
+| Tool | 說明 |
+| - | - |
+| `mastra_workspace_read_file` | 讀取檔案內容。文字檔會以文字傳回（可選擇指定行範圍）。圖片及 PDF 會以模型可直接查看的原生媒體部分傳回。除非明確傳入 `encoding`，否則其他二進位檔案只會傳回 metadata。 |
+| `mastra_workspace_write_file` | 使用新內容建立或覆寫檔案。自動建立父目錄。 |
+| `mastra_workspace_edit_file` | 透過尋找及取代文字來編輯現有檔案。適合在不重寫整個檔案的情況下進行針對性變更。 |
+| `mastra_workspace_list_files` | 以樹狀結構列出目錄內容。支援設有深度限制的遞迴列出、glob 模式及 `.gitignore` 篩選（預設啟用）。 |
+| `mastra_workspace_delete` | 刪除檔案或目錄。支援遞迴刪除目錄。 |
+| `mastra_workspace_file_stat` | 取得檔案或目錄的 metadata，包括大小、類型及修改時間。 |
+| `mastra_workspace_mkdir` | 建立目錄。如父目錄不存在，會自動建立。 |
+| `mastra_workspace_grep` | 使用 regex 模式搜尋檔案內容。支援 glob 篩選、context 行及不分大小寫搜尋。 |
+
+使用靜態檔案系統時，如果檔案系統處於唯讀模式，便不會包括寫入 Tool（`write_file`、`edit_file`、`delete`、`mkdir`）。使用[執行階段定義的檔案系統](/docs/workspace/filesystem#dynamic-filesystem)時，則一律包括寫入 Tool，並在執行階段強制執行唯讀限制。
+
+`read_file` Tool 接受 `mediaTypes` 及 `maxMediaBytes` 選項，用以控制哪些 mime type 會以原生媒體部分形式提供給模型，以及這些檔案可有多大：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'mediaTypes',
+    type: 'string[] | ((mimeType: string) => boolean) | false',
+    description:
+      "哪些 mime type 會以媒體部分（檔案／圖片部分）而非文字形式提供給模型。接受 glob 陣列（例如 `['image/*']`）、自訂 predicate 函數，或以 `false` 停用媒體偵測。預設為各 Provider 都能安全支援的圖片格式交集，另加 PDF。只在呼叫者沒有明確傳入 `encoding` 時套用。",
+    isOptional: true,
+    defaultValue: "['image/png', 'image/jpeg', 'image/webp', 'application/pdf']",
+  },
+  {
+    name: 'maxMediaBytes',
+    type: 'number',
+    description:
+      '以媒體部分形式內嵌的檔案大小上限（位元組）。大於此限制的檔案只會輸出 metadata，而不會完整編碼為 base64、加入 context，並在 rehydration 時保留於儲存空間。',
+    isOptional: true,
+    defaultValue: '10 * 1024 * 1024 (10 MiB)',
+  },
+]}
+/>
+
+```typescript
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  tools: {
+    [WORKSPACE_TOOLS.FILESYSTEM.READ_FILE]: {
+      // Broaden to any image (including SVG, BMP, HEIC) — may fail on some providers
+      mediaTypes: ['image/*'],
+      // Raise the inline-media cap to 25 MiB
+      maxMediaBytes: 25 * 1024 * 1024,
+    },
+  },
+})
+```
+
+### Sandbox Tool
+
+設定 Sandbox 後加入：
+
+| Tool | 說明 |
+| - | - |
+| `mastra_workspace_execute_command` | 執行 shell 指令。傳回 stdout、stderr 及結束代碼。當 Sandbox 設有程序管理器時，接受 `background: true` 以產生長時間運行的程序並傳回 PID。 |
+| `mastra_workspace_get_process_output` | 按 PID 取得背景程序的 stdout、stderr 及狀態。接受 `tail` 以限制輸出行數，亦接受 `wait: true` 以阻塞至程序結束。只在 Sandbox 設有程序管理器時可用。 |
+| `mastra_workspace_kill_process` | 按 PID 終止背景程序。傳回最後 50 行輸出。只在 Sandbox 設有程序管理器時可用。 |
+
+使用靜態 Sandbox 時，系統會透過能力檢查（`executeCommand`、`processes`）決定提供哪些 Tool 變體。使用[執行階段定義的 Sandbox](/docs/workspace/sandbox#dynamic-sandbox) 時，系統會註冊所有 Sandbox Tool；如果解析出的 Sandbox 未實作所要求的能力，執行階段便會擲回清楚的錯誤。
+
+`execute_command` Tool 接受 `backgroundProcesses` 選項，用於背景程序的生命週期 callback：
+
+<PropertiesTable
+  content={[
+  {
+    name: 'backgroundProcesses',
+    type: 'BackgroundProcessesConfig',
+    description:
+      '處理背景程序的設定。只在 Sandbox 支援背景執行時適用。',
+    isOptional: true,
+    properties: [
+      {
+        type: 'BackgroundProcessesConfig',
+        parameters: [
+          {
+            name: 'onStdout',
+            type: '(data: string, meta: BackgroundProcessMeta) => void',
+            description: '背景程序 stdout 資料區塊的 callback。',
+            isOptional: true,
+          },
+          {
+            name: 'onStderr',
+            type: '(data: string, meta: BackgroundProcessMeta) => void',
+            description: '背景程序 stderr 資料區塊的 callback。',
+            isOptional: true,
+          },
+          {
+            name: 'onExit',
+            type: '(meta: BackgroundProcessExitMeta) => void',
+            description: '背景程序結束時的 callback。Meta 包括 pid、exitCode、stdout 及 stderr。',
+            isOptional: true,
+          },
+          {
+            name: 'abortSignal',
+            type: 'AbortSignal | null | false',
+            description:
+              "背景程序的中止 signal。undefined（預設值）會使用 Agent 的 signal。null 或 false 會停用中止功能，程序會在 Agent 關閉後繼續運行。",
+            isOptional: true,
+          },
+        ],
+      },
+    ],
+  },
+]}
+/>
+
+使用範例請參閱[背景程序 callback](/docs/workspace/sandbox#background-process-callbacks)。
+
+### 搜尋 Tool
+
+設定 BM25 或向量搜尋後加入：
+
+| Tool | 說明 |
+| - | - |
+| `mastra_workspace_search` | 使用關鍵字（BM25）、語意（向量）或混合搜尋來搜尋已建立索引的內容。傳回附有分數的排序結果。 |
+| `mastra_workspace_index` | 為內容建立搜尋索引。將內容與路徑關聯，以便日後擷取。 |
+
+檔案系統處於唯讀模式時，不會包括 `index` Tool。
+
+### Skill Tool
+
+設定 Skill 後加入：
+
+| Tool | 說明 |
+| - | - |
+| `skill` | 按名稱或路徑啟用 Skill。傳回 Skill 的完整指示、參考資料、script 及 asset。 |
+| `skill_search` | 搜尋各 Skill 的內容。接受可選的 Skill 名稱清單作篩選，亦接受 `topK` 參數。 |
+| `skill_read` | 從 Skill 目錄讀取指定檔案（參考資料、script 或 asset）。 |
+
+當多個 Skill 使用相同名稱時，`list()` 會傳回全部 Skill。以名稱呼叫 `get()` 時，會套用優先次序（local > managed > external）。如果兩個 Skill 的名稱及來源類型都相同，`get()` 會擲回錯誤。將 Skill 的完整路徑傳入 `get()`，即可略過優先次序判定。詳情請參閱[同名 Skill](/docs/workspace/skills#same-named-skills)。
