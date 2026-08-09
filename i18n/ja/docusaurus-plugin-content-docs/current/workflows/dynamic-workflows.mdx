@@ -1,0 +1,155 @@
+---
+title: "Dynamic Workflow | Workflows"
+description: "JSON定義からWorkflowを作成、永続化、更新、実行します。"
+packages:
+  - "@mastra/core"
+---
+
+# Dynamic Workflow
+
+:::experimental
+
+この機能はベータ版です。APIが安定するまでは、メジャーバージョンを上げずに破壊的変更が加わる可能性があります。
+
+:::
+
+Dynamic Workflowは、コードではなくデータとして表現されるWorkflow定義です。定義は、Workflowのスキーマとステップグラフを記述したJSONドキュメントです。Mastraは定義を検証して実行可能なWorkflowとして登録し、プロセスを再起動しても保持されるようストレージに永続化します。
+
+定義にはJavaScriptクロージャが含まれないため、JSONを生成できるものなら、HTTPクライアント、LLM、ビジュアルエディター、独自ツールなど、何でもWorkflowを作成できます。登録後のDynamic Workflowは、コードで定義したWorkflowと同じ実行APIで動作します。
+
+## Dynamic Workflowを使う場面
+
+ユーザー、Agent、ビジュアルエディター、外部システムが、アプリケーションコードの変更や再デプロイなしにWorkflowを作成する必要がある場合は、Dynamic Workflowを使います。
+
+Workflowがアプリケーションのソースに属する場合や、カスタムのステップ関数が必要な場合は、引き続き[`createWorkflow()`](/docs/workflows/overview)で定義します。Dynamic Workflowからは、`Mastra`インスタンスに登録済みのAgent、Tool、Workflowを呼び出せます。
+
+## クイックスタート
+
+次の例ではToolを登録し、Dynamic Workflowから呼び出した後、そのWorkflowを実行します。`LibSQLStore`が定義を`mastra.db`に永続化するため、Mastraは再起動後に定義を復元できます。
+
+```typescript title="src/dynamic-workflow.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { createTool } from '@mastra/core/tools'
+import { LibSQLStore } from '@mastra/libsql'
+import { z } from 'zod'
+
+const greetingTool = createTool({
+  id: 'create-greeting',
+  description: 'Create a greeting for a name',
+  inputSchema: z.object({
+    name: z.string(),
+  }),
+  outputSchema: z.object({
+    message: z.string(),
+  }),
+  execute: async ({ name }) => ({
+    message: `Hello, ${name}!`,
+  }),
+})
+
+const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+  tools: { 'create-greeting': greetingTool },
+})
+
+await mastra.addDynamicWorkflow({
+  id: 'greeting-workflow',
+  description: 'Create a greeting for the supplied name',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+    },
+    required: ['name'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      message: { type: 'string' },
+    },
+    required: ['message'],
+  },
+  graph: [
+    {
+      type: 'tool',
+      id: 'greet',
+      toolId: 'create-greeting',
+    },
+  ],
+})
+
+const workflow = mastra.getWorkflow('greeting-workflow')
+const run = await workflow.createRun()
+const result = await run.start({
+  inputData: { name: 'Ada' },
+})
+
+if (result.status === 'success') {
+  console.log(result.result.message)
+}
+```
+
+このWorkflowは`Hello, Ada!`と出力します。[`addDynamicWorkflow()`](/reference/core/addDynamicWorkflow)は、ストレージや実行中のWorkflowレジストリを変更する前に定義を検証します。
+
+定義はJSONのラウンドトリップに耐える必要があるため、JSON Schemaを使います。`graph`は、呼び出す登録済みコンポーネントと、コンポーネント間のデータの流れを記述します。すべてのフィールドとグラフエントリについては、[Dynamic Workflow定義のリファレンス](/reference/workflows/dynamic-workflow-definition)を参照してください。
+
+## 定義の構築と更新
+
+定義は、JSONを生成できる任意のソースから取得できます。たとえば、APIルートでビジュアルエディターが作成した定義を受け取り、そのまま登録できます。
+
+```typescript
+const definition = await request.json()
+await mastra.addDynamicWorkflow(definition)
+```
+
+### 依存関係を先に登録する
+
+Dynamic Workflowを追加する前に、参照するコンポーネントを同じ`Mastra`インスタンスへ登録します。AgentとネストされたWorkflowのエントリでは、それぞれ固有のIDを使います。Toolのエントリでは`Mastra`の`tools`オブジェクトにあるキーを使うため、クイックスタートでは`toolId`でキーを参照する前に、Toolを`create-greeting`として登録しています。
+
+あるステップの出力が次のステップの入力と一致しない場合は、`mapping`エントリを使います。マッピングエントリは、Workflowの入力、前のステップの結果、Workflowの状態、リクエストコンテキストからデータを読み取れます。対応するマッピング記述子については、[定義リファレンス](/reference/workflows/dynamic-workflow-definition#mapping-steps)を参照してください。
+
+### Workflowを置き換える
+
+同じ`id`の新しい定義を追加すると、永続化された定義と実行中の登録が置き換わります。
+
+```typescript
+await mastra.addDynamicWorkflow(updatedDefinition)
+```
+
+新しい実行では更新後のグラフが使われます。すでに開始済みの実行は、元のグラフで続行されます。
+
+### ネストされたWorkflowをまとめて追加する
+
+ルートWorkflowが未登録の補助Workflowを参照する場合は、[`addDynamicWorkflows()`](/reference/core/addDynamicWorkflows)ですべてまとめて追加します。
+
+```typescript
+await mastra.addDynamicWorkflows([rootDefinition, helperDefinition])
+```
+
+Mastraはバンドル全体を一単位として検証し、依存関係から登録順を決定します。検証に失敗すると、どの定義も登録されません。
+
+### HTTP経由で定義を管理する
+
+Dynamic Workflowを管理するために、アプリケーションから`Mastra`インスタンスへ直接アクセスする必要はありません。次のいずれかのインターフェースを使います。
+
+- [Client SDKのWorkflows API](/reference/client-js/workflows): JavaScriptまたはTypeScriptクライアントから`upsertDynamicWorkflow()`を呼び出します。
+- [サーバールート](/reference/server/routes): `POST /api/stored/workflows`へ定義を送信します。
+
+認証済みサーバーでDynamic Workflowを管理するには、`stored-workflows:read`と`stored-workflows:write`の権限が必要です。登録済みWorkflowの実行には`workflows:execute`が必要です。
+
+### 定義を永続化する
+
+保存された定義では、`workflowDefinitions`ストレージドメインが使われます。Mastraは起動時に、ストレージから有効な定義を読み込み、依存関係の順序で登録します。
+
+このドメインに対応するストレージアダプターがない場合でも、`addDynamicWorkflow()`はWorkflowをメモリに登録しますが、プロセスを再起動すると定義は失われます。アダプターの対応状況については、[ストレージのリファレンス](/reference/storage/overview)を参照してください。
+
+## 関連項目
+
+- [Dynamic Workflow定義](/reference/workflows/dynamic-workflow-definition)
+- [`Mastra.addDynamicWorkflow()`](/reference/core/addDynamicWorkflow)
+- [`Mastra.addDynamicWorkflows()`](/reference/core/addDynamicWorkflows)
+- [Client SDKのWorkflows API](/reference/client-js/workflows)
+- [サーバールート](/reference/server/routes)

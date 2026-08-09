@@ -47,8 +47,14 @@ function translateProse(segment) {
       /description: "Use (.+?) models with Mastra\. 1 model available\."/g,
       'description: "Mastra で $1 モデルを使用します。利用可能なモデルは 1 個です。"',
     )
-    .replace(/description: "Use (.+?) models via the AI SDK\."/g, 'description: "AI SDK を通じて $1 モデルを使用します。"')
-    .replace(/description: "Direct access to AI model providers\."/g, 'description: "AI モデル Provider に直接アクセスします。"')
+    .replace(
+      /description: "Use (.+?) models via the AI SDK\."/g,
+      'description: "AI SDK を通じて $1 モデルを使用します。"',
+    )
+    .replace(
+      /description: "Direct access to AI model providers\."/g,
+      'description: "AI モデル Provider に直接アクセスします。"',
+    )
     .replace(/description="(\d+) models"/g, 'description="$1 個のモデル"')
     .replace(/alt="([^"]+?) logo"/g, 'alt="$1 ロゴ"')
     .replace(
@@ -63,7 +69,10 @@ function translateProse(segment) {
       /Access (\d+) (.+?) models through Mastra's model router\. Authentication is handled automatically using one of the following environment variables: `([^`]+)`, `([^`]+)`\./g,
       'Mastra のモデルルーターを通じて $1 個の $2 モデルを利用できます。認証には、`$3` または `$4` のいずれかの環境変数が自動的に使用されます。',
     )
-    .replace(/Learn more in the \[([^\]]+?) documentation\]\(([^)]+)\)\./g, '詳しくは、[$1 のドキュメント]($2)を参照してください。')
+    .replace(
+      /Learn more in the \[([^\]]+?) documentation\]\(([^)]+)\)\./g,
+      '詳しくは、[$1 のドキュメント]($2)を参照してください。',
+    )
     .replace(
       /(.+?) is available through the AI SDK\. Install the provider package to use their models with Mastra\./g,
       '$1 は AI SDK を通じて利用できます。Mastra でこの Provider のモデルを使用するには、Provider package をインストールしてください。',

@@ -1,0 +1,239 @@
+---
+title: "中断と再開 | Workflows"
+description: "Mastra の Workflow では、外部入力やリソースを待つ間、実行を中断して再開できます。"
+packages:
+  - "@mastra/core"
+---
+
+# 中断と再開
+
+Workflow は任意の Step で一時停止し、追加データの収集、API コールバックの待機、高コストな処理の抑制、[human-in-the-loop](/docs/workflows/human-in-the-loop) 入力の要求を行えます。Workflow が中断されると、現在の実行状態が Snapshot として保存されます。後から[特定の Step ID](/docs/workflows/snapshots#retrieving-snapshots) から Workflow を再開し、その Snapshot に記録された状態を正確に復元できます。[Snapshot](/docs/workflows/snapshots) は設定済みのストレージプロバイダーに保存され、デプロイやアプリケーションの再起動後も維持されます。
+
+## `suspend()` で Workflow を一時停止する
+
+特定の Step で Workflow の実行を一時停止するには、`suspend()` を使用します。Step の `execute` ブロックでは、`resumeData` の値を使用して中断条件を定義できます。
+
+- 条件を満たさない場合、Workflow は一時停止して `suspend()` を返します。
+- 条件を満たす場合、Workflow は Step 内の残りのロジックを続行します。
+
+![suspend() で Workflow を一時停止する](/img/workflows/workflows-suspend.jpg)
+
+```typescript {9-11,16-18} title="src/mastra/workflows/test-workflow.ts"
+const step1 = createStep({
+  id: 'step-1',
+  inputSchema: z.object({
+    userEmail: z.string(),
+  }),
+  outputSchema: z.object({
+    output: z.string(),
+  }),
+  resumeSchema: z.object({
+    approved: z.boolean(),
+  }),
+  execute: async ({ inputData, resumeData, suspend }) => {
+    const { userEmail } = inputData
+    const { approved } = resumeData ?? {}
+
+    if (!approved) {
+      return await suspend({})
+    }
+
+    return {
+      output: `Email sent to ${userEmail}`,
+    }
+  },
+})
+
+export const testWorkflow = createWorkflow({
+  id: 'test-workflow',
+  inputSchema: z.object({
+    userEmail: z.string(),
+  }),
+  outputSchema: z.object({
+    output: z.string(),
+  }),
+})
+  .then(step1)
+  .commit()
+```
+
+## `resume()` で Workflow を再開する
+
+一時停止した Step から中断中の Workflow を再開するには、`resume()` を使用します。Step の `resumeSchema` と一致する `resumeData` を渡して中断条件を満たし、実行を続けます。
+
+![resume() で Workflow を再開する](/img/workflows/workflows-resume.jpg)
+
+```typescript
+import { step1 } from './workflows/test-workflow'
+
+const workflow = mastra.getWorkflow('testWorkflow')
+const run = await workflow.createRun()
+
+await run.start({
+  inputData: {
+    userEmail: 'alex@example.com',
+  },
+})
+
+const handleResume = async () => {
+  const result = await run.resume({
+    step: step1,
+    resumeData: { approved: true },
+  })
+}
+```
+
+`step` オブジェクトを渡すと、`resumeData` に完全な型安全性が与えられます。一方、ID がユーザー入力やデータベースから得られる場合は、柔軟性を高めるために Step ID を渡すこともできます。
+
+```typescript
+const result = await run.resume({
+  step: 'step-1',
+  resumeData: { approved: true },
+})
+```
+
+中断中の Step が1つだけの場合、step 引数を完全に省略できます。Mastra は Workflow で最後に中断した Step を再開します。
+
+`runId` だけを使用して再開する場合は、まず `createRun()` で実行インスタンスを作成します。
+
+```typescript
+const workflow = mastra.getWorkflow('testWorkflow')
+const run = await workflow.createRun({ runId: '123' })
+
+const stream = run.resume({
+  resumeData: { approved: true },
+})
+```
+
+`resume()` は、HTTP エンドポイント、イベントハンドラー、[人による入力](/docs/workflows/human-in-the-loop)への応答、タイマーなど、アプリケーション内のどこからでも呼び出せます。
+
+```typescript
+const midnight = new Date()
+midnight.setUTCHours(24, 0, 0, 0)
+
+setTimeout(async () => {
+  await run.resume({
+    step: 'step-1',
+    resumeData: { approved: true },
+  })
+}, midnight.getTime() - Date.now())
+```
+
+## `suspendData` で中断データにアクセスする
+
+Step が中断された後、再開時に `suspend()` へ渡したデータへアクセスしたい場合があります。このデータへアクセスするには、Step の execute 関数で `suspendData` パラメーターを使用します。
+
+```typescript {22-25,29-30} title="src/mastra/workflows/user-approval.ts"
+const approvalStep = createStep({
+  id: 'user-approval',
+  inputSchema: z.object({
+    requestId: z.string(),
+  }),
+  resumeSchema: z.object({
+    approved: z.boolean(),
+  }),
+  suspendSchema: z.object({
+    reason: z.string(),
+    requestDetails: z.string(),
+  }),
+  outputSchema: z.object({
+    result: z.string(),
+  }),
+  execute: async ({ inputData, resumeData, suspend, suspendData }) => {
+    const { requestId } = inputData
+    const { approved } = resumeData ?? {}
+
+    // On first execution, suspend with context
+    if (!approved) {
+      return await suspend({
+        reason: 'User approval required',
+        requestDetails: `Request ${requestId} pending review`,
+      })
+    }
+
+    // On resume, access the original suspend data
+    const suspendReason = suspendData?.reason || 'Unknown'
+    const details = suspendData?.requestDetails || 'No details'
+
+    return {
+      result: `${details} - ${suspendReason} - Decision: ${approved ? 'Approved' : 'Rejected'}`,
+    }
+  },
+})
+```
+
+Step の再開時、`suspendData` パラメーターには最初の中断時に `suspend()` 関数へ渡したデータがそのまま自動設定されます。Workflow を中断した理由のコンテキストを維持し、再開処理でその情報を使用できます。
+
+## 中断中の実行を識別する
+
+Workflow が中断されると、一時停止した Step から再開します。Workflow の `status` で中断中であることを確認し、`suspended` を使用して一時停止した Step または[ネストされた Workflow](/docs/workflows/overview#workflows-as-steps) を識別できます。
+
+```typescript {11}
+const workflow = mastra.getWorkflow('testWorkflow')
+const run = await workflow.createRun()
+
+const result = await run.start({
+  inputData: {
+    userEmail: 'alex@example.com',
+  },
+})
+
+if (result.status === 'suspended') {
+  console.log(result.suspended[0])
+  await run.resume({
+    step: result.suspended[0],
+    resumeData: { approved: true },
+  })
+}
+```
+
+### 出力例
+
+`suspended` 配列には、実行中に中断した Workflow と Step の ID が含まれます。`resume()` の呼び出し時にこれらを `step` パラメーターへ渡すと、中断した実行経路を指定して再開できます。
+
+```typescript
+['nested-workflow', 'step-1']
+```
+
+## 中断した実行を復元する
+
+アプリケーションでストレージから中断中の実行を復元する必要がある場合は、`workflow.getWorkflowRunById()` と `createWorkflowStateReader()` を使用します。Reader は、生の Snapshot 構造を読み取ることなく、中断した Step、再開ラベル、Step のペイロード、Step の出力を公開します。
+
+```typescript title="src/mastra/workflows/recover-run.ts"
+import { createWorkflowStateReader } from '@mastra/core/workflows'
+
+const workflow = mastra.getWorkflow('testWorkflow')
+const state = await workflow.getWorkflowRunById('run-123')
+
+if (state?.status === 'suspended') {
+  const reader = createWorkflowStateReader(state)
+  const suspendedStep = reader.getSuspendedStep()
+  const approvalLabel = reader.getResumeLabel('approve')
+  const run = await workflow.createRun({ runId: state.runId })
+
+  await run.resume({
+    step: approvalLabel?.stepId ?? suspendedStep?.path,
+    resumeData: { approved: true },
+    forEachIndex: approvalLabel?.foreachIndex,
+  })
+}
+```
+
+ネストされた Workflow では、`suspendedStep.path` に再開パスが含まれます。`foreach` の中断では、ラベルが特定の反復を指す場合、一致する再開ラベルに `foreachIndex` が含まれます。
+
+## Sleep
+
+Sleep メソッドを使用すると、Workflow レベルで実行を一時停止でき、ステータスは `waiting` になります。一方、`suspend()` は特定の Step 内で実行を一時停止し、ステータスを `suspended` にします。
+
+**利用可能なメソッド：**
+
+- [`.sleep()`](/reference/workflows/workflow-methods/sleep)：指定したミリ秒の間、一時停止します
+- [`.sleepUntil()`](/reference/workflows/workflow-methods/sleepUntil)：指定した日時まで一時停止します
+
+## 関連項目
+
+- [制御フロー](/docs/workflows/control-flow)
+- [Human-in-the-loop](/docs/workflows/human-in-the-loop)
+- [Snapshot](/docs/workflows/snapshots)
+- [タイムトラベル](/docs/workflows/time-travel)
+- [Workflow state reader](/reference/workflows/workflow-state-reader)

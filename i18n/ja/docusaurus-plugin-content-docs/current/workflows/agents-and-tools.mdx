@@ -1,0 +1,197 @@
+---
+title: "AgentとTool | Workflows"
+description: "WorkflowのステップからAgentとToolを呼び出し、execute関数とステップ合成を使い分ける方法を説明します。"
+packages:
+  - "@mastra/core"
+---
+
+# AgentとTool
+
+Workflowのステップでは、LLMによる推論のためにAgentを呼び出したり、型安全なロジックのためにToolを呼び出したりできます。ステップの`execute()`関数内から実行する方法と、`createStep()`で直接ステップとして組み込む方法があります。
+
+## WorkflowでAgentを使う
+
+推論、文章生成、その他のLLMベースのタスクが必要な場合は、WorkflowのステップでAgentを使います。Agentの呼び出しを細かく制御する場合（メッセージ履歴の追跡や構造化出力の返却など）は、ステップの`execute()`関数から呼び出します。Agentの呼び出し方を変更する必要がなければ、ステップとして組み込みます。
+
+### Agentを呼び出す
+
+ステップの`execute()`関数内で`.generate()`または`.stream()`を使ってAgentを呼び出します。これにより、次のステップへ渡す前にAgentの呼び出しを変更し、レスポンスを処理できます。
+
+```typescript {6-14} title="src/mastra/workflows/test-workflow.ts"
+const step1 = createStep({
+  execute: async ({ inputData, mastra }) => {
+    const { message } = inputData
+
+    const testAgent = mastra.getAgent('testAgent')
+    const response = await testAgent.generate(
+      `Convert this message into bullet points: ${message}`,
+      {
+        memory: {
+          thread: 'user-123',
+          resource: 'test-123',
+        },
+      },
+    )
+
+    return {
+      list: response.text,
+    }
+  },
+})
+```
+
+### Agentをステップとして使う
+
+Agentの呼び出し方を変更する必要がなければ、`createStep()`を使ってAgentをステップとして組み込みます。`.map()`を使うと、前のステップの出力をAgentが利用できる`prompt`に変換できます。
+
+![ステップとしてのAgent](/img/workflows/workflows-agent-tools-agent-step.jpg)
+
+```typescript {1,2,5-10} title="src/mastra/workflows/test-workflow.ts"
+import { testAgent } from '../agents/test-agent'
+const step1 = createStep(testAgent)
+
+export const testWorkflow = createWorkflow({})
+  .map(async ({ inputData }) => {
+    const { message } = inputData
+    return {
+      prompt: `Convert this message into bullet points: ${message}`,
+    }
+  })
+  .then(step1)
+  .then(step2)
+  .commit()
+```
+
+詳しくは[入力データのマッピング](/docs/workflows/control-flow#input-data-mapping)を参照してください。
+
+`structuredOutput`オプションを指定しない場合、Mastra Agentは、入力に`prompt`文字列を受け取り、出力に`text`文字列を返すデフォルトのスキーマを使用します。
+
+```typescript prettier:false
+{
+  inputSchema: {
+    prompt: string
+  },
+  outputSchema: {
+    text: string
+  }
+}
+```
+
+### 構造化出力を返すAgent
+
+Agentからプレーンテキストではなく構造化データを返す必要がある場合は、`createStep()`に`structuredOutput`オプションを渡します。ステップの出力スキーマが指定したスキーマと一致するため、後続のステップへ型安全に連結できます。
+
+```typescript {8} title="src/mastra/workflows/test-workflow.ts"
+const articleSchema = z.object({
+  title: z.string(),
+  summary: z.string(),
+  tags: z.array(z.string()),
+})
+
+const agentStep = createStep(testAgent, {
+  structuredOutput: { schema: articleSchema },
+})
+
+// Next step receives typed structured data
+const processStep = createStep({
+  id: 'process',
+  inputSchema: articleSchema, // Matches agent's outputSchema
+  outputSchema: z.object({ tagCount: z.number() }),
+  execute: async ({ inputData }) => ({
+    tagCount: inputData.tags.length, // Fully typed
+  }),
+})
+
+export const testWorkflow = createWorkflow({})
+  .map(async ({ inputData }) => ({
+    prompt: `Generate an article about: ${inputData.topic}`,
+  }))
+  .then(agentStep)
+  .then(processStep)
+  .commit()
+```
+
+`structuredOutput.schema`オプションには、任意のStandard JSON Schemaを指定できます。Agentはこのスキーマに準拠する出力を生成し、ステップの`outputSchema`も自動的に同じスキーマへ設定されます。エラー処理戦略や構造化出力のストリーミングなど、その他のオプションについては[構造化出力](/docs/agents/structured-output)を参照してください。
+
+### `.agent()`ショートハンド
+
+Agentを`createStep()`でラップする代わりに、`.agent()`で直接追加できます。`createStep(agent, options)`と同じオプションを受け取り、Agentインスタンスの代わりにAgent ID文字列も指定できます。
+
+```typescript {8} title="src/mastra/workflows/test-workflow.ts"
+import { testAgent } from '../agents/test-agent'
+
+export const testWorkflow = createWorkflow({})
+  .map(async ({ inputData }) => ({
+    prompt: `Generate an article about: ${inputData.topic}`,
+  }))
+  .agent(testAgent, { structuredOutput: { schema: articleSchema } })
+  .commit()
+```
+
+`.agent()`は不透明なステップではなく宣言的なエントリをWorkflowグラフに記録するため、この方法で構築したWorkflowは[Dynamic Workflow](/docs/workflows/dynamic-workflows)として永続化できます。すべてのパラメーターについては[Workflow.agent()](/reference/workflows/workflow-methods/agent)を参照してください。
+
+## WorkflowでToolを使う
+
+既存のToolロジックを利用するには、WorkflowのステップでToolを使います。コンテキストの準備やレスポンスの処理が必要な場合は、ステップの`.execute()`関数から呼び出します。Toolの使い方を変更する必要がなければ、ステップとして組み込みます。
+
+### Toolを呼び出す
+
+ステップの`.execute()`関数内でToolを呼び出します。Toolの入力コンテキストを細かく制御したり、次のステップへ渡す前にレスポンスを処理したりできます。
+
+```typescript title="src/mastra/workflows/test-workflow.ts"
+import { testTool } from '../tools/test-tool'
+
+const step2 = createStep({
+  execute: async ({ inputData, requestContext }) => {
+    const { text } = inputData
+
+    const response = await testTool.execute({ text }, { requestContext })
+
+    return {
+      emphasized: response.emphasized,
+    }
+  },
+})
+```
+
+### Toolをステップとして使う
+
+前のステップの出力がToolの入力コンテキストと一致する場合は、`createStep()`を使ってToolをステップとして組み込みます。一致しない場合は、`.map()`で前のステップの出力を変換できます。
+
+![ステップとしてのTool](/img/workflows/workflows-agent-tools-tool-step.jpg)
+
+```typescript {1,3,7-12} title="src/mastra/workflows/test-workflow.ts"
+import { testTool } from '../tools/test-tool'
+
+const step2 = createStep(testTool)
+
+export const testWorkflow = createWorkflow({})
+  .then(step1)
+  .map(async ({ inputData }) => {
+    const { formatted } = inputData
+    return {
+      text: formatted,
+    }
+  })
+  .then(step2)
+  .commit()
+```
+
+詳しくは[入力データのマッピング](/docs/workflows/control-flow#input-data-mapping)を参照してください。
+
+### `.tool()`ショートハンド
+
+Toolを`createStep()`でラップする代わりに、`.tool()`で直接追加できます。Toolインスタンスまたは登録済みToolのID文字列に加え、ステップレベルの`retries`と`metadata`を指定できます。
+
+```typescript {5} title="src/mastra/workflows/test-workflow.ts"
+import { testTool } from '../tools/test-tool'
+
+export const testWorkflow = createWorkflow({}).then(step1).tool(testTool).commit()
+```
+
+`.agent()`と同様に、`.tool()`は宣言的なエントリを記録するため、Workflowを[Dynamic Workflow](/docs/workflows/dynamic-workflows)として永続化できます。すべてのパラメーターについては[Workflow.tool()](/reference/workflows/workflow-methods/tool)を参照してください。
+
+## 関連項目
+
+- [Agentの使用](/docs/agents/overview)
+- [MCPの概要](/docs/mcp/overview)

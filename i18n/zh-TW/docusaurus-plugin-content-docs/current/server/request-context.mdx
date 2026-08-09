@@ -1,0 +1,495 @@
+---
+title: "請求內容 | Server"
+description: 瞭解如何使用 Mastra 的 RequestContext，為 Agent 提供執行階段且依請求而定的設定。
+packages:
+  - "@mastra/core"
+---
+
+# 請求內容
+
+Agent、Tool 與 Workflow 都可以接受 `RequestContext` 作為參數，讓底層基本元件可以使用依請求而定的值。
+
+## 何時使用 `RequestContext`
+
+當基本元件的行為應依執行階段條件變更時，請使用 `RequestContext`。例如，你可以依使用者屬性切換模型或儲存後端，也可以依語言調整指示與 Tool 選擇。
+
+:::note
+
+`RequestContext` 主要用於將資料傳入特定請求。它與 Agent 記憶體不同；Agent 記憶體負責處理跨多次呼叫的對話記錄與狀態持久化。
+
+:::
+
+## 設定值
+
+將 `requestContext` 傳入 Agent、網路、Workflow 或 Tool 呼叫，即可讓所有底層基本元件在執行期間使用這些值。請在呼叫前使用 `.set()` 定義值。
+
+`.set()` 方法接受兩個引數：
+
+1. **key**：用於識別值的名稱。
+1. **value**：要與該鍵建立關聯的資料。
+
+```typescript
+import { RequestContext } from '@mastra/core/request-context'
+
+export type UserTier = {
+  'user-tier': 'enterprise' | 'pro'
+}
+
+const requestContext = new RequestContext<UserTier>()
+requestContext.set('user-tier', 'enterprise')
+
+const agent = mastra.getAgent('weatherAgent')
+await agent.generate("What's the weather in London?", {
+  requestContext,
+})
+
+const routingAgent = mastra.getAgent('routingAgent')
+routingAgent.network("What's the weather in London?", {
+  requestContext,
+})
+
+const run = await mastra.getWorkflow('weatherWorkflow').createRun()
+await run.start({
+  inputData: {
+    location: 'London',
+  },
+  requestContext,
+})
+await run.resume({
+  resumeData: {
+    city: 'New York',
+  },
+  requestContext,
+})
+
+await weatherTool.execute({ location: 'London' }, { requestContext })
+```
+
+### 根據請求標頭設定值
+
+你可以在執行階段的 Server 中介軟體中擷取請求資訊，以填入 `requestContext`。在此範例中，系統會根據 Cloudflare `CF-IPCountry` 標頭設定 `temperature-unit`，以確保回應符合使用者的地區設定。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RequestContext } from '@mastra/core/request-context'
+import { testWeatherAgent } from './agents/test-weather-agent'
+
+export const mastra = new Mastra({
+  agents: { testWeatherAgent },
+  server: {
+    middleware: [
+      async (context, next) => {
+        const country = context.req.header('CF-IPCountry')
+        const requestContext = context.get('requestContext')
+
+        requestContext.set('temperature-unit', country === 'US' ? 'fahrenheit' : 'celsius')
+
+        await next()
+      },
+    ],
+  },
+})
+```
+
+如需 Server 中介軟體的使用方式，請參閱[中介軟體](/docs/server/middleware)。
+
+## Studio
+
+在本機開發時，你可以在 JSON 檔案中定義預設集，並將其載入 [Studio](/docs/studio/overview)，方法是使用 [`--request-context-presets`](/reference/cli/mastra#--request-context-presets) CLI 旗標。這會在 Studio 的請求內容編輯器中新增下拉式選單，讓你快速切換設定，不必每次都手動編輯 JSON。
+
+```bash
+mastra dev --request-context-presets ./presets.json
+```
+
+```json title="presets.json"
+{
+  "development": { "userId": "dev-user", "env": "development" },
+  "production": { "userId": "prod-user", "env": "production" }
+}
+```
+
+從下拉式選單選取預設集後，JSON 編輯器會填入該預設集的值。手動編輯 JSON 會使下拉式選單切回 **「自訂」**。
+
+## 使用 Agent 存取值
+
+你可以從 Agent 支援的任何設定選項中存取 `requestContext` 引數。這些函式可以是同步函式或 `async` 函式。請使用 `.get()` 方法從 `requestContext` 讀取值。
+
+```typescript title="src/mastra/agents/weather-agent.ts"
+export type UserTier = {
+  'user-tier': 'enterprise' | 'pro'
+}
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: async ({ requestContext }) => {
+    const userTier = requestContext.get('user-tier') as UserTier['user-tier']
+
+    if (userTier === 'enterprise') {
+    }
+  },
+  model: ({ requestContext }) => {},
+  tools: ({ requestContext }) => {},
+  memory: ({ requestContext }) => {},
+})
+```
+
+你也可以搭配 `agents`、`workflows`、`scorers`、`inputProcessors` 及 `outputProcessors` 等其他選項使用 `requestContext`。
+
+### 動態指示
+
+Agent 指示可以非同步函式提供，讓你能在執行階段解析提示詞。搭配 `requestContext` 後，可實作下列模式：
+
+- **個人化**：依使用者屬性、偏好或方案層級調整指示
+- **本地化**：依地區設定調整語氣、語言或行為
+- **A/B 測試**：提供不同的提示詞變體以進行實驗
+- **外部提示詞管理**：無須重新部署，即可從登錄服務擷取提示詞
+
+```typescript title="src/mastra/agents/dynamic-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const dynamicAgent = new Agent({
+  id: 'dynamic-agent',
+  name: 'Dynamic Agent',
+  instructions: async ({ requestContext }) => {
+    const userTier = requestContext?.get('user-tier')
+    const locale = requestContext?.get('locale')
+
+    // Personalize based on user tier
+    const basePrompt =
+      userTier === 'enterprise'
+        ? 'You are a premium support agent. Provide detailed, thorough responses with technical depth.'
+        : 'You are a helpful assistant. Be concise and friendly.'
+
+    // Localize behavior
+    const localeInstructions = locale === 'ja' ? 'Respond in Japanese using formal keigo.' : ''
+
+    return `${basePrompt} ${localeInstructions}`.trim()
+  },
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+#### 從提示詞登錄服務擷取
+
+若組織使用提示詞登錄服務集中管理提示詞，你可以在執行階段擷取指示。如此即可在不重新部署的情況下更新提示詞、使用變體進行實驗，並追蹤各 Agent 的提示詞使用情況。
+
+```typescript title="src/mastra/agents/registry-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+// Your prompt registry client
+import { promptRegistry } from '../lib/prompt-registry'
+
+export const registryAgent = new Agent({
+  id: 'registry-agent',
+  name: 'Registry Agent',
+  instructions: async ({ requestContext }) => {
+    const prompt = await promptRegistry.getPrompt({
+      promptId: 'customer-support-agent',
+      // Pass context for variant selection or tracking
+      variant: requestContext?.get('experiment-variant'),
+      userId: requestContext?.get('user-id'),
+    })
+
+    return prompt.content
+  },
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+如需完整設定選項清單，請參閱 [Agent](/reference/agents/agent)。
+
+## 從 Workflow 步驟存取值
+
+你可以從 Workflow 步驟的 `execute` 函式存取 `requestContext` 引數。此函式可以是同步或非同步函式。請使用 `.get()` 方法從 `requestContext` 讀取值。
+
+```typescript title="src/mastra/workflows/weather-workflow.ts"
+export type UserTier = {
+  'user-tier': 'enterprise' | 'pro'
+}
+
+const stepOne = createStep({
+  id: 'step-one',
+  execute: async ({ requestContext }) => {
+    const userTier = requestContext.get('user-tier') as UserTier['user-tier']
+
+    if (userTier === 'enterprise') {
+    }
+  },
+})
+```
+
+如需完整設定選項清單，請參閱 [createStep()](/reference/workflows/step)。
+
+## 使用 Tool 存取值
+
+你可以從 Tool 的 `execute` 函式存取 `requestContext` 引數。此函式為 `async`。請使用 `.get()` 方法從 `requestContext` 讀取值。
+
+```typescript title="src/mastra/tools/weather-tool.ts"
+export type UserTier = {
+  'user-tier': 'enterprise' | 'pro'
+}
+
+export const weatherTool = createTool({
+  id: 'weather-tool',
+  execute: async (inputData, context) => {
+    const userTier = context?.requestContext?.get('user-tier') as UserTier['user-tier'] | undefined
+
+    if (userTier === 'enterprise') {
+    }
+  },
+})
+```
+
+如需完整設定選項清單，請參閱 [createTool()](/reference/tools/create-tool)。
+
+## 保留鍵
+
+基於安全考量，Mastra 保留了特殊內容鍵。設定後，這些鍵的優先順序高於用戶端提供的值。Server 會自動驗證擁有權；若使用者嘗試存取不屬於自己的資源，則傳回 403 錯誤。
+
+設定 `MASTRA_RESOURCE_ID_KEY` 最簡單的方式，是使用驗證設定中的 `mapUserToResourceId` 回呼：
+
+```typescript prettier:false
+auth: {
+  authenticateToken: async token => verifyToken(token),
+  mapUserToResourceId: user => user.id,
+}
+```
+
+以此方式衍生資源 ID 時，用戶端可在 Agent 的產生與串流請求本文中省略 `memory.resource`，系統會改用 Server 衍生的值（且一律優先於用戶端提供的任何值）。若請求使用記憶體，但本文與請求內容皆未提供資源 ID，Server 會回應 400 錯誤。
+
+你也可以在中介軟體中手動設定這些鍵：
+
+```typescript
+import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from '@mastra/core/request-context'
+
+// In middleware: force memory operations to use authenticated user's ID
+requestContext.set(MASTRA_RESOURCE_ID_KEY, user.id)
+
+// In middleware: set validated thread ID
+requestContext.set(MASTRA_THREAD_ID_KEY, threadId)
+```
+
+| 鍵 | 用途 |
+| - | - |
+| `MASTRA_RESOURCE_ID_KEY` | 強制所有記憶體操作使用此資源 ID。Server 會驗證所存取的對話串是否屬於此資源；若不屬於，則傳回 403。 |
+| `MASTRA_THREAD_ID_KEY` | 強制對話串操作使用此對話串 ID，覆寫用戶端提供的值 |
+
+這些鍵用於在多租戶應用程式中實作使用者隔離。使用範例請參閱[授權中介軟體](/docs/server/middleware#authorization-user-isolation)。
+
+## TypeScript 支援
+
+為 `RequestContext` 提供型別參數後，所有方法都會具有完整型別：
+
+```typescript
+import { RequestContext } from '@mastra/core/request-context'
+
+type MyContext = {
+  userId: string
+  maxTokens: number
+  isPremium: boolean
+}
+
+const ctx = new RequestContext<MyContext>()
+
+// set() enforces correct value types
+ctx.set('userId', 'user-123') // ✓ valid
+ctx.set('maxTokens', 4096) // ✓ valid
+ctx.set('maxTokens', 'wrong') // ✗ TypeScript error: expected number
+
+// get() returns the correct type automatically
+const tokens = ctx.get('maxTokens') // inferred as number
+const id = ctx.get('userId') // inferred as string
+
+// keys() returns typed keys
+for (const key of ctx.keys()) {
+  // key is "userId" | "maxTokens" | "isPremium"
+}
+
+// entries() supports type narrowing
+for (const [key, value] of ctx.entries()) {
+  if (key === 'maxTokens') {
+    // TypeScript knows value is number here
+    console.log(value.toFixed(2))
+  }
+  if (key === 'userId') {
+    // TypeScript knows value is string here
+    console.log(value.toUpperCase())
+  }
+}
+```
+
+## Schema 驗證
+
+使用 `requestContextSchema` 定義 [Standard JSON Schema](https://standardschema.dev/json-schema)（例如 [Zod](https://zod.dev/)、[Valibot](https://valibot.dev/)、[ArkType](https://arktype.io/)），在執行階段驗證請求內容值。如此可提早發現遺漏或無效的內容值、提供清楚的錯誤訊息，並讓元件內可進行型別推斷。
+
+### Agent schema 驗證
+
+在 Agent 上定義 `requestContextSchema` 後，系統會在 `generate()` 或 `stream()` 開始時驗證內容。若驗證失敗，Agent 會在進行任何 LLM 呼叫前擲回 `MastraError`。
+
+```typescript title="src/mastra/agents/validated-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { z } from 'zod'
+
+export const validatedAgent = new Agent({
+  id: 'validated-agent',
+  name: 'Validated Agent',
+  requestContextSchema: z.object({
+    userId: z.string(),
+    apiKey: z.string(),
+  }),
+  instructions: ({ requestContext }) => {
+    // Access all values as a typed object
+    const { userId, apiKey } = requestContext.all
+    // { userId: string; apiKey: string }
+
+    // Or retrieve individual values with .get()
+    const id = requestContext.get('userId')
+    // string
+
+    return `You are helping user ${userId}`
+  },
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+驗證失敗時，錯誤會包含 Agent ID 及驗證失敗的欄位詳細資料：
+
+```
+Request context validation failed for agent 'validated-agent':
+- apiKey: Required
+```
+
+### Tool schema 驗證
+
+在 Tool 上定義 `requestContextSchema` 後，系統會在執行 `execute()` 前驗證內容。Tool 與 Agent 不同，會傳回驗證錯誤物件，而非擲回錯誤：
+
+```typescript title="src/mastra/tools/validated-tool.ts"
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const validatedTool = createTool({
+  id: 'validated-tool',
+  description: 'A tool that requires authenticated context',
+  inputSchema: z.object({
+    query: z.string(),
+  }),
+  requestContextSchema: z.object({
+    userId: z.string(),
+  }),
+  execute: async (inputData, context) => {
+    // Access all values as a typed object
+    const { userId } = context.requestContext?.all ?? {}
+    // { userId: string }
+
+    // Or retrieve individual values with .get()
+    const id = context.requestContext?.get('userId')
+    // string | undefined
+
+    return { result: `Processed for ${userId}` }
+  },
+})
+```
+
+驗證失敗時，Tool 會傳回錯誤物件，而非擲回錯誤：
+
+```json
+{
+  "error": true,
+  "message": "Request context validation failed for validated-tool. Please fix the following errors and try again:\n- userId: Required\n\nProvided context: {}"
+}
+```
+
+### Workflow schema 驗證
+
+在 Workflow 上定義 `requestContextSchema` 後，系統會在 `run.start()` 開始時驗證內容。若驗證失敗，Workflow 會在執行任何步驟前擲回錯誤。
+
+```typescript title="src/mastra/workflows/validated-workflow.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+// Define schema once and share between workflow and steps
+const workflowContextSchema = z.object({
+  tenantId: z.string(),
+})
+
+const step1 = createStep({
+  id: 'step-1',
+  inputSchema: z.object({ message: z.string() }),
+  outputSchema: z.object({ result: z.string() }),
+  // Add schema to step for type inference
+  requestContextSchema: workflowContextSchema,
+  execute: async ({ inputData, requestContext }) => {
+    // Access all values as a typed object
+    const { tenantId } = requestContext.all
+    // { tenantId: string }
+
+    // Or retrieve individual values with .get()
+    const id = requestContext.get('tenantId')
+    // string
+
+    return { result: `Processed for tenant ${tenantId}` }
+  },
+})
+
+export const validatedWorkflow = createWorkflow({
+  id: 'validated-workflow',
+  inputSchema: z.object({ message: z.string() }),
+  outputSchema: z.object({ result: z.string() }),
+  requestContextSchema: workflowContextSchema,
+})
+  .then(step1)
+  .commit()
+```
+
+驗證失敗時，Workflow 會擲回錯誤：
+
+```
+Request context validation failed for workflow 'validated-workflow':
+- tenantId: Required
+```
+
+步驟也可以定義自己的 `requestContextSchema`，進行步驟層級驗證。步驟驗證會在該步驟的 `execute()` 函式之前執行。
+
+### 驗證行為
+
+| 元件 | 屬性 | 驗證時機 | 失敗時 |
+| - | - | - | - |
+| Agent | `requestContextSchema` | `generate()`／`stream()` 開始時 | 擲回 `MastraError` |
+| Tool | `requestContextSchema` | `execute()` 之前 | 傳回錯誤物件 |
+| Workflow | `requestContextSchema` | `run.start()` 開始時 | 擲回 `Error` |
+| 步驟 | `requestContextSchema` | 步驟的 `execute()` 之前 | 步驟因錯誤而失敗 |
+
+### 最佳實務
+
+**與中介軟體一致**：請在 schema 中定義與中介軟體所設定內容相同的必填欄位。如此一來，中介軟體與元件間的約定會明確且經過驗證。
+
+```typescript
+// Middleware sets these fields
+requestContext.set('userId', user.id)
+requestContext.set('tenantId', tenant.id)
+
+// Schema validates they exist
+requestContextSchema: z.object({
+  userId: z.string(),
+  tenantId: z.string(),
+})
+```
+
+**為條件式內容使用選填欄位**：對不一定存在的值使用 `.optional()`。
+
+```typescript
+requestContextSchema: z.object({
+  userId: z.string(), // Always required
+  experimentVariant: z.string().optional(), // May not be set
+})
+```
+
+**處理 Tool 驗證錯誤**：由於 Tool 會傳回錯誤物件而非擲回錯誤，因此當 Tool 執行至關重要時，請在 Agent 或 Workflow 邏輯中檢查錯誤。
+
+## 相關內容
+
+- [Agent 請求內容](/docs/memory/overview#switch-memory-per-request)
+- [Workflow 請求內容](../workflows/overview#using-requestcontext)
+- [Server 中介軟體](/docs/server/middleware)
+- [授權中介軟體](/docs/server/middleware#authorization-user-isolation)

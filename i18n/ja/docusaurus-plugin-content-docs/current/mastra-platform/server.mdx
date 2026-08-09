@@ -1,0 +1,283 @@
+---
+title: "Server | Mastra platform"
+description: Mastra アプリケーションを本番 API Server として Mastra platform にデプロイし、ホストします。
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# Mastra platform の Server
+
+Mastra platform の Server は、Mastra アプリケーションを API Server として実行する本番環境向けのデプロイ先です。Mastra Server のビルド、デプロイ、ホスト、管理を platform に任せたい場合に使用します。
+
+安定した API endpoint、環境変数の管理、custom domain のサポート、デプロイ履歴が標準で提供されます。
+
+:::note
+`mastra server deploy` は以前の分割されたデプロイ方法です。新しいプロジェクトでは、事前検証、環境、CLI 管理のデータベースを追加する統合コマンド [`mastra deploy`](/docs/mastra-platform/deploy) を使用してください。
+:::
+
+:::note
+
+Server のデプロイでは、ホストされた storage が自動的にプロビジョニングされます。[LibSQLStore](/reference/storage/libsql) と file URL で storage を上書きする場合は、リモートでホストされたデータベースに切り替えてください。Mastra platform は一時的なファイルシステムを使用します。
+
+:::
+
+## クイックスタート
+
+<Steps>
+  <StepItem>
+    [スタートガイド](/docs)に従って、最初の Mastra プロジェクトを作成します。
+  </StepItem>
+
+  <StepItem>
+    `mastra` CLI をグローバルにインストールします。
+
+    ```bash npm2yarn
+    npm install -g mastra
+    ```
+  </StepItem>
+
+  <StepItem>
+    プロジェクトをデプロイします。
+
+    ```bash
+    mastra server deploy
+    ```
+
+    まだ認証されていない場合、CLI にログインを求められます。認証情報はローカルに保存され、以降の CLI コマンドで使用されます。
+
+    このコマンドは `mastra build` を実行し、アーティファクトをアップロードして Docker image をビルドし、デプロイします。初回デプロイ時、CLI はローカルプロジェクトを platform にリンクする `.mastra-project.json` ファイルを作成します。以降のデプロイと CI/CD が同じプロジェクトを対象にするよう、このファイルをコミットしてください。
+
+    :::note
+    `.env`、`.env.local`、`.env.production` の環境変数は自動的に含まれます。初回デプロイ時に env var がまだ設定されていなければ、これらの値でプロジェクトが初期設定されます。それ以降は、Web dashboard で env var を管理してください。
+    開発専用または個人用の secret をアップロードしないよう、初回デプロイ前にこれらのファイルを確認して不要な値を除去してください。
+    :::
+
+    フラグの全一覧については、[CLI リファレンス](/reference/cli/mastra#mastra-server-deploy)を参照してください。
+  </StepItem>
+
+  <StepItem>
+    CLI に表示された URL でデプロイを確認します。末尾に `/api/agents` を付け、Agent の JSON リストが返されることを確認してください。
+
+    :::warning
+    endpoint を一般公開する前に、[認証](/docs/server/auth)を設定してください。
+    :::
+  </StepItem>
+</Steps>
+
+## デプロイのライフサイクル
+
+デプロイは **queued → uploading → building → deploying → running** の順に遷移します（または **failed**、**cancelled**、**crashed**、**stopped** のいずれかになります）。プロジェクトごとに同時に実行されるビルドは1つだけです。複数のデプロイがキューに入った場合、最新のものだけが進行し、残りはキャンセルされます。15分を超えて実行されているビルドは自動的に失敗となります。初回デプロイではインフラストラクチャがプロビジョニングされ、ローカルの `.env` から環境変数が初期設定されます。Server URL はデプロイ後も変わりません。
+
+## アイドル時の動作
+
+Mastra platform の Server は、リソースを節約するため、一定期間操作がないと service をスリープできます。操作がない状態は、外向きのネットワークトラフィックで測定されます。外向きの packet がない状態が約10分続いた場合にのみ、service はアイドルと見なされます。外向きのトラフィックが繰り返し発生すると、この timer がリセットされ、service は起動状態を維持します。
+
+まったくスリープしない Server では、通常、background task または長期間維持される connection が timer に従ってトラフィックを送信しています。次の一般的な原因を確認してください。
+
+### 永続的なデータベース connection
+
+開いたままの database client は、Server がアイドル状態でも connection を維持します。多くの driver は一定間隔でデータベースに ping を送る background health check も実行し、これが外向きトラフィックとしてカウントされます。たとえば、閉じられていない MongoDB client は monitoring socket を開いたままにし、約10秒ごとに heartbeat を送信します。
+
+アイドル状態の connection を解放する connection pool の設定だけでは不十分です。driver の monitoring connection が開いたままで ping を送信し続けるためです。Server をスリープさせるには、一定期間操作がなければ client を閉じ、次のリクエスト時に再接続します。
+
+:::note
+client を閉じると、Server の起動後、最初のリクエストに短い再接続遅延が加わります。workload がその遅延を許容できない場合は、connection を開いたままにし、アイドル時のスリープに依存しないでください。
+:::
+
+### スケジュールされた task と timer
+
+ネットワーク呼び出しを行う `setInterval`、cron job、polling loop は Server を起動状態に保ちます。スケジュールされた処理が必要な場合は、別の service として実行するか、リクエストによって Server を起動する外部 scheduler を使用してください。
+
+### 外部 ping と keep-alive check
+
+一定間隔で Server にアクセスする uptime monitor、health check、keep-alive ping は、アイドル timer をリセットします。Server をスリープさせたい場合は、これらの check を削除するか、その間隔をアイドル時間より長くしてください。
+
+### Observability exporter
+
+Trace、log、metric をリモート endpoint にストリーミングする exporter は、外向きトラフィックを送信します。exporter が一定間隔で flush するのではなく、Server がアイドル状態のときは送信を停止し、データを batch 処理することを確認してください。
+
+### 長期間維持される stream
+
+開いた server-sent events (SSE) stream、WebSocket、その他の長期間維持される connection は、閉じられるまでトラフィックを維持します。バックグラウンドで subscribe したままの streaming response は connection をアクティブに保ちます。client が切断したときに stream が閉じ、Server がそれ以外ではアイドル状態のときに開いたままの stream がないことを確認してください。
+
+### chat integration
+
+一部の chat integration は永続的な connection を維持し、定期的に heartbeat を送信するため、Server が起動状態に保たれます。たとえば、Socket Mode の Slack app は WebSocket を開き、約30秒ごとに ping を送信します。Discord bot は gateway WebSocket を開いたままにし、timer に従って heartbeat を送信します。開いた socket と heartbeat は、どちらもアイドル状態になるのを防ぎます。
+
+Server をスリープさせたい場合は、integration が対応していれば、永続的な connection ではなく HTTP webhook で event を受信します。たとえば Slack app では、Socket Mode の代わりに request URL を指定した Events API を使用できます。app に永続的な connection が必要な場合は、後述の **Persistent Server add-on** を使用して service を実行状態に保ってください。
+
+### アクティブな connection を調査する
+
+Server を起動状態にしている原因を特定するには、アイドル時に process のアクティブな handle を調査します。すべてのリクエストが完了した後も残っている handle が、調査すべき原因です。開いた socket は閉じる必要がある永続的な connection を示し、アクティブな timer は `setInterval` または自身を再スケジュールする `setTimeout` を示します。
+
+次の helper を app に追加し、トラフィックが停止した後の log を確認してください。Server がアイドル状態になっても一覧に残っているものが、Server を起動状態にしています。
+
+```typescript title="src/mastra/diagnose-idle.ts"
+export function logActiveHandles() {
+  // process._getActiveHandles is undocumented but useful for diagnosis.
+  const handles = (process as any)._getActiveHandles() as Array<any>
+
+  const summary = handles.map(handle => {
+    const type = handle?.constructor?.name ?? typeof handle
+    if (type === 'Socket') {
+      return `Socket -> ${handle.remoteAddress}:${handle.remotePort}`
+    }
+    return type
+  })
+
+  console.log(`[idle] ${handles.length} active handles:`, summary)
+}
+
+// Log every 30 seconds so you can see what persists while the server is idle.
+setInterval(logActiveHandles, 30_000).unref()
+```
+
+診断用 interval 自体が Server を起動状態にしないよう、`unref()` を呼び出します。
+
+### service を実行状態に保つ
+
+一部のアプリケーションでは、最初のリクエストの latency を抑えるための永続的なデータベース connection、background scheduler、長期間維持される stream など、上記の connection や task が実際に必要です。app がこれらのいずれかを必要とする場合、service を無理にスリープさせないでください。代わりに **Persistent Server add-on** を使用して、service を継続的に実行します。
+
+**Persistent Server add-on** を有効にすると、トラフィックがなくても service は起動状態を維持するため、永続的な connection、スケジュールされた task、開いた stream はアイドル時のスリープに中断されずに動作し続けます。
+
+## CI/CD
+
+GitHub Actions、GitLab CI、または任意の CI Provider からデプロイを自動化できます。最初の対話形式のデプロイ後、CI/CD には API Token と、リポジトリにコミットされた `.mastra-project.json` ファイルの2つが必要です。
+
+:::tip
+コードが GitHub にある場合は、[GitHub インテグレーション](/docs/mastra-platform/github)を使えば workflow file を記述せずに push-to-deploy を利用できます。GitLab、別の CI Provider、またはデプロイ前のカスタム build step が必要な場合は、以下の CLI ベースの CI/CD フローを使用してください。
+:::
+
+### API Token を作成する
+
+<Steps>
+  <StepItem>
+    ローカルで次のコマンドを実行します。
+
+    ```bash
+    mastra auth tokens create ci-deploy
+    ```
+
+    CLI が Token を表示するのは一度だけです。再取得できないため、すぐにコピーしてください。
+  </StepItem>
+
+  <StepItem>
+    CI Provider に Token を secret として追加します。GitHub Actions では、**Settings → Secrets and variables → Actions** に移動し、`MASTRA_API_TOKEN` という名前の secret を作成します。
+  </StepItem>
+
+  <StepItem>
+    `.mastra-project.json` ファイルがリポジトリにコミットされていることを確認します。CLI はこのファイルから `organizationId` と `projectId` を読み取り、CI デプロイ時に正しいプロジェクトを対象にします。
+  </StepItem>
+</Steps>
+
+### `--yes` フラグ
+
+すべての確認プロンプトを省略するには、`--yes`（または `-y`）を渡します。指定しない場合、CLI は対話形式の入力を待つため、CI job が停止します。
+
+```bash
+mastra server deploy --yes
+```
+
+### GitHub Actions
+
+次の workflow は、`main` に push されるたびにデプロイします。
+
+```yaml title=".github/workflows/deploy-mastra.yml"
+name: Deploy to Mastra platform
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/mastra/**']
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm install
+      - name: Deploy to Mastra platform
+        run: npx mastra server deploy --yes
+        env:
+          MASTRA_API_TOKEN: ${{ secrets.MASTRA_API_TOKEN }}
+```
+
+Mastra プロジェクトがサブディレクトリ（たとえば monorepo）にある場合は、`paths` filter と `working-directory` を調整してください。
+
+:::note
+
+Studio のデプロイでは、`mastra server deploy` を `mastra studio deploy` に置き換えます。フラグと環境変数は同じです。
+
+:::
+
+### GitLab CI
+
+次の pipeline は、`main` への push 時にデプロイします。
+
+```yaml title=".gitlab-ci.yml"
+deploy:
+  image: node:22
+  stage: deploy
+  only:
+    - main
+  before_script:
+    - npm install
+  script:
+    - npx mastra server deploy --yes
+```
+
+**Settings → CI/CD → Variables** で、`MASTRA_API_TOKEN` を CI/CD variable として追加します。
+
+### その他の CI Provider
+
+Node.js と shell command を実行できる CI system であれば、Mastra と連携できます。
+
+1. dependency をインストールします。
+1. `MASTRA_API_TOKEN` を環境変数として設定します。
+1. `mastra server deploy --yes`（または `mastra studio deploy --yes`）を実行します。
+
+### デプロイを検証する
+
+workflow の完了後、health endpoint にアクセスしてデプロイを検証します。
+
+```bash
+curl -f https://<your-project>.server.mastra.cloud/health
+```
+
+または、Agent の JSON リストを返す agents endpoint を確認します。
+
+```bash
+curl -f https://<your-project>.server.mastra.cloud/api/agents
+```
+
+次の例では、GitHub Actions workflow に検証 step を追加します。
+
+```yaml
+- name: Verify deployment
+  run: |
+    sleep 30
+    curl -f https://<your-project>.server.mastra.cloud/health
+```
+
+### 環境変数でプロジェクト設定を上書きする
+
+CLI は `organizationId` と `projectId` をデフォルトで `.mastra-project.json` から読み取ります。これらの値を上書きするには（たとえば、同じリポジトリから別のプロジェクトにデプロイする場合）、次の環境変数を設定します。
+
+| 変数 | 説明 |
+| - | - |
+| `MASTRA_ORG_ID` | `.mastra-project.json` の organization ID を上書きします。 |
+| `MASTRA_PROJECT_ID` | `.mastra-project.json` の project ID を上書きします。 |
+
+## 関連項目
+
+- [`mastra server deploy`](/reference/cli/mastra#mastra-server-deploy)
+- [`mastra server pause`](/reference/cli/mastra#mastra-server-pause)
+- [`mastra server restart`](/reference/cli/mastra#mastra-server-restart)
+- [`mastra studio deploy`](/reference/cli/mastra#mastra-studio-deploy)
+- [`mastra auth tokens`](/reference/cli/mastra#mastra-auth-tokens)

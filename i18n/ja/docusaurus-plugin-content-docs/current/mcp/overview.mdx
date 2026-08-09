@@ -1,0 +1,364 @@
+---
+title: "MCP の概要 | MCP"
+description: Mastra Agent を外部 MCP サーバーに接続し、MCPServer を通じて Mastra Tool を公開し、Studio 向けの対話型 MCP Apps を構築します。
+packages:
+  - "@mastra/mcp"
+---
+
+# MCP の概要
+
+Mastra は、AI Agent を外部の Tool やリソースに接続するためのオープン標準である [Model Context Protocol（MCP）](https://modelcontextprotocol.io/introduction)をサポートしています。
+
+MCP サーバーへの接続には [`MCPClient`](/reference/tools/mcp-client) を使用します。Mastra の Agent、Tool、Workflow、プロンプト、リソースを他の MCP 互換システムに公開するには、[`MCPServer`](/reference/tools/mcp-server) を使用します。
+
+## MCP サーバーに接続する
+
+MCP パッケージをインストールします。
+
+```bash npm2yarn
+npm install @mastra/mcp@latest
+```
+
+各サーバーをローカルコマンドまたはリモート URL で設定します。
+
+```typescript title="src/mastra/mcp/client.ts"
+import { MCPClient } from '@mastra/mcp'
+
+export const mcpClient = new MCPClient({
+  id: 'my-mcp-client',
+  servers: {
+    wikipedia: {
+      command: 'npx',
+      args: ['-y', 'wikipedia-mcp'],
+    },
+    weather: {
+      url: new URL('https://weather.example.com/mcp'),
+      requestInit: {
+        headers: {
+          Authorization: `Bearer ${process.env.WEATHER_API_KEY}`,
+        },
+      },
+    },
+  },
+})
+```
+
+:::tip 認証
+
+OAuth で保護されたサーバーでは、`authenticate()` を使用してブラウザベースの認可フローを完了します。設定の詳細については、[OAuth 認証](/reference/tools/mcp-client#oauth-authentication)を参照してください。
+
+:::
+
+設定済みサーバーの Tool を Agent に渡します。
+
+```typescript {2,13} title="src/mastra/agents/assistant.ts"
+import { Agent } from '@mastra/core/agent'
+import { mcpClient } from '../mcp/client'
+
+export const assistant = new Agent({
+  id: 'assistant',
+  name: 'Assistant',
+  instructions: `
+    Use the available MCP tools to answer questions.
+    Include the source of any information you retrieve.
+  `,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: await mcpClient.listTools(),
+})
+```
+
+### 静的 Tool とランタイム Tool
+
+サーバー設定がリクエスト間で変わるかどうかに応じて、Tool の読み込み方法を選択します。
+
+| | 静的 Tool | ランタイム Tool セット |
+| :- | :- | :- |
+| メソッド | `await mcpClient.listTools()` | `await mcpClient.listToolsets()` |
+| ユースケース | 共有の固定設定 | ユーザーまたはリクエストごとの設定 |
+| 認証情報 | すべてのリクエストで共有 | リクエストごとに変更可能 |
+| Agent API | `Agent` コンストラクターの `tools` | `generate()` または `stream()` の `toolsets` |
+
+先ほどの Agent の例では、静的 Tool を使用しています。ランタイム認証情報を使用する場合は、リクエスト用の Client を作成し、Agent を呼び出すときにその Tool セットを渡します。
+
+```typescript {5-16,21} title="src/handle-request.ts"
+import { MCPClient } from '@mastra/mcp'
+import { mastra } from './mastra'
+
+export async function handleRequest(prompt: string, apiKey: string) {
+  const userMcpClient = new MCPClient({
+    servers: {
+      weather: {
+        url: new URL('https://weather.example.com/mcp'),
+        requestInit: {
+          headers: { Authorization: `Bearer ${apiKey}` },
+        },
+      },
+    },
+  })
+
+  const agent = mastra.getAgent('assistant')
+  const response = await agent.generate(prompt, {
+    toolsets: await userMcpClient.listToolsets(),
+  })
+
+  await userMcpClient.disconnect()
+  return response.text
+}
+```
+
+完全な API については、[`listTools()`](/reference/tools/mcp-client#listtools) と [`listToolsets()`](/reference/tools/mcp-client#listtoolsets) を参照してください。
+
+### Tool の承認
+
+サーバー上のすべての Tool で承認を必須にするには、サーバーに `requireToolApproval` を設定します。
+
+```typescript
+const mcpClient = new MCPClient({
+  servers: {
+    github: {
+      url: new URL('https://github.example.com/mcp'),
+      requireToolApproval: true,
+    },
+  },
+})
+```
+
+Tool 名、引数、アノテーションに基づいて判断する関数を指定することもできます。
+
+```typescript
+requireToolApproval: ({ toolName }) => toolName.startsWith('delete_')
+```
+
+管理下にないサーバーからの Tool アノテーションは、信頼できないヒントとして扱ってください。コールバックのコンテキストとセキュリティのガイダンスについては、[Tool の承認](/reference/tools/mcp-client#tool-approval)を参照してください。
+
+### セキュリティ
+
+MCP サーバーは Agent に代わってコードを実行し、コンテンツを返します。そのため、他の外部依存関係と同様に慎重に設定してください。
+
+- **Stdio サブプロセス環境**：サブプロセスが継承するのは MCP SDK が管理する環境変数の許可リスト（POSIX では `PATH` や `HOME` など）のみで、親環境全体は継承しません。リストに指定した `env` 変数だけを渡すには、サーバーで `inheritDefaultEnv: false` を設定します。
+- **送信先ホストの制限**：HTTP サーバーの URL が信頼できない設定から渡される場合は、`allowedHosts` を設定して Client が接続できるホストを制限します。デフォルトの fetch 経路では、送信前にリダイレクト先もブロックされます。カスタム `fetch` では、リクエスト実行後に最終レスポンス URL が検証されるため、外部への接続を防ぐ必要がある場合は、カスタム実装側でリダイレクトポリシーを適用する必要があります。
+- **Tool レスポンスの信頼性**：Tool の結果は信頼できないモデル入力です。モデルに到達する前にコンテンツを検査またはサニタイズするには、[入力および出力 Processor](/docs/agents/processors)を使用します。機密性の高い Tool を制御するには、`requireToolApproval` を使用します。
+
+各オプションの適用に関する詳細は、[MCPClient のセキュリティリファレンス](/reference/tools/mcp-client#security)を参照してください。
+
+### MCP レジストリ
+
+レジストリは、ホスト型またはパッケージ化された MCP サーバーを提供します。前述の Client 設定は、レジストリのエンドポイントやコマンドでも使用できます。
+
+| レジストリ | 接続 | 注記 |
+| :- | :- | :- |
+| [Klavis AI](https://klavis.ai) | ホスト型 HTTP | エンタープライズ認証とマネージドサーバー |
+| [mcp.run](https://www.mcp.run/) | 署名付き SSE URL | プロファイル URL は秘密情報として扱ってください |
+| [Composio](https://mcp.composio.dev) | ホスト型 SSE URL | URL は多くの場合、1 つのユーザーアカウントに関連付けられています |
+| [Smithery](https://smithery.ai) | CLI またはホスト型 URL | `npx` を通じてローカルパッケージを実行します |
+| [Apify](https://mcp.apify.com) | ホスト型 HTTP | Apify API トークンで認証します |
+| [Ampersand](https://docs.withampersand.com/mcp) | SSE または stdio | 設定済みの SaaS インテグレーションに接続します |
+
+署名付き URL、API キー、トークンは環境変数に保存します。各サーバーのエンドポイント、コマンド、認証情報を取得するには、レジストリのドキュメントに従ってください。
+
+## Mastra MCP サーバーを公開する
+
+Mastra のプリミティブを外部 MCP Client に公開するため、`MCPServer` を作成します。
+
+```typescript title="src/mastra/mcp/server.ts"
+import { MCPServer } from '@mastra/mcp'
+import { assistant } from '../agents/assistant'
+import { weatherTool } from '../tools/weather'
+import { weatherWorkflow } from '../workflows/weather'
+
+export const mcpServer = new MCPServer({
+  id: 'my-mcp-server',
+  name: 'My MCP Server',
+  version: '1.0.0',
+  agents: { assistant },
+  tools: { weatherTool },
+  workflows: { weatherWorkflow },
+})
+```
+
+メインの `Mastra` インスタンスにサーバーを登録します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { mcpServer } from './mcp/server'
+
+export const mastra = new Mastra({
+  mcpServers: { mcpServer },
+})
+```
+
+:::tip 認証
+
+HTTP MCP サーバーを OAuth ミドルウェアで保護します。設定手順については、[OAuth による保護](/reference/tools/mcp-server#oauth-protection)を参照してください。
+
+:::
+
+プロンプト、リソース、トランスポート、その他のサーバーオプションについては、[`MCPServer` リファレンス](/reference/tools/mcp-server)を参照してください。
+
+## MCP Apps を構築する
+
+[MCP Apps 拡張機能](https://github.com/modelcontextprotocol/ext-apps)を使用すると、MCP Tool は `ui://` リソースを通じて対話型 HTML インターフェースを提供できます。Mastra Studio は、Tool ページと Agent チャット内で、これらの App をサンドボックス化された iframe にレンダリングします。
+
+フォーム、計算機、カラーピッカー、データ可視化など、Tool の結果を操作できると有用な場合に MCP App を使用します。
+
+### App リソースを定義する
+
+モデルには短い `content` の要約を返し、UI データは `structuredContent` に配置します。Tool を App に関連付けるには、`_meta.ui.resourceUri` を `appResources` で使用するものと同じ `ui://` URI に設定します。
+
+```typescript title="src/mastra/mcp/calculator.ts"
+import { MCPServer } from '@mastra/mcp'
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const calculatorTool = createTool({
+  id: 'calculatorWithUI',
+  description: 'Calculate the sum of two numbers',
+  inputSchema: z.object({
+    num1: z.number(),
+    num2: z.number(),
+  }),
+  execute: async ({ num1, num2 }) => ({
+    content: [{ type: 'text', text: 'The result is displayed in the calculator app.' }],
+    structuredContent: { result: num1 + num2 },
+  }),
+})
+
+calculatorTool._meta = {
+  ui: { resourceUri: 'ui://calculator/main' },
+}
+
+export const calculatorMcpServer = new MCPServer({
+  id: 'calculator-app-server',
+  name: 'Calculator App Server',
+  version: '1.0.0',
+  tools: { calculatorTool },
+  appResources: {
+    'ui://calculator/main': {
+      name: 'Calculator',
+      htmlPath: './src/mastra/mcp/calculator.html',
+    },
+  },
+})
+```
+
+モデルには `content` が表示され、App は `structuredContent` を受け取ります。インライン HTML、ファイルパス、メタデータ、コンテンツセキュリティポリシーのオプションについては、[`appResources`](/reference/tools/mcp-server#mcp-apps-appresources) を参照してください。
+
+### App を Studio に接続する
+
+HTML リソース内で `@modelcontextprotocol/ext-apps` の `App` クラスを使用します。`connect()` を呼び出す前に、イベントハンドラーを登録してください。
+
+```html title="src/mastra/mcp/calculator.html"
+<!doctype html>
+<html>
+  <body>
+    <p id="result">Waiting for input</p>
+    <button id="recalculate">Recalculate</button>
+
+    <script type="module">
+      import { App } from 'https://cdn.jsdelivr.net/npm/@modelcontextprotocol/ext-apps/+esm'
+
+      const app = new App({ name: 'Calculator', version: '1.0.0' })
+      let toolInput
+
+      app.ontoolinput = params => {
+        toolInput = params.arguments
+      }
+
+      document.querySelector('#recalculate').addEventListener('click', async () => {
+        const result = await app.callServerTool({
+          name: 'calculatorWithUI',
+          arguments: toolInput,
+        })
+        document.querySelector('#result').textContent = JSON.stringify(result)
+
+        await app.sendMessage({
+          role: 'user',
+          content: [{ type: 'text', text: 'Explain the recalculated result.' }],
+        })
+      })
+
+      await app.connect()
+    </script>
+  </body>
+</html>
+```
+
+ゲスト側の API は、操作の各部分を担います。
+
+| API | 目的 |
+| :- | :- |
+| `app.ontoolinput` | ホストの Tool 呼び出しから引数を受け取ります |
+| `app.callServerTool()` | iframe 内から MCP Tool を呼び出します |
+| `app.sendMessage()` | チャットにユーザーメッセージを追加し、新しいモデルターンを開始します |
+| `app.connect()` | イベントハンドラーを登録した後、ホストに接続します |
+
+操作は次の順序で進みます。
+
+1. Agent が Tool を呼び出します。
+1. Tool がモデル向けの `content` と UI 向けの `structuredContent` を返します。
+1. Studio が関連付けられた App リソースをレンダリングします。
+1. App が Tool の入力を受け取り、サーバー Tool の呼び出しやチャットメッセージの送信を行えます。
+
+ゲスト側のすべてのメソッドとライフサイクルフックについては、外部の [`App` API リファレンス](https://apps.extensions.modelcontextprotocol.io/api/classes/app.App.html)を参照してください。
+
+### MCP Apps を登録する
+
+ローカル App の場合は、Tool を Agent に渡し、その MCP サーバーを `Mastra` に登録します。
+
+```typescript title="src/mastra/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { Mastra } from '@mastra/core/mastra'
+import { calculatorMcpServer, calculatorTool } from './mcp/calculator'
+
+const calculatorAgent = new Agent({
+  id: 'calculator-agent',
+  name: 'Calculator Agent',
+  instructions: 'Use the calculator tool for arithmetic.',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  tools: { calculatorTool },
+})
+
+export const mastra = new Mastra({
+  agents: { calculatorAgent },
+  mcpServers: { calculatorMcpServer },
+})
+```
+
+MCP Apps を実装する外部 MCP サーバーの場合は、`MCPClient.listTools()` で Tool を読み込み、Studio がリモート App リソースを解決できるようにプロキシを登録します。
+
+```typescript title="src/mastra/remote-apps.ts"
+import { Agent } from '@mastra/core/agent'
+import { Mastra } from '@mastra/core/mastra'
+import { mcpClient } from './mcp/client'
+
+const tools = await mcpClient.listTools()
+const mcpServers = mcpClient.toMCPServerProxies()
+
+const agent = new Agent({
+  id: 'remote-app-agent',
+  name: 'Remote App Agent',
+  instructions: 'Use the available remote tools.',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  tools,
+})
+
+export const mastra = new Mastra({
+  agents: { agent },
+  mcpServers,
+})
+```
+
+`listTools()` で読み込まれた Tool の `_meta.ui` には `serverId` が含まれているため、Studio はすべてのサーバーをスキャンせずに各 App リソースを解決できます。プロキシ設定の詳細については、[`toMCPServerProxies()`](/reference/tools/mcp-client#tomcpserverproxies) を参照してください。
+
+### Sandbox のセキュリティ
+
+Mastra Studio は [`@mcp-ui/client`](https://www.npmjs.com/package/@mcp-ui/client) を使用して、Sandbox プロキシ経由で App の HTML を読み込み、`postMessage` を使った JSON-RPC で通信します。
+
+App の iframe では、スクリプト、フォーム、ポップアップを使用できます。親ページの DOM、Cookie、ストレージにはアクセスできません。ゲスト App とのすべての通信はホストが制御します。
+
+## 次のステップ
+
+- [Agent で Tool を使用する](/docs/agents/using-tools)
+- [`MCPClient` リファレンス](/reference/tools/mcp-client)
+- [`MCPServer` リファレンス](/reference/tools/mcp-server)
+- [MCP Apps 拡張機能の仕様](https://github.com/modelcontextprotocol/ext-apps)

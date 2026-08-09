@@ -1,0 +1,162 @@
+---
+title: "フィードバック | オブザーバビリティ"
+description: "Mastra オブザーバビリティで、人間によるフィードバックレコードを収集、一覧表示、クエリします。"
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+# フィードバック
+
+フィードバックレコードは、評価ボタン、レーティング、コメント、修正など、human-in-the-loop のシグナルを記録します。ユーザー、QA、Studio、またはシステムによるレビューデータを Trace や span に関連付け、ほかのオブザーバビリティシグナルと一緒にクエリする必要がある場合に使用します。
+
+メトリクスやスコアとは異なり、フィードバックは通常、人またはレビューワークフローから提供されます。数値のフィードバック値は、集計、グループ化、時系列でのグラフ化、パーセンタイルのクエリが可能です。
+
+## フィードバックを使用する場面
+
+- Agent の応答に対するユーザー満足度を収集する。
+- レビュー対象の Trace の横に QA コメントや修正を保存する。
+- Agent、環境、実験ごとのレーティングを表示するダッシュボードを構築する。
+
+## フィードバックを追加する
+
+アプリケーションコードから永続化済みの Trace や span に注釈を付ける場合は、`mastra.observability.addFeedback()` を使用します。このヘルパーはオブザーバビリティのエントリポイントではオプションなので、使用中のオブザーバビリティ実装が対応していることを確認してください。すべてのクライアントメソッドについては、[クライアント SDK のオブザーバビリティリファレンス](/reference/client-js/observability)を参照してください。
+
+```typescript title="src/mastra/feedback.ts"
+if (!mastra.observability.addFeedback) {
+  throw new Error('Feedback is not supported by the active observability implementation')
+}
+
+await mastra.observability.addFeedback({
+  traceId: 'trace-123',
+  spanId: 'span-456',
+  feedback: {
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'The answer solved my issue.',
+  },
+})
+```
+
+## メッセージの Trace を見つける
+
+フィードバックは通常、ユーザーがすでに読んだメッセージに対して収集するため、そのメッセージの `traceId` が必要です。Assistant メッセージでは、ストリーム結果でも、後からメモリから取得した場合でも、`content.metadata` にこの値が含まれます。
+
+```typescript title="src/mastra/message-trace.ts"
+const agent = mastra.getAgent('weatherAgent')
+const memory = await agent.getMemory()
+
+const { messages } = await memory!.recall({ threadId, perPage: false })
+
+const message = messages.find(m => m.id === messageId)
+const traceId = message?.content.metadata?.traceId
+```
+
+この値は、実行結果で `traceId` として報告される Trace と同じです。そのため、生成時に収集したフィードバックと、保存済みメッセージに対して後から収集したフィードバックは、同じ Trace に関連付けられます。トレーシングが無効な状態で生成されたメッセージには `traceId` がありません。
+
+## フィードバックを作成する
+
+すべての `createFeedback()` には `feedbackType` と `value` が必要です。フィードバックを Trace または特定の span に関連付ける場合は、`traceId` または `spanId` を追加します。`feedbackSource` は、`user`、`qa`、`studio`、`system` などのオプションの文字列メタデータとして使用します。
+
+ストレージレベルで書き込む場合は、メソッドがストアへ直接書き込むため `timestamp` を含めてください。
+
+```typescript
+const observability = await mastra.getStorage()!.getStore('observability')
+
+await observability!.createFeedback({
+  feedback: {
+    feedbackId: 'feedback-rating-1',
+    timestamp: new Date(),
+    traceId: 'trace-123',
+    spanId: 'span-456',
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'The answer solved my issue.',
+    tags: ['production'],
+  },
+})
+
+await observability!.createFeedback({
+  feedback: {
+    feedbackId: 'feedback-comment-1',
+    timestamp: new Date(),
+    feedbackSource: 'qa',
+    feedbackType: 'comment',
+    value: 'Needs a citation before shipping.',
+    experimentId: 'support-agent-eval',
+  },
+})
+```
+
+## フィードバックを一覧表示する
+
+`listFeedback()` を使用すると、生のレコードをページ単位で取得したり、差分モードでポーリングしたりできます。
+
+```typescript
+const result = await observability!.listFeedback({
+  filters: {
+    feedbackType: 'rating',
+    feedbackSource: 'user',
+    timestamp: { start: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+  },
+  pagination: { page: 0, perPage: 20 },
+  orderBy: { field: 'timestamp', direction: 'DESC' },
+})
+
+console.log(result.feedback, result.pagination?.hasMore)
+```
+
+フィルターには、`traceId` や `spanId` などの対象フィールド、`feedbackType`、`feedbackSource`、`feedbackUserId` などのフィードバックフィールド、`entityName`、`environment`、`experimentId`、`tags` などの共有コンテキストフィールドを指定できます。
+
+```typescript
+await observability!.listFeedback({
+  filters: {
+    traceId: 'trace-123',
+    feedbackType: ['rating', 'thumbs'],
+    tags: ['production'],
+  },
+})
+```
+
+## フィードバック分析をクエリする
+
+OLAP フィードバッククエリは、数値の `value` フィールドを対象に動作します。レーティング、`1` と `-1` で表現した評価ボタン、数値の QA スコア、またはその他の数値フィードバック形式に使用します。
+
+```typescript
+const rating = await observability!.getFeedbackAggregate({
+  feedbackType: 'rating',
+  feedbackSource: 'user',
+  aggregation: 'avg',
+  comparePeriod: 'previous_day',
+})
+
+const byAgent = await observability!.getFeedbackBreakdown({
+  feedbackType: 'rating',
+  groupBy: ['entityName'],
+  aggregation: 'avg',
+  filters: { environment: 'production' },
+})
+
+const ratingsOverTime = await observability!.getFeedbackTimeSeries({
+  feedbackType: 'rating',
+  aggregation: 'avg',
+  interval: '1h',
+  groupBy: ['feedbackSource'],
+})
+```
+
+すべてのフィールド、フィルター、戻り値の型、パーセンタイルクエリのパラメーターについては、[フィードバックリファレンス](/reference/observability/feedback)を参照してください。
+
+## フィードバックを外部プラットフォームへエクスポートする
+
+フィードバックはオブザーバビリティのイベントバスを通るため、フィードバックに対応する exporter は自動的に転送します。[PostHog exporter](/reference/observability/tracing/exporters/posthog#feedback-export) は、フィードバックをネイティブの `$ai_feedback` イベントとして送信し、PostHog で関連付けられた Trace 上に表示します。
+
+## 関連項目
+
+- [オブザーバビリティの概要](/docs/observability/overview)
+- [トレーシングの概要](/docs/observability/tracing/overview)
+- [メトリクスの概要](/docs/observability/metrics/overview)
+- [クライアント SDK のオブザーバビリティリファレンス](/reference/client-js/observability)
+- [フィードバックリファレンス](/reference/observability/feedback)

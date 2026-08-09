@@ -1,0 +1,535 @@
+---
+title: "OpenTelemetry exporter | Integrations | Observability"
+description: "OpenTelemetry 互換の任意の Observability プラットフォームへ Trace とログを送信します"
+packages:
+  - "@mastra/observability"
+  - "@mastra/otel-exporter"
+---
+
+# OpenTelemetry exporter
+
+OpenTelemetry（OTEL）exporter は、標準化された [OpenTelemetry Semantic Conventions for GenAI](https://opentelemetry.io/docs/specs/semconv/gen-ai/) を使用して、OTEL 互換の任意の Observability プラットフォームへ Trace とログを送信します。これにより、Datadog、New Relic、SigNoz、MLflow、Latitude、Dash0、Traceloop、Laminar、telemetry.dev など、幅広いプラットフォームとの互換性が確保されます。
+
+:::info 双方向の OTEL 統合をお探しですか？
+
+既存の OpenTelemetry instrumentation があり、Mastra の Trace にアクティブな OTEL Span のコンテキストを継承させたい場合は、代わりに [OpenTelemetry Bridge](/docs/observability/integrations/bridges/otel) を参照してください。
+
+:::
+
+## インストール
+
+Provider ごとに特定のプロトコルパッケージが必要です。基本 exporter と、使用する Provider 用のプロトコルパッケージをインストールします。
+
+### HTTP/Protobuf Provider の場合（SigNoz、New Relic、Laminar、MLflow、Latitude、telemetry.dev）
+
+```bash npm2yarn
+npm install @mastra/otel-exporter@latest @opentelemetry/exporter-trace-otlp-proto
+```
+
+### `gRPC` Provider の場合（Dash0、Datadog）
+
+```bash npm2yarn
+npm install @mastra/otel-exporter@latest @opentelemetry/exporter-trace-otlp-grpc @grpc/grpc-js
+```
+
+### HTTP/JSON Provider の場合（Traceloop）
+
+```bash npm2yarn
+npm install @mastra/otel-exporter@latest @opentelemetry/exporter-trace-otlp-http
+```
+
+## 環境変数
+
+すべての Provider は、環境変数によるゼロコンフィグ設定をサポートしています。適切な変数を設定すると、exporter が自動的に使用します。
+
+| Provider | 環境変数 |
+| - | - |
+| Dash0 | `DASH0_API_KEY`（必須）、`DASH0_ENDPOINT`（必須）、`DASH0_DATASET`（任意） |
+| SigNoz | `SIGNOZ_API_KEY`（必須）、`SIGNOZ_REGION`（任意）、`SIGNOZ_ENDPOINT`（任意） |
+| New Relic | `NEW_RELIC_LICENSE_KEY`（必須）、`NEW_RELIC_ENDPOINT`（任意） |
+| Traceloop | `TRACELOOP_API_KEY`（必須）、`TRACELOOP_DESTINATION_ID`、`TRACELOOP_ENDPOINT`（任意） |
+| Laminar | `LMNR_PROJECT_API_KEY`（必須）、`LAMINAR_ENDPOINT`（任意） |
+
+## Provider の設定
+
+### MLflow
+
+[MLflow](https://mlflow.org/docs/latest/genai/tracing/integrations/listing/mastra) は、`/v1/traces` の OTLP エンドポイントを介して Mastra のネイティブ Tracing をサポートします。HTTP/Protobuf で `custom` Provider を使用し、Trace が正しい MLflow experiment へルーティングされるように experiment header を含めます。
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({
+  provider: {
+    custom: {
+      endpoint: `${process.env.MLFLOW_TRACKING_URI}/v1/traces`,
+      protocol: 'http/protobuf',
+      headers: {
+        'x-mlflow-experiment-id': process.env.MLFLOW_EXPERIMENT_ID,
+      },
+    },
+  },
+})
+```
+
+### Latitude
+
+[Latitude](https://latitude.so) は、OTLP Trace を取り込むオープンソースの LLM Observability・評価プラットフォームです。HTTP/Protobuf で `custom` Provider を使用し、Latitude の取り込みエンドポイントを指定して、API キーとプロジェクト slug で認証します。
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({
+  provider: {
+    custom: {
+      endpoint: 'https://ingest.latitude.so/v1/traces',
+      protocol: 'http/protobuf',
+      headers: {
+        Authorization: `Bearer ${process.env.LATITUDE_API_KEY}`,
+        'X-Latitude-Project': process.env.LATITUDE_PROJECT,
+      },
+    },
+  },
+})
+```
+
+[console.latitude.so](https://console.latitude.so/login) で登録するか、セルフホストして、自身の取り込みホストをエンドポイントに指定します。
+
+### telemetry.dev
+
+[telemetry.dev](https://telemetry.dev) は OTLP/HTTP protobuf Trace を取り込み、OpenTelemetry GenAI セマンティック規約をモデル、Provider、token、レイテンシ、コストの各フィールドへ正規化します。プロジェクト API キーを指定して `custom` Provider を使用します。
+
+```bash title=".env"
+TELEMETRY_DEV_API_KEY=td_live_...
+```
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({
+  provider: {
+    custom: {
+      endpoint: 'https://ingest.telemetry.dev/v1/traces',
+      protocol: 'http/protobuf',
+      headers: {
+        Authorization: `Bearer ${process.env.TELEMETRY_DEV_API_KEY}`,
+      },
+    },
+  },
+})
+```
+
+### Dash0
+
+[Dash0](https://www.dash0.com/) は、自動インサイトを備えたリアルタイムの Observability を提供します。
+
+#### ゼロコンフィグ設定
+
+環境変数を設定し、空の設定で exporter を使用します。
+
+```bash title=".env"
+# Required
+DASH0_API_KEY=your-api-key
+DASH0_ENDPOINT=ingress.us-west-2.aws.dash0.com:4317
+
+# Optional
+DASH0_DATASET=production
+```
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { OtelExporter } from '@mastra/otel-exporter'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      otel: {
+        serviceName: 'my-service',
+        exporters: [new OtelExporter({ provider: { dash0: {} } })],
+      },
+    },
+  }),
+})
+```
+
+#### 明示的な設定
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { OtelExporter } from '@mastra/otel-exporter'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      otel: {
+        serviceName: 'my-service',
+        exporters: [
+          new OtelExporter({
+            provider: {
+              dash0: {
+                apiKey: process.env.DASH0_API_KEY,
+                endpoint: process.env.DASH0_ENDPOINT, // e.g., 'ingress.us-west-2.aws.dash0.com:4317'
+                dataset: 'production', // Optional dataset name
+              },
+            },
+            resourceAttributes: {
+              // Optional OpenTelemetry Resource Attributes for the trace
+              ['deployment.environment']: 'dev',
+            },
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+:::info
+
+Dash0 のエンドポイントはダッシュボードから取得します。形式は `ingress.{region}.aws.dash0.com:4317` です。
+
+:::
+
+### `SigNoz`
+
+[SigNoz](https://signoz.io/) は、Tracing サポートを組み込んだオープンソースの APM 代替製品です。
+
+#### ゼロコンフィグ設定
+
+```bash title=".env"
+# Required
+SIGNOZ_API_KEY=your-api-key
+
+# Optional
+SIGNOZ_REGION=us  # 'us' | 'eu' | 'in'
+SIGNOZ_ENDPOINT=https://my-signoz.example.com  # For self-hosted
+```
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({ provider: { signoz: {} } })
+```
+
+#### 明示的な設定
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({
+  provider: {
+    signoz: {
+      apiKey: process.env.SIGNOZ_API_KEY,
+      region: 'us', // 'us' | 'eu' | 'in'
+      // endpoint: 'https://my-signoz.example.com', // For self-hosted
+    },
+  },
+})
+```
+
+### New Relic
+
+[New Relic](https://newrelic.com/) は、AI 監視機能を備えた包括的な Observability を提供します。
+
+#### ゼロコンフィグ設定
+
+```bash title=".env"
+# Required
+NEW_RELIC_LICENSE_KEY=your-license-key
+
+# Optional
+NEW_RELIC_ENDPOINT=https://otlp.eu01.nr-data.net  # For EU region
+```
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({ provider: { newrelic: {} } })
+```
+
+#### 明示的な設定
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({
+  provider: {
+    newrelic: {
+      apiKey: process.env.NEW_RELIC_LICENSE_KEY,
+      // endpoint: 'https://otlp.eu01.nr-data.net', // For EU region
+    },
+  },
+})
+```
+
+### Traceloop
+
+[Traceloop](https://www.traceloop.com/) は、プロンプトの自動追跡を備えた LLM Observability に特化しています。
+
+#### ゼロコンフィグ設定
+
+```bash title=".env"
+# Required
+TRACELOOP_API_KEY=your-api-key
+
+# Optional
+TRACELOOP_DESTINATION_ID=my-destination
+TRACELOOP_ENDPOINT=https://custom.traceloop.com
+```
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({ provider: { traceloop: {} } })
+```
+
+#### 明示的な設定
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({
+  provider: {
+    traceloop: {
+      apiKey: process.env.TRACELOOP_API_KEY,
+      destinationId: 'my-destination', // Optional
+    },
+  },
+})
+```
+
+### Laminar
+
+[Laminar](https://laminar.sh/) は、LLM に特化した Observability と分析を提供します。
+
+#### ゼロコンフィグ設定
+
+```bash title=".env"
+# Required
+LMNR_PROJECT_API_KEY=your-api-key
+
+# Optional
+LAMINAR_ENDPOINT=https://api.lmnr.ai/v1/traces
+```
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({ provider: { laminar: {} } })
+```
+
+#### 明示的な設定
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({
+  provider: {
+    laminar: {
+      apiKey: process.env.LMNR_PROJECT_API_KEY,
+    },
+  },
+})
+```
+
+:::tip Laminar ネイティブ exporter
+
+ネイティブの Span パス、metadata、Laminar ダッシュボードでのタグ表示など、Laminar 固有の機能には、専用の [`@mastra/laminar`](/docs/observability/integrations/exporters/laminar) exporter の使用を検討してください。Laminar プラットフォーム向けに最適化された統合を提供します。
+
+:::
+
+### Datadog
+
+[Datadog](https://www.datadoghq.com/) APM は、分散 Tracing を使用したアプリケーションパフォーマンス監視を提供します。OTLP 経由で Datadog へ Trace を送信するには、OTLP 取り込みを有効にした Datadog Agent を実行する必要があります。
+
+Datadog は OTLP の取り込みに gRPC を使用します。正しく動作させるには、明示的な import と [bundler の設定](/reference/configuration#bundlerexternals)が必要です。
+
+```typescript title="src/mastra/index.ts"
+// Explicitly import gRPC dependencies for the bundler
+import '@grpc/grpc-js'
+import '@opentelemetry/exporter-trace-otlp-grpc'
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { OtelExporter, type ExportProtocol } from '@mastra/otel-exporter'
+
+export const mastra = new Mastra({
+  // Add grpc-js to externals so it's handled at runtime
+  bundler: {
+    externals: ['@grpc/grpc-js'],
+  },
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-service',
+        exporters: [
+          new OtelExporter({
+            provider: {
+              custom: {
+                endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://localhost:4317',
+                protocol: (process.env.OTEL_EXPORTER_OTLP_PROTOCOL || 'grpc') as ExportProtocol,
+                headers: {},
+              },
+            },
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+:::info
+
+Datadog Agent では OTLP の取り込みを有効にする必要があります。`datadog.yaml` に次の内容を追加します。
+
+```yaml
+otlp_config:
+  receiver:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+```
+
+Datadog Agent をローカルで実行する場合、デフォルトの OTLP エンドポイントは `http://localhost:4317` です。
+
+:::
+
+:::warning
+
+gRPC transport を正しく動作させるには、ファイル先頭での `@grpc/grpc-js` と `@opentelemetry/exporter-trace-otlp-grpc` の明示的な import、および [`bundler.externals`](/reference/configuration#bundlerexternals) の設定が必要です。これらがないと、接続の問題が発生する可能性があります。
+
+:::
+
+:::tip Datadog ネイティブ exporter
+
+Span タイプの自動マッピング、LLM Span の分類、gRPC 設定が不要な簡単なセットアップなど、Datadog 固有の機能には、専用の [`@mastra/datadog`](/docs/observability/integrations/exporters/datadog) exporter の使用を検討してください。Datadog の APM プラットフォーム向けに最適化された統合を提供します。
+
+:::
+
+### カスタム／汎用 OTEL エンドポイント
+
+その他の OTEL 互換プラットフォームまたはカスタム collector の場合：
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({
+  provider: {
+    custom: {
+      endpoint: 'https://your-collector.example.com/v1/traces',
+      protocol: 'http/protobuf', // 'http/json' | 'http/protobuf' | 'grpc'
+      headers: {
+        'x-api-key': process.env.API_KEY,
+      },
+    },
+  },
+})
+```
+
+## シグナル
+
+exporter は2つの OpenTelemetry シグナルを送信します。
+
+- Trace：Mastra の Span。`BatchSpanProcessor` を介して export されます。
+- ログ：Mastra のログイベント。`BatchLogRecordProcessor` を介して export されます。`traceId` と `spanId` を持つログは、OTEL ログレコードのネイティブ Trace コンテキストと `mastra.traceId`／`mastra.spanId` 属性の両方を使用して Trace に関連付けられます。そのため、Datadog、Grafana、Honeycomb などのバックエンドは、ログを Trace へ自動的に結合できます。
+
+両方のシグナルはデフォルトで有効になっており、同じ Provider 設定を共有します。ログエンドポイントは、Trace エンドポイントの `/v1/traces` suffix を `/v1/logs` に置き換えて生成されます。
+
+シグナルを無効にするには、`signals` オプションを設定します。
+
+```typescript title="src/mastra/index.ts"
+new OtelExporter({
+  provider: {/* ... */},
+  signals: {
+    traces: true, // default
+    logs: false, // disable log export
+  },
+})
+```
+
+ログの export には、使用するプロトコルに対応する OTLP ログ exporter パッケージのインストールが必要です。
+
+```bash npm2yarn
+# HTTP/JSON
+npm install @opentelemetry/exporter-logs-otlp-http
+# HTTP/Protobuf
+npm install @opentelemetry/exporter-logs-otlp-proto
+# gRPC
+npm install @opentelemetry/exporter-logs-otlp-grpc @grpc/grpc-js
+```
+
+対応するログ exporter パッケージがインストールされていない場合、ログの export は通知なく無効になり、Trace は引き続き動作します。
+
+## 設定オプション
+
+### 完全な設定
+
+```typescript
+new OtelExporter({
+  // Provider configuration (required)
+  provider: {
+    // Use one of: dash0, signoz, newrelic, traceloop, laminar, custom
+  },
+
+  // Per-signal toggles. Both default to true.
+  signals: {
+    traces: true,
+    logs: true,
+  },
+
+  // Export configuration
+  timeout: 30000, // Export timeout in milliseconds
+  batchSize: 100, // Number of spans/logs per batch
+
+  // Debug options
+  logLevel: 'info', // 'debug' | 'info' | 'warn' | 'error'
+})
+```
+
+## `OpenTelemetry` セマンティック規約
+
+exporter は [OpenTelemetry Semantic Conventions for GenAI v1.38.0](https://github.com/open-telemetry/semantic-conventions/tree/v1.38.0/docs/gen-ai) に従い、Observability プラットフォームとの互換性を確保します。
+
+### Span の命名
+
+- **LLM Operation**：`chat {model}`
+- **Tool の実行**：`execute_tool {tool_name}`
+- **Agent の実行**：`invoke_agent {agent_id}`
+- **Workflow の実行**：`invoke_workflow {workflow_id}`
+
+### 主な属性
+
+- `gen_ai.operation.name` - Operation タイプ（chat、tool.execute など）
+- `gen_ai.provider.name` - AI Provider（openai、anthropic など）
+- `gen_ai.request.model` - モデル識別子
+- `gen_ai.input.messages` - モデルに渡されたチャット履歴
+- `gen_ai.output.messages` - モデルから返されたメッセージ
+- `gen_ai.usage.input_tokens` - 入力 token 数
+- `gen_ai.usage.output_tokens` - 出力 token 数
+- `gen_ai.request.temperature` - サンプリング Temperature
+- `gen_ai.response.finish_reasons` - 完了理由
+
+## プロトコル選択ガイド
+
+使用する Provider に基づいて適切なプロトコルパッケージを選択します。
+
+| Provider | プロトコル | 必要なパッケージ |
+| - | - | - |
+| Dash0 | gRPC | `@opentelemetry/exporter-trace-otlp-grpc` |
+| Datadog | gRPC | `@opentelemetry/exporter-trace-otlp-grpc` |
+| SigNoz | HTTP/Protobuf | `@opentelemetry/exporter-trace-otlp-proto` |
+| New Relic | HTTP/Protobuf | `@opentelemetry/exporter-trace-otlp-proto` |
+| Traceloop | HTTP/JSON | `@opentelemetry/exporter-trace-otlp-http` |
+| Laminar | HTTP/Protobuf | `@opentelemetry/exporter-trace-otlp-proto` |
+| Custom | 場合により異なります | collector によって異なります |
+
+:::warning
+
+使用する Provider に適したプロトコルパッケージを必ずインストールしてください。誤ったパッケージがインストールされている場合、exporter は問題の解決に役立つエラーメッセージを表示します。
+
+:::
+
+## トラブルシューティング
+
+### 依存関係が見つからないエラー
+
+次のようなエラーが表示された場合：
+
+```
+HTTP/Protobuf exporter is not installed (required for signoz).
+To use HTTP/Protobuf export, install the required package:
+  npm install @opentelemetry/exporter-trace-otlp-proto
+```
+
+使用する Provider 向けに提案されたパッケージをインストールします。
+
+### よくある問題
+
+1. **誤ったプロトコルパッケージ**：使用する Provider に適した exporter がインストールされていることを確認します
+1. **無効なエンドポイント**：エンドポイントの形式が Provider の要件に合っていることを確認します
+1. **認証エラー**：API キーと header が正しいことを確認します
+
+## 関連情報
+
+- [Tracing の概要](/docs/observability/tracing/overview)
+- [OpenTelemetry Bridge](/docs/observability/integrations/bridges/otel)
+- [OpenTelemetry Semantic Conventions for GenAI v1.38.0](https://github.com/open-telemetry/semantic-conventions/tree/v1.38.0/docs/gen-ai)
+- [OTEL exporter リファレンス](/reference/observability/tracing/exporters/otel)

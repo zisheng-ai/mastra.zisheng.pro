@@ -1,0 +1,293 @@
+---
+title: "Datadog exporter | Integrations | Observability"
+description: "LLM Observability と分析のために Trace を Datadog に送信します"
+packages:
+  - "@mastra/observability"
+---
+
+# Datadog exporter
+
+[Datadog](https://datadoghq.com/) は、LLM Observability 専用機能を備えた包括的な監視プラットフォームです。Datadog exporter は Trace を Datadog の LLM Observability プロダクトに送信し、モデルのパフォーマンス、Token 使用量、会話フローに関するインサイトを提供します。
+
+:::info `dd-trace` APM も使用していますか？
+
+`dd-trace` APM の自動計装も使用する場合は、代わりに [Datadog Bridge](/docs/observability/integrations/bridges/datadog) を検討してください。Bridge は `dd-trace` Span をリアルタイムで作成するため、Tool や Processor 内の HTTP 呼び出しとデータベース呼び出しが、親となる Mastra Span の配下に正しくネストされます。exporter 単体では実行完了後に LLM Observability データを送信するため、自動計装された APM Span は request handler にフォールバックします。
+
+:::
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/datadog@latest
+```
+
+## 設定
+
+### 前提条件
+
+1. **Datadog アカウント**: LLM Observability を有効にして [datadoghq.com](https://datadoghq.com/) で登録する
+1. **API Key**: Datadog Organization Settings → API Keys から API key を取得する
+1. **環境変数**: 認証情報を設定する
+
+```bash title=".env"
+DD_API_KEY=your-datadog-api-key
+DD_LLMOBS_ML_APP=my-llm-app
+DD_SITE=datadoghq.com  # Optional: defaults to datadoghq.com
+DD_ENV=production      # Optional: environment name
+```
+
+### ゼロコンフィグセットアップ
+
+環境変数を設定すると、設定を渡さずに exporter を使用できます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { DatadogExporter } from '@mastra/datadog'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      datadog: {
+        serviceName: 'my-service',
+        exporters: [new DatadogExporter()],
+      },
+    },
+  }),
+})
+```
+
+### 明示的な設定
+
+認証情報を直接渡すこともできます（環境変数より優先されます）。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { DatadogExporter } from '@mastra/datadog'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      datadog: {
+        serviceName: 'my-service',
+        exporters: [
+          new DatadogExporter({
+            mlApp: process.env.DD_LLMOBS_ML_APP!,
+            apiKey: process.env.DD_API_KEY!,
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+## 設定オプション
+
+### 完全な設定
+
+```typescript
+new DatadogExporter({
+  // Required settings
+  mlApp: process.env.DD_LLMOBS_ML_APP!, // Groups traces under this ML app name
+  apiKey: process.env.DD_API_KEY!, // Required for agentless mode (default)
+
+  // Optional settings
+  site: 'datadoghq.com', // Datadog site (datadoghq.eu, us3.datadoghq.com, etc.)
+  service: 'my-service', // Service name (defaults to mlApp)
+  env: 'production', // Environment name
+  agentless: true, // true = direct HTTPS, false = local Datadog Agent
+
+  // Advanced settings
+  integrationsEnabled: false, // Enable dd-trace auto-instrumentation
+
+  // Diagnostic logging
+  logLevel: 'info', // debug | info | warn | error
+})
+```
+
+### ローカルの Datadog Agent を使用する
+
+Datadog Agent をローカルで実行している場合は、直接 HTTPS を使用する代わりに、Agent を経由して Trace をルーティングできます。
+
+```typescript
+new DatadogExporter({
+  mlApp: process.env.DD_LLMOBS_ML_APP!,
+  agentless: false, // Use local Datadog Agent
+  env: 'production',
+})
+```
+
+注: Agent mode を使用する場合、API key はローカル Agent の設定から読み取られます。
+
+## Span type のマッピング
+
+Mastra の Span type は、Datadog LLM Observability の Span kind に自動的にマッピングされます。
+
+| Mastra SpanType | Datadog Kind |
+| - | - |
+| `AGENT_RUN` | `agent` |
+| `MODEL_GENERATION` | `workflow` |
+| `MODEL_STEP` | `llm` |
+| `TOOL_CALL` | `tool` |
+| `MCP_TOOL_CALL` | `tool` |
+| `WORKFLOW_RUN` | `workflow` |
+| その他の Workflow type | `task` |
+| `GENERIC` | `task` |
+
+その他の、または将来追加される Mastra Span type は、指定がない限り、マッピング時にデフォルトで 'task' になります。
+
+## Application Performance Monitoring
+
+ここまでのセクションでは、Mastra の [LLM Observability](https://docs.datadoghq.com/llm_observability/) 統合について説明しました。Mastra HTTP server route（request latency、error tracking、service map）を Trace するには、Datadog Application Performance Monitoring（APM）用に `dd-trace` を直接使用します。
+
+### 前提条件
+
+1. **Datadog Agent**: 同じホスト、またはネットワーク経由でアクセス可能な環境に [Datadog Agent](https://docs.datadoghq.com/agent/) をインストールします。Agent は `dd-trace` から `localhost:8126` で Trace を受信し、Datadog に転送します。[Agent インストールガイド](https://docs.datadoghq.com/agent/)に従ってセットアップしてください。
+1. **dd-trace パッケージ**: プロジェクトに tracing library をインストールします。
+
+   ```bash npm2yarn
+   npm install dd-trace
+   ```
+
+:::note
+APM Trace は常に Datadog Agent を経由します。これは、Agentless mode（Datadog への直接 HTTPS）をサポートする LLM Observability とは異なります。
+:::
+
+### APM のみ
+
+他の import より前に、entry file の先頭で `dd-trace` を import して初期化します。
+
+```typescript title="src/mastra/index.ts"
+import tracer from 'dd-trace'
+
+tracer.init({
+  service: process.env.DD_SERVICE || 'my-mastra-app',
+  env: process.env.DD_ENV || 'production',
+  version: process.env.DD_VERSION,
+})
+
+import { Mastra } from '@mastra/core'
+
+export const mastra = new Mastra({
+  bundler: {
+    externals: [
+      'dd-trace',
+      '@datadog/native-metrics',
+      '@datadog/native-appsec',
+      '@datadog/native-iast-taint-tracking',
+      '@datadog/pprof',
+    ],
+  },
+})
+```
+
+tracer metadata の環境変数を設定します。
+
+```bash title=".env"
+DD_SERVICE=my-mastra-app
+DD_ENV=production
+DD_VERSION=1.0.0
+```
+
+`dd-trace` は、Mastra の [server adapter](/docs/server/server-adapters) がサポートするものを含め、一般的な HTTP framework を自動計装します。受信 request、送信 HTTP 呼び出し、database query は、Datadog で APM Trace として表示されます。
+
+### APM と LLM Observability
+
+Mastra インスタンスを作成する前に、`dd-trace` を import して初期化します。`DatadogExporter` は既存の tracer を検出して再初期化をスキップし、APM セットアップに LLM Observability を追加します。
+
+```typescript title="src/mastra/index.ts"
+import tracer from 'dd-trace'
+
+tracer.init({
+  service: process.env.DD_SERVICE || 'my-mastra-app',
+  env: process.env.DD_ENV || 'production',
+  version: process.env.DD_VERSION,
+})
+
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { DatadogExporter } from '@mastra/datadog'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      datadog: {
+        serviceName: 'my-mastra-app',
+        exporters: [
+          new DatadogExporter({
+            mlApp: process.env.DD_LLMOBS_ML_APP!,
+            apiKey: process.env.DD_API_KEY!,
+          }),
+        ],
+      },
+    },
+  }),
+  bundler: {
+    externals: [
+      'dd-trace',
+      '@datadog/native-metrics',
+      '@datadog/native-appsec',
+      '@datadog/native-iast-taint-tracking',
+      '@datadog/pprof',
+    ],
+  },
+})
+```
+
+```bash title=".env"
+DD_SERVICE=my-mastra-app
+DD_ENV=production
+DD_VERSION=1.0.0
+DD_API_KEY=your-datadog-api-key
+DD_LLMOBS_ML_APP=my-llm-app
+```
+
+server route は APM Trace、LLM 呼び出しは LLM Observability Span として表示され、すべて Datadog の同じ Service にまとめられます。
+
+:::note
+他のすべての module より前に `dd-trace` を import して初期化してください。これにより、自動計装で HTTP、database、framework library を読み込み時にパッチできます。
+:::
+
+## トラブルシューティング
+
+### Native module の ABI 不一致
+
+次のようなエラーが表示される場合:
+
+```
+Error: No native build was found for runtime=node abi=137 platform=linuxglibc arch=x64
+```
+
+これは、`dd-trace` の native module と Node.js バージョンの互換性に問題があることを示します。これらの native module は**任意**であり、performance monitoring 機能を提供します。
+
+**解決方法:**
+
+1. **Node.js 22.x を使用する**: Native module は Node.js 22.x との互換性が最も高くなっています。
+
+1. **Native module の警告を無視する**: Native module（`@datadog/native-metrics`、`@datadog/native-appsec` など）は任意です。読み込みに失敗しても、core tracing 機能は引き続き動作します。
+
+### Bundler の externals 設定
+
+esbuild、webpack、または Mastra CLI bundler などの bundler を使用する場合、`dd-trace` とその依存関係を external として指定する必要がある場合があります。
+
+```typescript title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  bundler: {
+    externals: [
+      'dd-trace',
+      '@datadog/native-metrics',
+      '@datadog/native-appsec',
+      '@datadog/native-iast-taint-tracking',
+      '@datadog/pprof',
+    ],
+  },
+})
+```
+
+## 関連項目
+
+- [Tracing の概要](/docs/observability/tracing/overview)
+- [Datadog LLM Observability ドキュメント](https://docs.datadoghq.com/llm_observability/)
+- [Datadog APM ドキュメント](https://docs.datadoghq.com/tracing/)

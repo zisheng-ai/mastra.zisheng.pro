@@ -1,0 +1,248 @@
+---
+title: "Snapshot | Workflows"
+description: "Mastra で Snapshot を使用して Workflow の実行状態を保存し、再開する方法を説明します"
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+---
+
+# Snapshot
+
+Mastra の Snapshot は、特定時点における Workflow の完全な実行状態をシリアライズ可能な形式で表したものです。Workflow を中断箇所から正確に再開するために必要な、次の情報をすべて記録します。
+
+- Workflow 内の各 Step の現在の状態
+- 完了した Step の出力
+- Workflow でたどった実行経路
+- 中断した Step とそのメタデータ
+- 各 Step に残っている再試行回数
+- 実行の再開に必要な追加のコンテキストデータ
+
+Workflow が中断されるたびに、Mastra が Snapshot を自動的に作成、管理し、設定済みのストレージシステムへ永続化します。
+
+## 中断と再開における Snapshot の役割
+
+Snapshot は、Mastra の中断と再開を実現する中心的な仕組みです。Workflow の Step が `await suspend()` を呼び出すと、次の処理が行われます。
+
+1. Workflow の実行がその時点で一時停止します
+1. Workflow の現在の状態が Snapshot として記録されます
+1. Snapshot がストレージへ永続化されます
+1. Workflow の Step が「中断」としてマークされ、ステータスが `'suspended'` になります
+1. 後から中断した Step に対して `resume()` を呼び出すと、Snapshot が取得されます
+1. Workflow の実行が中断箇所から正確に再開します
+
+この仕組みにより、human-in-the-loop Workflow の実装、レート制限への対応、外部リソースの待機、長時間の中断が必要になり得る複雑な分岐 Workflow の実装が可能になります。
+
+## Snapshot の構造
+
+各 Snapshot には、`runId`、入力、Step のステータス（`success`、`suspended` など）、中断と再開のペイロード、最終出力が含まれます。そのため、実行の再開時に完全なコンテキストを利用できます。
+
+```json
+{
+  "runId": "34904c14-e79e-4a12-9804-9655d4616c50",
+  "status": "success",
+  "value": {},
+  "context": {
+    "input": {
+      "value": 100,
+      "user": "Michael",
+      "requiredApprovers": ["manager", "finance"]
+    },
+    "approval-step": {
+      "payload": {
+        "value": 100,
+        "user": "Michael",
+        "requiredApprovers": ["manager", "finance"]
+      },
+      "startedAt": 1758027577955,
+      "status": "success",
+      "suspendPayload": {
+        "message": "Workflow suspended",
+        "requestedBy": "Michael",
+        "approvers": ["manager", "finance"]
+      },
+      "suspendedAt": 1758027578065,
+      "resumePayload": { "confirm": true, "approver": "manager" },
+      "resumedAt": 1758027578517,
+      "output": { "value": 100, "approved": true },
+      "endedAt": 1758027578634
+    }
+  },
+  "activePaths": [],
+  "serializedStepGraph": [
+    {
+      "type": "step",
+      "step": {
+        "id": "approval-step",
+        "description": "Accepts a value, waits for confirmation"
+      }
+    }
+  ],
+  "suspendedPaths": {},
+  "waitingPaths": {},
+  "result": { "value": 100, "approved": true },
+  "requestContext": {},
+  "timestamp": 1758027578740
+}
+```
+
+## Snapshot の保存と取得
+
+Snapshot は設定済みのストレージシステムへ保存されます。デフォルトでは libSQL を使用しますが、代わりに Upstash、PostgreSQL、OracleDB を設定できます。各 Snapshot は `workflow_snapshots` テーブルに保存され、Workflow の `runId` で識別されます。
+
+詳しくは次を参照してください。
+
+- [libSQL Storage](/reference/storage/libsql)
+- [Upstash Storage](/reference/storage/upstash)
+- [PostgreSQL Storage](/reference/storage/postgresql)
+- [OracleDB Storage](/reference/storage/oracledb)
+
+### Snapshot の保存
+
+Workflow が中断されると、Mastra は次の手順で Workflow の Snapshot を自動的に永続化します。
+
+1. Step の実行中に `suspend()` 関数が Snapshot 処理を開始します
+1. `WorkflowInstance.suspend()` メソッドが中断したマシンを記録します
+1. `persistWorkflowSnapshot()` が呼び出され、現在の状態が保存されます
+1. Snapshot がシリアライズされ、設定済みデータベースの `workflow_snapshots` テーブルに保存されます
+1. ストレージレコードには、Workflow 名、実行 ID、シリアライズされた Snapshot が含まれます
+
+### Snapshot の取得
+
+Workflow を再開すると、Mastra は次の手順で永続化された Snapshot を取得します。
+
+1. 特定の Step ID を指定して `resume()` メソッドを呼び出します
+1. `loadWorkflowSnapshot()` を使用してストレージから Snapshot を読み込みます
+1. Snapshot を解析し、再開できる状態にします
+1. Snapshot の状態を使用して Workflow の実行を再作成します
+1. 中断した Step を再開し、実行を続けます
+
+```typescript
+const storage = mastra.getStorage()
+const workflowStore = await storage?.getStore('workflows')
+
+const snapshot = await workflowStore?.loadWorkflowSnapshot({
+  runId: '<run-id>',
+  workflowName: '<workflow-id>',
+})
+
+console.log(snapshot)
+```
+
+## Snapshot のストレージオプション
+
+Snapshot は、`Mastra` クラスに設定した `storage` インスタンスを使用して永続化されます。このストレージレイヤーは、そのインスタンスへ登録されたすべての Workflow で共有されます。Mastra は、さまざまな環境に柔軟に対応できるよう複数のストレージオプションをサポートしています。
+
+```typescript title="src/mastra/index.ts" 
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+import { approvalWorkflow } from './workflows'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: ':memory:',
+  }),
+  workflows: { approvalWorkflow },
+})
+```
+
+- [libSQL Storage](/reference/storage/libsql)
+- [PostgreSQL Storage](/reference/storage/postgresql)
+- [OracleDB Storage](/reference/storage/oracledb)
+- [MongoDB Storage](/reference/storage/mongodb)
+- [Upstash Storage](/reference/storage/upstash)
+- [Cloudflare D1](/reference/storage/cloudflare-d1)
+- [DynamoDB](/reference/storage/dynamodb)
+- [その他のストレージプロバイダー](/docs/storage/overview)
+
+## ベストプラクティス
+
+1. **シリアライズ可能にする**：Snapshot に含める必要があるデータは、すべてシリアライズ可能（JSON に変換可能）でなければなりません。
+1. **Snapshot のサイズを抑える**：大きなデータオブジェクトを Workflow のコンテキストへ直接保存しないでください。代わりに ID などの参照を保存し、必要なときにデータを取得します。
+1. **再開コンテキストを慎重に扱う**：Workflow を再開するときは、提供するコンテキストを慎重に検討してください。既存の Snapshot データとマージされます。
+1. **適切な監視を設定する**：中断中の Workflow、特に長時間実行されるものを監視し、確実に再開されるようにしてください。
+1. **ストレージのスケーリングを検討する**：中断中の Workflow が多数あるアプリケーションでは、ストレージソリューションを適切にスケーリングしてください。
+
+## カスタム Snapshot メタデータ
+
+`suspendSchema` を定義すると、Workflow の中断時にカスタムメタデータを付加できます。このメタデータは Snapshot に保存され、Workflow の再開時に利用できます。
+
+```typescript {30-34} title="src/mastra/workflows/test-workflow.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+const approvalStep = createStep({
+  id: 'approval-step',
+  description: 'Accepts a value, waits for confirmation',
+  inputSchema: z.object({
+    value: z.number(),
+    user: z.string(),
+    requiredApprovers: z.array(z.string()),
+  }),
+  suspendSchema: z.object({
+    message: z.string(),
+    requestedBy: z.string(),
+    approvers: z.array(z.string()),
+  }),
+  resumeSchema: z.object({
+    confirm: z.boolean(),
+    approver: z.string(),
+  }),
+  outputSchema: z.object({
+    value: z.number(),
+    approved: z.boolean(),
+  }),
+  execute: async ({ inputData, resumeData, suspend }) => {
+    const { value, user, requiredApprovers } = inputData
+    const { confirm } = resumeData ?? {}
+
+    if (!confirm) {
+      return await suspend({
+        message: 'Workflow suspended',
+        requestedBy: user,
+        approvers: [...requiredApprovers],
+      })
+    }
+
+    return {
+      value,
+      approved: confirm,
+    }
+  },
+})
+```
+
+### 再開データを渡す
+
+中断した Step の再開時に構造化入力を渡すには、`resumeData` を使用します。Step の `resumeSchema` と一致している必要があります。
+
+```typescript {14-20}
+const workflow = mastra.getWorkflow('approvalWorkflow')
+
+const run = await workflow.createRun()
+
+const result = await run.start({
+  inputData: {
+    value: 100,
+    user: 'Michael',
+    requiredApprovers: ['manager', 'finance'],
+  },
+})
+
+if (result.status === 'suspended') {
+  const resumedResult = await run.resume({
+    step: 'approval-step',
+    resumeData: {
+      confirm: true,
+      approver: 'manager',
+    },
+  })
+}
+```
+
+## 関連項目
+
+- [制御フロー](/docs/workflows/control-flow)
+- [中断と再開](/docs/workflows/suspend-and-resume)
+- [タイムトラベル](/docs/workflows/time-travel)
+- [Human-in-the-loop](/docs/workflows/human-in-the-loop)

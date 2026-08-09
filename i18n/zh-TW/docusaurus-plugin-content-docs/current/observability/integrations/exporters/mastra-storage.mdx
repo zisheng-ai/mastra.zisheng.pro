@@ -1,0 +1,258 @@
+---
+title: "Mastra Storage Exporter | 整合 | Observability"
+description: "在本機儲存 Trace，以便開發及除錯"
+packages:
+  - "@mastra/observability"
+---
+
+# Mastra Storage Exporter
+
+`MastraStorageExporter` 會將 Trace 持久保存至你已設定的儲存後端，讓你可透過 Studio 存取，無須使用任何外部服務。
+
+:::note
+
+`MastraStorageExporter` 之前稱為 `DefaultExporter`。為向後相容，原有的 `DefaultExporter` class 仍會從 `@mastra/observability` export，但現已棄用。新程式碼應使用 `MastraStorageExporter`。
+
+:::
+
+:::warning[正式環境 Observability]
+在正式環境中，Observability 資料可能很快就讓一般用途的資料庫不堪負荷。對於高流量應用程式，請將 Observability Storage domain 導向 [ClickHouse](/reference/storage/clickhouse)，並透過 [Composite Storage](/reference/storage/composite) 完成路由。詳情請參閱[正式環境建議](#production-recommendations)。
+:::
+
+## 設定
+
+### 必要條件
+
+1. **儲存後端**：設定儲存 Provider（libSQL、PostgreSQL 等）
+1. **Studio**：安裝 Studio，以便在本機檢視 Trace
+
+### 基本設定
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+import { LibSQLStore } from '@mastra/libsql'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db', // Required for trace persistence
+  }),
+  observability: new Observability({
+    configs: {
+      local: {
+        serviceName: 'my-service',
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+### 建議設定
+
+在 Observability 設定中加入 MastraStorageExporter：
+
+```typescript
+import { Mastra } from '@mastra/core'
+import {
+  Observability,
+  MastraStorageExporter,
+  MastraPlatformExporter,
+  SensitiveDataFilter,
+} from '@mastra/observability'
+import { LibSQLStore } from '@mastra/libsql'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'mastra',
+        exporters: [
+          new MastraStorageExporter(), // Persists observability events to Mastra Storage
+          new MastraPlatformExporter(), // Sends observability events to Mastra platform (requires MASTRA_PLATFORM_ACCESS_TOKEN)
+        ],
+        spanOutputProcessors: [new SensitiveDataFilter()],
+      },
+    },
+  }),
+})
+```
+
+## Studio
+
+透過 Studio 存取你的 Trace：
+
+1. 啟動 Studio
+1. 前往 Observability
+1. 篩選及搜尋本機 Trace
+1. 查看詳細的 span 資訊
+
+## Tracing 策略
+
+MastraStorageExporter 會根據你的儲存 Provider，自動選擇最佳的 Tracing 策略。如有需要，你也可覆寫此選擇。
+
+### 可用策略
+
+| 策略 | 說明 | 使用情境 |
+| - | - | - |
+| **realtime** | 即時處理每個事件 | 開發、除錯、低流量 |
+| **batch-with-updates** | 緩衝事件並批次寫入，完整支援整個生命週期 | 低流量正式環境 |
+| **insert-only** | 只處理已完成的 span，忽略更新 | 高流量正式環境 |
+
+### 策略設定
+
+```typescript
+new MastraStorageExporter({
+  strategy: 'auto', // Default - let storage provider decide
+  // or explicitly set:
+  // strategy: 'realtime' | 'batch-with-updates' | 'insert-only'
+
+  // Batching configuration (applies to both batch-with-updates and insert-only)
+  maxBatchSize: 1000, // Max spans per batch
+  maxBatchWaitMs: 5000, // Max wait before flushing
+  maxBufferSize: 10000, // Max spans to buffer
+})
+```
+
+## 儲存 Provider 支援
+
+不同的儲存 Provider 支援不同的 Tracing 策略。部分 Provider 支援生產工作負載的 Observability，另一些則主要供本機開發使用。
+
+如果將策略設為 `'auto'`，`MastraStorageExporter` 會自動為該儲存 Provider 選擇最佳策略。如果你明確設定了儲存 Provider 不支援的策略，Exporter 會記錄警告，並改用該 Provider 的首選策略。
+
+### 支援 Observability 的 Provider
+
+| 儲存 Provider | 首選策略 | 支援的策略 | 建議用途 |
+| - | - | - | - |
+| **[ClickHouse](/reference/storage/clickhouse)** | insert-only | insert-only | 正式環境（高流量） |
+| **[PostgreSQL](/reference/storage/postgresql)** | batch-with-updates | batch-with-updates, insert-only | 正式環境（低流量） |
+| **[MSSQL](/reference/storage/mssql)** | batch-with-updates | batch-with-updates, insert-only | 正式環境（低流量） |
+| **[MongoDB](/reference/storage/mongodb)** | batch-with-updates | batch-with-updates, insert-only | 正式環境（低流量） |
+| **[OracleDB](/reference/storage/oracledb)** | batch-with-updates | batch-with-updates, insert-only | 正式環境（低流量） |
+| **[libSQL](/reference/storage/libsql)** | batch-with-updates | batch-with-updates, insert-only | 預設儲存，適合開發使用 |
+
+### 不支援 Observability 的 Provider
+
+以下 Storage Provider **不支援** Observability domain。如果你正在使用其中一個 Provider 並需要 Observability 功能，請使用 [Composite Storage](/reference/storage/composite)，將 Observability 資料導向支援此功能的 Provider：
+
+- [Convex](/reference/storage/convex)
+- [DynamoDB](/reference/storage/dynamodb)
+- [Cloudflare D1](/reference/storage/cloudflare-d1)
+- [Cloudflare Durable Objects](/reference/storage/cloudflare)
+- [Upstash](/reference/storage/upstash)
+- [LanceDB](/reference/storage/lance)
+
+### 策略優點
+
+- **realtime**：即時可見，最適合除錯
+- **batch-with-updates**：吞吐量提升 10 至 100 倍，完整支援 span 生命週期
+- **insert-only**：資料庫操作額外減少 70%，非常適合分析用途
+
+## 正式環境建議
+
+Observability 資料在正式環境中增長迅速。一次 Agent 互動可產生數百個 span，而高流量應用程式每日可產生數千個 Trace。大多數通用資料庫並未針對這類大量寫入、只附加的工作負載進行最佳化。
+
+### 建議：在高流量正式環境使用 ClickHouse
+
+[ClickHouse](/reference/storage/clickhouse) 是專為高容量分析工作負載設計的 columnar 資料庫。建議在正式環境中使用它儲存 Observability 資料，原因如下：
+
+- **針對寫入最佳化**：每秒可處理數百萬次 insert
+- **高效壓縮**：降低 Trace 資料的儲存成本
+- **快速查詢**：列式儲存可快速查找及彙總 Trace
+- **原生支援時間序列**：內置支援按時間保留及分割資料
+
+### 使用複合儲存
+
+如果你使用不支援 Observability 的 Provider（例如 Convex 或 DynamoDB），或希望改善效能，請使用 [Composite Storage](/reference/storage/composite#specialized-storage-for-observability)，將 Observability 資料導向 ClickHouse，同時將其他資料保留在主要資料庫中。
+
+## 批次處理行為
+
+### Flush 觸發條件
+
+對於兩種批次策略（`batch-with-updates` 及 `insert-only`），只要符合以下任何一項條件，Trace 就會 flush 至儲存空間：
+
+1. **大小觸發**：buffer 中的 span 數目達到 `maxBatchSize`
+1. **時間觸發**：自第一個事件起已經過 `maxBatchWaitMs`
+1. **緊急 flush**：buffer 接近 `maxBufferSize` 上限
+1. **關閉**：強制 flush 所有待處理事件
+
+### 錯誤處理
+
+MastraStorageExporter 具備可靠的錯誤處理機制，適合在正式環境使用：
+
+- **重試邏輯**：指數退避（500ms、1s、2s、4s）
+- **暫時性故障**：使用退避機制自動重試
+- **持續性故障**：嘗試 4 次仍失敗後捨棄該批次
+- **buffer 溢出**：避免儲存服務中斷期間出現記憶體問題
+
+## 被捨棄的 Observability 事件
+
+當 `DefaultExporter` 無法保存 Observability 資料時，會發出結構化的捨棄 event。註冊具備 `onDroppedEvent` 的 Exporter 或 Bridge，將這些捨棄 event 轉送至警示或監控系統。
+
+事件會因以下兩個原因被捨棄：
+
+- `unsupported-storage`：儲存 Provider 未實作該 signal 類型。
+- `retry-exhausted`：Exporter 對一個批次重試最多 `maxRetries` 次後仍告失敗，因而將其捨棄。
+
+以下範例示範如何將捨棄 event 的詳細資料轉送至監控 endpoint：
+
+```typescript title="src/mastra/observability.ts"
+import { BaseExporter } from '@mastra/observability'
+import type { ObservabilityDropEvent, TracingEvent } from '@mastra/core/observability'
+
+class DropAlertExporter extends BaseExporter {
+  name = 'drop-alerts'
+
+  async onDroppedEvent(event: ObservabilityDropEvent) {
+    await fetch('https://monitoring.example.com/observability-drops', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        count: event.count,
+        signal: event.signal,
+        reason: event.reason,
+        exporterName: event.exporterName,
+      }),
+    })
+  }
+
+  protected async _exportTracingEvent(_event: TracingEvent) {}
+}
+```
+
+## 設定範例
+
+```typescript
+// Zero config - recommended for most users
+new MastraStorageExporter()
+
+// Development override
+new MastraStorageExporter({
+  strategy: 'realtime', // Immediate visibility for debugging
+})
+
+// High-throughput production
+new MastraStorageExporter({
+  maxBatchSize: 2000, // Larger batches
+  maxBatchWaitMs: 10000, // Wait longer to fill batches
+  maxBufferSize: 50000, // Handle longer outages
+})
+
+// Low-latency production
+new MastraStorageExporter({
+  maxBatchSize: 100, // Smaller batches
+  maxBatchWaitMs: 1000, // Flush quickly
+})
+```
+
+## 相關內容
+
+- [Tracing 概覽](/docs/observability/tracing/overview)
+- [MastraPlatformExporter](/docs/observability/integrations/exporters/mastra-platform)
+- [複合儲存](/reference/storage/composite)：結合多個儲存 Provider
+- [儲存設定](/docs/storage/overview)

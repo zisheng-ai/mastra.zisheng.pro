@@ -1,0 +1,904 @@
+---
+title: "追蹤 | 可觀測性"
+description: "記錄並檢視 Agent、Workflow、Tool 與模型呼叫的階層式執行過程。"
+packages:
+  - "@mastra/observability"
+---
+
+# 追蹤
+
+追蹤是一種可觀測性訊號，用來記錄請求如何在 Agent、Workflow、Tool 與模型呼叫之間流轉。Mastra 將每項操作表示為 span，並將相關的 span 歸入同一個 Trace，讓你能檢視完整的執行路徑。
+
+本頁著重介紹 Trace 專屬概念：span 階層、取樣、metadata、篩選、Trace ID，以及第三方 Trace context。
+
+<Inject>
+  **給 AI Agent：** 執行 `npx mastra api trace list '{"page":0,"perPage":20}'`，即可直接檢視近期 Trace，無須開啟 Studio 或撰寫暫時性指令碼。此命令需要已設定可觀測性且正在執行的 Mastra 伺服器；請使用 `npx mastra dev` 啟動本機伺服器，或透過 `--url` 傳入可連線伺服器的基礎 URL。建構不同篩選條件前，請先執行 `npx mastra api trace list --schema`。使用 `npx skills add mastra-ai/skills --skill mastra` 安裝 Mastra 的 Skill，即可取得完整的 API CLI 探索、目標指定、schema、驗證及錯誤處理指南。
+</Inject>
+
+## 何時使用追蹤
+
+- 檢視完整執行路徑，以偵錯 Agent 或 Workflow 的非預期行為。
+- 追蹤單一請求中的模型呼叫、Tool 呼叫與 Workflow 步驟。
+- 附加 Trace 專屬的 metadata 與標籤，以便篩選和調查。
+- 將 Mastra Trace 連接至第三方追蹤系統。
+
+## 開始使用
+
+若要開始使用追蹤，請在 Mastra 執行個體中設定可觀測性，然後執行 Agent 或 Workflow。你可以透過下列功能設定其行為：
+
+- [設定](/docs/observability/overview#configuration)：可觀測性的基本設定、多組設定，以及 serverless 排空處理
+- [儲存空間](/docs/observability/overview#storage)：Trace、記錄與指標的儲存路由
+- [整合概覽](/docs/observability/integrations/overview)：exporter、bridge 與 processor
+
+## 取樣策略
+
+取樣可讓你控制要收集哪些 Trace，協助你在可觀測性需求與資源成本之間取得平衡。
+
+在高流量的正式環境中，收集每一筆 Trace 不但成本高昂，也沒有必要。
+
+取樣策略可讓你擷取具代表性的 Trace 子集，同時確保不會遺漏錯誤或重要操作的關鍵資訊。
+
+你可以在可觀測性設定層級設定取樣：
+
+```ts title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      '10_percent': {
+        serviceName: 'my-service',
+        // Sample 10% of traces
+        sampling: {
+          type: 'ratio',
+          probability: 0.1,
+        },
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+`sampling` 選項可讓你控制要收集哪些 Trace，協助你在可觀測性需求與資源成本之間取得平衡。Mastra 支援四種取樣策略：
+
+1. **一律取樣**：收集 100% 的 Trace。最適合需要完整可見性的開發、偵錯或低流量情境。
+
+   ```ts
+   sampling: {
+     type: 'always'
+   }
+   ```
+
+1. **永不取樣**：完全停用追蹤。適用於追蹤沒有幫助的特定環境，或需要在不移除設定的情況下暫時停用追蹤時。
+
+   ```ts
+   sampling: {
+     type: 'never'
+   }
+   ```
+
+1. **按比例取樣**：隨機抽取一定比例的 Trace。若希望在正式環境中取得統計洞察，又不想承擔完整追蹤的成本，這是理想選擇。機率值範圍從 0（不取樣任何 Trace）到 1（取樣所有 Trace）。
+
+   ```ts prettier:false
+   sampling: {
+     type: 'ratio',
+     probability: 0.1  // Sample 10% of traces
+   }
+   ```
+
+1. **自訂取樣**：根據請求 context、metadata 或業務規則實作自己的取樣邏輯。非常適合依據使用者層級、請求類型或錯誤條件進行取樣等複雜情境。
+
+   ```ts prettier:false
+   sampling: {
+     type: 'custom',
+     sampler: (options) => {
+       // Sample premium users at higher rate
+       if (options?.metadata?.userTier === 'premium') {
+         return Math.random() < 0.5; // 50% sampling
+       }
+
+       // Default 1% sampling for others
+       return Math.random() < 0.01;
+     }
+   }
+   ```
+
+## 新增自訂 metadata
+
+自訂 metadata 可讓你為 Trace 附加額外 context，方便你在正式環境中偵錯問題並瞭解系統行為。
+
+Metadata 可以包含業務邏輯與效能指標，也能承載使用者 context，或任何可說明執行期間發生何事的其他資訊。
+
+你可以使用 tracing context，將 metadata 新增至任何 span：
+
+```ts
+execute: async (inputData, context) => {
+  const startTime = Date.now()
+  const response = await fetch(inputData.endpoint)
+
+  // Add custom metadata to the current span
+  context?.tracingContext.currentSpan?.update({
+    metadata: {
+      apiStatusCode: response.status,
+      endpoint: inputData.endpoint,
+      responseTimeMs: Date.now() - startTime,
+      userTier: inputData.userTier,
+      region: process.env.AWS_REGION,
+    },
+  })
+
+  return await response.json()
+}
+```
+
+在此設定的 metadata 會顯示於所有已設定的 exporter 中。
+
+### 使用部署環境標記 Trace
+
+在 Mastra 上設定頂層 `environment` 欄位，即可自動將部署環境附加至所有可觀測性訊號，無須在每次呼叫時傳入 `tracingOptions.metadata.environment`。
+
+```ts title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  environment: 'production',
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-service',
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+若未設定 `environment`，Mastra 會改用 `process.env.NODE_ENV`。若兩者皆未設定，此欄位會維持 undefined，而不會猜測其值。
+
+每次呼叫所傳入的 `tracingOptions.metadata.environment` 一律優先，因此個別呼叫可視需要覆寫此值。
+
+### 從 `RequestContext` 自動取得 metadata
+
+你不必手動為每個 span 新增 metadata；可以設定 Mastra 自動從 RequestContext 擷取值，並將這些值作為 metadata 附加至 Trace 中的所有 span。這有助於在整筆 Trace 中一致地追蹤使用者識別碼、環境資訊、功能旗標，或任何以請求為範圍的資料。
+
+#### 設定層級的擷取
+
+在追蹤設定中定義要擷取哪些 RequestContext key。使用此設定建立的所有 span，都會自動將這些 key 納入 metadata：
+
+```ts title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-service',
+        requestContextKeys: ['userId', 'environment', 'tenantId'],
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+現在，當你搭配 RequestContext 執行 Agent 或 Workflow 時，系統會自動擷取這些值：
+
+```ts
+const requestContext = new RequestContext()
+requestContext.set('userId', 'user-123')
+requestContext.set('environment', 'production')
+requestContext.set('tenantId', 'tenant-456')
+
+// All spans in this trace automatically get userId, environment, and tenantId metadata
+const result = await agent.generate('Hello', {
+  requestContext,
+})
+```
+
+#### 為個別請求新增 key
+
+你可以使用 `tracingOptions.requestContextKeys` 新增 Trace 專屬的 key。這些 key 會與設定層級的 key 合併：
+
+```ts
+const requestContext = new RequestContext()
+requestContext.set('userId', 'user-123')
+requestContext.set('environment', 'production')
+requestContext.set('experimentId', 'exp-789')
+
+const result = await agent.generate('Hello', {
+  requestContext,
+  tracingOptions: {
+    requestContextKeys: ['experimentId'], // Adds to configured keys
+  },
+})
+
+// All spans now have: userId, environment, AND experimentId
+```
+
+#### 擷取巢狀值
+
+使用點記法從 RequestContext 擷取巢狀值：
+
+```ts
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        requestContextKeys: ['user.id', 'session.data.experimentId'],
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+
+const requestContext = new RequestContext()
+requestContext.set('user', { id: 'user-456', name: 'John Doe' })
+requestContext.set('session', { data: { experimentId: 'exp-999' } })
+
+// Metadata will include: { user: { id: 'user-456' }, session: { data: { experimentId: 'exp-999' } } }
+```
+
+#### 運作方式
+
+1. **TraceState 計算**：Trace 開始時（建立根 span），Mastra 會合併設定層級與個別請求的 key，以計算要擷取哪些 key
+1. **自動擷取**：根 span（Agent 執行、Workflow 執行）會自動從 RequestContext 擷取 metadata
+1. **子 span 擷取**：建立子 span 時若傳入 `requestContext`，子 span 也能擷取 metadata
+1. **Metadata 優先順序**：明確傳入 span 選項的 metadata，一律優先於擷取的 metadata
+
+### 為 Trace 新增標籤
+
+標籤是字串標記，可協助你分類與篩選 Trace。不同於包含結構化鍵值資料的 metadata，標籤是純字串，專為快速篩選與整理而設計。
+
+執行 Agent 或 Workflow 時，請使用 `tracingOptions.tags` 新增標籤：
+
+```ts
+// With agents
+const result = await agent.generate('Hello', {
+  tracingOptions: {
+    tags: ['production', 'experiment-v2', 'user-request'],
+  },
+})
+
+// With workflows
+const run = await mastra.getWorkflow('myWorkflow').createRun()
+const result = await run.start({
+  inputData: { data: 'process this' },
+  tracingOptions: {
+    tags: ['batch-processing', 'priority-high'],
+  },
+})
+```
+
+#### 標籤的運作方式
+
+- **僅限根 span**：標籤只會套用至 Trace 的根 span（Agent 執行或 Workflow 執行的 span）
+- **廣泛支援**：大多數 exporter 都支援使用標籤來篩選與搜尋 Trace：
+  - **Braintrust**：原生 `tags` 欄位
+  - **Langfuse**：Trace 上的原生 `tags` 欄位
+  - **ArizeExporter**：`tag.tags` OpenInference 屬性
+  - **OtelExporter**：`mastra.tags` span 屬性
+  - **OtelBridge**：`mastra.tags` span 屬性
+- **可與 metadata 搭配使用**：你可以在同一個 `tracingOptions` 中同時使用 `tags` 與 `metadata`
+
+```ts
+const result = await agent.generate([{ role: 'user', content: 'Analyze this' }], {
+  tracingOptions: {
+    tags: ['production', 'analytics'],
+    metadata: { userId: 'user-123', experimentId: 'exp-456' },
+  },
+})
+```
+
+#### 常見標籤模式
+
+- **環境**：`"production"`、`"staging"`、`"development"`
+- **功能旗標**：`"feature-x-enabled"`、`"beta-user"`
+- **請求類型**：`"user-request"`、`"batch-job"`、`"scheduled-task"`
+- **優先順序層級**：`"priority-high"`、`"priority-low"`
+- **實驗**：`"experiment-v1"`、`"control-group"`、`"treatment-a"`
+
+### 隱藏敏感的輸入／輸出
+
+處理敏感資料時，你可能不希望輸入與輸出值記錄至可觀測性平台。請在 `tracingOptions` 中使用 `hideInput` 與 `hideOutput`，將這些資料從 Trace 的所有 span 中排除：
+
+```ts
+// Hide input data (e.g., user credentials, PII)
+const result = await agent.generate([{ role: 'user', content: 'Process this sensitive data' }], {
+  tracingOptions: {
+    hideInput: true, // Input will be hidden from all spans
+  },
+})
+
+// Hide output data (e.g., generated secrets, confidential results)
+const result = await agent.generate([{ role: 'user', content: 'Generate API keys' }], {
+  tracingOptions: {
+    hideOutput: true, // Output will be hidden from all spans
+  },
+})
+
+// Hide both input and output
+const result = await agent.generate([{ role: 'user', content: 'Handle confidential request' }], {
+  tracingOptions: {
+    hideInput: true,
+    hideOutput: true,
+  },
+})
+```
+
+#### 運作方式
+
+- **套用至整筆 Trace**：在根 span 設定後，這些選項會套用至 Trace 中的所有子 span（Tool 呼叫、模型生成等）
+- **匯出時篩選**：資料在執行期間仍可供內部使用，但 span 匯出至可觀測性平台時會將其排除
+- **可與其他選項搭配使用**：你可以同時使用 `hideInput`／`hideOutput`、`tags`、`metadata` 與其他 `tracingOptions`
+
+```ts
+const result = await agent.generate([{ role: 'user', content: 'Sensitive operation' }], {
+  tracingOptions: {
+    hideInput: true,
+    hideOutput: true,
+    tags: ['sensitive-operation', 'pii-handling'],
+    metadata: { operationType: 'credential-processing' },
+  },
+})
+```
+
+若要更精細地控制敏感資料，可以考慮使用 [敏感資料篩選器](/docs/observability/integrations/processors/sensitive-data-filter) processor。它可以遮蔽特定欄位（例如密碼、token 與 key），同時保留輸入／輸出的其餘部分。
+
+#### 子 span 與 metadata 擷取
+
+在 Tool 或 Workflow 步驟中建立子 span 時，可以傳入 `requestContext` 參數以啟用 metadata 擷取：
+
+```ts
+execute: async (inputData, context) => {
+  // Create child span WITH requestContext - gets metadata extraction
+  const dbSpan = context?.tracingContext.currentSpan?.createChildSpan({
+    type: 'generic',
+    name: 'database-query',
+    requestContext: context?.requestContext, // Pass to enable metadata extraction
+  })
+
+  const results = await db.query('SELECT * FROM users')
+  dbSpan?.end({ output: results })
+
+  // Or create child span WITHOUT requestContext - no metadata extraction
+  const cacheSpan = context?.tracingContext.currentSpan?.createChildSpan({
+    type: 'generic',
+    name: 'cache-check',
+    // No requestContext - won't extract metadata
+  })
+
+  return results
+}
+```
+
+你可以精細控制哪些子 span 要包含 RequestContext metadata。根 span（Agent／Workflow 執行）一律會自動擷取 metadata，而子 span 只有在你明確傳入 `requestContext` 時才會擷取。
+
+## 建立子 span
+
+子 span 可讓你追蹤 Workflow 步驟或 Tool 內的細微作業，並提供資料庫查詢、API 呼叫、檔案作業或複雜計算等子作業的可見性。這種階層結構有助於找出效能瓶頸，並了解作業執行的確切順序。
+
+在 Tool 呼叫或 Workflow 步驟內建立子 span，以追蹤特定作業：
+
+```ts
+execute: async (inputData, context) => {
+  // Create another child span for the main database operation
+  const querySpan = context?.tracingContext.currentSpan?.createChildSpan({
+    type: 'generic',
+    name: 'database-query',
+    input: { query: inputData.query },
+    metadata: { database: 'production' },
+  })
+
+  try {
+    const results = await db.query(inputData.query)
+    querySpan?.end({
+      output: results.data,
+      metadata: {
+        rowsReturned: results.length,
+        queryTimeMs: results.executionTime,
+        cacheHit: results.fromCache,
+      },
+    })
+    return results
+  } catch (error) {
+    querySpan?.error({
+      error,
+      metadata: { retryable: isRetryableError(error) },
+    })
+    throw error
+  }
+}
+```
+
+子 span 會自動從父項繼承 Trace context，在 Observability 平台中維持關係階層。
+
+## Span 格式化
+
+Mastra 提供兩種方式，可在 span 資料送達 Observability 平台前進行轉換：**span Processor** 與 **Custom span formatter**。兩者都能修改、篩選或擴充 Trace 資料，但運作層級與用途不同。
+
+| 功能 | Span Processor | Custom span formatter |
+| - | - | - |
+| 設定層級 | Observability 設定 | 依個別 Exporter |
+| 處理對象 | 內部 `Span` object | 匯出的 `ExportedSpan` 資料 |
+| 套用範圍 | 所有 Exporter | 單一 Exporter |
+| 支援非同步 | 否 | 是 |
+| 使用情境 | 安全性、篩選、資料擴充 | 平台專用格式、非同步資料擴充 |
+
+若同步轉換應套用至所有 Exporter（例如遮蔽敏感資料），請使用 **span Processor**。若不同 Exporter 需要以不同形式呈現相同資料（例如一個平台使用純文字，另一個平台使用結構化資料），或需要執行從外部 API 擷取資料等非同步作業，請使用 **Custom span formatter**。
+
+### Span Processor
+
+Span Processor 會在 Trace 資料匯出前進行轉換、篩選或擴充。它們在 span 建立與匯出之間扮演 pipeline 的角色，讓你能基於安全性、法規遵循或除錯需求修改 span。Processor 只會執行一次，並影響所有 Exporter。
+
+#### 內建 Processor
+
+- [Sensitive Data Filter](/docs/observability/integrations/processors/sensitive-data-filter) 會遮蔽敏感資訊。預設 Observability 設定已啟用此功能。
+
+#### 建立自訂 Processor
+
+你可以實作 `SpanOutputProcessor` interface，建立自訂 span Processor。以下基本範例會將 span 中的所有輸入文字轉為小寫：
+
+```ts title="src/processors/lowercase-input-processor.ts"
+import type { SpanOutputProcessor, AnySpan } from '@mastra/observability'
+
+export class LowercaseInputProcessor implements SpanOutputProcessor {
+  name = 'lowercase-processor'
+
+  process(span: AnySpan): AnySpan {
+    span.input = `${span.input}`.toLowerCase()
+    return span
+  }
+
+  async shutdown(): Promise<void> {
+    // Cleanup if needed
+  }
+}
+
+// Use the custom processor
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      development: {
+        spanOutputProcessors: [new LowercaseInputProcessor(), new SensitiveDataFilter()],
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+Processor 會依定義順序執行，因此可串連多項轉換。常見使用情境包括：
+
+- 遮蔽敏感資料（密碼、token、API Key）
+- 加入環境專用 metadata
+- 根據條件篩除 span
+- 正規化資料格式
+- 使用商業 context 擴充 span
+
+如需更完整的 Exporter、Bridge 與 Processor 模型說明，請參閱[整合總覽](/docs/observability/integrations/overview)。
+
+## Span 篩選
+
+Span 篩選可在資料送達 Observability 平台前減少干擾資訊與每個 span 的成本。請依個別 Observability instance 進行設定，讓不同 Exporter 或環境能保留不同程度的詳細資訊。
+
+- 使用 `excludeSpanTypes`，以最少設定捨棄完整類別的 span。
+- 若需要根據匯出的 span 資料執行自訂邏輯，請使用 `spanFilter`。
+
+下列範例示範如何在單一設定中合併這兩個選項：
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { SpanType } from '@mastra/core/observability'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+import { LangfuseExporter } from '@mastra/langfuse'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-app',
+        exporters: [new MastraStorageExporter(), new LangfuseExporter()],
+        excludeSpanTypes: [SpanType.MODEL_CHUNK, SpanType.MODEL_STEP],
+        spanFilter: span => {
+          if (span.type === SpanType.TOOL_CALL && span.attributes?.success) {
+            return false
+          }
+
+          return true
+        },
+      },
+    },
+  }),
+})
+```
+
+篩選會在匯出時依下列順序進行：
+
+1. 除非 `includeInternalSpans` 為 `true`，否則會捨棄內部 span。
+1. `excludeSpanTypes` 會移除相符的 span 類型。
+1. `spanOutputProcessors` 會轉換其餘 span。
+1. `spanFilter` 會決定是否保留最終匯出的 span。
+
+如果 `spanFilter` 擲回錯誤，Mastra 會保留 span 並記錄錯誤，以避免資料在無提示的情況下遺失。如需完整 span 類型清單與更多範例，請參閱 [Span 篩選參考](/reference/observability/tracing/span-filtering)。
+
+### Custom span formatter
+
+Custom span formatter 會轉換 span 在特定 Observability 平台中的呈現方式。與 span Processor 不同，formatter 會依個別 Exporter 設定，因此可針對不同目的地採用不同格式。Formatter 同時支援同步與非同步作業。
+
+#### 使用情境
+
+- **從 AI SDK 訊息擷取純文字**：將結構化訊息 array 轉換為可讀文字
+- **轉換輸入／輸出格式**：自訂資料在特定平台中的顯示方式
+- **平台專用欄位對應**：根據平台需求新增或移除欄位
+- **非同步資料擴充**：從外部 API 或資料庫擷取額外 context
+
+#### 設定
+
+將 `customSpanFormatter` 加入任何 Exporter 設定：
+
+```ts title="src/mastra/index.ts"
+import { BraintrustExporter } from '@mastra/braintrust'
+import { LangfuseExporter } from '@mastra/langfuse'
+import { SpanType } from '@mastra/core/observability'
+import type { CustomSpanFormatter } from '@mastra/core/observability'
+
+// Formatter that extracts plain text from AI messages
+const plainTextFormatter: CustomSpanFormatter = span => {
+  if (span.type === SpanType.AGENT_RUN && Array.isArray(span.input)) {
+    const userMessage = span.input.find(m => m.role === 'user')
+    return {
+      ...span,
+      input: userMessage?.content ?? span.input,
+    }
+  }
+  return span
+}
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-service',
+        exporters: [
+          // Braintrust gets plain text formatting
+          new BraintrustExporter({
+            customSpanFormatter: plainTextFormatter,
+          }),
+          // Langfuse keeps the original structured format
+          new LangfuseExporter(),
+        ],
+      },
+    },
+  }),
+})
+```
+
+#### 串連多個 formatter
+
+使用 `chainFormatters` 合併多個 formatter。Formatter chain 同時支援同步與非同步 formatter：
+
+```ts
+import { chainFormatters } from '@mastra/observability'
+
+const inputFormatter: CustomSpanFormatter = span => ({
+  ...span,
+  input: extractPlainText(span.input),
+})
+
+const outputFormatter: CustomSpanFormatter = span => ({
+  ...span,
+  output: extractPlainText(span.output),
+})
+
+const exporter = new BraintrustExporter({
+  customSpanFormatter: chainFormatters([inputFormatter, outputFormatter]),
+})
+```
+
+#### 非同步 formatter
+
+Custom span formatter 支援非同步作業，可處理從外部 API 或資料庫擷取資料以擴充 span 等使用情境：
+
+```ts
+import type { CustomSpanFormatter } from '@mastra/core/observability'
+
+// Async formatter that enriches spans with user data
+const userEnrichmentFormatter: CustomSpanFormatter = async span => {
+  const userId = span.metadata?.userId
+  if (!userId) return span
+
+  // Fetch user data from your API or database
+  const userData = await fetchUserData(userId)
+
+  return {
+    ...span,
+    metadata: {
+      ...span.metadata,
+      userName: userData.name,
+      userEmail: userData.email,
+      department: userData.department,
+    },
+  }
+}
+
+// Async formatter that looks up additional context
+const contextEnrichmentFormatter: CustomSpanFormatter = async span => {
+  if (span.type !== SpanType.AGENT_RUN) return span
+
+  // Fetch experiment configuration
+  const experimentConfig = await getExperimentConfig(span.metadata?.experimentId)
+
+  return {
+    ...span,
+    metadata: {
+      ...span.metadata,
+      experimentVariant: experimentConfig?.variant,
+      experimentGroup: experimentConfig?.group,
+    },
+  }
+}
+
+// Use async formatters with an exporter
+const exporter = new BraintrustExporter({
+  customSpanFormatter: userEnrichmentFormatter,
+})
+
+// Or chain sync and async formatters together
+const exporter = new LangfuseExporter({
+  customSpanFormatter: chainFormatters([
+    plainTextFormatter, // sync
+    userEnrichmentFormatter, // async
+    contextEnrichmentFormatter, // async
+  ]),
+})
+```
+
+:::note
+非同步 formatter 會增加 span 匯出的延遲。請將非同步作業控制在快速完成的範圍內（低於 100ms），以免拖慢應用程式。對於經常存取的資料，可考慮使用快取。
+:::
+
+## 序列化選項
+
+序列化選項控制 span 資料（輸入、輸出與屬性）在匯出前如何截斷。處理大型 payload、深層巢狀物件，或需要最佳化 Trace 儲存空間時，這項功能非常實用。
+
+### 設定
+
+將 `serializationOptions` 加入可觀測性設定：
+
+```ts title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-service',
+        serializationOptions: {
+          maxStringLength: 2048, // Maximum length for string values (default: 1024)
+          maxDepth: 10, // Maximum depth for nested objects (default: 6)
+          maxArrayLength: 100, // Maximum number of items in arrays (default: 50)
+          maxObjectKeys: 75, // Maximum number of keys in objects (default: 50)
+        },
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+### 可用選項
+
+| 選項 | 預設值 | 說明 |
+| - | - | - |
+| `maxStringLength` | 1024 | 字串值的長度上限。較長的字串會被截斷。 |
+| `maxDepth` | 6 | 巢狀物件的深度上限。更深的層級會被省略。 |
+| `maxArrayLength` | 50 | 陣列中的項目數上限。超出的項目會被省略。 |
+| `maxObjectKeys` | 50 | 物件中的 key 數量上限。超出的 key 會被省略。 |
+
+### 使用情境
+
+**提高限制以利偵錯**：如果 Agent 或 Tool 會處理大型文件、API 回應或資料結構，請提高這些限制，以便在 Trace 中擷取更多脈絡：
+
+```ts prettier:false
+serializationOptions: {
+  maxStringLength: 8192,  // Capture longer text content
+  maxDepth: 12,           // Handle deeply nested JSON responses
+  maxArrayLength: 200,    // Keep more items from large lists
+}
+```
+
+**降低正式環境中的 Trace 大小**：不需要查看完整 payload 時，請降低這些值，以減少儲存成本並提升效能：
+
+```ts prettier:false
+serializationOptions: {
+  maxStringLength: 256,   // Truncate strings aggressively
+  maxDepth: 3,            // Shallow object representation
+  maxArrayLength: 10,     // Keep only first few items
+  maxObjectKeys: 20,      // Limit object keys
+}
+```
+
+所有選項皆為選填。未指定時，會使用上方顯示的預設值。
+
+## 取得 Trace ID
+
+啟用 tracing 後執行 Agent 或 Workflow 時，回應會包含 `traceId`，可用來在可觀測性平台中查詢完整 Trace。這有助於偵錯、提供客戶支援，或將 Trace 與系統中的其他事件建立關聯。
+
+### Agent Trace ID
+
+`generate` 與 `stream` 方法都會在回應中傳回 Trace ID：
+
+```ts
+// Using generate
+const result = await agent.generate('Hello')
+
+console.log('Trace ID:', result.traceId)
+
+// Using stream
+const streamResult = await agent.stream('Tell me a story')
+
+console.log('Trace ID:', streamResult.traceId)
+```
+
+### Workflow Trace ID
+
+Workflow 執行也會傳回 Trace ID：
+
+```ts
+// Create a workflow run
+const run = await mastra.getWorkflow('myWorkflow').createRun()
+
+// Start the workflow
+const result = await run.start({
+  inputData: { data: 'process this' },
+})
+
+console.log('Trace ID:', result.traceId)
+
+// Or stream the workflow
+const { stream, getWorkflowState } = run.stream({
+  inputData: { data: 'process this' },
+})
+
+// Get the final state which includes the trace ID
+const finalState = await getWorkflowState()
+console.log('Trace ID:', finalState.traceId)
+```
+
+### 使用 Trace ID
+
+取得 Trace ID 後，你可以：
+
+1. **在 Studio 中查詢 Trace**：前往 Trace 檢視並依 ID 搜尋
+1. **在外部平台中查詢 Trace**：在 Langfuse、Braintrust、MLflow 或你的可觀測性平台中使用該 ID
+1. **與記錄建立關聯**：在應用程式記錄中加入 Trace ID，以便交叉參照
+1. **分享以進行偵錯**：將 Trace ID 提供給支援團隊或開發人員進行調查
+
+只有啟用 tracing 時才能取得 Trace ID。如果 tracing 已停用，或 sampling 排除了該請求，`traceId` 會是 `undefined`。
+
+## 與外部 tracing 系統整合
+
+在已有分散式 tracing（OpenTelemetry、Datadog 等）的應用程式中執行 Mastra Agent 或 Workflow 時，可以將 Mastra Trace 連接至上層 Trace context。如此會建立涵蓋完整請求流程的統一檢視，讓你更容易瞭解 Mastra 操作如何融入整體系統。
+
+### 傳入外部 Trace ID
+
+使用 `tracingOptions` 參數指定上層系統的 Trace context：
+
+```ts
+// Get trace context from your existing tracing system
+const parentTraceId = getCurrentTraceId() // Your tracing system
+const parentSpanId = getCurrentSpanId() // Your tracing system
+
+// Execute Mastra operations as part of the parent trace
+const result = await agent.generate('Analyze this data', {
+  tracingOptions: {
+    traceId: parentTraceId,
+    parentSpanId: parentSpanId,
+  },
+})
+
+// The Mastra trace will now appear as a child in your distributed trace
+```
+
+### OpenTelemetry 整合
+
+與 OpenTelemetry 整合後，Mastra Trace 可直接顯示在現有的可觀測性平台中：
+
+```ts
+import { trace } from '@opentelemetry/api'
+
+// Get the current OpenTelemetry span
+const currentSpan = trace.getActiveSpan()
+const spanContext = currentSpan?.spanContext()
+
+if (spanContext) {
+  const result = await agent.generate(userMessage, {
+    tracingOptions: {
+      traceId: spanContext.traceId,
+      parentSpanId: spanContext.spanId,
+    },
+  })
+}
+```
+
+### Workflow 整合
+
+Workflow 支援相同的 Trace 傳播模式：
+
+```ts
+const workflow = mastra.getWorkflow('data-pipeline')
+const run = await workflow.createRun()
+
+const result = await run.start({
+  inputData: { data: '...' },
+  tracingOptions: {
+    traceId: externalTraceId,
+    parentSpanId: externalSpanId,
+  },
+})
+```
+
+### ID 格式要求
+
+Mastra 會驗證 Trace 與 span ID，以確保相容性：
+
+- **Trace ID**：1–32 個十六進位字元（OpenTelemetry 使用 32 個）
+- **Span ID**：1–16 個十六進位字元（OpenTelemetry 使用 16 個）
+
+Mastra 會妥善處理無效 ID，記錄錯誤後繼續執行：
+
+- 無效的 Trace ID → 產生新的 Trace ID
+- 無效的上層 span ID → 忽略上層關係
+
+因此，即使輸入格式錯誤，tracing 也不會讓應用程式當機。
+
+### 範例：Express middleware
+
+以下完整範例示範如何在 Express 應用程式中傳播 Trace：
+
+```ts
+import { trace } from '@opentelemetry/api'
+import express from 'express'
+
+const app = express()
+
+app.post('/api/analyze', async (req, res) => {
+  // Get current OpenTelemetry context
+  const currentSpan = trace.getActiveSpan()
+  const spanContext = currentSpan?.spanContext()
+
+  const result = await agent.generate(req.body.message, {
+    tracingOptions: spanContext
+      ? {
+          traceId: spanContext.traceId,
+          parentSpanId: spanContext.spanId,
+        }
+      : undefined,
+  })
+
+  res.json(result)
+})
+```
+
+這會建立單一分散式 Trace，其中同時包含 HTTP 請求處理與 Mastra Agent 執行，並可在你選用的可觀測性平台中查看。
+
+## 追蹤的內容
+
+Mastra 會自動為下列項目建立 span：
+
+### Agent 操作
+
+- **Agent run**：包含指示與 Tool 的完整執行
+- **LLM 呼叫**：包含 token 與參數的模型互動
+- **Tool 執行**：包含輸入與輸出的函式呼叫
+- **Memory 操作**：thread 與語義回憶
+
+### Workflow 操作
+
+- **Workflow run**：從開始到結束的完整執行
+- **個別步驟**：包含輸入／輸出的步驟處理
+- **控制流程**：條件判斷、迴圈與平行執行
+- **等待操作**：延遲與事件等待
+
+## 另請參閱
+
+### 參考文件
+
+- [Configuration API](/reference/observability/tracing/configuration)：ObservabilityConfig 詳細資訊
+- [Tracing 類別](/reference/observability/tracing/instances)：核心類別與方法
+- [Span 介面](/reference/observability/tracing/spans)：Span 類型與生命週期
+- [類型定義](/reference/observability/tracing/interfaces)：完整介面參考
+- [Span 篩選](/reference/observability/tracing/span-filtering)：篩選行為與 span 類型，以及範例

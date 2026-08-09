@@ -1,0 +1,108 @@
+---
+title: "メトリクスの概要 | Observability"
+description: "トレースされた実行から Mastra が自動的に出力するメトリクスについて説明します。"
+packages:
+  - "@mastra/observability"
+---
+
+# メトリクスの概要
+
+Mastra は、トレースされた実行からパフォーマンスと使用量のメトリクスを自動的に出力します。手動での計装は不要です。メトリクスは Span の完了時に、その Span から導出されます。
+
+次のカテゴリのメトリクスが自動的に出力されます。
+
+- **実行時間メトリクス**：Agent、Workflow、Tool、モデル呼び出し、processor の実行時間。
+- **Token 使用量メトリクス**：種類（テキスト、キャッシュ、音声、画像、推論）ごとの入力・出力 token 数。
+- **コスト見積もり**：組み込みの料金レジストリに基づくモデル呼び出しごとの推定コスト。
+
+:::note
+
+メトリクスには、分析に対応した Observability ストアが必要です。ほとんどのリレーショナルデータベース（LibSQL、MSSQL）はメトリクスに対応していません。インメモリストレージは再起動するとリセットされます。
+
+ローカル開発では、`@mastra/duckdb` を介して [DuckDB](https://duckdb.org/) を使用してください。本番環境では、`@mastra/clickhouse` を介して [ClickHouse](https://clickhouse.com/) を使用してください。Observability domain を有効にした `PostgresStoreVNext` もメトリクスに対応していますが、パーティション全体のスキャンを避けるため、必ず期間を指定してください。
+
+Google Cloud Spanner はメトリクスに対応していますが、高負荷のメトリクスワークロードには推奨されません。メトリクスは書き込みとスキャンの負荷が高いため、Spanner adapter ではデフォルトでメトリクスが無効になっています。`disableMetrics: false` は軽量なワークロードでのみ設定するか、メトリクスを OLAP ストアへ送ってください。
+
+:::
+
+## メトリクスを使用する場面
+
+- Agent、Tool、Workflow、モデル呼び出し全体のレイテンシーを監視する
+- Token 消費量とコストの長期的な傾向を追跡する
+- 成功率とエラー率を比較し、エラーの多い Agent や Tool を特定する
+- プロンプト、モデル、コードの変更前後でパフォーマンスを比較する
+
+## はじめに
+
+必要なパッケージをインストールします。
+
+```bash npm2yarn
+npm install @mastra/observability @mastra/libsql @mastra/duckdb
+```
+
+次に、Observability domain を DuckDB へルーティングする複合ストアを使用して Observability を設定します。
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { LibSQLStore } from '@mastra/libsql'
+import { DuckDBStore } from '@mastra/duckdb'
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { Observability, MastraStorageExporter, SensitiveDataFilter } from '@mastra/observability'
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite-storage',
+    default: new LibSQLStore({
+      id: 'mastra-storage',
+      url: 'file:./mastra.db',
+    }),
+    domains: {
+      observability: await new DuckDBStore().getStore('observability'),
+    },
+  }),
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'mastra',
+        exporters: [new MastraStorageExporter()],
+        spanOutputProcessors: [new SensitiveDataFilter()],
+      },
+    },
+  }),
+})
+```
+
+## Studio
+
+Studio の Metrics ダッシュボードでは、KPI カード、詳細な内訳、token 使用量のタイムライン、設定可能な期間を使用して、すべての自動メトリクスを可視化できます。詳しい手順については、[Studio Observability](/docs/studio/observability)を参照してください。
+
+## Mastra が測定する項目
+
+Mastra は3種類のメトリクスを自動的に出力します。
+
+- **実行時間**：Agent、Workflow、Tool、モデル呼び出し、processor の実行時間（ミリ秒）。
+- **Token 使用量**：種類（テキスト、キャッシュ、音声、画像、推論）ごとの入力・出力 token 数。
+- **コスト見積もり**：組み込みの料金レジストリに基づくモデル呼び出しごとの推定コスト。
+
+各メトリクスには Trace の関連付けコンテキストが含まれるため、ダッシュボード上の急増箇所から、その原因となった正確な Span まで掘り下げられます。
+
+メトリクス名、ラベル、コストフィールドの全一覧については、[自動メトリクスのリファレンス](/reference/observability/metrics/automatic-metrics)を参照してください。
+
+## 自動メトリクスの仕組み
+
+Mastra は Agent の実行、Workflow のステップ、Tool の呼び出し、モデル生成を Span として自動計装します。Span が終了すると、Observability レイヤーがそこからメトリクスを抽出します。
+
+1. **実行時間**：Span の開始・終了タイムスタンプから算出します。
+1. **Token 使用量**：モデル生成 Span の `usage` 属性から抽出します。
+1. **コスト見積もり**：各 token メトリクスを、Provider とモデル名で照合する組み込みの料金レジストリに適用します。
+
+ストレージへ保存する前に、すべてのメトリクスラベルはカーディナリティフィルターを通過します。このフィルターは Trace ID や UUID など、カーディナリティが高いことが分かっている値を除外し、ストレージ効率を維持します。その後、メトリクスは内部イベントバッファーによってバッチ化され、`MastraStorageExporter` によってストレージへフラッシュされます。
+
+## 次のステップ
+
+- [自動メトリクスのリファレンス](/reference/observability/metrics/automatic-metrics)
+- [メトリクスのクエリ](/docs/observability/metrics/querying)
+- [Tracing の概要](/docs/observability/tracing/overview)
+- [Studio Observability](/docs/studio/observability)
+- [Observability の概要](/docs/observability/overview)
+- [MastraStorageExporter のリファレンス](/docs/observability/integrations/exporters/mastra-storage)

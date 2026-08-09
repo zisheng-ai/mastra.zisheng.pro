@@ -1,0 +1,400 @@
+---
+title: "バックグラウンドタスク | 長時間実行 Agent"
+description: 長時間実行される Tool 呼び出しをバックグラウンドに投入し、完了までストリームを維持する方法と、Subagent を非同期でオーケストレーションする方法を説明します。
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+---
+
+# バックグラウンドタスク
+
+**追加バージョン：** `@mastra/core@1.29.0`
+
+バックグラウンドタスクを使用すると、Agent ループをブロックせずに、長時間実行される Tool 呼び出しを投入できます。Tool はすぐに受領確認を返し、LLM は応答を続け、タスクはバックグラウンドで完了まで実行されます。完了すると結果が Memory に書き込まれます。また、[`untilIdle`](/reference/streaming/agents/stream) オプションを指定して `stream()` を使用すると Agent が自動的に再呼び出しされ、同じ呼び出し内で結果が処理されます。
+
+## バックグラウンドタスクを使用する場面
+
+Tool 呼び出しに時間がかかり、応答が表示されるまでユーザーを待たせるべきでない場合に、バックグラウンドタスクを使用します。一般的な例は次のとおりです。
+
+- 複数ステップの調査や執筆を行う Subagent への委任。
+- 低速な外部サービス、キュー、大規模なデータジョブにアクセスする Tool 呼び出し。
+- 完了まで数分かかる可能性がある、Tool 呼び出しから開始された Workflow。
+
+すぐに結果を返す Tool 呼び出しには、`agent.stream()` と `agent.generate()` によるフォアグラウンド実行の方がシンプルです。
+
+:::note
+
+バックグラウンドタスクを使用するには、Mastra インスタンスに[ストレージ](/docs/storage/overview)バックエンドを設定する必要があります。タスクは永続化されるため、プロセスの再起動後も維持されます。
+
+:::
+
+## クイックスタート
+
+バックグラウンドタスクはデフォルトで無効です。Mastra インスタンスで `backgroundTasks.enabled` を設定して有効にします。
+
+```typescript title="src/mastra/index.ts" {6-12}
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({ id: 'storage', url: 'file:mastra.db' }),
+  backgroundTasks: {
+    enabled: true,
+    globalConcurrency: 10,
+    perAgentConcurrency: 5,
+    backpressure: 'queue',
+    defaultTimeoutMs: 300_000,
+  },
+})
+```
+
+すべてのオプションについては、[backgroundTasks 設定リファレンス](/reference/configuration#backgroundtasks)を参照してください。
+
+## Tool をバックグラウンドで実行する
+
+Manager を有効にするだけでは、何もバックグラウンドで実行されません。各 Tool はデフォルトでフォアグラウンド実行されます。Tool は次のいずれかのレイヤーでオプトインします。
+
+1. **Tool レベルの設定**：Tool 自身がバックグラウンド実行の対象であることを宣言します。
+1. **Agent レベルの設定**：Agent が、どの Tool をバックグラウンド実行の対象とするかを宣言します。
+
+Tool がオプトインすると、LLM は必要に応じて Tool の引数に `_background` フィールドを含め、特定の呼び出しについて解決済み設定を上書きできます（タイムアウト、リトライ、またはフォアグラウンド実行への切り替え）。
+
+### Tool レベル
+
+Tool 定義で `background.enabled: true` を設定します。このレイヤーでオプトインした Tool は、Manager が有効な Agent から呼び出されるたびにバックグラウンドで実行されます。
+
+```typescript title="src/mastra/tools/research.ts"
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const researchTool = createTool({
+  id: 'research',
+  description: 'Run a long research job',
+  inputSchema: z.object({ topic: z.string() }),
+  // highlight-start
+  background: {
+    enabled: true,
+    timeoutMs: 600_000,
+    maxRetries: 1,
+  },
+  // highlight-end
+  execute: async ({ topic }) => {
+    // Run the research job for topic
+  },
+})
+```
+
+### Agent レベル
+
+Agent の `backgroundTasks.tools` を使用すると、特定の Tool をオプトインしたり、Tool ごとにタイムアウトを上書きしたりできます。また、バックグラウンド実行の対象となるすべての Tool をバックグラウンドで実行することもできます。Agent のバックグラウンド投入をすべて無効化するには、`disabled: true` を使用します。
+
+```typescript title="src/mastra/agents/researcher.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const researcher = new Agent({
+  id: 'researcher',
+  instructions: 'You research topics and answer questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { researchTool, summarizeTool },
+  // highlight-start
+  backgroundTasks: {
+    tools: {
+      researchTool: { enabled: true, timeoutMs: 600_000 },
+      summarizeTool: false,
+    },
+  },
+  // highlight-end
+})
+```
+
+Agent が持つすべての Tool をオプトインするには、`tools: 'all'` を設定します。
+
+### 呼び出しごとの LLM オーバーライド
+
+バックグラウンドタスクが有効な Agent に Tool が登録されている場合、モデルは Tool の引数に `_background` フィールドを含め、その呼び出しに解決された設定を上書きできます。モデルは上書きしたい値だけを含めます。`_background` のすべてのフィールドは任意です。Tool の実行前に、このオーバーライドは引数から削除されます。
+
+```json
+{
+  "topic": "solana",
+  "_background": { "enabled": true, "timeoutMs": 900_000 }
+}
+```
+
+`_background` オーバーライドは、開発者が Tool または Agent レイヤーですでにオプトインした Tool に対する\_修飾子\_であり、単独でオプトインするものではありません。Tool がオプトインしていない場合、モデルの `_background.enabled: true` は無視され、Tool はフォアグラウンドで実行されます。これにより、決定論的でフォアグラウンド専用の Tool（計算、検索、スキーマ検証）が暗黙のうちにタスクとして投入されることを防ぎます。
+
+### 解決順序
+
+Tool 呼び出しを投入するとき、バックグラウンド設定は次の優先順位で解決されます。
+
+1. 対象 Tool に対する Agent レベルの `backgroundTasks.tools` エントリ。
+1. Tool レベルの `background` 設定。
+1. LLM の `_background.enabled` オーバーライド（上記いずれかのレイヤーで Tool がオプトインされている場合に、バックグラウンド投入を有効にする目的でのみ使用）。
+1. Manager のデフォルト（`defaultTimeoutMs`、`defaultRetries`）。
+
+Agent に `backgroundTasks.disabled: true` が設定されている場合、上記のレイヤーに関係なく、すべての Tool 呼び出しが同期的に実行されます。
+
+## バックグラウンドタスクに関連するストリームチャンク
+
+Tool 呼び出しがバックグラウンドタスクとして投入されると、Agent 自身のストリームと [`backgroundTaskManager.stream()`](/docs/long-running-agents/background-tasks#subscribe-to-all-task-events) の SSE ストリームの 2 つにライフサイクルイベントが現れる可能性があります。各ストリームが扱うチャンク型は異なります。
+
+| チャンク型 | 発生するタイミング | 出力元 |
+| - | - | - |
+| `background-task-started` | タスクがキューに追加され、`taskId` が割り当てられたとき。 | Agent ストリーム |
+| `background-task-running` | タスクが Worker に取得され、実行を開始したとき。 | Manager ストリーム |
+| `background-task-progress` | 実行中のバックグラウンドタスク数を示します。 | Agent ストリーム |
+| `background-task-output` | タスクの `execute` から出力されたストリーミングチャンク。 | Manager ストリーム |
+| `background-task-completed` | タスクが正常に完了したとき。`payload.result` は最終的な Tool の結果と一致します。 | Manager ストリーム |
+| `background-task-failed` | タスクが例外をスローしたか、タイムアウトしたとき。 | Manager ストリーム |
+| `background-task-cancelled` | タスクが完了前にキャンセルされたとき。 | Manager ストリーム |
+| `background-task-suspended` | Tool が自身の execute 内で `suspend()` を呼び出したとき。 | Manager ストリーム |
+| `background-task-resumed` | 一時停止中のタスクが `manager.resume(taskId, resumeData)` で再開されたとき。 | Manager ストリーム |
+
+`agent.stream().fullStream` 単独では、Agent ループのチャンク（`background-task-started`、`background-task-progress`）だけを出力します。`untilIdle: true` を指定した `agent.stream()` は同じ 2 つのチャンクに加え、実行の Memory スコープに対する Manager の PubSub を購読し、7 つの Manager チャンク（`background-task-running`、`background-task-output`、`background-task-completed`、`background-task-failed`、`background-task-cancelled`、`background-task-suspended`、`background-task-resumed`）を同じ `fullStream` に流します。
+
+`backgroundTaskManager.stream()` は、7 つの Manager チャンクだけを出力します。
+
+Payload の完全な形式については、[バックグラウンドタスクのチャンクリファレンス](/reference/streaming/ChunkType#background-task-chunks)を参照してください。
+
+## `untilIdle` で Agent ストリームを維持する
+
+バックグラウンドタスクがまだ実行中でも、LLM が最終応答を出力すると `agent.stream()` は終了します。投入したすべてのバックグラウンドタスクが完了し、LLM がその結果に応答できるまでストリームを維持するには、`untilIdle: true` を渡します。
+
+```typescript title="src/mastra/run.ts"
+const stream = await agent.stream('Research solana for me', {
+  memory: { thread: 't1', resource: 'u1' },
+  untilIdle: true,
+})
+
+for await (const chunk of stream.fullStream) {
+  // chunks from the initial turn AND any continuation turns triggered by
+  // background task completions flow through here
+}
+```
+
+バックグラウンドタスクが完了すると結果が Agent の Memory に注入され、`stream()` は Agent ループに再び入り、LLM が結果に反応できるようにします。実行中のタスクも、キューに入った完了イベントもなくなると、ストリームが閉じます。
+
+アイドルタイムアウトをカスタマイズするには、`true` の代わりにオブジェクトを渡します。タイマーはラッパーがターンの間にいるときだけ動作するため、最初の Token の生成が遅くてもストリームは閉じません。デフォルトは 5 分です。
+
+```typescript
+const stream = await agent.stream('Research solana for me', {
+  memory: { thread: 't1', resource: 'u1' },
+  untilIdle: { maxIdleMs: 30_000 },
+})
+```
+
+完全な API については、[`Agent.stream()`](/reference/streaming/agents/stream)を参照してください。
+
+### 集約プロパティ
+
+`untilIdle` を指定した `stream()` は通常の `stream()` 呼び出しと同様の `MastraModelOutput` を返しますが、最初のターンと自動的に続行されるターンの両方にまたがるのは `fullStream` だけです。集約プロパティ（`text`、`toolCalls`、`toolResults`、`finishReason`、`messageList`、`getFullOutput()`）は引き続き**最初のターン**の内部バッファに対して解決されます。続行ターンを含む集約ビューが必要な場合は、自分で `fullStream` を処理して蓄積してください。
+
+## バックグラウンドの Subagent
+
+Subagent の呼び出しは内部では Tool 呼び出しとして投入されるため、同じバックグラウンド設定が適用されます。推奨パターンは、Supervisor 側で各 Subagent をオプトインすることです。設定が明確になり、Subagent ごとの `timeoutMs` を 1 か所で調整できます。
+
+```typescript title="src/mastra/agents/supervisor.ts"
+import { Agent } from '@mastra/core/agent'
+
+const supervisor = new Agent({
+  id: 'supervisor',
+  instructions: 'Coordinate research and writing using the available agents.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  agents: { researchAgent, writingAgent },
+  // highlight-start
+  backgroundTasks: {
+    tools: {
+      researchAgent: { enabled: true, timeoutMs: 900_000 },
+      writingAgent: { enabled: true, timeoutMs: 900_000 },
+    },
+  },
+  // highlight-end
+})
+
+const stream = await supervisor.stream('Research AI in education and write an article', {
+  memory: { thread: 't1', resource: 'u1' },
+  untilIdle: true,
+})
+```
+
+### Subagent から継承する
+
+Subagent が Supervisor の `backgroundTasks.tools` に含まれていなくても、その Subagent 自身がバックグラウンド実行の対象となる Tool を持っている場合（Tool レベルの `background.enabled: true` または自身の `backgroundTasks.tools` エントリによる設定）、Framework は Subagent の呼び出し全体をバックグラウンドタスクとして投入します。Supervisor は Subagent の意図を継承します。Subagent 自身がバックグラウンドタスクとなり、内部の Tool は Subagent のループ内でフォアグラウンド実行されます。
+
+継承した投入に使用するバックグラウンド設定（`waitTimeoutMs` など）は、Subagent 自身の `backgroundTasks` 設定から派生します。
+
+```typescript title="src/mastra/agents/researcher.ts"
+const researchAgent = new Agent({
+  id: 'research-agent',
+  description: 'Gathers factual information.',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  tools: { deepResearchTool },
+  // highlight-start
+  backgroundTasks: {
+    tools: {
+      deepResearchTool: { enabled: true, timeoutMs: 600_000 },
+    },
+    waitTimeoutMs: 900_000,
+  },
+  // highlight-end
+})
+```
+
+この `researchAgent` が、`researchAgent` に対する backgroundTask 設定を持たない Supervisor から処理を委任された場合でも、Supervisor は `researchAgent` の呼び出し全体をバックグラウンドタスクとして投入します。`deepResearchTool` は独自のネストしたバックグラウンドタスクとして投入されるのではなく、その呼び出し内でフォアグラウンド実行されます。
+
+どの Supervisor から呼び出されても Subagent を一貫してバックグラウンドで動作させたい場合は、このパターンを使用します。Supervisor ごとにバックグラウンド動作を一元的に調整したい場合は、前述の Supervisor 側のオプトインを使用します。
+
+## 一時停止と再開
+
+バックグラウンドタスクは、実行途中で自身を一時停止し、外部シグナルを待ってから処理を続行できます。これは人間による承認、Webhook、後から届くデータに次のステップが依存するフローに役立ちます。
+
+Tool は `execute` 内から `suspend(data)` を呼び出します。これにより、次の処理が行われます。
+
+- タスクレコードに `status: 'suspended'` と `data` Payload を永続化します。
+- プロセスの再起動後も実行を維持できるように、Workflow のスナップショットを保存します。
+- Manager ストリームに `background-task-suspended` チャンクを出力します。
+- 他のタスクを実行できるように、同時実行スロットを解放します。
+
+`mastra.backgroundTaskManager.resume(taskId, resumeData)` でタスクを再開します。`resumeData` は再開後の実行で Tool の `execute` オプションに渡され、タスクは `running` に戻ります。
+
+```typescript title="src/mastra/tools/approval.ts"
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const reviewTool = createTool({
+  id: 'review',
+  description: 'Submit a draft for human review.',
+  inputSchema: z.object({ draft: z.string() }),
+  outputSchema: z.object({ approvedBy: z.string(), edits: z.string().optional() }),
+  background: { enabled: true },
+  execute: async ({ draft }, context) => {
+    const { suspend, resumeData } = context.agent
+    if (!resumeData) {
+      await suspend?.({ awaiting: 'approval', draft })
+      return { approvedBy: '', edits: undefined }
+    }
+    const { reviewer, edits } = resumeData as { reviewer: string; edits?: string }
+    return { approvedBy: reviewer, edits }
+  },
+})
+```
+
+最初の `execute` 呼び出しでは `resumeData === undefined` となり、`suspend` を呼び出します。タスクが再開されると、Runtime は `resumeData` が設定された状態で Tool を再起動します。`if` 条件が false になるため、Tool は実際の結果を返します。
+
+承認を受け取った後にタスクを再開するには、次のようにします。
+
+```typescript title="src/server/approvals.ts"
+await mastra.backgroundTaskManager?.resume(taskId, {
+  reviewer: 'alice@example.com',
+  edits: 'Reworded paragraph 3.',
+})
+```
+
+### Agent ループへの影響
+
+`untilIdle` を指定した `stream()` の途中でタスクが一時停止すると、ラッパーはそれを現在の反復における終端として扱い、ストリームを閉じます。再開用 Payload を取得した時点で Agent をすぐに続行するには、`agent.resumeStream(resumeData, { runId, toolCallId, memory, untilIdle: true })` を呼び出します。再開したバックグラウンドタスクの完了、結果のメッセージリストへの追加、Agent の後続ターンの実行が、すべて同じ SSE 接続上で行われます。帯域外で再開を制御する場合は、`mastra.backgroundTaskManager.resume(taskId, resumeData)` を直接呼び出します。その場合も結果はスレッドに書き込まれ、次のユーザーターンで取得できます。
+
+### 再開時に Executor を再登録する
+
+Manager は Tool の Executor をプロセスの Memory に保持します。タスクの一時停止中にプロセスが再起動すると Executor の Closure は失われるため、`resume()` の呼び出し元は先に `manager.registerTaskContext(taskId, ...)` で再登録する必要があります。同じプロセス内で投入、再開されるタスクでは必要ありません。
+
+### 一時停止中のタスクをキャンセルする
+
+`manager.cancel(taskId)` は実行中のタスクと同様に、一時停止中のタスクにも使用できます。行の状態が `cancelled` に変わり、Workflow のスナップショットが削除されます。その後、`task.cancelled` イベントが発生します。
+
+## ライフサイクルコールバック
+
+各レイヤーで終端状態のコールバックを登録できます。コールバック同士が置き換わることはなく、成功、失敗の Hook はそれぞれの結果に対して実行されます。
+
+- Tool レベルの `background.onComplete` / `onFailed`：1 つの Tool が対象。
+- Agent レベルの `backgroundTasks.onTaskComplete` / `onTaskFailed`：この Agent が投入したすべてのタスクが対象。
+- Manager レベルの `onTaskComplete` / `onTaskFailed`：グローバルに適用。
+
+```typescript title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  storage,
+  backgroundTasks: {
+    enabled: true,
+    onTaskComplete: task => {
+      logger.info('Background task complete', { taskId: task.id, toolName: task.toolName })
+    },
+    onTaskFailed: task => {
+      logger.error('Background task failed', { taskId: task.id, error: task.error })
+    },
+  },
+})
+```
+
+## ストリーミング
+
+### すべてのタスクイベントを購読する
+
+フィルターなしで `stream()` を呼び出すと、システム内のすべてのタスクイベントのストリームが返されます。接続時に、現在実行中の全タスクのスナップショットが出力され、その後は発生したライブイベントが転送されます。
+
+```typescript title="src/mastra/run.ts"
+const bgManager = mastra.backgroundTaskManager
+if (!bgManager) throw new Error('Background tasks are not enabled')
+
+const controller = new AbortController()
+const stream = bgManager.stream({ abortSignal: controller.signal })
+
+for await (const chunk of stream) {
+  switch (chunk.type) {
+    case 'background-task-running':
+      console.log('started', chunk.payload.taskId, chunk.payload.toolName)
+      break
+    case 'background-task-completed':
+      console.log('done', chunk.payload.taskId, chunk.payload.result)
+      break
+    case 'background-task-failed':
+      console.error('failed', chunk.payload.taskId, chunk.payload.error)
+      break
+  }
+}
+```
+
+ストリームは、呼び出し元の `AbortSignal` が発火するまで開いたままになります。正常に切断できるよう、必ず `abortSignal` を渡してください。
+
+### ストリームを絞り込む
+
+任意のフィルターオプションを組み合わせて渡し、受信するイベントを絞り込みます。フィルターは最初のスナップショットとライブイベントの購読の両方に適用されます。
+
+```typescript
+const stream = bgManager.stream({
+  agentId: 'researcher',
+  threadId: 't1',
+  resourceId: 'u1',
+  abortSignal: controller.signal,
+})
+```
+
+| フィルター | 説明 |
+| - | - |
+| `agentId` | この Agent が投入したタスクのイベントだけを受信します |
+| `runId` | この特定の Agent 実行のイベントだけを受信します |
+| `threadId` | この Memory スレッドをスコープとするタスクのイベントだけを受信します |
+| `resourceId` | このリソースをスコープとするタスクのイベントだけを受信します |
+| `taskId` | 単一タスクのイベントだけを受信します |
+| `abortSignal` | シグナルが中止されるとストリームを閉じます |
+
+### タスクの状態を直接取得する
+
+ライブストリームではなく一度だけ取得する場合は、`getTask` と `listTasks` を使用します。
+
+```typescript
+const task = await mastra.backgroundTaskManager?.getTask(taskId)
+const { tasks, total } = await mastra.backgroundTaskManager?.listTasks({
+  status: 'running',
+  agentId: 'researcher',
+})
+```
+
+これらは PubSub ストリームではなくストレージから読み取るため、ページネーションされたリストや詳細ビューに適しています。
+
+## 関連項目
+
+- [`Agent.stream()` リファレンス](/reference/streaming/agents/stream)
+- [backgroundTasks 設定リファレンス](/reference/configuration#backgroundtasks)
+- [Durable Agent](./durable-agents)
+- [Supervisor Agent](/docs/capabilities/subagents)
+- [ストリームチャンク型](/reference/streaming/ChunkType)
+- [ストレージ](/docs/storage/overview)

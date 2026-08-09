@@ -1,0 +1,186 @@
+---
+title: "LangSmith exporter | Integrations | Observability"
+description: "LLM の可観測性と評価のためにトレースを LangSmith へ送信します"
+packages:
+  - "@mastra/langsmith"
+  - "@mastra/observability"
+---
+
+# LangSmith exporter
+
+[LangSmith](https://smith.langchain.com/) は、LLM アプリケーションを監視・評価するための LangChain のプラットフォームです。LangSmith exporter はトレースを LangSmith へ送信し、モデルのパフォーマンスに関するインサイト、デバッグ機能、評価 Workflow を提供します。
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/langsmith@latest
+```
+
+## 設定
+
+### 前提条件
+
+1. **LangSmith アカウント**: [smith.langchain.com](https://smith.langchain.com) で登録します
+1. **API キー**: LangSmith の Settings → API Keys で API キーを生成します
+1. **環境変数**: 認証情報を設定します
+
+```bash title=".env"
+# Required
+LANGSMITH_API_KEY=ls-xxxxxxxxxxxx
+
+# Optional
+LANGCHAIN_PROJECT=my-project  # Default project for traces
+LANGSMITH_BASE_URL=https://api.smith.langchain.com  # For self-hosted
+```
+
+### 設定不要でのセットアップ
+
+環境変数を設定したら、設定を渡さずに exporter を使用できます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { LangSmithExporter } from '@mastra/langsmith'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      langsmith: {
+        serviceName: 'my-service',
+        exporters: [new LangSmithExporter()],
+      },
+    },
+  }),
+})
+```
+
+### 明示的な設定
+
+認証情報を直接渡すこともできます。この値は環境変数より優先されます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { LangSmithExporter } from '@mastra/langsmith'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      langsmith: {
+        serviceName: 'my-service',
+        exporters: [
+          new LangSmithExporter({
+            apiKey: process.env.LANGSMITH_API_KEY,
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+## 設定オプション
+
+### 完全な設定
+
+```typescript
+new LangSmithExporter({
+  // Required credentials
+  apiKey: process.env.LANGSMITH_API_KEY!,
+
+  // Optional settings
+  apiUrl: process.env.LANGSMITH_BASE_URL, // Default: https://api.smith.langchain.com
+  projectName: 'my-project', // Project to send traces to (overrides LANGCHAIN_PROJECT env var)
+  callerOptions: {
+    // HTTP client options
+    timeout: 30000, // Request timeout in ms
+    maxRetries: 3, // Retry attempts
+  },
+  logLevel: 'info', // Diagnostic logging: debug | info | warn | error
+
+  // LangSmith-specific options
+  hideInputs: false, // Hide input data in UI
+  hideOutputs: false, // Hide output data in UI
+})
+```
+
+### 環境変数
+
+| 変数 | 説明 |
+| - | - |
+| `LANGSMITH_API_KEY` | LangSmith API キー（必須） |
+| `LANGCHAIN_PROJECT` | トレースのデフォルトプロジェクト名（任意、デフォルトは "default"） |
+| `LANGSMITH_BASE_URL` | セルフホストインスタンスの API URL（任意） |
+
+`projectName` 設定オプションは `LANGCHAIN_PROJECT` 環境変数より優先されるため、トレースをプログラムから別のプロジェクトへ振り分けられます。
+
+## 動的な設定
+
+`withLangsmithMetadata` を使用すると、span ごとに LangSmith の設定を実行時に上書きできます。これは、実行時の条件（顧客、環境、機能など）に基づいてトレースを別のプロジェクトへ振り分ける場合に便利です。
+
+### Helper の使用
+
+`withLangsmithMetadata` と `buildTracingOptions` を使用して、LangSmith 固有のオプションを設定します。
+
+```typescript title="src/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { buildTracingOptions } from '@mastra/observability'
+import { withLangsmithMetadata } from '@mastra/langsmith'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  instructions: 'You are a helpful support agent.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  defaultOptions: {
+    tracingOptions: buildTracingOptions(withLangsmithMetadata({ projectName: 'customer-support' })),
+  },
+})
+```
+
+### 動的なプロジェクトの振り分け
+
+`requestContext` を使用して、実行時の条件に基づきトレースを別のプロジェクトへ振り分けます。
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { buildTracingOptions } from '@mastra/observability'
+import { withLangsmithMetadata } from '@mastra/langsmith'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  instructions: 'You are a helpful support agent.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  defaultOptions: ({ requestContext }) => {
+    const userTier = requestContext?.get('user-tier') as string
+    const userId = requestContext?.get('user-id') as string
+
+    return {
+      tracingOptions: buildTracingOptions(
+        withLangsmithMetadata({
+          projectName: userTier === 'enterprise' ? 'enterprise-traces' : 'standard-traces',
+          sessionId: userId,
+        }),
+      ),
+    }
+  },
+})
+```
+
+### 使用可能なフィールド
+
+`withLangsmithMetadata` helper は次のフィールドを受け取ります。
+
+| フィールド | 型 | 説明 |
+| - | - | - |
+| `projectName` | string | このトレースのプロジェクトを上書きします |
+| `sessionId` | string | 関連するトレースをセッション単位でグループ化します |
+| `sessionName` | string | セッションの表示名です |
+
+すべてのフィールドは任意です。helper は既存の metadata とマージされるため、複数回呼び出したり、ほかのトレースオプションと組み合わせたりできます。
+
+## 関連情報
+
+- [トレースの概要](/docs/observability/tracing/overview)
+- [LangSmith ドキュメント](https://docs.smith.langchain.com/)

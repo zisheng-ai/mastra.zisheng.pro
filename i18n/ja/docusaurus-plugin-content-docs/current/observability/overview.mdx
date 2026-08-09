@@ -1,0 +1,225 @@
+---
+title: "Observability の概要"
+description: "Mastra のトレーシング、メトリクス、ロギングがどのように連携し、AI アプリケーションの監視、デバッグ、最適化を支援するかを説明します。"
+packages:
+  - "@mastra/observability"
+---
+
+# Observability の概要
+
+Mastra の Observability システムを使用すると、Agent の実行、Workflow の各ステップ、Tool の呼び出し、モデルとのやり取りをすべて可視化できます。Agent の動作はモデルの応答、プロンプト、Tool、メモリ、Workflow の状態に左右されるため、Observability を活用すれば、運用初日から実行時の判断を詳しく調べられます。相互に補完し合うシグナルを収集することで、アプリケーションが何をしているのか、なぜそうしているのかを把握できます。
+
+- [**設定**](#configuration): Trace、ログ、メトリクス、フィードバックに対する Observability を一度に設定します。
+- [**ストレージ**](#storage): 永続化された Trace、ログ、メトリクスの集計、フィードバックのクエリに使用するストレージバックエンドを選択します。
+- [**トレーシング**](/docs/observability/tracing/overview): すべての操作を Span の階層的なタイムラインとして記録し、入力、出力、トークン使用量、処理時間を取得します。
+- [**ロギング**](/docs/observability/logging): アプリケーションと Mastra 内部の構造化ログエントリを Observability ストレージに転送し、自動的に Trace と関連付けます。
+- [**メトリクス**](/docs/observability/metrics/overview): Trace から使用量とコストのデータを抽出します。追加の計装は必要ありません。
+- [**フィードバック**](/docs/observability/feedback): Trace や Span に関連付けられた評価、コメント、修正、その他のレビューシグナルを保存します。
+- [**インテグレーション**](/docs/observability/integrations/overview): Studio、ホステッド環境、外部の Observability ワークフロー向けに、Exporter、Bridge、Span Processor を選択します。
+
+## Observability を使用する場面
+
+- 判断に至るまでの経路、Tool の呼び出し、モデルの応答をすべて確認し、Agent の予期しない動作をデバッグする。
+- Agent、Workflow、Tool 全体のレイテンシーを監視し、ボトルネックを特定する。
+- トークン消費量と推定コストの推移を追跡し、支出を管理する。
+- 各ステップの実行を追跡し、Workflow の失敗原因を診断する。
+- プロンプトやモデルを変更する前後で Agent のパフォーマンスを比較する。
+
+## 各要素の連携
+
+トレーシングが基盤となります。Observability を設定すると、Agent の実行、Workflow の実行、Tool の呼び出し、モデルとのやり取りごとに [Span](https://opentelemetry.io/docs/concepts/signals/traces/#spans) が生成されます。Span は Trace にまとめられ、リクエストのライフサイクル全体が階層的なタイムラインとして表示されます。
+
+メトリクスは Trace から自動的に生成されます。Span が終了すると、Mastra は追加のコードなしで処理時間、トークン数、推定コストを抽出します。これらのメトリクスは [Studio](/docs/studio/observability) のダッシュボードで使用されます。
+
+ログは Trace に自動的に関連付けられます。Trace のコンテキスト内で呼び出された `logger.info()`、`logger.warn()`、`logger.error()` にはすべて、現在の Trace ID と Span ID が付与されます。ログエントリから、そのログを生成した Trace に直接移動できます。
+
+フィードバックには、評価、コメント、修正など、人によるレビューのシグナルが記録されます。フィードバックは Trace や Span に関連付けることができ、メトリクスと同じ Observability ストアを使ってクエリできます。
+
+これらのシグナルは、Trace ID、Span ID、エンティティタイプ、エンティティ名などの相関 ID を共有します。これにより、メトリクスの急増から、その原因となった Trace、ログ、関連するフィードバックへとたどれます。
+
+## クイックスタート
+
+`@mastra/observability` と、Trace およびメトリクスに対応するストレージバックエンドをインストールします。
+
+```bash npm2yarn
+npm install @mastra/observability @mastra/libsql @mastra/duckdb
+```
+
+次に、Mastra インスタンスで Observability を設定します。次の例では複合ストレージを使用し、Observability データをメトリクス集計に対応する DuckDB にルーティングし、それ以外のデータは LibSQL に保存します。
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { LibSQLStore } from '@mastra/libsql'
+import { DuckDBStore } from '@mastra/duckdb'
+import { MastraCompositeStore } from '@mastra/core/storage'
+import {
+  Observability,
+  MastraStorageExporter,
+  MastraPlatformExporter,
+  SensitiveDataFilter,
+} from '@mastra/observability'
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite-storage',
+    default: new LibSQLStore({
+      id: 'mastra-storage',
+      url: 'file:./mastra.db',
+    }),
+    domains: {
+      observability: await new DuckDBStore().getStore('observability'),
+    },
+  }),
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'mastra',
+        exporters: [
+          new MastraStorageExporter(), // Persists observability events to Mastra Storage
+          new MastraPlatformExporter(), // Sends observability events to Mastra platform (if MASTRA_PLATFORM_ACCESS_TOKEN is set)
+        ],
+        spanOutputProcessors: [
+          new SensitiveDataFilter(), // Redacts sensitive data like passwords, tokens, keys
+        ],
+        logging: {
+          enabled: true,
+          level: 'info',
+        },
+      },
+    },
+  }),
+})
+```
+
+これにより、トレーシング、ログ転送、メトリクスが有効になります。Mastra は Langfuse、Datadog、OpenTelemetry 互換プラットフォームなどの外部トレーシングプロバイダーにも対応しています。外部プロバイダーにデータを送信しながら Mastra Studio からもアクセスできるようにする方法については、[Studio からのアクセスを維持する](#maintaining-studio-access)を参照してください。
+
+## 設定
+
+Observability は Mastra インスタンスで一度設定すれば、Trace、ログ、メトリクス全体に適用されます。
+
+### 基本設定
+
+Observability の設定には通常、次の項目が含まれます。
+
+- `serviceName`: エクスポートされる Observability データに付与されるサービス識別子。
+- `exporters`: Trace、ログ、派生メトリクスの送信先を1つ以上指定します。
+- `spanOutputProcessors`: Span がエクスポートされる前に実行される変換処理。
+- `logging`: Observability ストレージへのログ転送設定。
+
+送信先と Processor については、[インテグレーションの概要](/docs/observability/integrations/overview)を参照してください。
+
+### Studio からのアクセスを維持する
+
+外部 Exporter を追加する場合は、Studio の Observability 用に `MastraStorageExporter` を、ホステッド Mastra プラットフォームの Observability 用に `MastraPlatformExporter` を残してください。必要に応じて両方を使用できます。
+
+次の例では、Observability の設定のみを示します。ストレージは別途設定してください。
+
+```ts title="src/mastra/observability.ts"
+import { Observability, MastraStorageExporter, MastraPlatformExporter } from '@mastra/observability'
+import { ArizeExporter } from '@mastra/arize'
+
+export const observability = new Observability({
+  configs: {
+    production: {
+      serviceName: 'my-service',
+      exporters: [
+        new ArizeExporter({
+          endpoint: process.env.PHOENIX_COLLECTOR_ENDPOINT,
+          apiKey: process.env.PHOENIX_API_KEY,
+        }),
+        new MastraStorageExporter(),
+        new MastraPlatformExporter(),
+      ],
+    },
+  },
+})
+```
+
+### サーバーレス環境でのフラッシュ
+
+サーバーレス環境では、ランタイムが一時停止または終了する前に Observability Exporter をフラッシュします。
+
+```ts
+await mastra.observability.flush()
+```
+
+サーバーレス環境では、ローカルファイルストレージではなく外部ストレージを使用してください。ストレージの選択とルーティングについては、[ストレージ](#storage)を参照してください。
+
+### 複数設定の構成
+
+環境やリクエストの種類ごとに異なる Exporter やサンプリング動作が必要な場合は、複数の設定を使用します。実行時に `configSelector` で有効な設定を選択します。
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+import { LangfuseExporter } from '@mastra/langfuse'
+
+const storageExporter = new MastraStorageExporter()
+const langfuseExporter = new LangfuseExporter()
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      development: {
+        serviceName: 'my-service-dev',
+        exporters: [storageExporter],
+      },
+      production: {
+        serviceName: 'my-service-prod',
+        exporters: [storageExporter, langfuseExporter],
+      },
+    },
+    configSelector: () => process.env.NODE_ENV || 'development',
+  }),
+})
+```
+
+Trace のサンプリングについては、[トレーシング](/docs/observability/tracing/overview)を参照してください。
+
+## ストレージ
+
+ストレージによって、永続化される Observability シグナル、使用できるクエリ、メトリクスを集計できるかどうかが決まります。アプリケーションのプライマリストアとは別に、Observability 専用のストアを使用してください。
+
+### シグナルのサポート
+
+ストレージの対応状況は、シグナルとワークロードによって異なります。`MastraStorageExporter` は Trace を ClickHouse、PostgreSQL、MSSQL、MongoDB、LibSQL に永続化できます。メトリクスには、分析処理に対応したストアが必要です。
+
+- DuckDB: ローカルでのテストと開発に推奨。
+- ClickHouse: 大量データを扱う本番環境の Observability に推奨。
+- `PostgresStoreVNext`: Observability ドメインが有効な場合にメトリクスをサポートします。パーティション全体のスキャンを避けるため、必ず時間範囲を指定してください。
+- Mastra プラットフォーム: バックエンドを自分で管理せずにホステッド Observability を利用するには、`MastraPlatformExporter` を使用します。
+
+プロバイダーの完全な一覧と対応するトレーシング方式については、[Mastra Storage Exporter](/docs/observability/integrations/exporters/mastra-storage#storage-provider-support)を参照してください。プライマリストアが Observability に対応していない場合や、ワークロードを独立してスケーリングする必要がある場合は、複合ストレージを使用して `observability` ドメインを個別にルーティングします。
+
+### ローカル開発
+
+ローカル開発では、次の構成を使用します。
+
+- アプリケーションのプライマリストレージには `LibSQLStore`
+- `DuckDBStore` を `observability` ドメインに使用
+- ローカルの Studio からアクセスするには `MastraStorageExporter`
+
+### 本番環境へのデプロイ
+
+Observability のトラフィックは通常、アプリケーションの他の部分よりも書き込みの比率が高くなります。本番環境では、次の構成を使用します。
+
+- 独自のストレージで Observability を運用する場合は、`MastraStorageExporter` と ClickHouse を `observability` ドメインに使用します。
+- バックエンドを自分で管理せずにホステッド Mastra プラットフォームの Observability を利用するには、`MastraPlatformExporter` を使用します。
+- Observability にプライマリアプリケーションデータとは異なるバックエンドやスケーリングポリシーが必要な場合は、複合ストレージを使用します。
+
+バックエンドの互換性と Exporter のバッチ処理動作については、[Mastra Storage Exporter](/docs/observability/integrations/exporters/mastra-storage)を参照してください。
+
+## Mastra プラットフォーム
+
+プロジェクトやデプロイを横断してホステッド環境の Trace、ログ、メトリクスを確認する方法については、[Mastra プラットフォームの Observability](/docs/mastra-platform/observability)を参照してください。
+
+## 次のステップ
+
+- [トレーシング](/docs/observability/tracing/overview)
+- [ロギング](/docs/observability/logging)
+- [メトリクス](/docs/observability/metrics/overview)
+- [フィードバック](/docs/observability/feedback)
+- [インテグレーションの概要](/docs/observability/integrations/overview)
+- [Mastra Studio](/docs/studio/observability)
+- [自動メトリクスのリファレンス](/reference/observability/metrics/automatic-metrics)
+- [Mastra プラットフォームの Observability](/docs/mastra-platform/observability)

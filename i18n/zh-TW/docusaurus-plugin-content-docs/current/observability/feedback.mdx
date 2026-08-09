@@ -1,0 +1,162 @@
+---
+title: "Feedback | Observability"
+description: "在 Mastra Observability 中收集、列出及查詢人工 Feedback 記錄。"
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+# Feedback
+
+Feedback 記錄會擷取 Human-in-the-Loop 訊號，例如正負評、評分、留言與修正。當你需要將使用者、QA、Studio 或系統審查資料附加至 Trace 或 span，並與其他 Observability 訊號一同查詢時，可以使用 Feedback。
+
+不同於指標與 score，Feedback 通常由人員或審查 Workflow 提供。數值 Feedback 可以進行彙總、分組、依時間繪製圖表，以及查詢百分位數。
+
+## 使用 Feedback 的時機
+
+- 收集使用者對 Agent 回應的滿意度評分。
+- 將 QA 留言或修正內容儲存在所審查的 Trace 旁。
+- 依 Agent、環境或實驗建立評分儀表板。
+
+## 新增 Feedback
+
+若要從應用程式程式碼為已保存的 Trace 或 span 加上註記，請使用 `mastra.observability.addFeedback()`。此 helper 在 Observability 進入點上是選用項目，因此請確認目前啟用的 Observability 實作支援此功能。如需所有 Client 方法，請參閱 [Client SDK Observability 參考](/reference/client-js/observability)。
+
+```typescript title="src/mastra/feedback.ts"
+if (!mastra.observability.addFeedback) {
+  throw new Error('Feedback is not supported by the active observability implementation')
+}
+
+await mastra.observability.addFeedback({
+  traceId: 'trace-123',
+  spanId: 'span-456',
+  feedback: {
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'The answer solved my issue.',
+  },
+})
+```
+
+## 找出訊息的 Trace
+
+Feedback 通常會針對使用者已讀取的訊息收集，因此你需要取得該訊息的 `traceId`。無論是 stream 結果，或稍後從 Memory 叫回訊息時，Assistant 訊息都會在 `content.metadata` 中帶有此值：
+
+```typescript title="src/mastra/message-trace.ts"
+const agent = mastra.getAgent('weatherAgent')
+const memory = await agent.getMemory()
+
+const { messages } = await memory!.recall({ threadId, perPage: false })
+
+const message = messages.find(m => m.id === messageId)
+const traceId = message?.content.metadata?.traceId
+```
+
+這個值與執行結果中以 `traceId` 回報的 Trace 相同，因此無論是在生成時收集 Feedback，或稍後針對已儲存的訊息收集 Feedback，都會連結至同一個 Trace。在停用 Tracing 時產生的訊息不會有 `traceId`。
+
+## 建立 Feedback
+
+每次呼叫 `createFeedback()` 都必須提供 `feedbackType` 與 `value`。若 Feedback 應連結至 Trace 或特定 span，請加入 `traceId` 或 `spanId`。你可以使用 `feedbackSource` 作為選用的字串 metadata，例如 `user`、`qa`、`studio` 或 `system`。
+
+在 Storage 層級寫入時，請包含 `timestamp`，因為此方法會直接寫入 Store。
+
+```typescript
+const observability = await mastra.getStorage()!.getStore('observability')
+
+await observability!.createFeedback({
+  feedback: {
+    feedbackId: 'feedback-rating-1',
+    timestamp: new Date(),
+    traceId: 'trace-123',
+    spanId: 'span-456',
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'The answer solved my issue.',
+    tags: ['production'],
+  },
+})
+
+await observability!.createFeedback({
+  feedback: {
+    feedbackId: 'feedback-comment-1',
+    timestamp: new Date(),
+    feedbackSource: 'qa',
+    feedbackType: 'comment',
+    value: 'Needs a citation before shipping.',
+    experimentId: 'support-agent-eval',
+  },
+})
+```
+
+## 列出 Feedback
+
+使用 `listFeedback()` 分頁瀏覽原始記錄，或透過 delta 模式進行輪詢。
+
+```typescript
+const result = await observability!.listFeedback({
+  filters: {
+    feedbackType: 'rating',
+    feedbackSource: 'user',
+    timestamp: { start: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+  },
+  pagination: { page: 0, perPage: 20 },
+  orderBy: { field: 'timestamp', direction: 'DESC' },
+})
+
+console.log(result.feedback, result.pagination?.hasMore)
+```
+
+Filter 包含 `traceId` 和 `spanId` 等目標欄位、`feedbackType`、`feedbackSource` 和 `feedbackUserId` 等 Feedback 欄位，以及 `entityName`、`environment`、`experimentId` 和 `tags` 等共用 context 欄位。
+
+```typescript
+await observability!.listFeedback({
+  filters: {
+    traceId: 'trace-123',
+    feedbackType: ['rating', 'thumbs'],
+    tags: ['production'],
+  },
+})
+```
+
+## 查詢 Feedback 分析資料
+
+OLAP Feedback 查詢會針對數值 `value` 欄位運作。你可以用它處理評分、以 `1` 和 `-1` 編碼的正負評、數值 QA score 或其他數值 Feedback 類型。
+
+```typescript
+const rating = await observability!.getFeedbackAggregate({
+  feedbackType: 'rating',
+  feedbackSource: 'user',
+  aggregation: 'avg',
+  comparePeriod: 'previous_day',
+})
+
+const byAgent = await observability!.getFeedbackBreakdown({
+  feedbackType: 'rating',
+  groupBy: ['entityName'],
+  aggregation: 'avg',
+  filters: { environment: 'production' },
+})
+
+const ratingsOverTime = await observability!.getFeedbackTimeSeries({
+  feedbackType: 'rating',
+  aggregation: 'avg',
+  interval: '1h',
+  groupBy: ['feedbackSource'],
+})
+```
+
+如需所有欄位、filter、傳回型別與百分位數查詢參數，請參閱 [Feedback 參考](/reference/observability/feedback)。
+
+## 將 Feedback 匯出至外部平台
+
+Feedback 會通過 Observability event bus，因此支援 Feedback 的 Exporter 會自動將其轉送。[PostHog Exporter](/reference/observability/tracing/exporters/posthog#feedback-export)會將 Feedback 作為原生 `$ai_feedback` event 傳送，並顯示在 PostHog 中連結的 Trace 上。
+
+## 相關內容
+
+- [Observability 總覽](/docs/observability/overview)
+- [Tracing 總覽](/docs/observability/tracing/overview)
+- [指標總覽](/docs/observability/metrics/overview)
+- [Client SDK Observability 參考](/reference/client-js/observability)
+- [Feedback 參考](/reference/observability/feedback)

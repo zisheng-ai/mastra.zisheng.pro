@@ -1,0 +1,222 @@
+---
+title: "Human-in-the-loop（HITL）| Workflows"
+description: "Mastra の Human-in-the-loop Workflow では、手動承認、レビュー、ユーザー入力のために実行を一時停止し、その後再開できます。"
+packages:
+  - "@mastra/core"
+---
+
+# Human-in-the-loop（HITL）
+
+Workflow によっては、続行前に人間からの入力を待つ必要があります。Workflow を[一時停止](/docs/workflows/suspend-and-resume#pausing-a-workflow-with-suspend)すると、停止した理由と続行に必要な情報を示すメッセージを返せます。その後、受け取った入力に応じて Workflow を[再開](#resuming-workflows-with-human-input)するか、[終了](#handling-human-rejection-with-bail)できます。この方法は、手動での承認や却下、判断に承認が必要な場合、人間による監督が必要なあらゆるステップに適しています。
+
+## 人間の入力を待つために Workflow を一時停止する
+
+Human-in-the-loop の入力は、`suspend()` を使った [Workflow の一時停止](/docs/workflows/suspend-and-resume)とほぼ同じです。人間の入力が必要な場合は、続行方法の背景情報や指針をユーザーに示すペイロードを `suspend()` から返せる点が異なります。
+
+![suspend() による Workflow の一時停止](/img/workflows/workflows-suspend.jpg)
+
+```typescript {12-17,22-26} title="src/mastra/workflows/test-workflow.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+const step1 = createStep({
+  id: 'step-1',
+  inputSchema: z.object({
+    userEmail: z.string(),
+  }),
+  outputSchema: z.object({
+    output: z.string(),
+  }),
+  resumeSchema: z.object({
+    approved: z.boolean(),
+  }),
+  suspendSchema: z.object({
+    reason: z.string(),
+  }),
+  execute: async ({ inputData, resumeData, suspend }) => {
+    const { userEmail } = inputData
+    const { approved } = resumeData ?? {}
+
+    if (!approved) {
+      return await suspend({
+        reason: 'Human approval required.',
+      })
+    }
+
+    return {
+      output: `Email sent to ${userEmail}`,
+    }
+  },
+})
+
+export const testWorkflow = createWorkflow({
+  id: 'test-workflow',
+  inputSchema: z.object({
+    userEmail: z.string(),
+  }),
+  outputSchema: z.object({
+    output: z.string(),
+  }),
+})
+  .then(step1)
+  .commit()
+```
+
+## ユーザーにフィードバックを提供する
+
+Workflow が一時停止したら、停止中のステップを特定し、その `suspendPayload` を読み取ることで、`suspend()` が返したペイロードにアクセスできます。
+
+```typescript {12} title="src/test-workflow.ts"
+const workflow = mastra.getWorkflow('testWorkflow')
+const run = await workflow.createRun()
+
+const result = await run.start({
+  inputData: {
+    userEmail: 'alex@example.com',
+  },
+})
+
+if (result.status === 'suspended') {
+  const suspendStep = result.suspended[0]
+  const suspendedPayload = result.steps[suspendStep[0]].suspendPayload
+
+  console.log(suspendedPayload)
+}
+```
+
+### 出力例
+
+ステップが返すデータに理由を含めると、Workflow の再開に必要な操作をユーザーが把握できます。
+
+```typescript
+{
+  reason: 'Confirm to send email.'
+}
+```
+
+## 人間の入力を受けて Workflow を再開する
+
+[Workflow の再開](/docs/workflows/suspend-and-resume#restarting-a-workflow-with-resume)と同様に、人間から入力を受け取った後は `resumeData` を指定して `resume()` を呼び、Workflow を続行します。Workflow は一時停止したステップから再開します。
+
+![resume() による Workflow の再開](/img/workflows/workflows-resume.jpg)
+
+```typescript {13}
+const workflow = mastra.getWorkflow('testWorkflow')
+const run = await workflow.createRun()
+
+await run.start({
+  inputData: {
+    userEmail: 'alex@example.com',
+  },
+})
+
+const handleResume = async () => {
+  const result = await run.resume({
+    step: 'step-1',
+    resumeData: { approved: true },
+  })
+}
+```
+
+### `bail()` で人間による却下を処理する
+
+エラーを発生させずにステップで Workflow の実行を停止するには、`bail()` を使います。人間が操作を明示的に却下した場合に便利です。Workflow は `success` ステータスで完了し、`bail()` 呼び出し以降の処理はスキップされます。
+
+```typescript {6-10}
+const step1 = createStep({
+  execute: async ({ inputData, resumeData, suspend, bail }) => {
+    const { userEmail } = inputData
+    const { approved } = resumeData ?? {}
+
+    if (approved === false) {
+      return bail({
+        reason: 'User rejected the request.',
+      })
+    }
+
+    if (!approved) {
+      return await suspend({
+        reason: 'Human approval required.',
+      })
+    }
+
+    return {
+      message: `Email sent to ${userEmail}`,
+    }
+  },
+})
+```
+
+## 複数回の人間による入力
+
+複数の段階で入力が必要な Workflow でも、一時停止のパターンは変わりません。各ステップで `resumeSchema` を定義し、通常はユーザーへのフィードバックに使える理由を含む `suspendSchema` も定義します。
+
+```typescript {11-16,21-25} title="src/mastra/workflows/test-workflow.ts" prettier:false
+const step1 = createStep({...});
+
+const step2 = createStep({
+  id: "step-2",
+  inputSchema: z.object({
+    message: z.string()
+  }),
+  outputSchema: z.object({
+    output: z.string()
+  }),
+  resumeSchema: z.object({
+    approved: z.boolean()
+  }),
+  suspendSchema: z.object({
+    reason: z.string()
+  }),
+  execute: async ({ inputData, resumeData, suspend }) => {
+    const { message } = inputData;
+    const { approved } = resumeData ?? {};
+
+    if (!approved) {
+      return await suspend({
+        reason: "Human approval required."
+      });
+    }
+
+    return {
+      output: `${message} - Deleted`
+    };
+  }
+});
+
+export const testWorkflow = createWorkflow({
+  id: "test-workflow",
+  inputSchema: z.object({
+    userEmail: z.string()
+  }),
+  outputSchema: z.object({
+    output: z.string()
+  })
+})
+  .then(step1)
+  .then(step2)
+  .commit();
+```
+
+一時停止したステップごとに `resume()` を個別に呼び出し、各ステップを順番に再開する必要があります。この方法により、UI のフィードバックを統一し、各段階の入力処理を明確にしながら、複数ステップの承認を管理できます。
+
+```typescript {4,11}
+const handleResume = async () => {
+  const result = await run.resume({
+    step: 'step-1',
+    resumeData: { approved: true },
+  })
+}
+
+const handleDelete = async () => {
+  const result = await run.resume({
+    step: 'step-2',
+    resumeData: { approved: true },
+  })
+}
+```
+
+## 関連情報
+
+- [Control Flow](/docs/workflows/control-flow)
+- [一時停止と再開](/docs/workflows/suspend-and-resume)

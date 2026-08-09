@@ -1,0 +1,471 @@
+---
+title: 'Experiment の実行 | Datasets'
+description: 'Agent または Workflow に対して Experiment を実行し、採点して結果を追跡します。'
+packages:
+  - '@mastra/core'
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Experiment の実行
+
+**追加バージョン:** `@mastra/core@1.4.0`
+
+Experiment は、Dataset の各項目をターゲット（Agent、Workflow、または Scorer）で実行し、必要に応じて出力を採点します。LLM Judge 自体を評価する場合は、Scorer をターゲットにします。デフォルトでは結果がストレージに保存されるため、プロンプト、モデル、コードの変更ごとに実行結果を比較できます。
+
+<Inject>
+  **AI Agent 向け:** Studio を開いたり一時スクリプトを書いたりせず、`npx mastra api experiment run dataset_123 '{"name":"translation-baseline"}'` を実行して Experiment を直接開始できます。サンプル ID の代わりに、`npx mastra api dataset list` が返す Dataset ID を使用してください。このコマンドには、Dataset ストレージと登録済みの Experiment ターゲットを備えた稼働中の Mastra サーバーが必要です。`npx mastra dev` でローカルサーバーを起動するか、`--url` で接続可能なサーバーのベース URL を指定してください。異なる入力を作成する前に `npx mastra api experiment run --schema` を実行し、モデル呼び出しが発生する可能性があるため、Experiment の開始前にユーザーの承認を得てください。API CLI の検出、ターゲット指定、スキーマ、認証、エラー処理に関する詳しいガイダンスを利用するには、`npx skills add mastra-ai/skills --skill mastra` で Mastra の Skill をインストールしてください。
+</Inject>
+
+## 基本的な Experiment
+
+ターゲットと Scorer を指定して [`startExperiment()`](/reference/datasets/startExperiment) を呼び出します。
+
+```typescript title="src/mastra/experiments/basic.ts"
+import { mastra } from '../index'
+
+const dataset = await mastra.datasets.get({ id: 'translation-dataset-id' })
+
+const summary = await dataset.startExperiment({
+  name: 'gpt-5.1-baseline',
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  scorers: ['accuracy', 'fluency'],
+})
+
+console.log(summary.status) // 'completed' | 'failed'
+console.log(summary.succeededCount) // number of items that ran successfully
+console.log(summary.failedCount) // number of items that failed
+```
+
+`startExperiment()` は、すべての項目が完了するまで処理をブロックします。処理を開始して結果を待たない実行については、[非同期 Experiment](#async-experiments) を参照してください。
+
+## Studio
+
+[Studio](/docs/studio/overview) でも Experiment を実行できます。Dataset に項目を追加した後、その項目を開いて **Run Experiment** を選択し、ターゲット、Scorer、オプションを設定します。
+
+実行後、**Experiments** タブにはその Dataset のすべての実行（ステータス、件数、タイムスタンプ）が表示されます。Experiment を選択すると、項目ごとの結果、Score、実行 Trace を確認できます。
+
+**Experiments** タブで **Compare** を選択し、2つ以上の Experiment を指定すると、Score と結果を並べて比較できます。
+
+## Experiment のターゲット
+
+Experiment のターゲットには、登録済みの Agent、Workflow、Scorer を指定できます。
+
+### 登録済み Agent
+
+Mastra インスタンスに登録された Agent を指定します。
+
+```typescript title="src/mastra/experiments/agent-target.ts"
+const summary = await dataset.startExperiment({
+  name: 'agent-v2-eval',
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  scorers: ['accuracy'],
+})
+```
+
+各項目の `input` は `agent.generate()` に直接渡されるため、`string`、`string[]`、`CoreMessage[]` のいずれかである必要があります。
+
+#### Memory を使用する Agent
+
+ターゲット Agent に独自の Memory があり、request context に resource id（認証ミドルウェア、Experiment または項目の `requestContext`、Studio の **Run Experiment** フォームで設定される `MASTRA_RESOURCE_ID_KEY`）が含まれる場合、Experiment runner は項目ごとに新しい Memory thread を挿入します。request context の resource id は「この resource として実行する」ことを意味します。各項目の会話はその resource 配下の thread として保存され、再試行では試行ごとに新しい thread が作成されるため、前の失敗した試行のコンテキストが再試行へ漏れることはありません。
+
+挿入された thread には、実行との対応を確認できるタグが付きます。thread metadata には `experimentId` と、Dataset 項目の id が `experimentItemId` として保存されます。thread title は生成されません。
+
+thread は呼び出し元の resource に属するため、resource scope の Memory 機能は実行中にその resource の状態を読み書きします。
+
+- resource scope の working memory の更新は resource に保存され、後続の項目は前の項目による更新を参照します。
+- resource scope の semantic recall は、その resource の過去の会話を Experiment へ提示できます。また、Experiment の transcript は、その resource の後続の会話から呼び出せるようになります。
+
+これは、実際のユーザーが蓄積したコンテキストに対して Agent を評価する場合に便利です。Experiment から実ユーザーの状態へ影響を与えたくない場合は、評価専用の resource id を使って実行してください。
+
+次の場合、thread は挿入されません。
+
+- request context に `MASTRA_THREAD_ID_KEY` も設定されている場合、runner はその thread をそのまま使用するため、すべての項目（および再試行）が同じ会話を共有します。
+- Agent に Memory がない場合、または request context に resource id がない場合、実行では Memory を使用せず、何も保存されません。
+
+### 登録済み Workflow
+
+Mastra インスタンスに登録された Workflow を指定します。
+
+```typescript title="src/mastra/experiments/workflow-target.ts"
+const summary = await dataset.startExperiment({
+  name: 'workflow-eval',
+  targetType: 'workflow',
+  targetId: 'translation-workflow',
+  scorers: ['accuracy'],
+})
+```
+
+Workflow は、各項目の `input` を trigger data として受け取ります。
+
+### 登録済み Scorer
+
+ground truth に対して LLM Judge を評価するには、Scorer を指定します。
+
+```typescript title="src/mastra/experiments/scorer-target.ts"
+const summary = await dataset.startExperiment({
+  name: 'judge-accuracy-eval',
+  targetType: 'scorer',
+  targetId: 'accuracy',
+})
+```
+
+Scorer は各項目の `input` と `groundTruth` を受け取ります。LLM ベースの Judge は、基盤モデルの変更に伴って時間の経過とともにずれる可能性があります。そのため、正しいことが確認済みのラベルに対して定期的に再調整することが重要です。Dataset は、そのずれを検出するための安定したベンチマークになります。
+
+## 結果を採点する
+
+各項目でターゲットを実行した後、Scorer が自動的に実行されます。Scorer インスタンスまたは登録済み Scorer ID を渡します。
+
+<Tabs>
+  <TabItem value="ids" label="Scorer ID">
+    ```typescript
+    // Reference scorers registered on the Mastra instance
+    const summary = await dataset.startExperiment({
+      name: 'with-registered-scorers',
+      targetType: 'agent',
+      targetId: 'translation-agent',
+      scorers: ['accuracy', 'fluency'],
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="instances" label="Scorer インスタンス">
+    ```typescript
+    import { createAnswerRelevancyScorer } from '@mastra/evals/scorers/prebuilt'
+
+    const relevancy = createAnswerRelevancyScorer({ model: '__GATEWAY_OPENAI_MODEL_MINI__' })
+
+    const summary = await dataset.startExperiment({
+      name: 'with-scorer-instances',
+      targetType: 'agent',
+      targetId: 'translation-agent',
+      scorers: [relevancy],
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+各項目の結果には、Scorer ごとの Score が含まれます。
+
+```typescript
+for (const item of summary.results) {
+  console.log(item.itemId, item.output)
+  for (const score of item.scores) {
+    console.log(`  ${score.scorerName}: ${score.score} — ${score.reason}`)
+  }
+}
+```
+
+利用可能な Scorer とカスタム Scorer については、[Scorer の概要](/docs/evals/overview)を参照してください。
+
+## 実行ごとに保存を制御する
+
+特定の実行でストレージへの書き込みを省略するには、`persistence` を使用します。Experiment レコードと Score レコードは個別に無効化できます。
+
+```typescript title="src/mastra/experiments/no-persistence.ts"
+const summary = await dataset.startExperiment({
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  scorers: ['accuracy'],
+  persistence: {
+    experiments: 'none',
+    scores: 'none',
+  },
+})
+```
+
+ターゲットと Scorer は引き続き実行され、`startExperiment()` も項目の結果と Score を `summary` で返します。設定は互いに独立しています。たとえば `scores: 'none'` だけを設定すると、Score レコードを作成せず、Experiment と項目の結果を保存できます。
+
+省略した設定のデフォルトは `'default'` で、標準のストレージ動作を維持します。このポリシーが制御するのは、実行で作成される Experiment と Score のレコードだけです。Agent Memory、Vector、Observability、カスタム Tool ストレージなど、ターゲットが使用するストレージは無効になりません。
+
+`startExperimentAsync()` を `experiments: 'none'` で実行すると、Experiment レコード、進捗更新、項目の結果は保存されません。Score の保存は引き続き `persistence.scores` で個別に制御します。Experiment event observer がない場合、処理は開始後に切り離され、Experiment API から完了または失敗を確認できません。
+
+呼び出し元が返される summary を必要とする場合は、同期的な `startExperiment()` を使用します。Experiment event observer は lifecycle event と最終 summary を受け取れます。
+
+## Experiment event を監視する
+
+Experiment の実行中に、バージョン付きで JSON に安全な lifecycle event を受け取るには `onEvent` を使用します。`startExperiment()`、`startExperimentAsync()`、`runExperiment()` で利用できます。
+
+```typescript title="src/mastra/experiments/observe.ts"
+import type { ExperimentEvent } from '@mastra/core/datasets'
+
+const events: ExperimentEvent[] = []
+
+await dataset.startExperimentAsync({
+  task: async ({ input }) => processItem(input),
+  persistence: { experiments: 'none' },
+  onEvent: async event => {
+    events.push(event)
+    await publishEvent(event)
+  },
+})
+```
+
+observer は次の event type を受け取ります。
+
+- `experiment.run.started`: 実行、ターゲット、解決済み Dataset バージョン、項目数を示します。
+- `experiment.item.completed`: 採点後に確定した項目の結果を報告します。Score、エラー、再試行回数、Tool mock の詳細、安定した項目 ID が含まれます。
+- `experiment.run.finished`: 最終結果と summary のカウンターを報告します。
+
+Mastra は、各 observer 呼び出しの完了を待ってから次の event を渡します。この直列配信によってバックプレッシャーが適用され、event の `sequence` 値が配信順序と一致しますが、項目の実行は並行したままにできます。
+
+observer が例外を投げるか reject すると、Mastra は残りの実行を中止し、`id` が `EXPERIMENT_EVENT_OBSERVER_FAILED` の `MastraError` で `runExperiment()` を reject します。失敗した observer には最終 event を送りません。`startExperimentAsync()` では、切り離された observer が失敗する時点でメソッドがすでに返っているため、呼び出し元がエラーを直接受け取る必要がある場合は observer 内で配信エラーを処理してください。
+
+Mastra は、最終的な Experiment ステータスを保存する前に `experiment.run.finished` event の完了を待ちます。Experiment の保存を無効にした場合は、この event を正式な最終シグナルとして扱います。ただし、ストレージへの書き込み直後の読み取りを保証するシグナルとしては使用しないでください。
+
+エクスポートされる event type は、`ExperimentEvent`、`ExperimentRunStartedEvent`、`ExperimentItemCompletedEvent`、`ExperimentRunFinishedEvent` です。event 固有のプロパティを読む前に、判別用の `type` フィールドで event を絞り込んでください。
+
+## Tool mock
+
+Experiment で副作用のある Tool を呼び出す Agent を実行する場合、個々の Dataset 項目に静的な Tool mock を設定すると、実行を決定論的にできます。Experiment 中は、モック化された Tool が実行される代わりに、宣言済みの出力を返します。項目に mock がない Tool は、デフォルトでは実際に実行されます。
+
+mock は Dataset 項目に保存されるため、行とともにバージョン管理され、テストケースと一緒に移動します。各 mock では、Tool 名、期待する引数、返す出力を宣言します。
+
+```typescript title="src/mastra/experiments/tool-mocks.ts"
+await dataset.addItem({
+  input: 'What is the weather in Seattle?',
+  toolMocks: [
+    {
+      toolName: 'getWeather',
+      args: { city: 'Seattle' },
+      output: { temperature: 60, conditions: 'rainy' },
+    },
+  ],
+})
+```
+
+Tool mock は `agent` ターゲットでのみサポートされます。
+
+### 宣言されていない Tool をブロックする
+
+Experiment に `unmockedToolPolicy: 'deny'` を設定すると、mock がないすべての Tool 呼び出しをブロックできます。実際の呼び出しで副作用が発生する可能性がある場合に便利です。
+
+```typescript
+const summary = await dataset.startExperiment({
+  targetType: 'agent',
+  targetId: 'weather-agent',
+  unmockedToolPolicy: 'deny',
+})
+```
+
+デフォルトポリシーは `'allow'` です。保存済みまたはインラインの個別項目で Experiment のポリシーを上書きできます。
+
+```typescript
+await dataset.addItem({
+  input: 'What is the weather in Seattle?',
+  unmockedToolPolicy: 'allow',
+})
+```
+
+項目の値が Experiment の値より優先されます。拒否された呼び出しは Tool が実行される前に `TOOL_MOCK_NOT_DECLARED` で失敗します。この失敗は再試行されず、`liveCalls` にも追加されません。
+
+### 照合と消費
+
+引数は厳密に照合されます。オブジェクトキーの順序は無視されますが、配列の順序には意味があり、型変換も行われません。Agent が Tool を呼び出した引数と mock の `args` が深い等価性で一致する場合にのみ、mock が使用されます。
+
+同じ Tool と引数に対して複数の mock が宣言されている場合、宣言順に消費されます。最初の呼び出しには最初の mock、次の呼び出しには2番目の mock が使用されます。順序は `(toolName, args)` グループごとに追跡され、異なる引数間では独立しています。
+
+### 照合モード
+
+デフォルトでは、各 mock は `args` と厳密に照合されます。Tool 名だけで照合するには `matchArgs: 'ignore'` を設定します。mock の `args` は比較されず、Agent がどのように呼び出したかに関係なく、その Tool の次の未使用 mock が返されます。
+
+```typescript
+const subAgentMock = {
+  toolName: 'agent-balanceAgent',
+  args: { prompt: 'look up the balance for YJ' },
+  output: { text: "YJ's balance is $100." },
+  matchArgs: 'ignore',
+}
+```
+
+これは、Tool の引数にノイズが多い場合や、モデルが生成する場合に便利です。最も一般的なのは、**Sub-agent の応答**を mock 化するケースです。委譲された Sub-agent は、親に `agent-<name>` Tool として公開され、その引数には LLM が作成した `prompt` とランタイムで挿入されたフィールドが含まれます。`agent-<name>` を mock 化すると、Sub-agent とその内部 Tool を実行せず、事前定義した応答を返します。Trace から mock を作成すると、Sub-agent への委譲呼び出しには自動的に `matchArgs: 'ignore'` が設定されます。正確な引数に固定するには `'strict'` に変更できます。
+
+### 失敗
+
+mock の設定に違反すると、Tool 呼び出しによって項目が失敗します。
+
+- `TOOL_MOCK_MISMATCH`: どの mock とも一致しない引数で Tool が呼び出されました。
+- `TOOL_MOCK_EXHAUSTED`: 一致するすべての mock がすでに消費されています。
+- `TOOL_MOCK_NOT_DECLARED`: Tool に mock がなく、有効な `unmockedToolPolicy` が `'deny'` です。
+
+いずれかの失敗が発生すると Agent の実行はただちに中止されるため、その後は、通常なら実際に実行される未モック化の副作用を伴う Tool を含め、他の Tool を呼び出せません。これらの失敗は決定論的なため、再試行されません。宣言されていても使用されなかった mock は項目を失敗させず、未消費として報告されます。
+
+mock の介入中は Agent の Tool が順次実行されるため、繰り返される `(toolName, args)` の mock は Provider の呼び出し順に消費されます。項目で mock が宣言されているか、有効な `unmockedToolPolicy` が `'deny'` の場合に介入が有効になります。
+
+### 診断
+
+各項目の結果には、その項目の mock に対する実行内容を示す `toolMockReport` が含まれます。
+
+```typescript
+for (const item of summary.results) {
+  const report = item.toolMockReport
+  if (!report) continue
+
+  console.log(report.served) // mocks matched and returned
+  console.log(report.unconsumed) // mocks declared but never used
+  console.log(report.liveCalls) // undeclared tools allowed to run live
+  console.log(report.failure) // the first deterministic mock failure, if any
+}
+```
+
+[Studio](/docs/studio/overview) では、Dataset 項目を編集して Tool mock を JSON 配列で作成し、Experiment の結果を開いて同じレポートを確認できます。
+
+### 制限事項
+
+- **モック化された呼び出しには Tool span がない。** モック化された呼び出しは Tool の実行前に出力を返すため、Tool span を作成しません。そのため、保存済み Trace を使用する Trajectory Scorer では、モック化された Tool 呼び出しを認識できない場合があります。Agent のメッセージ出力へフォールバックする Trajectory 抽出では認識できるため、Observability の設定によって Trajectory の採点結果が異なることがあります。
+- **ストレージの対応状況。** Tool mock と Tool mock report は、LibSQL、PostgreSQL、MongoDB、Spanner アダプターで保存されます。MySQL アダプターは対応しておらず、Tool mock または Tool mock report を含む書き込みを拒否します。すべての Dataset ストレージアダプターは `unmockedToolPolicy` を保存します。
+
+## 非同期 Experiment
+
+`startExperiment()` は、すべての項目が完了するまで処理をブロックします。実行時間が長い Dataset では、[`startExperimentAsync()`](/reference/datasets/startExperimentAsync) を使用してバックグラウンドで Experiment を開始します。
+
+```typescript title="src/mastra/experiments/async.ts"
+const { experimentId, status } = await dataset.startExperimentAsync({
+  name: 'large-dataset-run',
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  scorers: ['accuracy'],
+})
+
+console.log(experimentId) // UUID
+console.log(status) // 'pending'
+```
+
+完了するまで [`getExperiment()`](/reference/datasets/getExperiment) でポーリングします。
+
+```typescript
+let experiment = await dataset.getExperiment({ experimentId })
+
+while (experiment.status === 'pending' || experiment.status === 'running') {
+  await new Promise(resolve => setTimeout(resolve, 5000))
+  experiment = await dataset.getExperiment({ experimentId })
+}
+
+console.log(experiment.status) // 'completed' | 'failed'
+```
+
+## 設定オプション
+
+### 並行処理数
+
+並行して実行する項目数を制御します（デフォルト: 5）。
+
+```typescript
+const summary = await dataset.startExperiment({
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  maxConcurrency: 10,
+})
+```
+
+### タイムアウトと再試行
+
+項目ごとのタイムアウト（ミリ秒）と再試行回数を設定します。
+
+```typescript
+const summary = await dataset.startExperiment({
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  itemTimeout: 30_000, // 30 seconds per item
+  maxRetries: 2, // retry failed items up to 2 times
+})
+```
+
+再試行では指数バックオフを使用します。中止エラーは再試行されません。
+
+### Experiment を中止する
+
+実行中の Experiment をキャンセルするには `AbortSignal` を渡します。
+
+```typescript
+const controller = new AbortController()
+
+// Cancel after 60 seconds
+setTimeout(() => controller.abort(), 60_000)
+
+const summary = await dataset.startExperiment({
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  signal: controller.signal,
+})
+```
+
+残りの項目は summary でスキップ済みと記録されます。
+
+### Dataset のバージョンを固定する
+
+Dataset の特定のスナップショットに対して実行します。
+
+```typescript
+const summary = await dataset.startExperiment({
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  version: 3, // use items from dataset version 3
+})
+```
+
+## 結果を確認する
+
+### Experiment を一覧表示する
+
+```typescript
+const { experiments, pagination } = await dataset.listExperiments({
+  page: 0,
+  perPage: 10,
+})
+
+for (const exp of experiments) {
+  console.log(`${exp.name} — ${exp.status} (${exp.succeededCount}/${exp.totalItems})`)
+}
+```
+
+### Experiment の詳細
+
+```typescript
+const experiment = await dataset.getExperiment({
+  experimentId: 'exp-abc-123',
+})
+
+console.log(experiment.status)
+console.log(experiment.startedAt)
+console.log(experiment.completedAt)
+```
+
+:::tip[📹 動画]
+
+Dataset と Experiment が信頼性の向上にどう役立つかは、[Mastra Dataset と Experiment のワークフロー](https://www.youtube.com/watch?v=R6pjAdGhxhQ)をご覧ください。
+
+:::
+
+### 項目レベルの結果
+
+```typescript
+const { results, pagination } = await dataset.listExperimentResults({
+  experimentId: 'exp-abc-123',
+  page: 0,
+  perPage: 50,
+})
+
+for (const result of results) {
+  console.log(result.itemId, result.output, result.error)
+}
+```
+
+## Summary を理解する
+
+`startExperiment()` は、件数と項目ごとの結果を含む `ExperimentSummary` を返します。
+
+- Experiment は完了したものの一部の項目が失敗した場合、`completedWithErrors` は `true` になります。
+- `signal` でキャンセルされた項目は `skippedCount` に含まれます。
+
+すべてのパラメーターと戻り値の型については、[`startExperiment` リファレンス](/reference/datasets/startExperiment)を参照してください。
+
+## 関連情報
+
+- [Dataset の概要](/docs/datasets/overview)
+- [Scorer の概要](/docs/evals/overview)
+- [`startExperiment` リファレンス](/reference/datasets/startExperiment)
+- [`listExperimentResults` リファレンス](/reference/datasets/listExperimentResults)

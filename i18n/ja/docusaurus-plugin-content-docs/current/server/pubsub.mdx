@@ -1,0 +1,136 @@
+---
+title: "PubSub | Server"
+description: Mastra が pub/sub を使用してコンポーネント間でイベントを配信する仕組みと、マルチプロセスまたはマルチインスタンスのデプロイで分散バックエンドを設定するタイミングについて説明します。
+packages:
+  - "@mastra/core"
+  - "@mastra/redis-streams"
+  - "@mastra/google-cloud-pubsub"
+---
+
+# PubSub
+
+Mastra は内部イベントバスとして publish/subscribe（pub/sub）システムを使用します。コンポーネントがトピックにイベントを publish し、ほかのコンポーネントがそれらのトピックを subscribe して応答します。設定するバックエンドによって、イベントが届く範囲が決まります。単一プロセス内、同一ホスト上の複数プロセス間、または別々のインスタンス間です。
+
+バックエンドは `Mastra` インスタンスに一度設定すれば、システムのほかの部分は変更せずにそのバックエンドを使用します。デフォルトでは、設定不要のインプロセスバックエンドが使用されます。
+
+## Mastra による PubSub の利用方法
+
+複数の組み込みシステムが、同じ pub/sub バスを介してイベントを publish および subscribe します。
+
+- **Workflow の実行**: スケジューラーが `workflow.start` イベントを publish し、長時間稼働する Worker がそれを受け取って Workflow を実行します。実行中の Step イベントとライフサイクルイベントも pub/sub を経由します。
+- **スケジュールされた Workflow**: スケジューラーは、実行時刻を迎えた処理を Workflow トピックへ publish してディスパッチします。[スケジュールされた Workflow](/docs/workflows/scheduled-workflows)を参照してください。
+- **バックグラウンドタスク**: タスクマネージャーが処理を Worker グループへディスパッチし、タスクのライフサイクル更新を subscriber へ配信します。これにより、バックグラウンドタスクのストリームが維持されます。[バックグラウンドタスクのストリーミング](/docs/long-running-agents/background-tasks#subscribe-to-all-task-events)を参照してください。
+- **Agent シグナル**: 実行中の Agent run にシグナルを送信すると、スレッドのトピックにイベントが publish されるため、別のプロセスで実行されている run がシグナルを受信できます。
+- **再開可能なストリーム**: ストリームのチャンクは run ごとに publish されるため、再接続したクライアントは受信できなかった内容を再生できます。
+
+これらのシステムは1つのバス上で動作するため、選択したバックエンドがすべてのシステムに一括して適用されます。
+
+## 配信モード
+
+バックエンドは、[`PubSub`](/reference/pubsub/base) の規約で定義される次の2つのモードのいずれかでイベントを配信します。
+
+- **Pull**: consumer が自らバックエンドから読み取ります。Mastra では、長時間稼働する Worker ループがこの処理を行います。[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) などの分散バックエンドは、このモードを使用します。
+- **Push**: プロセス内または HTTP 経由で、consumer が要求しなくてもイベントが届きます。デフォルトの [`EventEmitterPubSub`](/reference/pubsub/event-emitter) は、プロセス内でこの方法により配信します。
+
+subscriber は consumer グループを通じて処理を分散することもできます。同じグループのメンバーはイベントを分担し、各イベントが一度だけ処理されるようにします。グループに属さない subscriber はすべてのイベントを受信するため、ストリームはグループに属さないすべての subscriber へ配信されます。
+
+## デフォルトのバックエンド
+
+`pubsub` オプションを設定しない場合、Mastra は [`EventEmitterPubSub`](/reference/pubsub/event-emitter) を使用します。Node.js の [`EventEmitter`](https://nodejs.org/api/events.html#class-eventemitter) を使用してプロセス内でイベントを配信するため、外部サービスなしで動作します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+
+// No pubsub option: Mastra uses EventEmitterPubSub
+export const mastra = new Mastra({})
+```
+
+プロセス内で動作するため、イベントは永続化されず、ほかのプロセスには届きません。デフォルトは単一インスタンスに適しており、ほとんどのアプリケーションに対応できます。
+
+## バックエンドの選択
+
+バックエンドを選択するには、`Mastra` インスタンスに `pubsub` オプションを設定します。各バックエンドは同じ [`PubSub`](/reference/pubsub/base) の規約を実装しているため、アプリケーションのほかの部分を変更する必要はありません。
+
+判断基準は subscriber がどこで動作するかです。
+
+| バックエンド | スコープ | モード | パッケージ |
+| - | - | - | - |
+| [`EventEmitterPubSub`](/reference/pubsub/event-emitter) | 単一プロセス | Pull と Push | `@mastra/core` |
+| [`UnixSocketPubSub`](/reference/pubsub/unix-socket-pubsub) | 同一ホスト上の複数プロセス | Push | `@mastra/core` |
+| [`RedisStreamsPubSub`](/reference/pubsub/redis-streams) | 複数ホストに分散 | Pull | `@mastra/redis-streams` |
+| [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub) | 複数ホストに分散 | Pull | `@mastra/google-cloud-pubsub` |
+
+### 同一ホスト上の複数プロセス
+
+同じマシン上の複数プロセスでストリームを共有する必要がある場合は、[`UnixSocketPubSub`](/reference/pubsub/unix-socket-pubsub) を使用します。Unix ドメインソケット経由でイベントを配信し、1つのプロセスを broker として選出します。broker が終了すると、残りのプロセスが新しい broker を選出します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { UnixSocketPubSub } from '@mastra/core/events'
+
+export const mastra = new Mastra({
+  pubsub: new UnixSocketPubSub('/tmp/mastra/events.sock'),
+})
+```
+
+### 分散デプロイ
+
+複数のインスタンスまたはホストで実行する場合は、すべてのインスタンスが同じイベントを受信できるよう、分散バックエンドを使用します。あるインスタンスが処理したリクエストから、別のインスタンスで実行中の処理へ到達する必要がある場合に重要です。
+
+たとえば Agent run にシグナルを送信するには、その run を所有するインスタンスまで、シグナルイベントがプロセス境界を越える必要があります。デフォルトのインプロセスバックエンドでは、そのインスタンスはイベントを受信できません。
+
+以下の2つのバックエンドは、いずれもプロセスやホストをまたいで配信し、再配信に備えてイベントを永続化します。
+
+次の例では [Redis Streams](https://redis.io/docs/latest/develop/data-types/streams/) を使用します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RedisStreamsPubSub } from '@mastra/redis-streams'
+
+export const mastra = new Mastra({
+  pubsub: new RedisStreamsPubSub({
+    url: 'redis://localhost:6379',
+  }),
+})
+```
+
+次の例では [Google Cloud Pub/Sub](https://cloud.google.com/pubsub/docs) を使用します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { GoogleCloudPubSub } from '@mastra/google-cloud-pubsub'
+
+export const mastra = new Mastra({
+  pubsub: new GoogleCloudPubSub({
+    projectId: 'my-project',
+  }),
+})
+```
+
+## 再開可能なストリーム
+
+再開可能なストリームでは、クライアントが再接続して受信できなかったイベントを再生できます。そのためには、バックエンドが直近の履歴を保持する必要があります。[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) などの分散バックエンドはイベントを永続化するため、バックエンド単体で再生をサポートします。
+
+インプロセス配信では履歴が保持されません。[`EventEmitterPubSub`](/reference/pubsub/event-emitter) に再生機能を追加するには、[`CachingPubSub`](/reference/pubsub/caching-pubsub) でラップします。これにより、publish されたイベントがトピックごとに記録され、遅れて接続した subscriber や再接続した subscriber は、ライブイベントの受信を続ける前に過去のイベントを取得できます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { CachingPubSub, EventEmitterPubSub } from '@mastra/core/events'
+import { InMemoryServerCache } from '@mastra/core/cache'
+
+const cache = new InMemoryServerCache()
+
+export const mastra = new Mastra({
+  pubsub: new CachingPubSub(new EventEmitterPubSub(), cache),
+})
+```
+
+配信規約の全内容と各バックエンドの設定オプションについては、[PubSub リファレンス](/reference/pubsub/base)を参照してください。
+
+## 関連項目
+
+- [PubSub リファレンス](/reference/pubsub/base)
+- [Mastra クラス](/reference/core/mastra-class)
+- [Worker](/docs/deployment/workers): PubSub を使用し、専用プロセスで Workflow のオーケストレーションとバックグラウンドタスクを実行します
+- [バックグラウンドタスクのストリーミング](/docs/long-running-agents/background-tasks#subscribe-to-all-task-events)
+- [スケジュールされた Workflow](/docs/workflows/scheduled-workflows)

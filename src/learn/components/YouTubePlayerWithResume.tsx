@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { cn } from '@site/src/lib/utils'
 import { useYouTubePlayer } from '../hooks/useYouTubePlayer'
+import { useLocalizedLearnContent } from '../localization'
 
 type YouTubePlayerWithResumeProps = {
   videoId: string
@@ -10,13 +11,13 @@ type YouTubePlayerWithResumeProps = {
   className?: string
 }
 
-function YouTubePoster({ videoId, onClick }: { videoId: string; onClick: () => void }) {
+function YouTubePoster({ videoId, onClick, playLabel }: { videoId: string; onClick: () => void; playLabel: string }) {
   return (
     <button
       type="button"
       onClick={onClick}
       className="group relative aspect-video w-full cursor-pointer overflow-hidden rounded-lg border-0 bg-(--mastra-surface-2) p-0"
-      aria-label="Play video"
+      aria-label={playLabel}
     >
       <img
         src={`https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`}
@@ -71,7 +72,17 @@ export function YouTubePlayerWithResume({
   onAutoComplete,
   className,
 }: YouTubePlayerWithResumeProps) {
+  const { isSimplifiedChinese, isTaiwanChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
   const [activated, setActivated] = useState(false)
+  const playLabel = isSimplifiedChinese
+    ? '播放视频'
+    : isTaiwanChinese
+      ? '播放影片'
+      : isHongKongChinese
+        ? '播放影片'
+        : isJapanese
+          ? '動画を再生'
+          : 'Play video'
 
   return (
     <div className={cn('mb-6', className)}>
@@ -83,7 +94,7 @@ export function YouTubePlayerWithResume({
           onAutoComplete={onAutoComplete}
         />
       ) : (
-        <YouTubePoster videoId={videoId} onClick={() => setActivated(true)} />
+        <YouTubePoster videoId={videoId} onClick={() => setActivated(true)} playLabel={playLabel} />
       )}
     </div>
   )

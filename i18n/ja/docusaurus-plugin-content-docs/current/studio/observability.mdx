@@ -1,0 +1,111 @@
+---
+title: "Observability | Studio"
+description: Studio のメトリクスダッシュボード、Trace ビュー、ログブラウザーを使用して、Agent、Workflow、Tool のパフォーマンスを監視します。
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+# Studio の Observability
+
+Studio には、次の Observability ビューがあります。
+
+- 集約されたパフォーマンスデータを表示する **Metrics**
+- 個々のリクエストを調査する **Traces**
+- 内部ログとアプリケーションログを閲覧する **Logs**
+
+いずれも Observability ストレージバックエンドの設定が必要です。
+
+## クイックスタート
+
+詳しい手順については、[Observability の手順](/docs/observability/overview)を参照してください。すぐに使い始めるには、`@mastra/observability` パッケージをプロジェクトに追加し、Trace とメトリクスの両方をサポートするローカル開発環境向けに [LibSQL](/reference/storage/libsql) と [DuckDB](/reference/vectors/duckdb) を設定します。
+
+```bash npm2yarn
+npm install @mastra/observability @mastra/libsql @mastra/duckdb
+```
+
+次に、`src/mastra/index.ts` に以下を追加します。
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { LibSQLStore } from '@mastra/libsql'
+import { DuckDBStore } from '@mastra/duckdb'
+import { MastraCompositeStore } from '@mastra/core/storage'
+import {
+  Observability,
+  MastraStorageExporter,
+  MastraPlatformExporter,
+  SensitiveDataFilter,
+} from '@mastra/observability'
+
+export const mastra = new Mastra({
+  // highlight-start
+  storage: new MastraCompositeStore({
+    id: 'composite-storage',
+    default: new LibSQLStore({
+      id: 'mastra-storage',
+      url: 'file:./mastra.db',
+    }),
+    domains: {
+      observability: await new DuckDBStore().getStore('observability'),
+    },
+  }),
+  // highlight-end
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'mastra',
+        exporters: [
+          new MastraStorageExporter(), // Persists observability events to Mastra Storage
+          new MastraPlatformExporter(), // Sends observability events to Mastra platform (if MASTRA_PLATFORM_ACCESS_TOKEN is set)
+        ],
+        spanOutputProcessors: [
+          new SensitiveDataFilter(), // Redacts sensitive data like passwords, tokens, keys
+        ],
+      },
+    },
+  }),
+})
+```
+
+## Mastra platform
+
+複数のプロジェクトやデプロイにまたがるホスト型の Trace、ログ、メトリクスについては、[Mastra platform の Observability](/docs/mastra-platform/observability)を参照してください。
+
+## メトリクス
+
+設定可能な期間（過去24時間から30日間）における Agent、Workflow、Tool のパフォーマンスをまとめたダッシュボードです。最上段には、Agent の総実行回数、モデルのコスト、トークン消費量、Scorer の平均パフォーマンスが表示されます。その下の詳細カードでは、モデル別の使用量とコスト、Agent 別のトークン使用量、推定コストを含む時系列のトークン使用量、完了数とエラー数を含む Trace 数、レイテンシのパーセンタイル（p50 と p95）、時系列の Scorer の傾向を確認できます。
+
+詳しくは、[メトリクスの概要](/docs/observability/metrics/overview)を参照してください。
+
+:::note
+
+メトリクスには、Observability 用の独立した OLAP ストアが必要です。PostgreSQL や LibSQL などのリレーショナルデータベースは、メトリクスをサポートしていません。インメモリストレージのデータは再起動時にリセットされます。
+
+:::
+
+## Trace
+
+Agent または Workflow を実行すると、Observability タブに Trace が表示され、モデル呼び出し、Tool の実行、Workflow のステップなど、主要な AI 操作が強調されます。Trace をたどることで、データの流れ、処理に時間がかかっている箇所、内部で起きていることを確認できます。
+
+Trace 一覧の上にある **Columns** を開くと、入力、エンティティ、所要時間、入力トークン、出力トークン、推定コスト、カスタムメタデータの各列を表示または非表示にできます。カスタムメタデータを表示するには、`tracingOptions.metadata` で使用しているトップレベルキーを追加します。Studio は、現在の Mastra サーバーと API プレフィックスに対する選択内容をブラウザーのストレージに保存します。
+
+トークンと推定コストの列には、メトリクスをサポートする Observability ストアが必要です。複数のブランチ行が同じ Trace に属する場合があるため、これらの列は **Branches** ビューでは非表示のままです。
+
+Tracing は低レベルのフレームワーク詳細を除外するため、Trace が要点に絞られ、読みやすくなります。詳しくは、[Tracing の概要](/docs/observability/tracing/overview)を参照してください。
+
+Trace をエクスポートするには、Trace パネルのヘッダーで **Download trace JSON** を選択します。これにより、すべての Span と、その完全な入力、出力、メタデータ、属性を含む Trace 全体が `trace-<id>.json` ファイルとして保存されます。Trace の共有やバグレポートへの添付のほか、オフラインでの評価データセット作成にも使用できます。
+
+## ログ
+
+Observability ストレージに転送された Mastra の内部ログを閲覧できます。ログでは、全文検索（メッセージ内容、エンティティ名、Trace ID が対象）、日付のプリセット（過去24時間から30日間）、レベル、エンティティタイプ、エンティティ名の複数選択フィルターを利用できます。ログを選択すると詳細パネルが開き、メッセージ全文、構造化データ、メタデータが表示されます。ログが Trace と関連付けられている場合は、Trace と Span のタイムラインに直接移動できます。
+
+Observability を設定すると、ログ転送はデフォルトで有効になります。レベル設定、クエリ例、カスタマイズの詳細については、[ロギング](/docs/observability/logging)を参照してください。
+
+## 関連項目
+
+- [Observability の概要](/docs/observability/overview)
+- [メトリクスの概要](/docs/observability/metrics/overview)
+- [Tracing の概要](/docs/observability/tracing/overview)
+- [ロギング](/docs/observability/logging)
+- [Mastra platform の Observability](/docs/mastra-platform/observability)

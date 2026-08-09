@@ -1,0 +1,281 @@
+---
+title: "Google | Auth"
+description: ホストドメインのチェックとグループベースの RBAC を使用して、Google Workspace で Mastra サーバーと Studio を認証します。
+packages:
+  - "@mastra/auth-google"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Google
+
+`@mastra/auth-google` パッケージは、Google Workspace を使用した Mastra の認証とロールベースのアクセス制御を提供します。暗号化されたセッション Cookie を使用する OAuth 2.0 / OIDC ログインフローに対応し、Google ID トークンを検証して、Google Workspace グループを Mastra の権限にマッピングします。
+
+Studio のユーザーが Google でログインし、1つ以上の Google Workspace ドメインにアクセスを制限する場合に使用します。
+
+## 前提条件
+
+このガイドでは Google Workspace 認証を使用します。次の準備を行ってください。
+
+1. Google Cloud プロジェクトを作成または選択する
+1. ウェブアプリケーション用の OAuth クライアントを設定する
+1. Mastra SSO のコールバック URL を承認済みのリダイレクト URI に追加する
+1. RBAC を使用する場合は、Google Workspace グループを設定する
+
+Google Groups RBAC を使用する場合は、ドメイン全体の委任を有効にした Google Workspace サービスアカウントも設定し、Directory API のグループ読み取り専用スコープを付与します。
+
+```text
+https://www.googleapis.com/auth/admin.directory.group.readonly
+```
+
+環境変数が設定されていることを確認してください。
+
+```env title=".env"
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret
+GOOGLE_REDIRECT_URI=http://localhost:4111/api/auth/sso/callback
+GOOGLE_COOKIE_PASSWORD=a-random-string-at-least-32-characters-long
+GOOGLE_ALLOWED_DOMAINS=example.com
+
+GOOGLE_SERVICE_ACCOUNT_EMAIL=service-account@project.iam.gserviceaccount.com
+GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+GOOGLE_WORKSPACE_ADMIN_EMAIL=admin@example.com
+```
+
+:::note
+
+`GOOGLE_COOKIE_PASSWORD` はセッション Cookie を暗号化します。省略すると自動生成された値が使用されますが、サーバーを再起動すると失われます。本番環境では明示的に設定してください。
+
+`MastraAuthGoogle` は `GOOGLE_*` 認証変数を自動的に読み込みます。上記のサービスアカウント変数は、`MastraRBACGoogle` に渡す設定コードによって読み込まれます。
+
+:::
+
+## インストール
+
+`MastraAuthGoogle` クラスを使用するには、`@mastra/auth-google` パッケージをインストールします。
+
+```bash npm2yarn
+npm install @mastra/auth-google
+```
+
+## 使用例
+
+### 環境変数を使用する基本的な構成
+
+上記の環境変数を設定すると、コンストラクターのすべてのパラメーターを省略できます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthGoogle } from '@mastra/auth-google'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthGoogle(),
+  },
+})
+```
+
+:::warning
+
+Workspace へのアクセスを制限するには、`allowedDomains` または `GOOGLE_ALLOWED_DOMAINS` を使用してください。Mastra はメールアドレスのサフィックスではなく、Google が検証した `hd` クレームを確認します。
+
+:::
+
+### カスタム設定
+
+環境変数に依存しない場合は、コンストラクターオプションを直接渡します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthGoogle } from '@mastra/auth-google'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthGoogle({
+      clientId: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      redirectUri: process.env.GOOGLE_REDIRECT_URI,
+      allowedDomains: ['example.com'],
+    }),
+  },
+})
+```
+
+### Google Groups RBAC を使用する認証
+
+Google Workspace グループを Mastra の権限にマッピングするには、`MastraRBACGoogle` を追加します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthGoogle, MastraRBACGoogle } from '@mastra/auth-google'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthGoogle(),
+    rbac: new MastraRBACGoogle({
+      serviceAccount: {
+        clientEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!,
+        privateKey: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!,
+        subject: process.env.GOOGLE_WORKSPACE_ADMIN_EMAIL!,
+      },
+      roleMapping: {
+        'admins@example.com': ['*'],
+        'engineering@example.com': ['agents:*', 'workflows:*', 'tools:*'],
+        'viewers@example.com': ['agents:read', 'workflows:read'],
+        _default: [], // users with unmapped groups get no permissions
+      },
+    }),
+  },
+})
+```
+
+### 複数 Provider の併用
+
+ログインには別の認証 Provider（Auth0、Clerk など）を使用し、RBAC には Google Workspace グループを使用できます。別の Provider のユーザーオブジェクトから Google Directory API のユーザーキーを解決するには、`getUserKey` 関数を渡します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthAuth0 } from '@mastra/auth-auth0'
+import { MastraRBACGoogle } from '@mastra/auth-google'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthAuth0(),
+    rbac: new MastraRBACGoogle({
+      getUserKey: user => {
+        if (!user || typeof user !== 'object') return undefined
+
+        const { email } = user as { email?: unknown }
+        return typeof email === 'string' ? email : undefined
+      },
+      serviceAccount: {
+        clientEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!,
+        privateKey: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!,
+        subject: process.env.GOOGLE_WORKSPACE_ADMIN_EMAIL!,
+      },
+      roleMapping: {
+        'engineering@example.com': ['agents:*', 'workflows:*'],
+        'admins@example.com': ['*'],
+        _default: [],
+      },
+    }),
+  },
+})
+```
+
+利用可能なすべての設定オプションについては、[MastraAuthGoogle](/reference/auth/google) を参照してください。
+
+## ロールのマッピング
+
+`roleMapping` オプションは、Google Workspace グループのメールアドレスを Mastra の権限文字列の配列にマッピングします。権限は `resource:action` パターンに従い、ワイルドカードに対応しています。
+
+```typescript
+const rbac = new MastraRBACGoogle({
+  roleMapping: {
+    // full access to everything
+    'admins@example.com': ['*'],
+
+    // full access to agents and workflows
+    'engineering@example.com': ['agents:*', 'workflows:*'],
+
+    // read-only access
+    'viewers@example.com': ['agents:read', 'workflows:read'],
+
+    // users whose groups don't match any key above
+    _default: [],
+  },
+})
+```
+
+デフォルトでは、グループのメールアドレスがロール ID として使用されます。グループ名や別のプロパティでマッピングする場合は、`mapGroupToRoles` を使用します。`_default` キーは、Google Workspace グループが他のどのキーにも一致しないユーザーに権限を割り当てます。
+
+## クライアント側の設定
+
+認証を有効にすると、Mastra ルートへのリクエストに認証が必要になります。`GOOGLE_CLIENT_SECRET` で SSO を有効にすると、`MastraAuthGoogle` は Google ログインを使用し、ログイン後に暗号化されたセッション Cookie を設定します。
+
+### Cookie セッション（推奨）
+
+オリジン間リクエスト（たとえば、`:3000` のフロントエンドから `:4111` の Mastra を呼び出す場合）では、Mastra サーバーで CORS の資格情報を有効にします。
+
+```typescript title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthGoogle(),
+    cors: {
+      origin: 'http://localhost:3000',
+      credentials: true,
+    },
+  },
+})
+```
+
+資格情報を含めるようにクライアントを設定します。
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  baseUrl: 'http://localhost:4111',
+  credentials: 'include',
+})
+```
+
+### Bearer トークン
+
+Google ID トークンを Bearer トークンとして渡すこともできます。Mastra は Google の JSON Web Key Set（JWKS）エンドポイントに対してトークンを検証します。
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const createMastraClient = (idToken: string) => {
+  return new MastraClient({
+    baseUrl: 'http://localhost:4111',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+    },
+  })
+}
+```
+
+その他の設定オプションについては、[Mastra Client SDK](/docs/server/mastra-client) を参照してください。
+
+### 認証済みリクエストの送信
+
+<Tabs>
+  <TabItem value="client" label="MastraClient">
+    ```typescript title="src/api/agents.ts"
+    import { mastraClient } from '../lib/mastra-client'
+
+    const agent = mastraClient.getAgent('weatherAgent')
+    const response = await agent.generate('Weather in London')
+    console.log(response)
+    ```
+  </TabItem>
+
+  <TabItem value="curl" label="cURL">
+    ```bash
+    curl -X POST http://localhost:4111/api/agents/weatherAgent/generate \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer <your-google-id-token>" \
+      -d '{
+        "messages": "Weather in London"
+      }'
+    ```
+  </TabItem>
+</Tabs>
+
+## トラブルシューティング
+
+- **ログイン後に 401 が返される**: `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`、`GOOGLE_REDIRECT_URI` が Google Cloud OAuth クライアントと一致していることを確認します。
+- **Workspace ユーザーが拒否される**: `GOOGLE_ALLOWED_DOMAINS` が Google ID トークンの `hd` クレームと一致していることを確認します。
+- **一般の Gmail アカウントが拒否される**: `allowedDomains` が設定されている場合は想定どおりの動作です。Gmail アカウントには Workspace の `hd` クレームがありません。
+- **RBAC がデフォルトの権限を返す**: ユーザーのロールを解決できていません。ユーザーのメールアドレスまたはカスタムの `getUserKey`、Google グループのメンバーシップ、`roleMapping` を確認します。Directory API の検索に失敗した場合、Provider は `_default` を返さずにエラーをスローします。
+- **オリジン間で Cookie が送信されない**: `credentials: "include"` を `MastraClient` に設定し、`server.cors` にフロントエンドのオリジンと `credentials: true` を設定します。
+- **再起動するとセッションが失われる**: `GOOGLE_COOKIE_PASSWORD` に32文字以上の固定値を設定します。設定しない場合、開発環境では自動生成されたキーが使用され、再起動のたびに変わります。
+
+## 関連項目
+
+- [認証の概要](/docs/server/auth)
+- [Composite Auth](/docs/server/auth/composite-auth)
+- [MastraAuthGoogle リファレンス](/reference/auth/google)

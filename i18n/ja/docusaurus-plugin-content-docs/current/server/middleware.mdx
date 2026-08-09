@@ -1,0 +1,249 @@
+---
+title: "ミドルウェア | Server"
+description: "カスタムミドルウェア関数を適用してリクエストをインターセプトします。"
+packages:
+  - "@mastra/core"
+  - "@mastra/server"
+---
+
+# ミドルウェア
+
+Mastra サーバーでは、API ルートハンドラーが呼び出される前後にカスタムミドルウェア関数を実行できます。認証、ログ記録、リクエスト固有のコンテキストの注入、CORS ヘッダーの追加などに役立ちます。
+
+ミドルウェアは [Hono](https://hono.dev) の `Context`（`c`）と `next` 関数を受け取ります。`Response` を返すと、リクエストの処理はそこで終了します。`next()` を呼び出すと、次のミドルウェアまたはルートハンドラーの処理へ進みます。
+
+```typescript
+import { Mastra } from '@mastra/core'
+
+export const mastra = new Mastra({
+  server: {
+    middleware: [
+      {
+        handler: async (c, next) => {
+          // Example: Add authentication check
+          const authHeader = c.req.header('Authorization')
+          if (!authHeader) {
+            return new Response('Unauthorized', { status: 401 })
+          }
+
+          await next()
+        },
+        path: '/api/*',
+      },
+      // Add a global request logger
+      async (c, next) => {
+        console.log(`${c.req.method} ${c.req.url}`)
+        await next()
+      },
+    ],
+  },
+})
+```
+
+単一のルートにミドルウェアを追加するには、`registerApiRoute` に `middleware` オプションを渡します。
+
+```typescript
+registerApiRoute('/my-custom-route', {
+  method: 'GET',
+  middleware: [
+    async (c, next) => {
+      console.log(`${c.req.method} ${c.req.url}`)
+      await next()
+    },
+  ],
+  handler: async c => {
+    const mastra = c.get('mastra')
+    return c.json({ message: 'Hello, world!' })
+  },
+})
+```
+
+## 一般的な例
+
+### `RequestContext` の使用
+
+ランタイムサーバーのミドルウェアでは、リクエストから情報を抽出して `RequestContext` に値を設定できます。この例では、ユーザーのロケールに合ったレスポンスを返すため、Cloudflare の `CF-IPCountry` ヘッダーに基づいて `temperature-unit` を設定します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RequestContext } from '@mastra/core/request-context'
+import { testWeatherAgent } from './agents/test-weather-agent'
+
+export const mastra = new Mastra({
+  agents: { testWeatherAgent },
+  server: {
+    middleware: [
+      async (context, next) => {
+        const country = context.req.header('CF-IPCountry')
+        const requestContext = context.get('requestContext')
+
+        requestContext.set('temperature-unit', country === 'US' ? 'fahrenheit' : 'celsius')
+
+        await next()
+      },
+    ],
+  },
+})
+```
+
+### 認証
+
+```typescript prettier:false
+{
+  handler: async (c, next) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+
+    // Validate token here
+    await next();
+  },
+  path: '/api/*',
+}
+```
+
+### 認可（ユーザーの分離）
+
+認証ではユーザーが誰であるかを確認し、認可ではユーザーがアクセスできる対象を制御します。リソース ID のスコープを設定しないと、認証済みユーザーが ID を推測したり `resourceId` パラメーターを操作したりして、ほかのユーザーのスレッドにアクセスできる可能性があります。
+
+Memory とスレッドのスコープを認証済みユーザーに限定する最も簡単な方法は、認証設定で `mapUserToResourceId` コールバックを使用することです。
+
+```typescript
+import { Mastra } from '@mastra/core'
+
+export const mastra = new Mastra({
+  server: {
+    auth: {
+      authenticateToken: async token => {
+        return verifyToken(token) // { id: 'user-123', orgId: 'org-456', ... }
+      },
+      mapUserToResourceId: user => user.id,
+    },
+  },
+})
+```
+
+認証に成功すると、認証済みユーザーのオブジェクトを引数として `mapUserToResourceId` が呼び出されます。戻り値はリクエストコンテキストに `MASTRA_RESOURCE_ID_KEY` として設定され、すべての Server Adapter（Hono、Express、Next.js など）で機能します。
+
+リソース ID は `user.id` である必要はありません。一般的なパターンは次のとおりです。
+
+```typescript
+// Org-scoped
+mapUserToResourceId: user => `${user.orgId}:${user.id}`
+
+// From a JWT claim
+mapUserToResourceId: user => user.tenantId
+
+// Composite key
+mapUserToResourceId: user => `${user.workspaceId}:${user.projectId}:${user.id}`
+```
+
+リソース ID を設定すると、サーバーは自動的に次の処理を行います。
+
+- **スレッド一覧をフィルタリング**し、ユーザーが所有するスレッドだけを返す
+- **スレッドへのアクセスを検証**し、ほかのユーザーのスレッドにアクセスした場合は 403 を返す
+- **スレッドの作成時に**認証済みユーザーの ID を強制的に使用する
+- 削除を含む**メッセージ操作を検証**し、メッセージがユーザー所有のスレッドに属していることを確認する
+
+クライアントが `?resourceId=other-user-id` を渡した場合でも、認証によって設定された値が優先されます。ほかのユーザーが所有するスレッドやメッセージにアクセスしようとすると、403 エラーが返されます。
+
+#### 高度な設定: ミドルウェアでのリソース ID の設定
+
+データベースからリソース ID を検索する場合など、より複雑なシナリオでは、ミドルウェアで `MASTRA_RESOURCE_ID_KEY` を直接設定できます。
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { MASTRA_RESOURCE_ID_KEY } from '@mastra/core/request-context'
+import { getAuthenticatedUser } from '@mastra/server/auth'
+
+export const mastra = new Mastra({
+  server: {
+    auth: {
+      authenticateToken: async token => verifyToken(token),
+    },
+    middleware: [
+      {
+        path: '/api/*',
+        handler: async (c, next) => {
+          const token = c.req.header('Authorization')
+          if (!token) {
+            return c.json({ error: 'Unauthorized' }, 401)
+          }
+
+          const user = await getAuthenticatedUser<{ id: string }>({
+            mastra: c.get('mastra'),
+            token,
+            request: c.req.raw,
+          })
+          const requestContext = c.get('requestContext')
+
+          if (!user) {
+            return c.json({ error: 'Unauthorized' }, 401)
+          }
+
+          requestContext.set(MASTRA_RESOURCE_ID_KEY, user.id)
+          return next()
+        },
+      },
+    ],
+  },
+})
+```
+
+`server.middleware` は、Mastra がルートごとに行う認証チェックより先に実行されます。ミドルウェアで認証済みユーザーが必要な場合は、`getAuthenticatedUser()` を呼び出します。これにより、デフォルトのルート認証フローを変更することなく、設定済みの認証 Provider からユーザーを取得できます。
+
+#### `MASTRA_THREAD_ID_KEY` の使用
+
+`MASTRA_THREAD_ID_KEY` を設定して、クライアントが指定したスレッド ID を上書きすることもできます。
+
+```typescript
+import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from '@mastra/core/request-context'
+
+// Force operations to use a specific thread
+requestContext.set(MASTRA_THREAD_ID_KEY, validatedThreadId)
+```
+
+別の方法で検証済みの特定のスレッドに操作を限定したい場合に役立ちます。
+
+### CORS サポート
+
+```typescript prettier:false
+{
+  handler: async (c, next) => {
+    c.header('Access-Control-Allow-Origin', '*');
+    c.header(
+      'Access-Control-Allow-Methods',
+      'GET, POST, PUT, DELETE, OPTIONS',
+    );
+    c.header(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization',
+    );
+
+    if (c.req.method === 'OPTIONS') {
+      return new Response(null, { status: 204 });
+    }
+
+    await next();
+  },
+}
+```
+
+### リクエストのログ記録
+
+```typescript prettier:false
+{
+  handler: async (c, next) => {
+    const start = Date.now();
+    await next();
+    const duration = Date.now() - start;
+    console.log(`${c.req.method} ${c.req.url} - ${duration}ms`);
+  },
+}
+```
+
+# 関連情報
+
+- [Request Context](/docs/server/request-context)
+- [予約済みキー](/docs/server/request-context#reserved-keys)

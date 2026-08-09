@@ -1,0 +1,235 @@
+---
+title: "Composite Auth | Auth"
+description: "複数の認証 Provider を1つの認証ハンドラーにまとめる CompositeAuth クラスについて説明します。"
+packages:
+  - "@mastra/core"
+---
+
+# Composite Auth
+
+`CompositeAuth` クラスを使用すると、複数の認証 Provider を1つの認証ハンドラーにまとめられます。成功するまで、各 Provider を順番に試します。
+
+## ユースケース
+
+- API キーと OAuth トークンの両方をサポートする
+- 既存のクライアントを停止させずに認証 Provider を移行する
+- 複数のアイデンティティ Provider を利用する（Web には Clerk、連携には API キーを使用する場合など）
+- 新しい認証方式を段階的に導入する
+
+## インストール
+
+CompositeAuth は `@mastra/core` に含まれているため、追加のパッケージは不要です。
+
+```typescript
+import { CompositeAuth } from '@mastra/core/server'
+```
+
+## 使用例
+
+SimpleAuth（API キー用）と Clerk（ユーザーセッション用）を組み合わせます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { CompositeAuth, SimpleAuth } from '@mastra/core/server'
+import { MastraAuthClerk } from '@mastra/auth-clerk'
+
+// API key users
+type ApiKeyUser = {
+  id: string
+  name: string
+  type: 'api-key'
+}
+
+const apiKeyAuth = new SimpleAuth<ApiKeyUser>({
+  tokens: {
+    'sk-integration-key-123': {
+      id: 'integration-1',
+      name: 'CI/CD Pipeline',
+      type: 'api-key',
+    },
+  },
+})
+
+// Clerk users (from web app)
+const clerkAuth = new MastraAuthClerk({
+  publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
+  secretKey: process.env.CLERK_SECRET_KEY,
+  jwksUri: process.env.CLERK_JWKS_URI,
+})
+
+export const mastra = new Mastra({
+  server: {
+    auth: new CompositeAuth([apiKeyAuth, clerkAuth]),
+  },
+})
+```
+
+## 仕組み
+
+リクエストを受信すると、CompositeAuth は次の処理を行います。
+
+1. `Authorization` ヘッダーからトークンを抽出する
+1. 各 Provider の `authenticateToken()` メソッドを順番に試す
+1. 最初に成功した Provider からユーザーを返す
+1. すべての Provider が失敗した場合は `null`（401 Unauthorized）を返す
+
+認可では、いずれかが `true` を返すまで、各 Provider の `authorizeUser()` メソッドを呼び出します。
+
+```typescript prettier:false
+// Pseudocode of CompositeAuth behavior
+async authenticateToken(token, request) {
+  for (const provider of this.providers) {
+    const user = await provider.authenticateToken(token, request);
+    if (user) return user;  // First match wins
+  }
+  return null;  // All providers failed
+}
+```
+
+## Provider の順序
+
+Provider の順序はパフォーマンスに影響するため、最もよく使用する認証方式を先頭に配置します。
+
+```typescript
+// If most requests use Clerk, put it first
+new CompositeAuth([
+  clerkAuth, // Checked first (most common)
+  apiKeyAuth, // Checked second (less common)
+])
+
+// If most requests use API keys, put it first
+new CompositeAuth([
+  apiKeyAuth, // Checked first (most common)
+  clerkAuth, // Checked second (less common)
+])
+```
+
+## 複数の OAuth Provider
+
+異なるアイデンティティ Provider のユーザーをサポートします。
+
+```typescript
+import { CompositeAuth } from '@mastra/core/server'
+import { MastraAuthClerk } from '@mastra/auth-clerk'
+import { MastraAuthAuth0 } from '@mastra/auth-auth0'
+
+const clerkAuth = new MastraAuthClerk({
+  publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
+  secretKey: process.env.CLERK_SECRET_KEY,
+  jwksUri: process.env.CLERK_JWKS_URI,
+})
+
+const auth0Auth = new MastraAuthAuth0({
+  domain: process.env.AUTH0_DOMAIN,
+  audience: process.env.AUTH0_AUDIENCE,
+})
+
+export const mastra = new Mastra({
+  server: {
+    auth: new CompositeAuth([clerkAuth, auth0Auth]),
+  },
+})
+```
+
+## 移行例
+
+後方互換性を維持しながら JWT から Clerk に移行します。
+
+```typescript
+import { CompositeAuth } from '@mastra/core/server'
+import { MastraJwtAuth } from '@mastra/auth'
+import { MastraAuthClerk } from '@mastra/auth-clerk'
+
+// Legacy JWT auth (existing clients)
+const legacyAuth = new MastraJwtAuth({
+  secret: process.env.JWT_SECRET,
+})
+
+// New Clerk auth (new clients)
+const clerkAuth = new MastraAuthClerk({
+  publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
+  secretKey: process.env.CLERK_SECRET_KEY,
+  jwksUri: process.env.CLERK_JWKS_URI,
+})
+
+// Support both during migration
+export const mastra = new Mastra({
+  server: {
+    auth: new CompositeAuth([
+      clerkAuth, // New auth method (preferred)
+      legacyAuth, // Legacy support
+    ]),
+  },
+})
+```
+
+## カスタム Provider との併用
+
+組み込み Provider とカスタム実装を組み合わせます。
+
+```typescript
+import { CompositeAuth, SimpleAuth } from '@mastra/core/server'
+import { MyCustomAuth } from './my-custom-auth'
+
+const apiKeyAuth = new SimpleAuth({
+  tokens: {
+    'sk-key-123': { id: 'user-1', name: 'API User' },
+  },
+})
+
+const customAuth = new MyCustomAuth({
+  apiUrl: process.env.CUSTOM_AUTH_URL,
+})
+
+export const mastra = new Mastra({
+  server: {
+    auth: new CompositeAuth([apiKeyAuth, customAuth]),
+  },
+})
+```
+
+## エラー処理
+
+CompositeAuth は個々の Provider で発生したエラーを通知せずに捕捉し、次の Provider に進みます。これにより、1つの Provider の障害によって認証全体が妨げられることを防ぎます。
+
+```typescript
+// If clerkAuth throws an error, apiKeyAuth still gets tried
+new CompositeAuth([clerkAuth, apiKeyAuth])
+```
+
+認証の問題をデバッグするには、カスタム Provider にログ出力を追加するか、個々の Provider の設定を確認してください。
+
+## 制限事項
+
+- すべての Provider が `Authorization` ヘッダーの同じトークンを共有する
+- Provider ごとにユーザー型が異なる場合がある（必要に応じて判別可能な Union 型を使用する）
+- どの Provider がリクエストを認証したかを識別する組み込みの方法がない
+
+### 異なるユーザー型の処理
+
+Provider が異なるユーザー型を返す場合は、判別可能な Union 型を使用します。
+
+```typescript
+type ApiKeyUser = {
+  type: 'api-key'
+  id: string
+  name: string
+}
+
+type ClerkUser = {
+  type: 'clerk'
+  sub: string
+  email: string
+}
+
+type User = ApiKeyUser | ClerkUser
+
+// In your application code
+function handleUser(user: User) {
+  if (user.type === 'api-key') {
+    console.log('API key user:', user.name)
+  } else {
+    console.log('Clerk user:', user.email)
+  }
+}
+```

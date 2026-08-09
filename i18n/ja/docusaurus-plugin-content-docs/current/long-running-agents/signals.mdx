@@ -1,0 +1,440 @@
+---
+title: "シグナル | 長時間実行エージェント"
+description: "Mastra のエージェントスレッドへリアルタイムのメッセージとコンテキストを送る方法を説明します。"
+packages:
+  - "@mastra/core"
+  - "@mastra/client-js"
+---
+
+# シグナル
+
+**追加バージョン:** `@mastra/core@1.39.0`
+
+:::experimental
+
+この機能はベータ版です。API が安定するまでは、メジャーバージョンの更新なしに破壊的変更が行われる可能性があります。
+
+:::
+
+シグナルを使用すると、スレッドを通じてエージェントとやり取りできます。やり取りのたびに `agent.stream()` を開始する代わりに、スレッドを購読してメッセージやシグナルを送信します。スレッドがアイドル状態なら Mastra がエージェントを起動し、実行中ならエージェントループへ入力を渡します。または、次のターンに向けて入力をキューに追加できます。
+
+ユーザーが作成した入力にはメッセージ API を使用します。バックグラウンドタスクの通知、ポリシーのリマインダー、プロセッサーが生成したコンテキストなど、低レベルのシステムコンテキストには `sendSignal()` を使用します。
+
+:::tip[📹 視聴する]
+
+シグナルが長時間実行エージェントを起動し、制御する仕組みについては、[Mastra シグナルの概要](https://www.youtube.com/watch?v=7It2y89TVP4)をご覧ください。
+
+:::
+
+## シグナルを使用する場面
+
+元の `stream()` 呼び出しとは別に、エージェントスレッドへ新しい入力やコンテキストを渡す必要がある場合にシグナルを使用します。実行中にユーザーがフォローアップメッセージを送る場合、バックグラウンドシステムがスレッドへコンテキストを追加する場合、外部イベントによってエージェントを起動、更新、または通知する場合に役立ちます。
+
+ユーザーが作成した入力には `sendMessage()` と `queueMessage()` を使用します。低レベルのシステムコンテキストには `sendSignal()`、永続的な状態レーンには `sendStateSignal()`、外部イベントから永続的な通知受信トレイのレコードを作成する場合は `sendNotificationSignal()` を使用します。
+
+## クイックスタート
+
+エージェントを作成してスレッドを購読し、そのスレッドへメッセージを送信します。メッセージによってエージェントが起動するか、実行中のループへメッセージが入ると、購読側はアクティブなストリームを受信します。
+
+```typescript title="src/mastra/signals.ts"
+import { Agent } from '@mastra/core/agent'
+
+const agent = new Agent({
+  id: 'support-agent',
+  name: 'Support Agent',
+  instructions: 'Help the user compare options.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const thread = {
+  resourceId: 'user_123',
+  threadId: 'thread_456',
+}
+
+const subscription = await agent.subscribeToThread(thread)
+
+await agent.sendMessage('Compare that with the previous option.', thread)
+
+for await (const chunk of subscription.stream) {
+  console.log(chunk)
+}
+```
+
+スレッドに実行中のエージェントストリームがある場合、`sendMessage()` はそのエージェントループ内の新しい入力になります。スレッドがアイドル状態の場合、Mastra はメッセージを最初の入力としてストリームを開始します。
+
+## メッセージ入力
+
+### メッセージを今すぐ送る
+
+アクティブなエージェントにメッセージをすぐ確認させたい場合は、`sendMessage()` を使用します。
+
+```typescript title="src/mastra/signals.ts"
+agent.sendMessage(
+  {
+    contents: 'Use the latest customer note too.',
+    attributes: { name: 'Jane', sentFrom: 'slack' },
+  },
+  {
+    resourceId: 'user_123',
+    threadId: 'thread_456',
+  },
+)
+```
+
+属性付きのメッセージは、XML で囲まれたユーザー入力としてモデルに渡されます。
+
+```xml
+<user name="Jane" sentFrom="slack">Use the latest customer note too.</user>
+```
+
+属性のないメッセージは、プレーンなユーザー入力として送信されます。
+
+### 次のターンに向けてメッセージをキューに追加する
+
+ユーザーがフォローアップを送ったものの、アクティブなモデル呼び出しを先に完了させる必要がある場合は、`queueMessage()` を使用します。Mastra はアクティブな実行の完了を待ってから、同じスレッドで新しい実行を開始します。
+
+```typescript title="src/mastra/signals.ts"
+agent.queueMessage('Also check whether the tests need updates.', {
+  resourceId: 'user_123',
+  threadId: 'thread_456',
+})
+```
+
+スレッドがアイドル状態の場合、`queueMessage()` はすぐに実行を開始します。スレッドがアクティブな場合、アクティブな実行が完了した後に新しい実行を開始し、ターンの順序を維持します。
+
+## シグナルコンテキスト
+
+### 低レベルのシグナル動作を制御する
+
+ユーザーが作成した入力ではなく、システムが生成したコンテキストを送る必要がある場合は、`sendSignal()` を使用します。外部イベントには `type: 'notification'` を使用します。既定では、Mastra はアクティブな実行へシグナルを配信し、アイドル状態のスレッドを起動します。この動作を変更するには、`ifActive.behavior` と `ifIdle.behavior` を使用します。
+
+```typescript title="src/mastra/signals.ts"
+const result = agent.sendSignal(
+  {
+    type: 'notification',
+    contents: 'GitHub CI failed on PR #123: 3 tests failed.',
+  },
+  {
+    resourceId: 'user_123',
+    threadId: 'thread_456',
+    ifIdle: {
+      behavior: 'persist',
+    },
+  },
+)
+
+await result.persisted
+```
+
+アイドル状態から起動するストリームに、モデル設定、Tool、ランタイムコンテキストなどのオプションが必要な場合は、`ifIdle.streamOptions` を渡します。`ifActive`、`ifIdle`、分岐属性、`streamOptions` については、[`Agent.sendSignal()` リファレンス](/reference/agents/agent#sendsignalsignal-options)を参照してください。
+
+### 通知コンテキストを送る
+
+シグナルには、意味上の `type` と LLM に渡される `tagName` があります。シグナルのカテゴリを表すには `type`、モデルが受け取る XML タグを制御するには `tagName` を使用します。
+
+外部イベントには `type: 'notification'` を使用します。リアクティブシグナルは、ポリシーのガイダンス、バックグラウンドタスクの結果、自動読み込みされた指示など、プロセッサーまたはランタイムが生成するコンテキスト専用です。
+
+```typescript title="src/mastra/signals.ts"
+agent.sendSignal(
+  {
+    type: 'notification',
+    contents: 'PR #123 has a new review comment from User X about the API surface.',
+    attributes: {
+      source: 'github',
+      pr: '123',
+    },
+  },
+  {
+    resourceId: 'user_123',
+    threadId: 'thread_456',
+  },
+)
+```
+
+モデルは次のようなコンテキストとしてシグナルを受け取ります。
+
+```xml
+<notification source="github" pr="123">PR #123 has a new review comment from User X about the API surface.</notification>
+```
+
+XML で安全な `tagName` と属性名を使用してください。使用できるのは文字、数字、ショー、ピリオド、ハイフンです。先頭は文字またはアンダースコアでなければなりません。
+
+#### ストレージ対応
+
+通知受信トレイのストレージは、より高度なメモリとシグナルのワークフローに対応するストレージアダプターで利用できます。[libSQL](/reference/storage/libsql)、[PostgreSQL](/reference/storage/postgresql)、[MongoDB](/reference/storage/mongodb) が該当します。これらのアダプターは `getStore('notifications')` を通じて通知レコードを公開します。
+
+### プロセッサーコンテキストを送る
+
+プロセッサーは、実行中にリアクティブシグナルを送信できます。プロセッサーはチャット履歴を調べ、特定のトリガーに反応し、同じコンテキストを複数回送らないようにする必要があります。
+
+次の例は、Tool 呼び出しが `AGENTS.md` ファイルを読み取った後に、`AGENTS.md` の指示を挿入するプロセッサーです。
+
+```typescript title="src/mastra/processors/agents-md-reminder.ts"
+import type { Processor, ProcessInputStepArgs } from '@mastra/core/processors'
+
+export const agentsMdReminderProcessor: Processor = {
+  id: 'agents-md-reminder',
+  async processInputStep({ messageList, sendSignal }: ProcessInputStepArgs) {
+    const messages = messageList.get.all.db()
+    const agentsMdPath = findAgentsMdPathFromToolCalls(messages)
+
+    if (!agentsMdPath || hasAlreadySentAgentsMdReminder(messages, agentsMdPath)) {
+      return messageList
+    }
+
+    await sendSignal?.({
+      type: 'reactive',
+      contents: readAgentsMdInstructions(agentsMdPath),
+      attributes: {
+        type: 'dynamic-agents-md',
+        path: agentsMdPath,
+      },
+      metadata: {
+        path: agentsMdPath,
+      },
+    })
+
+    return messageList
+  },
+}
+```
+
+リアクティブシグナルの既定値は `tagName: 'system-reminder'` なので、モデルは次のコンテキストを受け取ります。
+
+```xml
+<system-reminder type="dynamic-agents-md" path="packages/ui/AGENTS.md">
+  $agentsMdFileContents
+</system-reminder>
+```
+
+購読中のスレッドがアクティブな場合、`sendSignal()` を await することで、ストリームへのエコー順序が維持されます。
+
+### 条件付き属性
+
+配信時にエージェントがアクティブかアイドルかによって変わるコンテキストを入力へ付けるには、`ifActive.attributes` と `ifIdle.attributes` を使用します。トップレベルの `attributes` は常に適用され、入力が受け入れられると、Mastra は選択された分岐の `attributes` をそこへマージします。分岐固有の属性については、[`Agent.sendMessage()` リファレンス](/reference/agents/agent#sendmessagemessage-options)と [`Agent.sendSignal()` リファレンス](/reference/agents/agent#sendsignalsignal-options)を参照してください。
+
+## 状態シグナルと通知シグナル
+
+### 状態シグナル
+
+状態シグナルは、名前付きでスレッドにスコープされたコンテキストレーンを公開します。ブラウザーの状態、エディターの状態、バックグラウンド監視の結果など、時間とともに変化する永続的なコンテキストに使用します。
+
+外部の生成元が状態の変化を検出した場合は、`sendStateSignal()` を使用します。各状態シグナルでは、状態レーン、生成元が管理するキャッシュキー、更新がスナップショットか差分かを指定します。
+
+```typescript title="src/mastra/browser-watcher.ts"
+await agent.sendStateSignal(
+  {
+    id: 'browser',
+    mode: 'snapshot',
+    cacheKey: 'browser:https://example.com:3-tabs',
+    contents: 'Browser is open. Active tab URL: https://example.com. 3 open tabs.',
+    value: {
+      activeUrl: 'https://example.com',
+      tabCount: 3,
+      open: true,
+    },
+  },
+  {
+    resourceId: 'user_123',
+    threadId: 'thread_456',
+  },
+)
+```
+
+Mastra が状態シグナルを受け入れると、スレッドに簡潔な追跡メタデータを保存します。その状態がまだ最新である間に、生成元が同じ `cacheKey` とモードを再度送信した場合、Mastra は重複をスキップします。
+
+プロセッサーが状態レーンを管理する場合は、`computeStateSignal()` を使用します。Mastra は `processInputStep()` の後、モデルへの入力ステップごとに1回このメソッドを呼び出します。状態シグナルのフィールドと戻り値については、[`Agent.sendStateSignal()` リファレンス](/reference/agents/agent#sendstatesignalstate-options)を参照してください。
+
+```typescript title="src/mastra/processors/browser-state.ts"
+import type { ComputeStateSignalArgs, Processor } from '@mastra/core/processors'
+
+export const browserStateProcessor: Processor = {
+  id: 'browser-state',
+  stateId: 'browser',
+  computeStateSignal(args: ComputeStateSignalArgs) {
+    const browser = readCurrentBrowserState()
+    const previous = readMostRecentBrowserState(args.activeStateSignals)
+    const changed = previous ? diffBrowserState(previous, browser) : browser
+    const shouldRefreshSnapshot = Boolean(args.lastSnapshot && !args.contextWindow.hasSnapshot)
+
+    if (previous && Object.keys(changed).length === 0 && !shouldRefreshSnapshot) {
+      return
+    }
+
+    const isDelta = Boolean(previous && !shouldRefreshSnapshot)
+
+    return {
+      mode: isDelta ? 'delta' : 'snapshot',
+      cacheKey: stableBrowserStateCacheKey(browser),
+      contents: isDelta ? describeBrowserDelta(changed) : describeBrowserSnapshot(browser),
+      value: browser,
+      ...(isDelta ? { delta: changed } : {}),
+    }
+  },
+}
+```
+
+Mastra は `lastSnapshot` と `deltasSinceSnapshot` を `computeStateSignal()` に渡します。現在のメッセージリストに最新のスナップショットが含まれていない場合、メッセージ履歴からこれらを解決します。マージと差分のロジックは、引き続きプロセッサー側が管理します。
+
+`contextWindow.hasSnapshot` は、この状態レーンのスナップショットがアクティブなメッセージウィンドウにすでに含まれているかどうかをプロセッサーに示します。`false` の場合は新しい `snapshot` を返し、古い状態メッセージがコンテキストウィンドウから削除された後でも、モデルが現在の状態を確認できるようにします。
+
+組み込みのブラウザーコンテキストプロセッサーは、スナップショットモードと差分モードを使い、`browser` ID の下に状態を出力します。
+
+### 通知シグナル
+
+通知シグナルは、GitHub のアクティビティ、メール、Slack のメンション、CI ステータス、インシデント、録画、ダイレクトメッセージなどの外部イベントを表します。イベントから永続的な受信トレイレコードを作成する場合は、`agent.sendNotificationSignal()` を使用します。
+
+通知の配信には2つのフェーズがあります。取り込み時には、`agent.sendNotificationSignal()` が通知レコードを保存し、エージェントの配信ポリシーを解決します。ディスパッチ時には、Mastra が期限に達したレコードを処理し、完全な通知シグナルまたはサマリーシグナルを出力します。
+
+既定の配信ポリシーは優先度を考慮します。緊急の通知はすぐに配信されますが、優先度が低い通知はサマリーにまとめられたり、スレッドがアイドル状態になるまで待機したりする場合があります。通知フィールドについては [`Agent.sendNotificationSignal()` リファレンス](/reference/agents/agent#sendnotificationsignalnotification-options)、`notifications.deliveryPolicy` の設定については [`Agent` コンストラクターリファレンス](/reference/agents/agent#constructor-parameters)、受信トレイ Tool のアクションについては [`createNotificationInboxTool()` リファレンス](/reference/signals/create-notification-inbox-tool)を参照してください。
+
+```typescript title="src/mastra/notifications.ts"
+await agent.sendNotificationSignal(
+  {
+    source: 'github',
+    kind: 'ci-status',
+    priority: 'high',
+    summary: 'CI failed on main: 3 tests failed.',
+    payload: {
+      repository: 'acme/app',
+      branch: 'main',
+    },
+    dedupeKey: 'github:acme/app:main:ci',
+  },
+  {
+    resourceId: 'user_123',
+    threadId: 'thread_456',
+  },
+)
+```
+
+モデルは完全な通知をコンテキストとして受け取ります。
+
+```xml
+<notification source="github" type="ci-status" priority="high" status="delivered">CI failed on main: 3 tests failed.</notification>
+```
+
+通知サマリーは、受信トレイのレコードが待機中であることをモデルに伝えます。
+
+```xml
+<notification-summary pending="10">github: 3, email: 5, slack: 2</notification-summary>
+```
+
+Mastra がサマリーを出力すると、要約された各レコードの `summaryAt` を消去し、`summarySignalId` を設定します。レコードは保留中かつ読み取り可能な状態で残ります。Mastra が完全な通知を出力すると、`deliveredSignalId` を設定し、レコードを `delivered` としてマークします。受信トレイ Tool が先に通知を読み取った場合、完全な通知シグナルを挿入してレコードを `seen` としてマークできるため、完全な通知の重複配信を防げます。
+
+一部の通知を別のディスパッチ期間またはサマリー集約まで待機させる場合は、エージェントに配信ポリシーを設定します。延期された通知とサマリー集約を自動配信する場合は、Mastra レベルでスケジュール済みディスパッチを有効にします。`notifications.deliveryPolicy` については [`Agent` コンストラクターリファレンス](/reference/agents/agent#constructor-parameters)、ランタイムの通知ディスパッチ設定については [`Mastra` クラスリファレンス](/reference/core/mastra-class#constructor-parameters)を参照してください。
+
+#### 通知受信トレイ Tool
+
+多数の CRUD Tool の代わりに、受信トレイ操作用の1つの Tool をエージェントへ提供するには、`createNotificationInboxTool()` を使用します。エージェントが `<notification-summary>` シグナルの背後にある完全なレコードを必要とする場合は、そのシグナルの後で `read` を使用します。通知の内容は通常の Tool 出力ではなく、シグナルとして配信されます。セットアップ例、入力スキーマ、アクションの動作については、[`createNotificationInboxTool()` リファレンス](/reference/signals/create-notification-inbox-tool)を参照してください。
+
+`sendNotificationSignal()` には、`notifications` をサポートするストレージドメインが必要です。受信トレイのストレージを迂回すべき低レベルの通知形式コンテキストに限り、`sendSignal({ type: 'notification' })` を使用します。
+
+## 分散環境とサーバーレス環境へのデプロイ
+
+シグナルは pub/sub バックエンドを通じて実行を調整します。`LeaseProvider` を実装したバックエンドにシグナルが到着すると、Mastra は対象スレッドのリースを取得して、会話を一度に1つのプロセスだけが所有するようにします。その後、エージェントを起動するか、実行中のループへ入力を転送します。リース機能のないバックエンドでは、常に所有権を付与する no-op にフォールバックします。これは単一プロセスでは問題ありませんが、複数インスタンス間では適切ではありません。
+
+既定のインメモリ pub/sub は、インスタンスの境界を越えられません。Vercel などのサーバーレスプラットフォームや複数インスタンスのデプロイでは、フォローアップシグナルが、エージェントを実行しているインスタンスとは別のインスタンスへ転送される場合があります。
+
+共有 pub/sub がない場合、そのインスタンスはアクティブな実行へ到達できず、独自の実行を開始します。その結果、元の実行はそのまま残り、スレッドが二重に処理されます。
+
+インスタンス間でリースとシグナルを調整するには、Redis Streams を使用する共有 pub/sub を `Mastra` インスタンスに設定します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RedisStreamsPubSub } from '@mastra/redis-streams'
+
+export const mastra = new Mastra({
+  agents: { agent },
+  pubsub: new RedisStreamsPubSub({
+    url: process.env.REDIS_URL,
+    keyPrefix: 'mastra:my-app',
+  }),
+})
+```
+
+`RedisStreamsPubSub` はイベント配信の契約と分散リースの両方を実装しているため、1つのバックエンドでインスタンス間のシグナル配信とリース所有権を処理できます。Vercel のマネージド Redis インテグレーションと Upstash Redis はどちらも適しています。分散 pub/sub が必要になる状況について詳しくは、[PubSub ガイド](/docs/server/pubsub)と [`RedisStreamsPubSub` リファレンス](/reference/pubsub/redis-streams)を参照してください。
+
+## 互換性と API
+
+### 互換性
+
+Mastra は引き続き、`type: 'user-message'` や `type: 'system-reminder'` などの従来のシグナルペイロードを受け付けます。内部では、新しいカテゴリとタグの形式に正規化されます。
+
+- `type: 'user-message'`: `type: 'user'` と `tagName: 'user'` に正規化されます
+- `type: 'system-reminder'`: `type: 'reactive'` と `tagName: 'system-reminder'` に正規化されます
+
+保存済みの既存シグナル行と古いクライアントは、互換性レイヤーを通じて引き続き読み込まれます。新しいクライアントは、サーバーが対応している場合にメッセージルートを呼び出します。React のスレッドシグナルパスは、古いサーバーを検出すると従来の `/signals` ルートへフォールバックします。メッセージ、シグナル、購読の完全な型については、[エージェントシグナルリファレンス](/reference/agents/agent#thread-signals)を参照してください。
+
+### Tool 呼び出しを承認する
+
+購読中の実行が Tool の承認待ちで一時停止した場合は、購読専用のメソッドを使って Tool 呼び出しを承認または拒否します。再開後のチャンクは、既存のスレッド購読を通じて届きます。リクエストとレスポンスの形式については、[`client.getAgent().sendToolApproval()` リファレンス](/reference/client-js/agents#sendtoolapproval)と[サーバーのエージェントルート](/reference/server/routes#subscription-tool-approval-routes)を参照してください。
+
+### HTTP ルートを使用する
+
+HTTP 経由で Mastra を直接呼び出す場合、即時メッセージには `POST /api/agents/:agentId/send-message`、次のターン用のメッセージには `POST /api/agents/:agentId/queue-message` を使用します。購読専用の Tool 承認には、`POST /api/agents/:agentId/send-tool-approval` を使用します。リクエストとレスポンスのスキーマについては、[サーバールートリファレンス](/reference/server/routes#agent-message-routes)を参照してください。
+
+### クライアント SDK を使用する
+
+JavaScript クライアントは、スレッドシグナル API を公開しています。
+
+スレッドへ入力を送る前に `subscribeToThread()` を使用すると、入力を受け取ったり入力に応じて起動したりするストリームをクライアントで表示できます。
+
+```typescript title="src/app/chat.ts"
+const agent = client.getAgent('supportAgent')
+
+const subscription = await agent.subscribeToThread({
+  resourceId: 'user_123',
+  threadId: 'thread_456',
+})
+
+await agent.sendMessage({
+  message: 'Show the shorter version.',
+  resourceId: 'user_123',
+  threadId: 'thread_456',
+})
+
+await subscription.processDataStream({
+  onChunk: chunk => {
+    console.log(chunk)
+  },
+  reconnect: true,
+})
+```
+
+長時間維持する購読には `reconnect: true` を使用します。再接続オプションについては、[`client.getAgent().subscribeToThread()` リファレンス](/reference/client-js/agents#subscribetothread)を参照してください。
+
+### カスタム SSE 購読を維持する
+
+スレッド購読用の独自の Server-Sent Events（SSE）エンドポイントを公開する場合は、ストリームがアイドル状態の間に定期的なハートビートフレームを送信します。これにより、次のシグナルやモデルチャンクが届く前に、ブラウザー、プロキシ、ロードバランサーが接続を閉じるのを防ぎます。
+
+次の例では、25秒ごとに SSE コメントを送信します。
+
+```typescript title="src/api/subscribe.ts"
+const heartbeat = setInterval(() => {
+  controller.enqueue(encoder.encode(': keep-alive\n\n'))
+}, 25_000)
+
+request.signal.addEventListener('abort', () => {
+  clearInterval(heartbeat)
+})
+```
+
+ハートビートは、クライアント側の再接続ロジックと組み合わせて使用します。ハートビートはアイドル時の切断を減らし、ネットワークやランタイムによってストリームが閉じられた場合は、再接続によって復旧します。
+
+## 関連情報
+
+- [`Agent.sendMessage()`](/reference/agents/agent#sendmessagemessage-options)
+- [`Agent.queueMessage()`](/reference/agents/agent#queuemessagemessage-options)
+- [`Agent.sendSignal()`](/reference/agents/agent#sendsignalsignal-options)
+- [`Agent.sendStateSignal()`](/reference/agents/agent#sendstatesignalstate-options)
+- [`Agent.subscribeToThread()`](/reference/agents/agent#subscribetothreadoptions)
+- [`createNotificationInboxTool()`](/reference/signals/create-notification-inbox-tool)
+- [`client.getAgent().sendMessage()`](/reference/client-js/agents#sendmessage)
+- [`client.getAgent().queueMessage()`](/reference/client-js/agents#queuemessage)
+- [`client.getAgent().sendSignal()`](/reference/client-js/agents#sendsignal)
+- [サーバーのエージェントルート](/reference/server/routes#agent-message-routes)
+- [`client.getAgent().subscribeToThread()`](/reference/client-js/agents#subscribetothread)
+- [`client.getAgent().sendToolApproval()`](/reference/client-js/agents#sendtoolapproval)
+- [`RedisStreamsPubSub`](/reference/pubsub/redis-streams)
+- 📹 [Mastra シグナルワークショップ](https://www.youtube.com/watch?v=KLg6uFKz9aw\&t=3020s)

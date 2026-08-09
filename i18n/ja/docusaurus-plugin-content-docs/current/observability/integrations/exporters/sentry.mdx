@@ -1,0 +1,198 @@
+---
+title: "Sentry exporter | Integrations | Observability"
+description: "AI の Tracing と監視のために Trace を Sentry へ送信します"
+packages:
+  - "@mastra/sentry"
+  - "@mastra/observability"
+---
+
+# Sentry exporter
+
+[Sentry](https://sentry.io/) は、AI 固有の Tracing 機能を備えたアプリケーション監視プラットフォームです。Sentry exporter は OpenTelemetry セマンティック規約を使用して Trace を Sentry へ送信し、モデルのパフォーマンス、token 使用量、Tool の実行に関するインサイトを提供します。
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/sentry@latest
+```
+
+## 設定
+
+### 前提条件
+
+1. **Sentry アカウント**：[sentry.io](https://sentry.io/) で登録します
+1. **DSN**：Project Settings → Client Keys から [Data Source Name](https://docs.sentry.io/concepts/key-terms/dsn-explainer/) を取得します
+1. **環境変数**：設定を指定します
+
+```bash title=".env"
+SENTRY_DSN=https://...@...sentry.io/...
+
+# Optional
+SENTRY_ENVIRONMENT=production
+SENTRY_RELEASE=1.0.0
+```
+
+### ゼロコンフィグ設定
+
+環境変数を設定したら、設定なしで exporter を使用できます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { SentryExporter } from '@mastra/sentry'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      sentry: {
+        serviceName: 'my-service',
+        exporters: [new SentryExporter()],
+      },
+    },
+  }),
+})
+```
+
+### 明示的な設定
+
+認証情報を直接渡すこともできます（環境変数より優先されます）。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { SentryExporter } from '@mastra/sentry'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      sentry: {
+        serviceName: 'my-service',
+        exporters: [
+          new SentryExporter({
+            dsn: process.env.SENTRY_DSN!,
+            environment: 'production',
+            tracesSampleRate: 1.0, // Send 100% of transactions to Sentry
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+## 設定オプション
+
+### 完全な設定
+
+```typescript
+new SentryExporter({
+  // Required settings
+  dsn: process.env.SENTRY_DSN!, // Data Source Name - tells the SDK where to send events
+
+  // Optional settings
+  environment: 'production', // Deployment environment (enables filtering issues and alerts by environment)
+  tracesSampleRate: 1.0, // Percentage of transactions sent to Sentry (0.0 = 0%, 1.0 = 100%)
+  release: '1.0.0', // Version of your code deployed (helps identify regressions and track deployments)
+
+  // Advanced Sentry options
+  options: {
+    // Any additional Sentry.NodeOptions
+    integrations: [],
+    beforeSend: event => event,
+    // ... other Sentry SDK options
+  },
+
+  // Diagnostic logging
+  logLevel: 'info', // debug | info | warn | error
+})
+```
+
+### サンプリング設定
+
+Sentry へ送信する Transaction の割合を制御します。トラフィック量の多いアプリケーションで役立ちます。
+
+```typescript
+new SentryExporter({
+  dsn: process.env.SENTRY_DSN!,
+  tracesSampleRate: 0.1, // Send 10% of transactions to Sentry (recommended for high-load backends)
+})
+```
+
+:::tip
+開発環境では `1.0`（100%）、本番環境の高負荷なアプリケーションでは `0.1`～`0.2`（10～20%）に設定してください。Tracing を完全に無効にするには、`tracesSampleRate` 自体を設定せず、`0` にも設定しないでください。
+:::
+
+## Span タイプのマッピング
+
+Mastra の Span タイプは Sentry の Operation に自動的にマッピングされます。
+
+| Mastra SpanType | Sentry Operation | 備考 |
+| - | - | - |
+| `AGENT_RUN` | `gen_ai.invoke_agent` | 子の MODEL\_GENERATION Span の token を含みます |
+| `MODEL_GENERATION` | `gen_ai.chat` | 使用量の統計とストリーミングデータを含みます |
+| `MODEL_STEP` | _（スキップ）_ | Trace 階層を簡潔にするためスキップします |
+| `MODEL_CHUNK` | _（スキップ）_ | MODEL\_GENERATION にデータを集約します |
+| `TOOL_CALL` | `gen_ai.execute_tool` | input/output を含む Tool の実行 |
+| `MCP_TOOL_CALL` | `gen_ai.execute_tool` | MCP Tool の実行 |
+| `WORKFLOW_RUN` | `workflow.run` | |
+| `WORKFLOW_STEP` | `workflow.step` | |
+| `WORKFLOW_CONDITIONAL` | `workflow.conditional` | |
+| `WORKFLOW_CONDITIONAL_EVAL` | `workflow.conditional` | |
+| `WORKFLOW_PARALLEL` | `workflow.parallel` | |
+| `WORKFLOW_LOOP` | `workflow.loop` | |
+| `WORKFLOW_SLEEP` | `workflow.sleep` | |
+| `WORKFLOW_WAIT_EVENT` | `workflow.wait` | |
+| `PROCESSOR_RUN` | `ai.processor` | |
+| `GENERIC` | `ai.span` | |
+
+## OpenTelemetry セマンティック規約
+
+exporter は、Sentry 固有の属性とともに標準の GenAI セマンティック規約を使用します。
+
+**MODEL\_GENERATION Span の場合：**
+
+- `gen_ai.system`：モデル Provider（例：`openai`、`anthropic`）
+- `gen_ai.request.model`：モデル識別子（例：`gpt-5.4`）
+- `gen_ai.response.model`：レスポンスモデル
+- `gen_ai.response.text`：出力テキストのレスポンス
+- `gen_ai.response.tool_calls`：generation 中に行われた Tool 呼び出し（JSON 配列）
+- `gen_ai.usage.input_tokens`：入力 token 数
+- `gen_ai.usage.output_tokens`：出力 token 数
+- `gen_ai.request.temperature`：Temperature パラメーター
+- `gen_ai.request.stream`：ストリーミングが要求されたかどうか
+- `gen_ai.request.messages`：入力メッセージ／プロンプト（JSON）
+- `gen_ai.completion_start_time`：最初の token が到着した時刻
+
+**TOOL\_CALL Span の場合：**
+
+- `gen_ai.tool.name`：Tool 識別子
+- `gen_ai.tool.type`：`function`
+- `gen_ai.tool.call.id`：Tool 呼び出し ID
+- `gen_ai.tool.input`：Tool の入力（JSON）
+- `gen_ai.tool.output`：Tool の出力（JSON）
+- `tool.success`：Tool 呼び出しが成功したかどうか
+
+**AGENT\_RUN Span の場合：**
+
+- `gen_ai.agent.name`：Agent 識別子
+- `gen_ai.pipeline.name`：Agent 名（Sentry AI ビュー用）
+- `gen_ai.agent.instructions`：Agent の instructions
+- `gen_ai.response.model`：子 generation のモデル
+- `gen_ai.response.text`：子 generation の出力テキスト
+- `gen_ai.usage.*`：子 generation の token 使用量
+
+## 機能
+
+- **階層型 Trace**：親子関係を維持します
+- **token の追跡**：generation の token 使用量を自動的に追跡します
+- **Tool 呼び出しの追跡**：input/output を含む Tool の実行を取得します
+- **ストリーミングのサポート**：ストリーミングレスポンスを集約します
+- **エラー追跡**：エラーステータスと例外を自動的に取得します
+- **Workflow のサポート**：Workflow の実行ステップを追跡します
+- **簡潔な階層**：ノイズを減らすため、MODEL\_STEP と MODEL\_CHUNK の Span はスキップされます
+
+## 関連情報
+
+- [Tracing の概要](/docs/observability/tracing/overview)
+- [Sentry ドキュメント](https://docs.sentry.io/)
+- [OpenTelemetry セマンティック規約](https://opentelemetry.io/docs/concepts/semantic-conventions/)

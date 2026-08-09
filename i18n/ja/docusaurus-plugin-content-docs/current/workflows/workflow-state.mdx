@@ -1,0 +1,188 @@
+---
+title: "Workflow の状態 | Workflows"
+description: "Workflow の実行全体を通して保持されるグローバルな状態を使用し、Workflow のステップ間で値を共有します。"
+packages:
+  - "@mastra/core"
+---
+
+# Workflow の状態
+
+Workflow の状態を使うと、すべてのステップの inputSchema と outputSchema を介さずに、ステップ間で値を共有できます。進行状況の追跡、結果の蓄積、Workflow 全体での設定の共有に役立ちます。
+
+## 状態とステップの入出力の違い
+
+**状態**と**ステップの入出力**の違いを理解することが重要です。
+
+- **ステップの入出力**: データはステップ間を順番に流れます。各ステップは前のステップの出力を `inputData` として受け取り、次のステップに出力を返します。
+- **状態**: すべてのステップが `state` と `setState` を介して読み取り、更新できる共有ストアです。状態は中断と再開のサイクルを含め、Workflow の実行全体を通して保持されます。
+
+```typescript title="src/mastra/workflows/test-workflow.ts"
+const step1 = createStep({
+  id: 'step-1',
+  inputSchema: z.object({ workflowInput: z.string() }),
+  outputSchema: z.object({ step1Output: z.string() }),
+  stateSchema: z.object({ sharedCounter: z.number() }),
+  execute: async ({ inputData, state, setState }) => {
+    // inputData comes from workflow input or previous step's output
+    console.log(inputData.workflowInput)
+
+    // state is the shared workflow state
+    console.log(state.sharedCounter)
+
+    // Update state for subsequent steps
+    await setState({ sharedCounter: state.sharedCounter + 1 })
+
+    // Return output that flows to next step's inputData
+    return { step1Output: 'processed' }
+  },
+})
+```
+
+## 状態スキーマを定義する
+
+Workflow と個々のステップの両方に `stateSchema` を定義します。Workflow の stateSchema は取り得るすべての状態値を含むマスタースキーマで、各ステップでは必要な値だけを宣言します。
+
+```typescript title="src/mastra/workflows/test-workflow.ts"
+const step1 = createStep({
+  stateSchema: z.object({
+    processedItems: z.array(z.string()),
+  }),
+  execute: async ({ inputData, state, setState }) => {
+    const { message } = inputData
+    const { processedItems } = state
+
+    await setState({
+      processedItems: [...processedItems, 'item-1', 'item-2'],
+    })
+
+    return {
+      formatted: message.toUpperCase(),
+    }
+  },
+})
+
+const step2 = createStep({
+  stateSchema: z.object({
+    metadata: z.object({
+      processedBy: z.string(),
+    }),
+  }),
+  execute: async ({ inputData, state }) => {
+    const { formatted } = inputData
+    const { metadata } = state
+
+    return {
+      emphasized: `${formatted}!! ${metadata.processedBy}`,
+    }
+  },
+})
+
+export const testWorkflow = createWorkflow({
+  stateSchema: z.object({
+    processedItems: z.array(z.string()),
+    metadata: z.object({
+      processedBy: z.string(),
+    }),
+  }),
+})
+  .then(step1)
+  .then(step2)
+  .commit()
+```
+
+## 初期状態を設定する
+
+Workflow の実行開始時に `initialState` を渡して初期値を設定します。
+
+```typescript
+const run = await workflow.createRun()
+
+const result = await run.start({
+  inputData: { message: 'Hello' },
+  initialState: {
+    processedItems: [],
+    metadata: { processedBy: 'system' },
+  },
+})
+```
+
+`initialState` オブジェクトは、Workflow の `stateSchema` で定義した構造と一致させる必要があります。
+
+## 中断と再開をまたいだ状態の永続化
+
+状態は、中断と再開のサイクルをまたいで自動的に保持されます。Workflow が中断した後に再開すると、中断前に行われた状態の更新がすべて維持されます。
+
+```typescript title="src/mastra/workflows/test-workflow.ts"
+const step1 = createStep({
+  id: 'step-1',
+  inputSchema: z.object({}),
+  outputSchema: z.object({}),
+  stateSchema: z.object({ count: z.number(), items: z.array(z.string()) }),
+  resumeSchema: z.object({ proceed: z.boolean() }),
+  execute: async ({ state, setState, suspend, resumeData }) => {
+    if (!resumeData) {
+      // First run: update state and suspend
+      await setState({ count: state.count + 1, items: [...state.items, 'item-1'] })
+      await suspend({})
+      return {}
+    }
+    // After resume: state changes are preserved (count: 1, items: ["item-1"])
+    return {}
+  },
+})
+```
+
+## ネストされた Workflow の状態
+
+ネストされた Workflow を使用すると、状態は親から子へ伝播します。親 Workflow がネストされた Workflow を呼び出す前に行った変更は、ネストされた Workflow 内のステップから参照できます。
+
+```typescript title="src/mastra/workflows/test-workflow.ts"
+const nestedStep = createStep({
+  id: 'nested-step',
+  inputSchema: z.object({}),
+  outputSchema: z.object({ result: z.string() }),
+  stateSchema: z.object({ sharedValue: z.string() }),
+  execute: async ({ state }) => {
+    // Receives state modified by parent workflow
+    return { result: `Received: ${state.sharedValue}` }
+  },
+})
+
+const nestedWorkflow = createWorkflow({
+  id: 'nested-workflow',
+  inputSchema: z.object({}),
+  outputSchema: z.object({ result: z.string() }),
+  stateSchema: z.object({ sharedValue: z.string() }),
+})
+  .then(nestedStep)
+  .commit()
+
+const parentStep = createStep({
+  id: 'parent-step',
+  inputSchema: z.object({}),
+  outputSchema: z.object({}),
+  stateSchema: z.object({ sharedValue: z.string() }),
+  execute: async ({ state, setState }) => {
+    // Modify state before nested workflow runs
+    await setState({ sharedValue: 'modified-by-parent' })
+    return {}
+  },
+})
+
+const parentWorkflow = createWorkflow({
+  id: 'parent-workflow',
+  inputSchema: z.object({}),
+  outputSchema: z.object({ result: z.string() }),
+  stateSchema: z.object({ sharedValue: z.string() }),
+})
+  .then(parentStep)
+  .then(nestedWorkflow)
+  .commit()
+```
+
+## 関連項目
+
+- [Workflows の概要](/docs/workflows/overview)
+- [中断と再開](/docs/workflows/suspend-and-resume)
+- [Step クラス](/reference/workflows/step)
+- [Workflow クラス](/reference/workflows/workflow)

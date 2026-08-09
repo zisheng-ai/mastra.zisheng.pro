@@ -13,7 +13,8 @@ const mappings = [
 const requestedScopes = new Set(process.argv.slice(2))
 
 const simplifiedChinesePattern =
-  /[这们个过还让进从则并将仅应对开关网务级术广门线现项优据标签选测显边阅码页击览载层统环认权态复输备图库构处创问达种语话请继续动经导观错实总验终结]/u
+  /[这们个过还让进从则并仅应对开关网务级术广门线现项优据标签选测显边阅码页击览载层统环认权态复输备图库构处创问达种语话请继续动经导观错实总验终结]/u
+const japaneseCharacterPattern = /[぀-ヿ㐀-鿿]/u
 
 async function listContentFiles(directory, prefix = '') {
   const entries = await fs.readdir(directory, { withFileTypes: true })
@@ -117,13 +118,18 @@ for (const [scope, sourceRelativeRoot, targetRelativeRoot, topLevelOnly = false]
     const targetStructure = structure(target)
     for (const key of Object.keys(sourceStructure)) {
       if (sourceStructure[key].length !== targetStructure[key].length) {
-        errors.push(
-          `${label}: ${key} count changed (${sourceStructure[key].length} -> ${targetStructure[key].length})`,
-        )
+        errors.push(`${label}: ${key} count changed (${sourceStructure[key].length} -> ${targetStructure[key].length})`)
       }
     }
 
-    if (simplifiedChinesePattern.test(target)) {
+    const targetWithoutFences = target.replace(/```[^\n]*\n[\s\S]*?```/g, '')
+    if (source === target) {
+      errors.push(`${label}: translation is identical to English source`)
+    }
+    if (!japaneseCharacterPattern.test(targetWithoutFences)) {
+      errors.push(`${label}: no Japanese prose detected`)
+    }
+    if (simplifiedChinesePattern.test(targetWithoutFences)) {
       errors.push(`${label}: possible Simplified Chinese residue`)
     }
   }

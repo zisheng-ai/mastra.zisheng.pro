@@ -23,7 +23,8 @@ function PublishedContent({
   lessonNumber: number
   totalLessons: number
 }) {
-  const { contentModules, isSimplifiedChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
+  const { contentModules, isSimplifiedChinese, isTaiwanChinese, isHongKongChinese, isJapanese } =
+    useLocalizedLearnContent()
   const { watched, seconds, setWatched, setSeconds, setLastVisited } = useLessonProgress(lesson.slug)
 
   useEffect(() => {
@@ -61,7 +62,7 @@ function PublishedContent({
                 <div className="py-4 text-(--mastra-text-tertiary)">
                   {isSimplifiedChinese
                     ? '正在加载内容……'
-                    : isHongKongChinese
+                    : isTaiwanChinese || isHongKongChinese
                       ? '正在載入內容……'
                       : isJapanese
                         ? 'コンテンツを読み込んでいます…'
@@ -78,6 +79,7 @@ function PublishedContent({
         watched={watched}
         onToggle={() => setWatched(!watched)}
         isSimplifiedChinese={isSimplifiedChinese}
+        isTaiwanChinese={isTaiwanChinese}
         isHongKongChinese={isHongKongChinese}
         isJapanese={isJapanese}
         className="mt-8"
@@ -91,6 +93,7 @@ function MarkAsCompleteButton({
   watched,
   onToggle,
   isSimplifiedChinese,
+  isTaiwanChinese,
   isHongKongChinese,
   isJapanese,
   className,
@@ -98,6 +101,7 @@ function MarkAsCompleteButton({
   watched: boolean
   onToggle: () => void
   isSimplifiedChinese: boolean
+  isTaiwanChinese: boolean
   isHongKongChinese: boolean
   isJapanese: boolean
   className?: string
@@ -128,14 +132,14 @@ function MarkAsCompleteButton({
       {watched
         ? isSimplifiedChinese
           ? '已完成'
-          : isHongKongChinese
+          : isTaiwanChinese || isHongKongChinese
             ? '已完成'
             : isJapanese
               ? '完了'
               : 'Completed'
         : isSimplifiedChinese
           ? '将本课标记为已完成'
-          : isHongKongChinese
+          : isTaiwanChinese || isHongKongChinese
             ? '將本課標記為已完成'
             : isJapanese
               ? 'このレッスンを完了としてマーク'
@@ -145,7 +149,7 @@ function MarkAsCompleteButton({
 }
 
 export default function LessonPage() {
-  const { course, isSimplifiedChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
+  const { course, isSimplifiedChinese, isTaiwanChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
   const location = useLocation()
   const learnBasePath = useBaseUrl('/learn/')
   const slug = location.pathname.startsWith(learnBasePath)
@@ -168,11 +172,13 @@ export default function LessonPage() {
     'author',
     isSimplifiedChinese
       ? '跟随 Guil 使用 TypeScript 构建你的第一个 AI Agent'
-      : isHongKongChinese
-        ? '跟隨 Guil 使用 TypeScript 建立你的第一個 AI Agent'
-        : isJapanese
-          ? 'Guil と TypeScript で最初の AI Agent を構築'
-          : 'Build Your First AI Agent in TypeScript with Guil',
+      : isTaiwanChinese
+        ? '跟著 Guil 使用 TypeScript 建立你的第一個 AI Agent'
+        : isHongKongChinese
+          ? '跟隨 Guil 使用 TypeScript 建立你的第一個 AI Agent'
+          : isJapanese
+            ? 'Guil と TypeScript で最初の AI Agent を構築'
+            : 'Build Your First AI Agent in TypeScript with Guil',
   )
 
   return (

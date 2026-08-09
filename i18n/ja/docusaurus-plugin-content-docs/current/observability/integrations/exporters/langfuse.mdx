@@ -1,0 +1,265 @@
+---
+title: "Langfuse exporter | Integrations | Observability"
+description: "LLM の可観測性と分析のためにトレースを Langfuse へ送信します"
+packages:
+  - "@mastra/langfuse"
+  - "@mastra/observability"
+---
+
+# Langfuse exporter
+
+[Langfuse](https://langfuse.com/) は、LLM アプリケーション専用に設計されたオープンソースの可観測性プラットフォームです。Langfuse exporter はトレースを Langfuse へ送信し、モデルのパフォーマンス、token の使用量、会話フローに関する詳細なインサイトを提供します。
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/langfuse@latest
+```
+
+## 設定
+
+### 前提条件
+
+1. **Langfuse アカウント**: [cloud.langfuse.com](https://cloud.langfuse.com) で登録するか、セルフホストでデプロイします
+1. **API キー**: Langfuse の Settings → API Keys で公開鍵と秘密鍵のペアを作成します
+1. **環境変数**: 認証情報を設定します
+
+```bash title=".env"
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com  # Or your self-hosted URL
+```
+
+### 設定不要でのセットアップ
+
+環境変数を設定したら、設定を渡さずに exporter を使用できます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { LangfuseExporter } from '@mastra/langfuse'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      langfuse: {
+        serviceName: 'my-service',
+        exporters: [new LangfuseExporter()],
+      },
+    },
+  }),
+})
+```
+
+### 明示的な設定
+
+認証情報を直接渡すこともできます。この値は環境変数より優先されます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { LangfuseExporter } from '@mastra/langfuse'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      langfuse: {
+        serviceName: 'my-service',
+        exporters: [
+          new LangfuseExporter({
+            publicKey: process.env.LANGFUSE_PUBLIC_KEY!,
+            secretKey: process.env.LANGFUSE_SECRET_KEY!,
+            baseUrl: process.env.LANGFUSE_BASE_URL,
+            environment: process.env.NODE_ENV,
+            release: process.env.GIT_COMMIT,
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+## 設定オプション
+
+### リアルタイムモードとバッチモード
+
+Langfuse exporter は、トレースを送信する 2 つのモードをサポートしています。
+
+#### リアルタイムモード（開発環境）
+
+トレースは Langfuse dashboard に即座に表示されるため、デバッグに適しています。
+
+```typescript
+new LangfuseExporter({
+  publicKey: process.env.LANGFUSE_PUBLIC_KEY!,
+  secretKey: process.env.LANGFUSE_SECRET_KEY!,
+  realtime: true, // Flush after each event
+})
+```
+
+#### バッチモード（本番環境）
+
+自動バッチ処理により、パフォーマンスが向上します。
+
+```typescript
+new LangfuseExporter({
+  publicKey: process.env.LANGFUSE_PUBLIC_KEY!,
+  secretKey: process.env.LANGFUSE_SECRET_KEY!,
+  realtime: false, // Default - batch traces
+})
+```
+
+#### 大量トレース向けのバッチ調整
+
+セルフホストの Langfuse デプロイや、毎秒多数の span を生成するストリーミング実行では、OTEL のバッチサイズとフラッシュ間隔を調整することで、Langfuse の取り込み endpoint に対するリクエスト負荷を軽減できます。
+
+```typescript
+new LangfuseExporter({
+  publicKey: process.env.LANGFUSE_PUBLIC_KEY!,
+  secretKey: process.env.LANGFUSE_SECRET_KEY!,
+  flushAt: 500, // Maximum spans per OTEL export batch
+  flushInterval: 20, // Maximum seconds between flushes
+})
+```
+
+大量に発生する種類の span（ストリーミング応答による `MODEL_CHUNK` span など）を完全に除外するには、exporter を設定するのではなく、可観測性レベルの [`excludeSpanTypes` オプション](/reference/observability/tracing/span-filtering)を使用します。
+
+```typescript
+import { SpanType } from '@mastra/core/observability'
+
+new Observability({
+  configs: {
+    langfuse: {
+      serviceName: 'my-service',
+      exporters: [new LangfuseExporter()],
+      excludeSpanTypes: [SpanType.MODEL_CHUNK],
+    },
+  },
+})
+```
+
+### 完全な設定
+
+```typescript
+new LangfuseExporter({
+  // Required credentials
+  publicKey: process.env.LANGFUSE_PUBLIC_KEY!,
+  secretKey: process.env.LANGFUSE_SECRET_KEY!,
+
+  // Optional settings
+  baseUrl: process.env.LANGFUSE_BASE_URL, // Default: https://cloud.langfuse.com
+  realtime: process.env.NODE_ENV === 'development', // Dynamic mode selection
+  flushAt: 500, // Maximum spans per OTEL export batch
+  flushInterval: 20, // Maximum seconds between flushes
+  logLevel: 'info', // Diagnostic logging: debug | info | warn | error
+
+  // Langfuse-specific settings
+  environment: process.env.NODE_ENV, // Shows in Langfuse UI for filtering
+  release: process.env.GIT_COMMIT, // Git commit hash for version tracking
+})
+```
+
+## Agent ごとの evaluator のスコープ設定
+
+Langfuse evaluator（LLM-as-a-Judge など）は、特定のトレースに対してのみ実行するようフィルタリングできます。Mastra Langfuse exporter は、それぞれのトレースを開始した Agent または Workflow に自動的にスコープ設定するため、トレースレベルのフィルターは該当する実行を正しく特定します。
+
+root span が `AGENT_RUN` である各トレースに対し、exporter は次の値を設定します。
+
+- `langfuse.trace.name`: Agent 名（名前が設定されていない場合は id）
+- `langfuse.trace.metadata.agentId`: Agent id
+- `langfuse.trace.metadata.agentName`: Agent 名
+
+`WORKFLOW_RUN` root span にも同様に適用され、`langfuse.trace.metadata.workflowId` と `langfuse.trace.metadata.workflowName` が設定されます。
+
+evaluator の対象を特定の Agent に限定するには、Langfuse で次のいずれかのフィルターを設定します。
+
+- **Trace name**: Agent 名と等しい値（例: `weather-agent`）。
+- **Metadata**: `agentId` が Agent id と等しい値。
+
+Langfuse の evaluator フィルターにある Trace name のドロップダウンには、これまで検出された一意の値がすべて表示されます。そのため、各 Agent が少なくとも 1 つのトレースを生成すると、それぞれ個別の項目として表示されます。
+
+`mastra.metadata.traceName` でカスタムの `traceName` を設定した場合、その値がデフォルトの Agent 名より優先されます。
+
+## カスタムトレース metadata
+
+Langfuse がトレースのフィルタリングとグループ化に使用するのは、トップレベルの metadata のみです。ネストされた metadata キーは、フィルタリングやグループ化に使用できません。
+
+独自のトップレベル metadata を追加するには、span metadata の `langfuse` 配下にキーを設定します。exporter は各キーを `langfuse.trace.metadata.<key>` へ転送し、Langfuse でフィルタリングできるようにします。
+
+```typescript
+const tracingOptions = {
+  metadata: {
+    langfuse: {
+      customerId: 'cust_123',
+      tier: 'enterprise',
+    },
+  },
+}
+```
+
+この例では、`langfuse.trace.metadata.customerId` と `langfuse.trace.metadata.tier` が生成されます。
+
+注意事項:
+
+- 予約済みの `prompt` キーは[プロンプトのリンク](#prompt-linking)に使用され、トレース metadata としては転送されません。
+- 予約済みの識別用キー `agentId`、`agentName`、`workflowId`、`workflowName` は root span から設定され、同名のカスタム値より優先されます。
+- Langfuse はトレース metadata 属性を文字列としてマッピングするため、値は文字列として送信されます。数値、boolean、object は JSON でシリアライズされます。Langfuse Cloud は取り込み時に元の型へ復元します。
+
+## プロンプトのリンク
+
+LLM generation を [Langfuse Prompt Management](https://langfuse.com/docs/prompt-management) に保存されたプロンプトへリンクできます。これにより、プロンプトのバージョン追跡とメトリクスが利用可能になります。
+
+### Helper の使用（推奨）
+
+最も簡潔な API として、`withLangfusePrompt` を `buildTracingOptions` と組み合わせて使用します。
+
+```typescript title="src/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { buildTracingOptions } from '@mastra/observability'
+import { LangfuseExporter, withLangfusePrompt } from '@mastra/langfuse'
+
+const exporter = new LangfuseExporter()
+
+// Fetch the prompt from Langfuse Prompt Management via the client
+const prompt = await exporter.client.prompt.get('customer-support', { type: 'text' })
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  instructions: prompt.compile(), // Use the prompt text from Langfuse
+  model: '__GATEWAY_OPENAI_MODEL__',
+  defaultGenerateOptions: {
+    tracingOptions: buildTracingOptions(
+      withLangfusePrompt({ name: prompt.name, version: prompt.version }),
+    ),
+  },
+})
+```
+
+`withLangfusePrompt` helper は、プロンプトをリンクするための `name` と `version` フィールドを受け取ります。Langfuse v5 では両方のフィールドが必須です。
+
+### フィールドの手動指定
+
+Langfuse SDK を使用していない場合は、フィールドを手動で渡すこともできます。
+
+```typescript
+const tracingOptions = buildTracingOptions(withLangfusePrompt({ name: 'my-prompt', version: 1 }))
+```
+
+### Prompt object のフィールド
+
+prompt object には `name` と `version` の両方が必要です。
+
+| フィールド | 型 | 説明 |
+| - | - | - |
+| `name` | string | Langfuse におけるプロンプト名 |
+| `version` | number | プロンプトのバージョン番号 |
+
+`MODEL_GENERATION` span に設定すると、Langfuse exporter は generation を対応するプロンプトへ自動的にリンクします。
+
+## 関連情報
+
+- [トレースの概要](/docs/observability/tracing/overview)
+- [Langfuse ドキュメント](https://langfuse.com/docs)
+- [Langfuse Prompt Management](https://langfuse.com/docs/prompt-management)

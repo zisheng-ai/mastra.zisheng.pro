@@ -1,0 +1,312 @@
+---
+title: "機密データフィルター | Processor | Observability"
+description: "自動的なデータマスキングにより、Trace 内の機密情報を保護します"
+packages:
+  - "@mastra/observability"
+---
+
+# 機密データフィルター
+
+Sensitive Data Filter は、エクスポート前の処理パイプラインで Trace から機密情報をマスキングする Span processor です。これにより、パスワード、API キー、token、その他の機密データがアプリケーションの外部へ出たり、Observability プラットフォームに保存されたりすることを防ぎます。
+
+## デフォルト設定
+
+Sensitive Data Filter は、推奨される Observability 設定に含まれています。
+
+```ts title="src/mastra/index.ts"
+import {
+  Observability,
+  MastraStorageExporter,
+  MastraPlatformExporter,
+  SensitiveDataFilter,
+} from '@mastra/observability'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'mastra',
+        exporters: [new MastraStorageExporter(), new MastraPlatformExporter()],
+        spanOutputProcessors: [
+          new SensitiveDataFilter(), // Redacts sensitive fields before export
+        ],
+      },
+    },
+  }),
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+})
+```
+
+デフォルト設定では、次の一般的な機密フィールド名がマスキングされます。
+
+- `password`
+- `token`
+- `secret`
+- `key`
+- `apikey`
+- `auth`
+- `authorization`
+- `bearer`
+- `bearertoken`
+- `jwt`
+- `credential`
+- `clientsecret`
+- `privatekey`
+- `refresh`
+- `ssn`
+
+:::note
+
+フィールドの照合では大文字と小文字が区別されず、区切り文字は正規化されます。たとえば、`api-key`、`api_key`、`Api Key` はすべて `apikey` として扱われます。
+
+:::
+
+## 仕組み
+
+Sensitive Data Filter は、Span が exporter に送信される前に次の項目を走査して処理します。
+
+- **属性** - Span のメタデータとプロパティ
+- **メタデータ** - Span に付加されたカスタムメタデータ
+- **入力** - Agent、Tool、LLM に送信されるデータ
+- **出力** - レスポンスと結果
+- **エラー情報** - スタックトレースとエラーの詳細
+
+機密フィールドが検出されると、デフォルトではその値が `[REDACTED]` に置き換えられます。このフィルターは、ネストされたオブジェクト、配列、循環参照を安全に処理します。
+
+## カスタム設定
+
+マスキングするフィールドとマスキングの表示方法をカスタマイズできます。
+
+```ts title="src/mastra/index.ts"
+import { SensitiveDataFilter, MastraStorageExporter, Observability } from '@mastra/observability'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      production: {
+        serviceName: 'my-service',
+        exporters: [new MastraStorageExporter()],
+        spanOutputProcessors: [
+          new SensitiveDataFilter({
+            // Add custom sensitive fields
+            sensitiveFields: [
+              // Default fields
+              'password',
+              'token',
+              'secret',
+              'key',
+              'apikey',
+              // Custom fields for your application
+              'creditCard',
+              'bankAccount',
+              'routingNumber',
+              'email',
+              'phoneNumber',
+              'dateOfBirth',
+            ],
+            // Custom redaction token
+            redactionToken: '***SENSITIVE***',
+            // Redaction style
+            redactionStyle: 'full', // or 'partial'
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+## マスキングスタイル
+
+このフィルターは、2種類のマスキングスタイルをサポートします。
+
+### 完全マスキング（デフォルト）
+
+値全体を固定 token に置き換えます。
+
+```jsonc prettier:false
+// Before
+{
+  "apiKey": "sk-abc123xyz789def456",
+  "userId": "user_12345"
+}
+
+// After
+{
+  "apiKey": "[REDACTED]",
+  "userId": "user_12345"
+}
+```
+
+### 部分マスキング
+
+先頭と末尾の3文字を表示します。値全体を公開せずにデバッグする場合に役立ちます。
+
+```ts
+new SensitiveDataFilter({
+  redactionStyle: 'partial',
+})
+```
+
+```json prettier:false
+// Before
+{
+  "apiKey": "sk-abc123xyz789def456",
+  "creditCard": "4111111111111111"
+}
+
+// After
+{
+  "apiKey": "sk-…456",
+  "creditCard": "411…111"
+}
+```
+
+情報漏えいを防ぐため、7文字未満の値は完全にマスキングされます。
+
+## フィールドの照合ルール
+
+このフィルターは、高度なフィールド照合を使用します。
+
+1. **大文字と小文字を区別しない**：`APIKey`、`apikey`、`ApiKey` はすべて一致します
+1. **区切り文字に依存しない**：`api-key`、`api_key`、`apiKey` は同一として扱われます
+1. **完全一致**：正規化後のフィールドは完全に一致する必要があります
+   - `token` は `token`、`Token`、`TOKEN` と一致します
+   - `token` は `promptTokens` や `tokenCount` とは一致しません
+
+## ネストされたオブジェクトの処理
+
+このフィルターは、ネストされた構造を再帰的に処理します。
+
+```json prettier:false
+// Before
+{
+  "user": {
+    "id": "12345",
+    "credentials": {
+      "password": "SuperSecret123!",
+      "apiKey": "sk-production-key"
+    }
+  },
+  "config": {
+    "auth": {
+      "jwt": "eyJhbGciOiJIUzI1NiIs..."
+    }
+  }
+}
+
+// After
+{
+  "user": {
+    "id": "12345",
+    "credentials": {
+      "password": "[REDACTED]",
+      "apiKey": "[REDACTED]"
+    }
+  },
+  "config": {
+    "auth": {
+      "jwt": "[REDACTED]"
+    }
+  }
+}
+```
+
+## パフォーマンス上の考慮事項
+
+Sensitive Data Filter は、軽量かつ効率的に動作するよう設計されています。
+
+- **同期処理**：非同期処理を行わず、レイテンシーへの影響を最小限に抑えます
+- **循環参照の処理**：複雑なオブジェクトグラフを安全に処理します
+- **エラーからの復旧**：フィルタリングに失敗した場合、クラッシュさせずにフィールドをエラーマーカーへ置き換えます
+
+## フィルターの無効化
+
+機密データのフィルタリングを無効にする必要がある場合（本番環境では推奨されません）は、次のように設定します。
+
+```ts title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      debug: {
+        serviceName: 'debug-service',
+        spanOutputProcessors: [], // No processors, including no SensitiveDataFilter
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+:::warning
+
+機密データのフィルタリングは、管理された環境でのみ無効にしてください。Trace を外部サービスや共有ストレージへ送信する場合は、絶対に無効にしないでください。
+
+:::
+
+## 一般的なユースケース
+
+### 医療アプリケーション
+
+```ts
+new SensitiveDataFilter({
+  sensitiveFields: [
+    // HIPAA-related fields
+    'ssn',
+    'socialSecurityNumber',
+    'medicalRecordNumber',
+    'mrn',
+    'healthInsuranceNumber',
+    'diagnosisCode',
+    'icd10',
+    'prescription',
+    'medication',
+  ],
+})
+```
+
+### 金融サービス
+
+```ts
+new SensitiveDataFilter({
+  sensitiveFields: [
+    // PCI compliance fields
+    'creditCard',
+    'ccNumber',
+    'cardNumber',
+    'cvv',
+    'cvc',
+    'securityCode',
+    'expirationDate',
+    'expiry',
+    'bankAccount',
+    'accountNumber',
+    'routingNumber',
+    'iban',
+    'swift',
+  ],
+})
+```
+
+## エラー処理
+
+フィールドの処理中にエラーが発生した場合、フィルターはそのフィールドを安全なエラーマーカーに置き換えます。
+
+```json
+{
+  "problematicField": {
+    "error": {
+      "processor": "sensitive-data-filter"
+    }
+  }
+}
+```
+
+そのため、処理エラーによって Trace のエクスポートが妨げられたり、アプリケーションがクラッシュしたりすることはありません。
+
+## 関連項目
+
+- [SensitiveDataFilter API](/reference/observability/tracing/processors/sensitive-data-filter)

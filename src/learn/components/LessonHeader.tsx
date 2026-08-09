@@ -21,7 +21,7 @@ export function LessonHeader({
   onWatchedChange,
   className,
 }: LessonHeaderProps) {
-  const { isSimplifiedChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
+  const { isSimplifiedChinese, isTaiwanChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
   const [animating, setAnimating] = useState(false)
 
   return (
@@ -30,7 +30,7 @@ export function LessonHeader({
         <span className="learn-meta-text text-sm">
           {isSimplifiedChinese
             ? `第 ${lessonNumber} 课，共 ${totalLessons} 课`
-            : isHongKongChinese
+            : isTaiwanChinese || isHongKongChinese
               ? `第 ${lessonNumber} 課，共 ${totalLessons} 課`
               : isJapanese
                 ? `レッスン ${lessonNumber}/${totalLessons}`
@@ -38,7 +38,8 @@ export function LessonHeader({
         </span>
         <span className="learn-meta-text">·</span>
         <span className="learn-meta-text text-sm">
-          {lesson.durationMin} {isSimplifiedChinese ? '分钟' : isHongKongChinese ? '分鐘' : isJapanese ? '分' : 'min'}
+          {lesson.durationMin}{' '}
+          {isSimplifiedChinese ? '分钟' : isTaiwanChinese || isHongKongChinese ? '分鐘' : isJapanese ? '分' : 'min'}
         </span>
         {lesson.status === 'comingSoon' && (
           <>
@@ -61,14 +62,14 @@ export function LessonHeader({
               {watched
                 ? isSimplifiedChinese
                   ? '已完成'
-                  : isHongKongChinese
+                  : isTaiwanChinese || isHongKongChinese
                     ? '已完成'
                     : isJapanese
                       ? '完了'
                       : 'Complete'
                 : isSimplifiedChinese
                   ? '标记为已完成'
-                  : isHongKongChinese
+                  : isTaiwanChinese || isHongKongChinese
                     ? '標記為已完成'
                     : isJapanese
                       ? '完了としてマーク'

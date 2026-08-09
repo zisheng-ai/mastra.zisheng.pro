@@ -9,24 +9,28 @@ type LessonStatusChipProps = {
 }
 
 export function LessonStatusChip({ status, module, className }: LessonStatusChipProps) {
-  const { isSimplifiedChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
+  const { isSimplifiedChinese, isTaiwanChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
   if (status === 'published') return null
 
   const label = isSimplifiedChinese
     ? module === '生产环境'
       ? '即将推出'
       : '下周推出'
-    : isHongKongChinese
-      ? module === '生產環境'
+    : isTaiwanChinese
+      ? module === '正式環境'
         ? '即將推出'
-        : '下星期推出'
-      : isJapanese
-        ? module === '本番環境'
-          ? '近日公開'
-          : '来週公開'
-        : module === 'Production'
-          ? 'Coming soon'
-          : 'Coming next week'
+        : '下週推出'
+      : isHongKongChinese
+        ? module === '生產環境'
+          ? '即將推出'
+          : '下星期推出'
+        : isJapanese
+          ? module === '本番環境'
+            ? '近日公開'
+            : '来週公開'
+          : module === 'Production'
+            ? 'Coming soon'
+            : 'Coming next week'
 
   return (
     <span

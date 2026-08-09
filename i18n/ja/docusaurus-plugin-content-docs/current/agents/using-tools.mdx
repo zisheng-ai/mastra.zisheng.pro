@@ -1,0 +1,640 @@
+---
+title: "Tool | Agent"
+description: Tool を作成して Agent に追加し、テキスト生成を超えて機能を拡張する方法を説明します。
+packages:
+  - "@mastra/core"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Tool
+
+Agent は Tool を使用して、API の呼び出し、データベースへのクエリ、コードベース内のカスタム関数の実行を行います。Tool は、データへの構造化されたアクセスを提供し、明確に定義された処理を実行することで、言語生成を超えた機能を Agent に与えます。リモートの [MCP server](/docs/mcp/overview) から Tool を読み込み、Agent の機能を拡張することもできます。
+
+<Inject>
+  **AI Agent 向け:** 一時的なスクリプトを作成する代わりに、`npx mastra api tool execute weather-tool '{"location":"San Francisco"}'` を実行してこの Tool を直接テストします。このコマンドには実行中の Mastra server が必要です。`npx mastra dev` でローカル server を起動するか、到達可能な server のベース URL を `--url` で渡してください。別の入力を作成する前に、`npx mastra api tool execute --schema` を実行します。API CLI の検出、対象指定、スキーマ、認証、エラー処理に関する完全なガイダンスを利用するには、`npx skills add mastra-ai/skills --skill mastra` で Mastra の Skill をインストールしてください。
+</Inject>
+
+## Tool を使用する場面
+
+Agent がリモートリソースから追加のコンテキストや情報を必要とする場合や、特定の処理を行うコードを実行する必要がある場合に Tool を使用します。リアルタイムデータの取得や、一貫性のある明確に定義された出力の返却など、モデルだけでは確実に処理できないタスクが該当します。
+
+## クイックスタート
+
+`@mastra/core/tools` から [`createTool`](/reference/tools/create-tool) をインポートし、`id`、`description`、`inputSchema`、`outputSchema`、`execute` 関数を指定して Tool を定義します。
+
+次の例では、API から天気データを取得する Tool を作成します。`execute` 関数は、第1引数で `inputSchema` によって検証された入力を、第2引数で任意の実行コンテキストを受け取ります。関数シグネチャで入力フィールドを直接分割代入できます。
+
+```typescript title="src/mastra/tools/weather-tool.ts"
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const weatherTool = createTool({
+  id: 'weather-tool',
+  description: 'Fetches weather for a location',
+  inputSchema: z.object({
+    location: z.string(),
+  }),
+  outputSchema: z.object({
+    location: z.string(),
+    temperatureCelsius: z.number(),
+    conditions: z.string(),
+  }),
+  execute: async ({ location }, { abortSignal }) => {
+    const response = await fetch(`https://wttr.in/${location}?format=j1`, {
+      signal: abortSignal,
+    })
+    const data = await response.json()
+
+    return {
+      location,
+      temperatureCelsius: Number(data.current_condition[0].temp_C),
+      conditions: data.current_condition[0].weatherDesc[0].value,
+    }
+  },
+})
+```
+
+Tool を作成するときは、主なユースケースを強調し、Tool の処理内容に焦点を当てた簡潔な説明にします。内容の分かるスキーマ名も、Tool の使い方を Agent に示すのに役立ちます。利用可能なプロパティ、設定、例について詳しくは、[`createTool`](/reference/tools/create-tool) リファレンスを参照してください。
+
+Agent で Tool を利用できるようにするには、`Agent` クラスの `tools` プロパティに追加します。Agent のシステムプロンプトに利用可能な Tool とその一般的な用途を記載すると、Tool を呼び出す場面と呼び出さない場面を Agent が判断しやすくなります。
+
+```typescript {11} title="src/mastra/agents/weather-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { weatherTool } from '../tools/weather-tool'
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: `
+    You are a helpful weather assistant.
+    Use the weatherTool to fetch current weather data.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { weatherTool },
+})
+```
+
+## スキーマを定義する
+
+Tool の `inputSchema` と `outputSchema` は、[Standard JSON Schema](https://standardschema.dev/json-schema) をサポートする任意のライブラリで定義できます。[Zod](https://zod.dev/)、[Valibot](https://valibot.dev/)、[ArkType](https://arktype.io/) などのライブラリが該当します。
+
+<Tabs>
+  <TabItem value="zod" label="Zod">
+    ```typescript title="src/mastra/tools/weather-tool.ts"
+    import { createTool } from '@mastra/core/tools'
+    import { z } from 'zod'
+
+    export const weatherTool = createTool({
+      id: 'weather-tool',
+      description: 'Fetches weather for a location',
+      inputSchema: z.object({
+        location: z.string(),
+      }),
+      outputSchema: z.object({
+        location: z.string(),
+        temperatureCelsius: z.number(),
+        conditions: z.string(),
+      }),
+      execute: async ({ location }) => {
+        return { location, temperatureCelsius: 21, conditions: 'sunny' }
+      },
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="valibot" label="Valibot">
+    ```typescript title="src/mastra/tools/weather-tool.ts"
+    import { createTool } from '@mastra/core/tools'
+    import * as v from 'valibot'
+    import { toStandardJsonSchema } from '@valibot/to-json-schema'
+
+    export const weatherTool = createTool({
+      id: 'weather-tool',
+      description: 'Fetches weather for a location',
+      inputSchema: toStandardJsonSchema(
+        v.object({
+          location: v.string(),
+        }),
+      ),
+      outputSchema: toStandardJsonSchema(
+        v.object({
+          location: v.string(),
+          temperatureCelsius: v.number(),
+          conditions: v.string(),
+        }),
+      ),
+      execute: async ({ location }) => {
+        return { location, temperatureCelsius: 21, conditions: 'sunny' }
+      },
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="arktype" label="ArkType">
+    ```typescript title="src/mastra/tools/weather-tool.ts"
+    import { createTool } from '@mastra/core/tools'
+    import { type } from 'arktype'
+
+    export const weatherTool = createTool({
+      id: 'weather-tool',
+      description: 'Fetches weather for a location',
+      inputSchema: type({
+        location: 'string',
+      }),
+      outputSchema: type({
+        location: 'string',
+        temperatureCelsius: 'number',
+        conditions: 'string',
+      }),
+      execute: async ({ location }) => {
+        return { location, temperatureCelsius: 21, conditions: 'sunny' }
+      },
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+## 複数の Tool
+
+Agent は特定の部分を個別の Tool に委ねることで、複数の Tool を使ってより複雑なタスクを処理できます。Agent はユーザーのメッセージ、Agent の指示、Tool の説明とスキーマに基づいて、使用する Tool を判断します。
+
+```typescript {13} title="src/mastra/agents/weather-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { weatherTool } from '../tools/weather-tool'
+import { hazardsTool } from '../tools/hazards-tool'
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: `
+    You are a helpful weather assistant.
+    Use the weatherTool to fetch current weather data.
+    Use the hazardsTool to provide information about potential weather hazards.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { weatherTool, hazardsTool },
+})
+```
+
+## Tool としての Agent
+
+`agents` 設定を通じてサブ Agent を追加し、[Supervisor](/docs/capabilities/subagents) を作成します。Mastra は各サブ Agent を `agent-<key>` Tool に変換します。Supervisor が委譲する場面を判断できるように、各サブ Agent に `description` を指定してください。
+
+```typescript title="src/mastra/agents/supervisor.ts"
+import { Agent } from '@mastra/core/agent'
+
+const writer = new Agent({
+  id: 'writer',
+  name: 'Writer',
+  description: 'Drafts and edits written content',
+  instructions: 'You are a skilled writer.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+export const supervisor = new Agent({
+  id: 'supervisor',
+  name: 'Supervisor',
+  instructions: 'Coordinate the writer to produce content.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // highlight-next-line
+  agents: { writer },
+})
+```
+
+## Tool としての Workflow
+
+`workflows` 設定を通じて Workflow を追加します。Mastra は各 Workflow を、その Workflow の `inputSchema` と `outputSchema` を使用する `workflow-<key>` Tool に変換します。Agent が Workflow を開始する場面を判断できるように、Workflow に `description` を指定してください。
+
+```typescript title="src/mastra/agents/research-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { researchWorkflow } from '../workflows/research-workflow'
+
+export const researchAgent = new Agent({
+  id: 'research-agent',
+  name: 'Research Agent',
+  instructions: 'You are a research assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // highlight-next-line
+  workflows: { researchWorkflow },
+})
+```
+
+## 複数の Agent で Tool を共有する
+
+1つの Tool を複数の Agent で使用する場合は、直接インポートする方法が最適です。各 Agent が Tool をインポートし、それぞれの `tools` レコードに追加します。依存関係が明示されたままになり、各 Agent を独立して使用できます。
+
+```typescript title="src/mastra/tools/weather-tool.ts"
+import { createTool } from '@mastra/core/tools'
+
+export const weatherTool = createTool({
+  id: 'weather-tool',
+  // Rest of the tool definition...
+})
+```
+
+```typescript title="src/mastra/agents/weather-agents.ts"
+import { Agent } from '@mastra/core/agent'
+import { weatherTool } from '../tools/weather-tool'
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: 'Answer questions about current weather.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { weatherTool },
+})
+```
+
+```typescript title="src/mastra/agents/travel-agents.ts"
+import { Agent } from '@mastra/core/agent'
+import { weatherTool } from '../tools/weather-tool'
+
+export const travelAgent = new Agent({
+  id: 'travel-agent',
+  name: 'Travel Agent',
+  instructions: 'Help users plan trips.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { weatherTool },
+})
+```
+
+Mastra インスタンスから Tool にアクセスする必要がある場合は、[`Mastra.getTool()`](/reference/core/getTool)、[`Mastra.getToolById()`](/reference/core/getToolById)、[`Mastra.listTools()`](/reference/core/listTools)、および [`Agent` リファレンス](/reference/agents/agent)を参照してください。
+
+## モデル向けに出力を整形する
+
+Tool がアプリケーション向けに情報量の多い構造化データを返す一方で、モデルにはより小さい表現やマルチモーダル表現を渡したい場合は、`toModelOutput` を使用します。アプリ内に Tool の完全な結果を保持しながら、モデルのコンテキストを必要な情報に絞れます。
+
+```typescript title="src/mastra/tools/weather-tool.ts"
+export const weatherTool = createTool({
+  execute: async ({ location }) => {
+    const response = await fetch(`https://wttr.in/${location}?format=j1`)
+    const data = await response.json()
+
+    return {
+      location,
+      temperatureCelsius: Number(data.current_condition[0].temp_C),
+      conditions: data.current_condition[0].weatherDesc[0].value,
+      weatherIconUrl: data.current_condition[0].weatherIconUrl[0].value,
+      source: data,
+    }
+  },
+  toModelOutput: output => {
+    return {
+      type: 'content',
+      value: [
+        {
+          type: 'text',
+          text: `${output.location}: ${output.temperatureCelsius}°C and ${output.conditions}`,
+        },
+        { type: 'image-url', url: output.weatherIconUrl },
+      ],
+    }
+  },
+})
+```
+
+`toModelOutput` は、`clientTools` を通じて渡されるクライアント側の Tool でも機能します。マッピングは Tool の実行後にクライアントで行われ、変換後の出力が未加工の結果とともに server へ返されます。
+
+## UI とトランスクリプト向けに Tool のペイロードを変換する
+
+Tool がアプリケーションに必要な未加工データを返す一方で、ブラウザ向けストリームやユーザーに表示するトランスクリプトメッセージには、より小さく安全な形式を渡したい場合は、`transform` を使用します。`transform` は `toModelOutput` とは別の機能です。`toModelOutput` はモデルへ返すペイロードを整形し、`transform` は `display` と `transcript` の対象に向けて、Tool の入力、出力、エラー、承認ペイロード、一時停止ペイロードを整形します。
+
+変換が設定されていて失敗した場合、Mastra は表示やトランスクリプトの対象に未加工のペイロードを使用しません。安全な `inputDelta` 変換を利用できない場合、入力差分は抑制されます。
+
+`transform` の例は、[`createTool()` リファレンス](/reference/tools/create-tool#example-with-transform)を参照してください。複数の Tool に共通するルールには、[`Agent` コンストラクター](/reference/agents/agent#constructor-parameters)で Agent レベルの `transform` ポリシーを設定します。
+
+## Tool 呼び出しの前後でロジックを実行する
+
+`hooks` を使用すると、Agent が行う各 Tool 呼び出しの前後でカスタムロジックを実行できます。フックは、割り当てられた Tool、Memory Tool、Toolset、クライアント Tool、Agent と Workflow の Tool、[Workspace Tool](/docs/workspace/overview#tool-hooks)など、すべての Tool ソースに適用されます。一般的な用途には、ログ記録、監査、入力検証、特定の呼び出しのブロックがあります。
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  instructions: 'Help users with their questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // highlight-start
+  hooks: {
+    beforeToolCall: ({ toolName, input }) => {
+      console.log(`Running ${toolName}`, input)
+    },
+    afterToolCall: ({ toolName, output, error }) => {
+      console.log(`Finished ${toolName}`, { output, error })
+    },
+  },
+  // highlight-end
+})
+```
+
+`beforeToolCall` は Tool の実行前に呼び出され、Tool 名、入力、実行コンテキストを受け取ります。`{ proceed: false, output }` を返すと Tool 呼び出しを完全にスキップし、Agent は `output` を Tool の結果として受け取ります。
+
+```typescript
+const guardedAgent = new Agent({
+  id: 'guarded-agent',
+  name: 'guarded-agent',
+  instructions: 'Run shell commands for the user.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  hooks: {
+    beforeToolCall: ({ toolName, input }) => {
+      const command = (input as { command?: string }).command ?? ''
+      if (toolName === 'execute_command' && command.includes('rm -rf')) {
+        return { proceed: false, output: 'Command blocked by policy.' }
+      }
+    },
+  },
+})
+```
+
+`afterToolCall` は成功したか失敗したかにかかわらず、Tool の終了後に呼び出されます。成功時には `output` を受け取り、Tool が例外をスローした場合は代わりに `error` を受け取り、フックの実行後にエラーが再スローされます。
+
+### 実行単位のフック
+
+`.generate()` または `.stream()` に `hooks` を渡すと、1回の実行に対するフックを設定できます。実行単位のフックは、対応する Agent レベルのフックを上書きします。
+
+```typescript
+await supportAgent.generate('Look up the order status', {
+  hooks: {
+    beforeToolCall: ({ toolName }) => {
+      console.log(`This run only: ${toolName}`)
+    },
+  },
+})
+```
+
+Agent レベルと実行単位のフックはキーごとにマージされます。実行時に `beforeToolCall` だけを渡した場合、Agent レベルの `afterToolCall` は維持されます。
+
+## ストリーミング
+
+Tool は、ストリーミング中の実行における各段階を監視できるライフサイクルフックをサポートしています。これらのフックは、ログ記録や分析に特に役立ちます。
+
+汎用的な `writer` API の使用方法は、[ストリーミング](/guides/concepts/streaming#writer-api)を参照してください。
+
+### 利用可能なフック
+
+- **onInputStart**: Tool 呼び出しの入力ストリーミング開始時に呼び出されます
+- **onInputDelta**: ストリーミングされる入力の各チャンクに対して呼び出されます
+- **onInputAvailable**: 完全な入力の解析と検証が完了したときに呼び出されます
+- **onOutput**: Tool が正常に実行され、出力が得られた後に呼び出されます
+
+すべてのライフサイクルフックの詳細は、[createTool() リファレンス](/reference/tools/create-tool#tool-lifecycle-hooks)を参照してください。
+
+### 例：`onInputAvailable` と `onOutput` を使用する
+
+```typescript
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const weatherTool = createTool({
+  id: 'weather-tool',
+  description: 'Get weather information',
+  inputSchema: z.object({
+    location: z.string(),
+  }),
+  outputSchema: z.object({
+    location: z.string(),
+    temperatureCelsius: z.number(),
+    conditions: z.string(),
+  }),
+  // Called when the complete input is available
+  onInputAvailable: ({ input, toolCallId }) => {
+    console.log(`Weather requested for: ${input.location}`)
+  },
+  execute: async ({ location }) => {
+    const weather = await fetchWeather(location)
+    return weather
+  },
+  // Called after successful execution
+  onOutput: ({ output, toolName }) => {
+    console.log(`${toolName} result: ${output.temperatureCelsius}°C, ${output.conditions}`)
+  },
+})
+```
+
+### UI で Tool の入力をストリーミングする
+
+モデルが Tool 呼び出しを生成すると、引数は最後の `tool-call` チャンクより前に、`tool-call-delta` ストリームチャンクとして段階的に到着します。UI は対応する `tool_input_start`、`tool_input_delta`、`tool_input_end` イベントをリッスンし、Tool の引数を到着に応じて表示できます。たとえば、Tool 呼び出しが完了するまで待たずに、ファイルパスやコマンドをすぐに表示できます。
+
+蓄積した `argsTextDelta` の断片に部分 JSON パーサーを使用すると、JSON が完成する前に利用可能な引数値を抽出できます。これにより、編集 Tool での差分のライブプレビュー、書き込み Tool でのファイル内容のストリーミング、検索パターンやファイルパスの即時表示などの機能を実現できます。
+
+## Tool の選択を制御する
+
+`.generate()` または `.stream()` に `toolChoice` か `activeTools` を渡して、実行時に Agent が使用する Tool を制御します。
+
+```typescript
+await agent.generate('Check the forecast', {
+  toolChoice: 'required',
+  activeTools: ['weatherTool'],
+})
+```
+
+`toolsets`、`clientTools`、`prepareStep` を含むすべての実行時オプションについては、[`Agent.generate()` リファレンス](/reference/agents/generate)を参照してください。
+
+## ストリームレスポンスの `toolName` を制御する
+
+ストリームレスポンスの `toolName` は、Tool、Agent、Workflow の `id` プロパティではなく、使用する**オブジェクトキー**によって決まります。
+
+```typescript prettier:false
+export const weatherTool = createTool({
+  id: 'weather-tool',
+})
+
+// Using the variable name as the key
+tools: { weatherTool }
+// Stream returns: toolName: "weatherTool"
+
+// Using the tool's id as the key
+tools: { [weatherTool.id]: weatherTool }
+// Stream returns: toolName: "weather-tool"
+
+// Using a custom key
+tools: { "my-custom-name": weatherTool }
+// Stream returns: toolName: "my-custom-name"
+```
+
+これにより、ストリーム内で Tool を識別する方法を指定できます。`toolName` を Tool の `id` と一致させる場合は、Tool の `id` をオブジェクトキーとして使用します。
+
+### Tool としてのサブ Agent と Workflow
+
+サブ Agent と Workflow も同じパターンに従います。プレフィックスの後にオブジェクトキーが続く名前の Tool に変換されます。
+
+| プロパティ | プレフィックス | キーの例 | `toolName` |
+| - | - | - | - |
+| `agents` | `agent-` | `weather` | `agent-weather` |
+| `workflows` | `workflow-` | `research` | `workflow-research` |
+
+```typescript
+const orchestrator = new Agent({
+  id: 'orchestrator',
+  agents: {
+    weather: weatherAgent, // toolName: "agent-weather"
+  },
+  workflows: {
+    research: researchWorkflow, // toolName: "workflow-research"
+  },
+})
+```
+
+サブ Agent の場合、ストリームレスポンスには2つの異なる識別子が表示されることに注意してください。
+
+- Tool 呼び出しイベントの `toolName: "agent-weather"`：生成された Tool ラッパーの名前
+- `data-tool-agent` チャンクの `id: "weather-agent"`：サブ Agent の実際の `id` プロパティ
+
+## 組み込み Tool
+
+Mastra は、どの Agent にも対話機能や整理機能を追加できる、Agent に依存しない組み込み Tool を `@mastra/core/tools` に用意しています。
+
+| Tool | 用途 |
+| - | - |
+| `ask_user` | ユーザーに質問し、回答を待つ |
+| `submit_plan` | ユーザーの承認を得るために計画ファイルを提出する |
+| `task_write` | 構造化されたタスクリストを作成または置換する |
+| `task_update` | 追跡中の1つのタスクを ID で更新する |
+| `task_complete` | 追跡中の1つのタスクを完了としてマークする |
+| `task_check` | タスクリストの完了状態を確認する |
+| `webSearchTool` | アクティブなモデルで Provider ネイティブの Web 検索を実行する |
+| `webFetchTool` | URL から Web ページを取得し、そのテキスト内容を返す |
+
+### Provider の Web 検索を使用する
+
+モデルの Provider にネイティブの Web 検索 Tool を実行させる場合は、`@mastra/core/tools` から `webSearchTool` をインポートします。Mastra は実行時にアクティブなモデルから Provider を特定し、Provider が管理する Tool をモデルへ渡します。
+
+```typescript {2,10} title="src/mastra/agents/research-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { webSearchTool } from '@mastra/core/tools'
+
+export const researchAgent = new Agent({
+  id: 'research-agent',
+  name: 'Research Agent',
+  instructions: 'Use web search when you need current information.',
+  model: 'openai/gpt-5.6-sol',
+  tools: {
+    search: webSearchTool,
+  },
+})
+```
+
+`webSearchTool` は、OpenAI、Anthropic、Google Gemini、xAI のモデルをサポートしています。Mastra がアクティブなモデルからいずれの Provider も推測できない場合、Agent の実行は `MastraError` で失敗します。
+
+`search` キーは Agent 内で使用する Tool 名にすぎないため、任意のキーを使用できます。`webSearchTool` の値によって、Mastra に Provider の Web 検索を使用するよう指示します。
+
+### Web ページを取得する
+
+Agent が特定の URL を読み取る必要がある場合は、`@mastra/core/tools` から `webFetchTool` をインポートします。この Tool は HTTP または HTTPS でページをリクエストし、テキスト内容とレスポンスのメタデータを返します。
+
+```typescript {2,10} title="src/mastra/agents/reader-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { webFetchTool } from '@mastra/core/tools'
+
+export const readerAgent = new Agent({
+  id: 'reader-agent',
+  name: 'Reader Agent',
+  instructions: 'Fetch the page the user links to before answering.',
+  model: 'openai/gpt-5.6-sol',
+  tools: {
+    fetch: webFetchTool,
+  },
+})
+```
+
+この Tool は単一の `url` 入力を受け取り、`content`、`truncated`、`status`、`statusText`、`contentType`、`url`、`ok` を返します。次の制限が適用されます。
+
+- 使用できる URL は `http:` と `https:` だけです。
+- `localhost`、プライベート IP アドレス、予約済み IP アドレスへのリクエストはブロックされます。DNS 解決で返されたアドレスも対象です。
+- レスポンスは100,000文字で切り詰められ、結果には `truncated: true` が含まれます。
+- リクエストがたどるリダイレクトは最大5回で、15秒後にタイムアウトします。
+
+失敗しても例外はスローされません。Tool は `isError: true` を返し、`content` に理由を含めるため、Agent は再試行するか問題を説明できます。
+
+### ユーザーに質問する
+
+[`askUserTool`](/reference/tools/ask-user-tool) をインポートし、Agent の Toolset に追加します。
+
+この Tool は実行を一時停止し、質問を含む `tool-call-suspended` イベントを送出します。ユーザーの回答を指定して `resumeStream()` を呼び出すと、実行が再開されます。
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { askUserTool } from '@mastra/core/tools'
+
+const agent = new Agent({
+  id: 'assistant',
+  name: 'Assistant',
+  instructions: 'Ask the user for clarification when the request is ambiguous.',
+  model,
+  tools: { askUserTool },
+})
+```
+
+Agent をストリーミングし、`tool-call-suspended` チャンクを監視します。`suspendPayload` には質問と、任意の構造化された選択肢が含まれます。
+
+```typescript title="src/run.ts"
+const stream = await agent.stream('Summarize my project')
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'tool-call-suspended') {
+    const { question, options } = chunk.payload.suspendPayload
+    console.log(question)
+    const answer = await getUserAnswer() // your UI logic
+    const resumed = await agent.resumeStream(answer, { runId: stream.runId })
+    for await (const c of resumed.textStream) process.stdout.write(c)
+  }
+}
+```
+
+`askUserTool` は、自由記述、単一選択（`options` 配列）、複数選択（`selectionMode: 'multi_select'`）のプロンプトをサポートしています。`autoResumeSuspendedTools` と組み合わせると、ユーザーの次のチャットメッセージから Agent が自動的に再開されます。詳しくは、[Tool の自動再開](/docs/agents/agent-approval#automatic-tool-resumption)を参照してください。
+
+### レビュー用の計画を提出する
+
+[`submitPlanTool`](/reference/tools/submit-plan-tool) をインポートすると、Agent が計画をファイルに書き込み、ユーザーのレビュー用に提出できます。この Tool は、ユーザーが承認または却下するまで実行を一時停止します。
+
+```typescript title="src/run.ts"
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'tool-call-suspended' && chunk.payload.toolName === 'submit_plan') {
+    const { path } = chunk.payload.suspendPayload
+    // Read and display the plan file, then resume:
+    const resumed = await agent.resumeStream({ action: 'approved' }, { runId: stream.runId })
+    for await (const c of resumed.textStream) process.stdout.write(c)
+  }
+}
+```
+
+### タスク追跡
+
+タスク Tool は、Agent の実行に対して構造化された永続的なタスクリストを管理します。リストをスレッドスコープのストアに永続化するため、[Memory](/docs/memory/overview) が必要です。
+
+4つすべての Tool と `TaskStateProcessor` を1回の登録にまとめる [`TaskSignalProvider`](/reference/signals/task-signal-provider) を通じて、タスク追跡を追加します。
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { TaskSignalProvider } from '@mastra/core/signals'
+
+const agent = new Agent({
+  id: 'coder',
+  name: 'Coder',
+  instructions: 'Track your progress with the task tools.',
+  model,
+  memory: new Memory(),
+  signals: [new TaskSignalProvider()],
+})
+```
+
+一度に `in_progress` にできるタスクは1つだけです。リストはスレッドスコープの `threadState` ストレージドメインに保存され、Agent の [state-signal](/docs/long-running-agents/signals) レーンに投影されるため、observational memory が切り詰められても保持されます。完全なスキーマについては、[タスク Tool リファレンス](/reference/tools/task-tools)を参照してください。
+
+[AgentController](/docs/harness/agent-controller) は、すべてのモードで組み込み Tool を自動的にすべて含めるため、手動で追加する必要はありません。AgentController 固有の動作については、[Tool の承認](/docs/harness/agent-controller#approve-tools-and-resume-suspensions)を参照してください。
+
+## 関連項目
+
+- [`createTool` リファレンス](/reference/tools/create-tool)
+- [`Agent.generate()` リファレンス](/reference/agents/generate)：Tool の選択、ステップ、コールバックに関する実行時オプション
+- [バックグラウンドタスク](/docs/long-running-agents/background-tasks)：Agent のループをブロックせずに長時間実行される Tool を動かす
+- [MCP の概要](/docs/mcp/overview)
+- [動的 Tool 検索](/reference/processors/tool-search-processor)：大規模な Tool ライブラリを持つ Agent に必要に応じて Tool を読み込む
+- [構造化出力を使用する Tool](/docs/agents/structured-output#combine-tools-and-structured-output)：Tool と構造化出力を組み合わせる場合のモデル互換性
+- [Agent の承認](/docs/agents/agent-approval)
+- [`askUserTool` リファレンス](/reference/tools/ask-user-tool)
+- [`submitPlanTool` リファレンス](/reference/tools/submit-plan-tool)
+- [タスク Tool リファレンス](/reference/tools/task-tools)
+- [TaskSignalProvider リファレンス](/reference/signals/task-signal-provider)
+- [リクエストコンテキスト](/docs/server/request-context)

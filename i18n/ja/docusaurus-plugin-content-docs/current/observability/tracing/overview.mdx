@@ -1,0 +1,904 @@
+---
+title: "トレーシング | Observability"
+description: "Agent、Workflow、Tool、モデル呼び出しの階層的な実行を記録し、調査します。"
+packages:
+  - "@mastra/observability"
+---
+
+# トレーシング
+
+トレーシングは、リクエストが Agent、Workflow、Tool、モデル呼び出しをどのように通過するかを記録する Observability シグナルです。Mastra は各操作を Span として表し、関連する Span を Trace にまとめることで、実行経路全体を調査できるようにします。
+
+このページでは、Span の階層、サンプリング、メタデータ、フィルタリング、Trace ID、サードパーティの Trace コンテキストなど、Trace 固有の概念に焦点を当てます。
+
+<Inject>
+  **AI Agent 向け：** Studio を開いたり一時的なスクリプトを作成したりせずに最近の Trace を直接調べるには、`npx mastra api trace list '{"page":0,"perPage":20}'` を実行します。このコマンドを使用するには、Observability が設定された Mastra サーバーが稼働している必要があります。`npx mastra dev` でローカルサーバーを起動するか、`--url` で接続可能なサーバーのベース URL を渡してください。別のフィルターを作成する前に、`npx mastra api trace list --schema` を実行します。API CLI の探索、対象指定、スキーマ、認証、エラー処理に関する完全なガイダンスを利用するには、`npx skills add mastra-ai/skills --skill mastra` で Mastra の skill をインストールしてください。
+</Inject>
+
+## トレーシングを使用する場面
+
+- 実行経路全体を調査し、Agent や Workflow の予期しない動作をデバッグする。
+- 1つのリクエスト内でモデル呼び出し、Tool 呼び出し、Workflow のステップを追跡する。
+- フィルタリングや調査のため、Trace 固有のメタデータやタグを付与する。
+- Mastra の Trace をサードパーティのトレーシングシステムに接続する。
+
+## はじめに
+
+トレーシングを開始するには、Mastra インスタンスで Observability を設定し、Agent または Workflow を実行します。次の機能を通じて動作を設定できます。
+
+- [設定](/docs/observability/overview#configuration)：Observability の基本設定と複数設定、およびサーバーレス環境でのフラッシュ
+- [ストレージ](/docs/observability/overview#storage)：Trace、ログ、メトリクスのストレージルーティング
+- [インテグレーションの概要](/docs/observability/integrations/overview)：Exporter、Bridge、Processor
+
+## サンプリング戦略
+
+サンプリングを使用すると、収集する Trace を制御でき、Observability の要件とリソースコストのバランスを取れます。
+
+トラフィックの多い本番環境では、すべての Trace を収集するとコストが高くなり、不要な場合もあります。
+
+サンプリング戦略を使用すれば、エラーや重要な操作に関する重大な情報を見逃すことなく、Trace の代表的なサブセットを取得できます。
+
+サンプリングは Observability の設定レベルで構成できます。
+
+```ts title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      '10_percent': {
+        serviceName: 'my-service',
+        // Sample 10% of traces
+        sampling: {
+          type: 'ratio',
+          probability: 0.1,
+        },
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+`sampling` オプションを使用すると、収集する Trace を制御でき、Observability の要件とリソースコストのバランスを取れます。Mastra は4つのサンプリング戦略に対応しています。
+
+1. **常にサンプリング**：Trace を100%収集します。完全な可視性が必要な開発、デバッグ、またはトラフィックの少ないシナリオに最適です。
+
+   ```ts
+   sampling: {
+     type: 'always'
+   }
+   ```
+
+1. **サンプリングしない**：トレーシングを完全に無効にします。トレーシングに価値がない特定の環境や、設定を削除せずに一時的にトレーシングを無効にする場合に便利です。
+
+   ```ts
+   sampling: {
+     type: 'never'
+   }
+   ```
+
+1. **比率ベースのサンプリング**：Trace を一定の割合でランダムにサンプリングします。完全なトレーシングにかかるコストを負担せずに統計的な知見を得たい本番環境に最適です。確率値の範囲は0（Trace なし）から1（すべての Trace）です。
+
+   ```ts prettier:false
+   sampling: {
+     type: 'ratio',
+     probability: 0.1  // Sample 10% of traces
+   }
+   ```
+
+1. **カスタムサンプリング**：リクエストコンテキスト、メタデータ、またはビジネスルールに基づく独自のサンプリングロジックを実装します。ユーザー階層、リクエストタイプ、エラー条件に基づくサンプリングなど、複雑なシナリオに最適です。
+
+   ```ts prettier:false
+   sampling: {
+     type: 'custom',
+     sampler: (options) => {
+       // Sample premium users at higher rate
+       if (options?.metadata?.userTier === 'premium') {
+         return Math.random() < 0.5; // 50% sampling
+       }
+
+       // Default 1% sampling for others
+       return Math.random() < 0.01;
+     }
+   }
+   ```
+
+## カスタムメタデータの追加
+
+カスタムメタデータを使用すると、Trace に追加のコンテキストを付与できるため、問題のデバッグや本番環境でのシステム動作の把握が容易になります。
+
+メタデータには、ビジネスロジックやパフォーマンスメトリクスを含められます。また、ユーザーコンテキストや、実行中に起きたことを説明するその他の情報も格納できます。
+
+トレーシングコンテキストを使用して、任意の Span にメタデータを追加できます。
+
+```ts
+execute: async (inputData, context) => {
+  const startTime = Date.now()
+  const response = await fetch(inputData.endpoint)
+
+  // Add custom metadata to the current span
+  context?.tracingContext.currentSpan?.update({
+    metadata: {
+      apiStatusCode: response.status,
+      endpoint: inputData.endpoint,
+      responseTimeMs: Date.now() - startTime,
+      userTier: inputData.userTier,
+      region: process.env.AWS_REGION,
+    },
+  })
+
+  return await response.json()
+}
+```
+
+ここで設定したメタデータは、設定済みのすべての Exporter に表示されます。
+
+### デプロイ環境による Trace のタグ付け
+
+Mastra のトップレベルにある `environment` フィールドを設定すると、各呼び出しで `tracingOptions.metadata.environment` を渡さずに、すべての Observability シグナルへデプロイ環境を自動的に付与できます。
+
+```ts title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  environment: 'production',
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-service',
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+`environment` が設定されていない場合、Mastra は `process.env.NODE_ENV` を使用します。どちらも設定されていない場合、推測せずにこのフィールドを未定義のままにします。
+
+呼び出しごとの `tracingOptions.metadata.environment` が常に優先されるため、必要に応じて個別の呼び出しで値を上書きできます。
+
+### `RequestContext` からの自動メタデータ
+
+各 Span にメタデータを手動で追加する代わりに、RequestContext から値を自動的に抽出し、Trace 内のすべての Span にメタデータとして付与するよう Mastra を設定できます。これは、Trace 全体でユーザー識別子、環境情報、機能フラグ、その他のリクエストスコープのデータを一貫して追跡する場合に便利です。
+
+#### 設定レベルでの抽出
+
+トレーシング設定で、抽出する RequestContext のキーを定義します。これらのキーは、この設定で作成されたすべての Span のメタデータに自動的に含まれます。
+
+```ts title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-service',
+        requestContextKeys: ['userId', 'environment', 'tenantId'],
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+RequestContext を使用して Agent や Workflow を実行すると、これらの値が自動的に抽出されます。
+
+```ts
+const requestContext = new RequestContext()
+requestContext.set('userId', 'user-123')
+requestContext.set('environment', 'production')
+requestContext.set('tenantId', 'tenant-456')
+
+// All spans in this trace automatically get userId, environment, and tenantId metadata
+const result = await agent.generate('Hello', {
+  requestContext,
+})
+```
+
+#### リクエストごとの追加
+
+`tracingOptions.requestContextKeys` を使用して、Trace 固有のキーを追加できます。これらは設定レベルのキーとマージされます。
+
+```ts
+const requestContext = new RequestContext()
+requestContext.set('userId', 'user-123')
+requestContext.set('environment', 'production')
+requestContext.set('experimentId', 'exp-789')
+
+const result = await agent.generate('Hello', {
+  requestContext,
+  tracingOptions: {
+    requestContextKeys: ['experimentId'], // Adds to configured keys
+  },
+})
+
+// All spans now have: userId, environment, AND experimentId
+```
+
+#### ネストされた値の抽出
+
+RequestContext からネストされた値を抽出するには、ドット記法を使用します。
+
+```ts
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        requestContextKeys: ['user.id', 'session.data.experimentId'],
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+
+const requestContext = new RequestContext()
+requestContext.set('user', { id: 'user-456', name: 'John Doe' })
+requestContext.set('session', { data: { experimentId: 'exp-999' } })
+
+// Metadata will include: { user: { id: 'user-456' }, session: { data: { experimentId: 'exp-999' } } }
+```
+
+#### 仕組み
+
+1. **TraceState の計算**：Trace の開始時（ルート Span の作成時）に、Mastra は設定レベルのキーとリクエストごとのキーをマージし、抽出するキーを計算します。
+1. **自動抽出**：ルート Span（Agent の実行、Workflow の実行）は、RequestContext からメタデータを自動的に抽出します。
+1. **子 Span での抽出**：子 Span の作成時に `requestContext` を渡すと、子 Span でもメタデータを抽出できます。
+1. **メタデータの優先順位**：Span のオプションへ明示的に渡されたメタデータは、抽出されたメタデータより常に優先されます。
+
+### Trace へのタグの追加
+
+タグは、Trace の分類やフィルタリングに役立つ文字列ラベルです。構造化されたキーと値のデータを含むメタデータとは異なり、タグはすばやいフィルタリングと整理を目的とした単純な文字列です。
+
+Agent や Workflow の実行時にタグを追加するには、`tracingOptions.tags` を使用します。
+
+```ts
+// With agents
+const result = await agent.generate('Hello', {
+  tracingOptions: {
+    tags: ['production', 'experiment-v2', 'user-request'],
+  },
+})
+
+// With workflows
+const run = await mastra.getWorkflow('myWorkflow').createRun()
+const result = await run.start({
+  inputData: { data: 'process this' },
+  tracingOptions: {
+    tags: ['batch-processing', 'priority-high'],
+  },
+})
+```
+
+#### タグの仕組み
+
+- **ルート Span のみ**：タグは Trace のルート Span（Agent の実行または Workflow の実行を表す Span）にのみ適用されます。
+- **幅広い対応**：ほとんどの Exporter は、Trace のフィルタリングと検索にタグを使用できます。
+  - **Braintrust**：ネイティブの `tags` フィールド
+  - **Langfuse**：Trace 上のネイティブの `tags` フィールド
+  - **ArizeExporter**：OpenInference の `tag.tags` 属性
+  - **OtelExporter**：Span の `mastra.tags` 属性
+  - **OtelBridge**：Span の `mastra.tags` 属性
+- **メタデータとの併用**：`tags` と `metadata` の両方を同じ `tracingOptions` で使用できます。
+
+```ts
+const result = await agent.generate([{ role: 'user', content: 'Analyze this' }], {
+  tracingOptions: {
+    tags: ['production', 'analytics'],
+    metadata: { userId: 'user-123', experimentId: 'exp-456' },
+  },
+})
+```
+
+#### 一般的なタグのパターン
+
+- **環境**：`"production"`、`"staging"`、`"development"`
+- **機能フラグ**：`"feature-x-enabled"`、`"beta-user"`
+- **リクエストタイプ**：`"user-request"`、`"batch-job"`、`"scheduled-task"`
+- **優先度**：`"priority-high"`、`"priority-low"`
+- **実験**：`"experiment-v1"`、`"control-group"`、`"treatment-a"`
+
+### 機密性の高い入出力を非表示にする
+
+機密データを処理する場合、Observability プラットフォームに入力値や出力値が記録されないようにする必要があります。Trace 内のすべての Span からこのデータを除外するには、`hideInput` と `hideOutput` を `tracingOptions` で使用します。
+
+```ts
+// Hide input data (e.g., user credentials, PII)
+const result = await agent.generate([{ role: 'user', content: 'Process this sensitive data' }], {
+  tracingOptions: {
+    hideInput: true, // Input will be hidden from all spans
+  },
+})
+
+// Hide output data (e.g., generated secrets, confidential results)
+const result = await agent.generate([{ role: 'user', content: 'Generate API keys' }], {
+  tracingOptions: {
+    hideOutput: true, // Output will be hidden from all spans
+  },
+})
+
+// Hide both input and output
+const result = await agent.generate([{ role: 'user', content: 'Handle confidential request' }], {
+  tracingOptions: {
+    hideInput: true,
+    hideOutput: true,
+  },
+})
+```
+
+#### 仕組み
+
+- **Trace 全体への適用**：ルート Span に設定すると、これらのオプションは Trace 内のすべての子 Span（Tool 呼び出し、モデル生成など）に適用されます。
+- **エクスポート時のフィルタリング**：データは実行中、内部では引き続き使用できますが、Span を Observability プラットフォームへエクスポートする際に除外されます。
+- **他のオプションとの併用**：`hideInput`／`hideOutput` は、`tags`、`metadata`、その他の `tracingOptions` と併用できます。
+
+```ts
+const result = await agent.generate([{ role: 'user', content: 'Sensitive operation' }], {
+  tracingOptions: {
+    hideInput: true,
+    hideOutput: true,
+    tags: ['sensitive-operation', 'pii-handling'],
+    metadata: { operationType: 'credential-processing' },
+  },
+})
+```
+
+機密データをより細かく制御するには、[Sensitive Data Filter](/docs/observability/integrations/processors/sensitive-data-filter) Processor の使用を検討してください。この Processor では、入出力のその他の部分を保持しながら、パスワード、Token、キーなどの特定フィールドをマスキングできます。
+
+#### 子 Span とメタデータの抽出
+
+Tool や Workflow のステップ内で子 Span を作成するときに、`requestContext` パラメーターを渡すとメタデータの抽出を有効にできます。
+
+```ts
+execute: async (inputData, context) => {
+  // Create child span WITH requestContext - gets metadata extraction
+  const dbSpan = context?.tracingContext.currentSpan?.createChildSpan({
+    type: 'generic',
+    name: 'database-query',
+    requestContext: context?.requestContext, // Pass to enable metadata extraction
+  })
+
+  const results = await db.query('SELECT * FROM users')
+  dbSpan?.end({ output: results })
+
+  // Or create child span WITHOUT requestContext - no metadata extraction
+  const cacheSpan = context?.tracingContext.currentSpan?.createChildSpan({
+    type: 'generic',
+    name: 'cache-check',
+    // No requestContext - won't extract metadata
+  })
+
+  return results
+}
+```
+
+これにより、どの子 Span に RequestContext のメタデータを含めるかを細かく制御できます。ルート Span（Agent／Workflow の実行）は常にメタデータを自動抽出しますが、子 Span は `requestContext` を明示的に渡した場合にのみ抽出します。
+
+## 子 Span の作成
+
+子 Span を使用すると、Workflow のステップや Tool 内の細かな操作を追跡できます。データベースクエリ、API 呼び出し、ファイル操作、複雑な計算などのサブ操作を可視化できます。この階層構造により、パフォーマンスのボトルネックを特定し、操作の正確な順序を把握できます。
+
+特定の操作を追跡するには、Tool 呼び出しまたは Workflow のステップ内で子 Span を作成します。
+
+```ts
+execute: async (inputData, context) => {
+  // Create another child span for the main database operation
+  const querySpan = context?.tracingContext.currentSpan?.createChildSpan({
+    type: 'generic',
+    name: 'database-query',
+    input: { query: inputData.query },
+    metadata: { database: 'production' },
+  })
+
+  try {
+    const results = await db.query(inputData.query)
+    querySpan?.end({
+      output: results.data,
+      metadata: {
+        rowsReturned: results.length,
+        queryTimeMs: results.executionTime,
+        cacheHit: results.fromCache,
+      },
+    })
+    return results
+  } catch (error) {
+    querySpan?.error({
+      error,
+      metadata: { retryable: isRetryableError(error) },
+    })
+    throw error
+  }
+}
+```
+
+子 Span は親から Trace コンテキストを自動的に継承し、Observability プラットフォーム内で関係の階層を維持します。
+
+## Span の整形
+
+Mastra には、Span データが Observability プラットフォームへ到達する前に変換する方法として、**Span Processor** と **カスタム Span Formatter** の2つがあります。どちらも Trace データの変更、フィルタリング、拡充が可能ですが、動作するレベルと用途が異なります。
+
+| 機能 | Span Processor | カスタム Span Formatter |
+| - | - | - |
+| 設定レベル | Observability の設定 | Exporter ごと |
+| 操作対象 | 内部の `Span` オブジェクト | エクスポートされる `ExportedSpan` データ |
+| 適用対象 | すべての Exporter | 1つの Exporter |
+| 非同期処理への対応 | なし | あり |
+| ユースケース | セキュリティ、フィルタリング、拡充 | プラットフォーム固有の整形、非同期での拡充 |
+
+機密データのマスキングなど、すべての Exporter に適用する同期変換には **Span Processor** を使用します。プラットフォームごとに同じデータを異なる形式で表す必要がある場合（あるプラットフォームではプレーンテキスト、別のプラットフォームでは構造化データなど）や、外部 API からのデータ取得のような非同期操作が必要な場合は、**カスタム Span Formatter** を使用します。
+
+### Span Processor
+
+Span Processor は、Trace データがエクスポートされる前に変換、フィルタリング、拡充します。Span の作成からエクスポートまでの間をつなぐパイプラインとして機能し、セキュリティ、コンプライアンス、デバッグの目的で Span を変更できます。Processor は一度実行され、すべての Exporter に影響します。
+
+#### 組み込み Processor
+
+- [Sensitive Data Filter](/docs/observability/integrations/processors/sensitive-data-filter) は機密情報をマスキングします。Observability のデフォルト設定で有効になっています。
+
+#### カスタム Processor の作成
+
+`SpanOutputProcessor` インターフェースを実装して、カスタム Span Processor を作成できます。次の基本例では、Span 内のすべての入力テキストを小文字に変換します。
+
+```ts title="src/processors/lowercase-input-processor.ts"
+import type { SpanOutputProcessor, AnySpan } from '@mastra/observability'
+
+export class LowercaseInputProcessor implements SpanOutputProcessor {
+  name = 'lowercase-processor'
+
+  process(span: AnySpan): AnySpan {
+    span.input = `${span.input}`.toLowerCase()
+    return span
+  }
+
+  async shutdown(): Promise<void> {
+    // Cleanup if needed
+  }
+}
+
+// Use the custom processor
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      development: {
+        spanOutputProcessors: [new LowercaseInputProcessor(), new SensitiveDataFilter()],
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+Processor は定義された順序で実行されるため、複数の変換を連結できます。一般的なユースケースは次のとおりです。
+
+- 機密データ（パスワード、Token、API キー）のマスキング
+- 環境固有のメタデータの追加
+- 条件に基づく Span の除外
+- データ形式の正規化
+- ビジネスコンテキストによる Span の拡充
+
+Exporter、Bridge、Processor のより広範なモデルについては、[インテグレーションの概要](/docs/observability/integrations/overview)を参照してください。
+
+## Span のフィルタリング
+
+Span のフィルタリングにより、データが Observability プラットフォームへ到達する前にノイズや Span ごとのコストを削減できます。Observability インスタンスごとに設定できるため、Exporter や環境に応じて異なる詳細レベルを保持できます。
+
+- 最小限の設定で Span のカテゴリ全体を除外するには、`excludeSpanTypes` を使用します。
+- エクスポートされる Span データに基づくカスタムロジックが必要な場合は、`spanFilter` を使用します。
+
+次の例は、1つの設定で両方のオプションを組み合わせる方法を示しています。
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { SpanType } from '@mastra/core/observability'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+import { LangfuseExporter } from '@mastra/langfuse'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-app',
+        exporters: [new MastraStorageExporter(), new LangfuseExporter()],
+        excludeSpanTypes: [SpanType.MODEL_CHUNK, SpanType.MODEL_STEP],
+        spanFilter: span => {
+          if (span.type === SpanType.TOOL_CALL && span.attributes?.success) {
+            return false
+          }
+
+          return true
+        },
+      },
+    },
+  }),
+})
+```
+
+エクスポート時のフィルタリングは、次の順序で行われます。
+
+1. `includeInternalSpans` が `true` でない限り、内部 Span を除外します。
+1. `excludeSpanTypes` で一致するタイプの Span を除外します。
+1. `spanOutputProcessors` で残りの Span を変換します。
+1. `spanFilter` で最終的にエクスポートされる Span を保持するかどうかを決定します。
+
+`spanFilter` が例外をスローした場合、データが気付かないうちに失われるのを防ぐため、Mastra はその Span を保持してエラーをログに記録します。Span タイプの完全な一覧とその他の例については、[Span フィルタリングのリファレンス](/reference/observability/tracing/span-filtering)を参照してください。
+
+### カスタム Span Formatter
+
+カスタム Span Formatter は、特定の Observability プラットフォームで Span がどのように表示されるかを変換します。Span Processor とは異なり、Formatter は Exporter ごとに設定されるため、送信先ごとに異なる形式を指定できます。Formatter は同期操作と非同期操作の両方に対応しています。
+
+#### ユースケース
+
+- **AI SDK メッセージからプレーンテキストを抽出**：構造化されたメッセージ配列を読みやすいテキストに変換する
+- **入出力形式を変換**：特定のプラットフォームでのデータ表示をカスタマイズする
+- **プラットフォーム固有のフィールドマッピング**：プラットフォームの要件に基づいてフィールドを追加または削除する
+- **非同期でのデータ拡充**：外部 API やデータベースから追加のコンテキストを取得する
+
+#### 設定
+
+任意の Exporter 設定に `customSpanFormatter` を追加します。
+
+```ts title="src/mastra/index.ts"
+import { BraintrustExporter } from '@mastra/braintrust'
+import { LangfuseExporter } from '@mastra/langfuse'
+import { SpanType } from '@mastra/core/observability'
+import type { CustomSpanFormatter } from '@mastra/core/observability'
+
+// Formatter that extracts plain text from AI messages
+const plainTextFormatter: CustomSpanFormatter = span => {
+  if (span.type === SpanType.AGENT_RUN && Array.isArray(span.input)) {
+    const userMessage = span.input.find(m => m.role === 'user')
+    return {
+      ...span,
+      input: userMessage?.content ?? span.input,
+    }
+  }
+  return span
+}
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-service',
+        exporters: [
+          // Braintrust gets plain text formatting
+          new BraintrustExporter({
+            customSpanFormatter: plainTextFormatter,
+          }),
+          // Langfuse keeps the original structured format
+          new LangfuseExporter(),
+        ],
+      },
+    },
+  }),
+})
+```
+
+#### 複数の Formatter の連結
+
+複数の Formatter を組み合わせるには、`chainFormatters` を使用します。連結された Formatter は、同期と非同期の両方に対応しています。
+
+```ts
+import { chainFormatters } from '@mastra/observability'
+
+const inputFormatter: CustomSpanFormatter = span => ({
+  ...span,
+  input: extractPlainText(span.input),
+})
+
+const outputFormatter: CustomSpanFormatter = span => ({
+  ...span,
+  output: extractPlainText(span.output),
+})
+
+const exporter = new BraintrustExporter({
+  customSpanFormatter: chainFormatters([inputFormatter, outputFormatter]),
+})
+```
+
+#### 非同期 Formatter
+
+カスタム Span Formatter は非同期操作に対応しているため、外部 API やデータベースからデータを取得して Span を拡充するようなユースケースを実現できます。
+
+```ts
+import type { CustomSpanFormatter } from '@mastra/core/observability'
+
+// Async formatter that enriches spans with user data
+const userEnrichmentFormatter: CustomSpanFormatter = async span => {
+  const userId = span.metadata?.userId
+  if (!userId) return span
+
+  // Fetch user data from your API or database
+  const userData = await fetchUserData(userId)
+
+  return {
+    ...span,
+    metadata: {
+      ...span.metadata,
+      userName: userData.name,
+      userEmail: userData.email,
+      department: userData.department,
+    },
+  }
+}
+
+// Async formatter that looks up additional context
+const contextEnrichmentFormatter: CustomSpanFormatter = async span => {
+  if (span.type !== SpanType.AGENT_RUN) return span
+
+  // Fetch experiment configuration
+  const experimentConfig = await getExperimentConfig(span.metadata?.experimentId)
+
+  return {
+    ...span,
+    metadata: {
+      ...span.metadata,
+      experimentVariant: experimentConfig?.variant,
+      experimentGroup: experimentConfig?.group,
+    },
+  }
+}
+
+// Use async formatters with an exporter
+const exporter = new BraintrustExporter({
+  customSpanFormatter: userEnrichmentFormatter,
+})
+
+// Or chain sync and async formatters together
+const exporter = new LangfuseExporter({
+  customSpanFormatter: chainFormatters([
+    plainTextFormatter, // sync
+    userEnrichmentFormatter, // async
+    contextEnrichmentFormatter, // async
+  ]),
+})
+```
+
+:::note
+非同期 Formatter は Span のエクスポートにレイテンシーを加えます。アプリケーションの速度低下を避けるため、非同期操作は短時間（100ミリ秒未満）で完了するようにしてください。頻繁にアクセスするデータには、キャッシュの使用を検討してください。
+:::
+
+## シリアル化オプション
+
+シリアル化オプションは、Span データ（入力、出力、属性）がエクスポート前にどのように切り詰められるかを制御します。大きなペイロードや深くネストされたオブジェクトを扱う場合や、Trace ストレージを最適化する必要がある場合に便利です。
+
+### 設定
+
+Observability の設定に `serializationOptions` を追加します。
+
+```ts title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-service',
+        serializationOptions: {
+          maxStringLength: 2048, // Maximum length for string values (default: 1024)
+          maxDepth: 10, // Maximum depth for nested objects (default: 6)
+          maxArrayLength: 100, // Maximum number of items in arrays (default: 50)
+          maxObjectKeys: 75, // Maximum number of keys in objects (default: 50)
+        },
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+### 使用可能なオプション
+
+| オプション | デフォルト | 説明 |
+| - | - | - |
+| `maxStringLength` | 1024 | 文字列値の最大長。これを超える文字列は切り詰められます。 |
+| `maxDepth` | 6 | ネストされたオブジェクトの最大深度。これより深い階層は省略されます。 |
+| `maxArrayLength` | 50 | 配列内の項目の最大数。これを超える項目は省略されます。 |
+| `maxObjectKeys` | 50 | オブジェクト内のキーの最大数。これを超えるキーは省略されます。 |
+
+### ユースケース
+
+**デバッグのために上限を引き上げる**：Agent や Tool が大きなドキュメント、API レスポンス、データ構造を扱う場合は、これらの上限を引き上げることで、Trace により多くのコンテキストを記録できます。
+
+```ts prettier:false
+serializationOptions: {
+  maxStringLength: 8192,  // Capture longer text content
+  maxDepth: 12,           // Handle deeply nested JSON responses
+  maxArrayLength: 200,    // Keep more items from large lists
+}
+```
+
+**本番環境で Trace のサイズを削減する**：ペイロード全体を可視化する必要がない場合は、これらの値を引き下げてストレージコストを削減し、パフォーマンスを向上させます。
+
+```ts prettier:false
+serializationOptions: {
+  maxStringLength: 256,   // Truncate strings aggressively
+  maxDepth: 3,            // Shallow object representation
+  maxArrayLength: 10,     // Keep only first few items
+  maxObjectKeys: 20,      // Limit object keys
+}
+```
+
+すべてのオプションは任意です。指定しない場合は、上記のデフォルト値が使用されます。
+
+## Trace ID の取得
+
+トレーシングを有効にして Agent や Workflow を実行すると、レスポンスに `traceId` が含まれます。この ID を使用して、Observability プラットフォーム上で Trace 全体を検索できます。これはデバッグやカスタマーサポートに役立つほか、Trace をシステム内の他のイベントと関連付ける場合にも便利です。
+
+### Agent の Trace ID
+
+`generate` メソッドと `stream` メソッドは、どちらもレスポンスで Trace ID を返します。
+
+```ts
+// Using generate
+const result = await agent.generate('Hello')
+
+console.log('Trace ID:', result.traceId)
+
+// Using stream
+const streamResult = await agent.stream('Tell me a story')
+
+console.log('Trace ID:', streamResult.traceId)
+```
+
+### Workflow の Trace ID
+
+Workflow の実行でも Trace ID が返されます。
+
+```ts
+// Create a workflow run
+const run = await mastra.getWorkflow('myWorkflow').createRun()
+
+// Start the workflow
+const result = await run.start({
+  inputData: { data: 'process this' },
+})
+
+console.log('Trace ID:', result.traceId)
+
+// Or stream the workflow
+const { stream, getWorkflowState } = run.stream({
+  inputData: { data: 'process this' },
+})
+
+// Get the final state which includes the trace ID
+const finalState = await getWorkflowState()
+console.log('Trace ID:', finalState.traceId)
+```
+
+### Trace ID の使用
+
+Trace ID を取得すると、次のことができます。
+
+1. **Studio で Trace を検索**：Trace ビューへ移動し、ID で検索します。
+1. **外部プラットフォームで Trace を検索**：Langfuse、Braintrust、MLflow、または使用している Observability プラットフォームで ID を使用します。
+1. **ログとの関連付け**：相互参照できるよう、アプリケーションログに Trace ID を含めます。
+1. **デバッグ用に共有**：調査のため、サポートチームや開発者に Trace ID を提供します。
+
+Trace ID は、トレーシングが有効な場合にのみ使用できます。トレーシングが無効な場合や、サンプリングによってリクエストが除外された場合、`traceId` は `undefined` になります。
+
+## 外部トレーシングシステムとの統合
+
+既存の分散トレーシング（OpenTelemetry、Datadog など）があるアプリケーション内で Mastra の Agent や Workflow を実行する場合、Mastra の Trace を親の Trace コンテキストに接続できます。これによりリクエストフロー全体を一元的に表示でき、Mastra の操作がシステム全体の中でどのように位置付けられるかを把握しやすくなります。
+
+### 外部 Trace ID の受け渡し
+
+親システムからの Trace コンテキストを指定するには、`tracingOptions` パラメーターを使用します。
+
+```ts
+// Get trace context from your existing tracing system
+const parentTraceId = getCurrentTraceId() // Your tracing system
+const parentSpanId = getCurrentSpanId() // Your tracing system
+
+// Execute Mastra operations as part of the parent trace
+const result = await agent.generate('Analyze this data', {
+  tracingOptions: {
+    traceId: parentTraceId,
+    parentSpanId: parentSpanId,
+  },
+})
+
+// The Mastra trace will now appear as a child in your distributed trace
+```
+
+### OpenTelemetry との統合
+
+OpenTelemetry と統合すると、Mastra の Trace を既存の Observability プラットフォームへ直接表示できます。
+
+```ts
+import { trace } from '@opentelemetry/api'
+
+// Get the current OpenTelemetry span
+const currentSpan = trace.getActiveSpan()
+const spanContext = currentSpan?.spanContext()
+
+if (spanContext) {
+  const result = await agent.generate(userMessage, {
+    tracingOptions: {
+      traceId: spanContext.traceId,
+      parentSpanId: spanContext.spanId,
+    },
+  })
+}
+```
+
+### Workflow との統合
+
+Workflow でも、Trace の伝播に同じパターンを使用できます。
+
+```ts
+const workflow = mastra.getWorkflow('data-pipeline')
+const run = await workflow.createRun()
+
+const result = await run.start({
+  inputData: { data: '...' },
+  tracingOptions: {
+    traceId: externalTraceId,
+    parentSpanId: externalSpanId,
+  },
+})
+```
+
+### ID 形式の要件
+
+互換性を確保するため、Mastra は Trace ID と Span ID を検証します。
+
+- **Trace ID**：1～32文字の16進数（OpenTelemetry では32文字）
+- **Span ID**：1～16文字の16進数（OpenTelemetry では16文字）
+
+無効な ID は適切に処理され、Mastra はエラーをログに記録して処理を続行します。
+
+- 無効な Trace ID → 新しい Trace ID を生成します。
+- 無効な親 Span ID → 親子関係を無視します。
+
+そのため、入力形式が不正な場合でも、トレーシングによってアプリケーションがクラッシュすることはありません。
+
+### 例：Express ミドルウェア
+
+Express アプリケーションで Trace を伝播する完全な例を次に示します。
+
+```ts
+import { trace } from '@opentelemetry/api'
+import express from 'express'
+
+const app = express()
+
+app.post('/api/analyze', async (req, res) => {
+  // Get current OpenTelemetry context
+  const currentSpan = trace.getActiveSpan()
+  const spanContext = currentSpan?.spanContext()
+
+  const result = await agent.generate(req.body.message, {
+    tracingOptions: spanContext
+      ? {
+          traceId: spanContext.traceId,
+          parentSpanId: spanContext.spanId,
+        }
+      : undefined,
+  })
+
+  res.json(result)
+})
+```
+
+これにより、HTTP リクエストの処理と Mastra Agent の実行の両方を含む単一の分散 Trace が作成され、選択した Observability プラットフォームで表示できます。
+
+## トレースされる対象
+
+Mastra は、次の対象に対して Span を自動的に作成します。
+
+### Agent の操作
+
+- **Agent の実行**：指示と Tool を含む完全な実行
+- **LLM 呼び出し**：Token とパラメーターを含むモデルとのやり取り
+- **Tool の実行**：入力と出力を含む関数呼び出し
+- **メモリ操作**：Thread とセマンティックリコール
+
+### Workflow の操作
+
+- **Workflow の実行**：開始から終了までの完全な実行
+- **個別のステップ**：入出力を含むステップ処理
+- **制御フロー**：条件分岐、ループ、並列実行
+- **待機操作**：遅延とイベント待機
+
+## 関連項目
+
+### リファレンスドキュメント
+
+- [設定 API](/reference/observability/tracing/configuration)：ObservabilityConfig の詳細
+- [トレーシングクラス](/reference/observability/tracing/instances)：コアクラスとメソッド
+- [Span インターフェース](/reference/observability/tracing/spans)：Span のタイプとライフサイクル
+- [型定義](/reference/observability/tracing/interfaces)：完全なインターフェースリファレンス
+- [Span のフィルタリング](/reference/observability/tracing/span-filtering)：フィルタリングの動作、Span タイプ、使用例

@@ -1,0 +1,190 @@
+---
+title: "スケジュールされた Workflow | Workflows"
+description: "Workflow 定義に `schedule` フィールドを宣言し、cron スケジュールで Workflow を実行します。"
+packages:
+  - "@mastra/core"
+---
+
+# スケジュールされた Workflow
+
+Workflow に `schedule` フィールドを宣言すると、指定した cron に従って Mastra が実行します。同じ Workflow は `workflow.start()` で直接呼び出すこともでき、スケジュール実行と手動実行は同じ実行経路を共有します。
+
+## クイックスタート
+
+次の Workflow はニューヨーク時間の毎日午前9時に実行されます。他の Workflow と同様に `Mastra` へ登録すれば、スケジューラーが自動的に検出します。
+
+```typescript title="src/mastra/workflows/daily-report.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+const sendReport = createStep({
+  id: 'send-report',
+  inputSchema: z.object({ userId: z.string() }),
+  outputSchema: z.object({ ok: z.boolean() }),
+  execute: async ({ inputData }) => {
+    // ...send the report for inputData.userId
+    return { ok: true }
+  },
+})
+
+export const dailyReport = createWorkflow({
+  id: 'daily-report',
+  inputSchema: z.object({ userId: z.string() }),
+  outputSchema: z.object({ ok: z.boolean() }),
+  schedule: {
+    cron: '0 9 * * *',
+    timezone: 'America/New_York',
+    inputData: { userId: 'system' },
+  },
+})
+  .then(sendReport)
+  .commit()
+```
+
+別途「スケジュール登録」を呼び出す必要はありません。`Mastra` の起動時に、スケジューラーが Workflow の `schedule` を直接読み取ります。
+
+## `schedule` による変更
+
+`schedule` を宣言した Workflow は、**イベント駆動実行エンジン**へ自動的に昇格します。公開 API（`workflow.start()`、`workflow.startAsync()`、`streamLegacy()`、`resume()`）は変わりません。`EventedWorkflow extends Workflow` が各メソッドを同じシグネチャでオーバーライドします。コードから見れば、スケジュール実行と手動実行に違いはありません。
+
+この昇格には実務上の注意点が1つあります。イベント駆動の実行には、`@mastra/libsql` など同時更新に対応したストレージアダプターが必要です。アダプターが対応していない場合、`createRun()` は `schedule` フィールドを示す明確なエラーをスローします。アダプターを変更するか、スケジュールを削除してください。
+
+## 単一のスケジュール
+
+1つの周期で実行する Workflow では、`schedule` にオブジェクトを渡します。
+
+```typescript title="src/mastra/workflows/daily-report.ts"
+const dailyReport = createWorkflow({
+  id: 'daily-report',
+  schedule: {
+    cron: '0 9 * * *',
+    timezone: 'America/New_York',
+    inputData: { userId: 'system' },
+  },
+  // ...
+})
+```
+
+フィールド：
+
+- `cron`（必須）：5、6、または7要素の cron 式。Workflow の構築時に検証されます。
+- `timezone`（任意）：`America/New_York` などの IANA タイムゾーン。デフォルトはホストのローカルタイムゾーンです。本番環境では、実行時刻がサーバーのロケールに左右されないよう明示的に設定してください。
+- `inputData`（任意）：実行のたびに Workflow の入力として渡すペイロード。
+- `initialState`（任意）：実行の初期状態。
+- `requestContext`（任意）：実行に付加するリクエストコンテキスト。
+- `metadata`（任意）：スケジュール行とともに永続化する任意のメタデータ。
+
+## 複数のスケジュール
+
+同じ Workflow を複数の周期で実行するには、配列を渡します。各要素には一意で安定した `id` が必要です。
+
+```typescript title="src/mastra/workflows/status-check.ts"
+const statusCheck = createWorkflow({
+  id: 'status-check',
+  schedule: [
+    { id: 'morning', cron: '0 9 * * *', inputData: { window: 'morning' } },
+    { id: 'evening', cron: '0 18 * * *', inputData: { window: 'evening' } },
+  ],
+  // ...
+})
+```
+
+各要素は独立したスケジュール行を作成し、それぞれの cron に従って実行されます。Studio の Schedules ビューにも個別に表示されます。
+
+## Studio でスケジュールを確認する
+
+Studio では、スケジュールは Workflow 内のタブではなく、トップレベルの領域に表示されます。
+
+- **すべてのスケジュール**：`/workflows/schedules` を開くと、Workflow を横断した一覧が表示されます。各行には Workflow ID、cron、次回実行時刻、直近の実行ステータスが表示されるため、問題の有無をひと目で確認できます。
+- **Workflow で絞り込む**：`?workflowId=<id>` を追加すると、単一の Workflow に絞り込めます。例：`/workflows/schedules?workflowId=daily-report`。
+- **スケジュールの詳細**：任意の行を選択すると、`/workflows/schedules/:scheduleId` が開きます。このページにはスケジュールのメタデータ、**Pause**／**Resume** コントロール、すべてのトリガー履歴が表示されます。
+
+Workflow に1つ以上のスケジュールがある場合、ヘッダーに **Schedules** アクションが表示されます。
+
+- 一致するスケジュールが1つの場合、アクションはその詳細ページへ直接リンクします。
+- 複数ある場合、アクションは `/workflows/schedules?workflowId=<id>` の Workflow 絞り込み一覧へリンクします。
+- スケジュールがない場合、アクションは表示されません。
+
+### トリガー履歴
+
+実行のたびに、実行 ID、予定時刻、実際の実行時刻、publish ステータスを含むトリガー行が記録されます。スケジュール詳細ページでは、各トリガーを対応する Workflow 実行と結び付け、次の情報を表示します。
+
+- 実行ステータス（`running`、`success`、`failed`、`suspended`、`canceled`）を示すバッジ。
+- 実行の開始時刻と所要時間。
+- `/workflows/:workflowId/graph/:runId` にある実行の完全なグラフビューへのリンク。
+- トリガーの publish と実行 Snapshot の競合により、実行レコードがまだ書き込まれていないトリガーに付く `pending` バッジ。
+- スケジューラーが実行をまったくキューへ追加できなかった場合に、publish エラーとともに表示される `publish failed` バッジ。
+
+終了状態に達していないトリガーがある間、パネルは終了状態になるまで5秒ごとにポーリングします。一覧はページ分割されるため、長期間稼働するスケジュールでも最初から数千行を読み込むことはありません。
+
+## 実行時にスケジュールを一時停止する
+
+本番環境でスケジュールされた Workflow が誤作動しても、再デプロイやデータベースの手動編集は不要です。SDK から一時停止できます。
+
+```typescript
+import { MastraClient } from '@mastra/client-js'
+
+const client = new MastraClient({ baseUrl: 'http://localhost:4111' })
+
+// Schedule ids are derived from the workflow id: `wf_<workflowId>` for a
+// single declarative schedule, or `wf_<workflowId>__<scheduleId>` when you
+// declare multiple schedules per workflow as an array.
+await client.pauseSchedule('wf_daily-report')
+// ...investigate, ship a fix, then:
+await client.resumeSchedule('wf_daily-report')
+```
+
+Studio では、スケジュール詳細ページを開き、ヘッダーの **Pause** または **Resume** を選択します。
+
+知っておくべきルールは次のとおりです。
+
+- 一時停止は永続的です。ステータスは schedules テーブルへ書き込まれ、プロセスの再起動や再デプロイ後も維持されます。`cron`、`timezone`、その他のフィールドを変更しても、宣言的設定の upsert がユーザー設定のステータスを上書きすることはありません。
+- 再開時には、現在時刻を基準に `nextFireAt` が再計算されます。1週間停止していたスケジュールを再開しても、滞留した7回分が即座に実行されることはありません。次の通常の cron タイミングで実行されます。
+- 一時停止を解除するには、`resumeSchedule` または Studio の **Resume** ボタンを使用します。Workflow の `schedule` 設定を編集しても、一時停止中の行は再開されません。
+- 一時停止と再開はべき等です。すでに一時停止中のスケジュールに pause を呼び出しても何も起こりません。
+- この運用上のオーバーライドは既存のスケジュールを制御します。宣言的スケジュールはコードで作成してください。宣言的スケジュールの作成、削除、編集は、`createWorkflow` の `schedule` フィールドを通じてコードで行います。代わりに実行時に命令的にスケジュールを作成するには、`workflowId` と統合 [`mastra.schedules`](/docs/long-running-agents/schedules) サービスを使用します。
+
+基盤となる HTTP ルートは `POST /api/schedules/:scheduleId/pause` と `POST /api/schedules/:scheduleId/resume` です。どちらにも `schedules:write` 権限が必要です。
+
+## 変更後の再デプロイ
+
+`schedule` 設定を変更して再デプロイすると、Mastra は既存のスケジュール行と新しい設定の差分を比較します。
+
+- `cron` または `timezone` が変わった場合、`nextFireAt` が再計算されます。
+- `inputData`、`initialState`、`metadata` だけが変わった場合、行はその場で更新され、次回実行時刻は維持されます。
+- ユーザー設定のステータス（`client.pauseSchedule` で一時停止した場合など）と実行履歴は上書きされません。
+
+Workflow の `schedule` 配列からスケジュール要素を削除すると、次回起動時にその行が削除されます。
+
+## デプロイトポロジー
+
+組み込みスケジューラーは `setInterval` の tick ループで schedules テーブルをポーリングし、期限に達した行を確保します。Workflow の実行はプロセス内 pubsub を通じてディスパッチされます。この仕組みは、長時間稼働するホストプロセスを前提としています。
+
+### 長時間稼働するホスト（推奨）
+
+Fly Machines、Railway、Render、AWS ECS、GKE、独自サーバーなどのデプロイ先では、cron の tick 間も Mastra プロセスが稼働し続けます。追加設定なしでスケジュールが動作します。本番環境では、スケジューラーを[専用ワーカープロセス](/docs/deployment/workers#scheduler-worker)として実行し、API レイヤーから分離できます。
+
+### サーバーレスプラットフォーム
+
+Vercel、Netlify、AWS Lambda、Cloudflare Workers などの Functions-as-a-Service プラットフォームは、各リクエストの後にプロセスを停止します。tick ループが2回目の tick を迎えないため、現在の組み込みスケジューラーでは、コードで宣言したスケジュールはこれらのプラットフォーム上で実行されません。
+
+これらのプラットフォームでは、代わりに [`@mastra/inngest`](#inngest-workflows) を使用してください。Inngest はサーバーレスにネイティブ対応し、cron の状態を保持します。
+
+## Inngest Workflow
+
+このページで説明する `schedule` フィールドは、Mastra の組み込みスケジューラーを駆動します。`@mastra/inngest` を使用する場合、スケジュールされた Workflow は `createFunction` にある Inngest 独自の `cron` フィールドで設定し、Inngest のスケジューラーで実行します。
+
+実務上の影響は次のとおりです。
+
+- Inngest のスケジュールは Studio の `/workflows/schedules` ビューに表示されません。
+- Inngest Workflow のヘッダーには **Schedules** アクションが表示されません。
+- `client.pauseSchedule` と `client.resumeSchedule` では Inngest のスケジュールを制御できません。
+
+Inngest のスケジュールは [Inngest dashboard](https://www.inngest.com/docs/guides/scheduled-functions) で管理します。スケジューリング全体を Mastra に管理させたい場合は、Mastra のスケジュールを使用してください。
+
+## 関連項目
+
+- [Workflow の概要](/docs/workflows/overview)
+- [一時停止と再開](/docs/workflows/suspend-and-resume)
+- [Workers](/docs/deployment/workers)：[scheduler worker](/docs/deployment/workers#scheduler-worker) は専用プロセスで cron スケジュールを実行します
+- [Agent schedules](/docs/long-running-agents/schedules)：Workflow ではなく Agent を cron スケジュールで実行し、`mastra.schedules` を通じて両方のスケジュール形式を実行時に管理します。

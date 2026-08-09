@@ -1,0 +1,228 @@
+---
+title: "OpenTelemetry bridge | インテグレーション | オブザーバビリティ"
+description: "Mastra のトレーシングを既存の OpenTelemetry インフラストラクチャと統合します"
+packages:
+  - "@mastra/observability"
+  - "@mastra/otel-bridge"
+---
+
+# OpenTelemetry bridge
+
+:::warning
+
+OpenTelemetry Bridge は現在**実験的機能**です。API と設定オプションは今後のリリースで変更される可能性があります。
+
+:::
+
+OpenTelemetry（OTEL）Bridge は、Mastra のトレーシングシステムと既存の OpenTelemetry インフラストラクチャを双方向に統合します。Trace データを外部プラットフォームへ送信する exporter とは異なり、この bridge は分散トレーシングのコンテキストに参加するネイティブ OTEL span を作成します。
+
+:::info 既存の OTEL インフラストラクチャなしで Trace を送信したい場合
+
+既存の OpenTelemetry 計装がない場合は、[OpenTelemetry Exporter](/docs/observability/integrations/exporters/otel)の方が簡単です。OTEL SDK のセットアップを必要とせず、Trace を直接送信します。
+
+:::
+
+## bridge を使用する場面
+
+次の場合は OtelBridge を使用します。
+
+- アプリケーションに既存の OTEL 計装がある（HTTP サーバー、データベースクライアントなど）
+- Mastra の処理を既存の OTEL Trace の子 span として表示したい
+- Mastra Tool 内の OTEL 計装済みコードで、適切な親子関係を維持する必要がある
+- Trace コンテキストをサービス間で伝播させる必要がある分散システムを構築している
+
+## 仕組み
+
+OtelBridge は双方向の統合を提供します。
+
+**OTEL から Mastra へ：**
+
+- OTEL のアンビエントコンテキスト（AsyncLocalStorage）を自動的に読み取る
+- アクティブな OTEL span から Trace ID と親 span ID を継承する
+- OTEL のサンプリング判断を尊重する。Trace がサンプリングされない場合、Mastra もその span を作成しない
+- OTEL の自動計装が有効な場合、Trace ID を手動で渡す必要がない
+
+**Mastra から OTEL へ：**
+
+- Mastra の処理（Agent、LLM 呼び出し、Tool、Workflow）にネイティブ OTEL span を作成する
+- 分散 Trace で適切な親子関係を維持する
+- Mastra の処理内にある OTEL 計装済みコード（HTTP クライアント、データベース呼び出し）を正しくネストできるようにする
+- Mastra のログイベントを、グローバルに登録された OTEL `LoggerProvider` へ転送する。Mastra span 内で発生したログはその span の OTEL コンテキストで送信されるため、バックエンドで Trace と相関付けられる。`LoggerProvider` が登録されていない場合、ログ送信は何もせず終了する
+
+## インストール
+
+```bash npm2yarn
+npm install @mastra/otel-bridge
+```
+
+bridge は既存の OpenTelemetry セットアップと連携します。設定によっては、次のパッケージも必要になる場合があります。
+
+- `@opentelemetry/sdk-node` - OTEL 用のコア Node.js SDK
+- `@opentelemetry/auto-instrumentations-node` - 一般的なライブラリの自動計装
+- `@opentelemetry/exporter-trace-otlp-proto` - OTLP exporter（HTTP 経由の Protobuf）
+- `@opentelemetry/exporter-trace-otlp-http` - OTLP exporter（HTTP 経由の JSON）
+- `@opentelemetry/exporter-trace-otlp-grpc` - OTLP exporter（gRPC）
+- `@opentelemetry/sdk-trace-base` - 基本トレーシング SDK（BatchSpanProcessor など）
+- `@opentelemetry/core` - コアユーティリティ（W3CTraceContextPropagator など）
+- `@opentelemetry/sdk-logs` と OTLP ログ exporter（例：`@opentelemetry/exporter-logs-otlp-http`）- bridge で Mastra のログイベントも転送する場合に必要
+
+## 設定
+
+OtelBridge を使用するには、次の2つの手順が必要です。
+
+1. アプリケーションで OpenTelemetry 計装を設定する
+1. Mastra のオブザーバビリティ設定に OtelBridge を追加する
+
+### 手順1：OpenTelemetry 計装
+
+OTEL を初期化する計装ファイルを作成します。このファイルはアプリケーションコードより前に実行する必要があります。
+
+```typescript title="instrumentation.ts"
+import { NodeSDK } from '@opentelemetry/sdk-node'
+import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node'
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto'
+import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-base'
+import { W3CTraceContextPropagator } from '@opentelemetry/core'
+
+const sdk = new NodeSDK({
+  serviceName: 'my-service',
+  spanProcessors: [
+    new BatchSpanProcessor(
+      new OTLPTraceExporter({
+        url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://localhost:4318/v1/traces',
+      }),
+    ),
+  ],
+  instrumentations: [getNodeAutoInstrumentations()],
+  textMapPropagator: new W3CTraceContextPropagator(),
+})
+
+sdk.start()
+
+export { sdk }
+```
+
+### 手順2：Mastra の設定
+
+Mastra のオブザーバビリティ設定に OtelBridge を追加します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { OtelBridge } from '@mastra/otel-bridge'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-service',
+        bridge: new OtelBridge(),
+      },
+    },
+  }),
+  agents: {/* your agents */},
+})
+```
+
+bridge を使用する場合、Mastra の exporter は必要ありません。Trace は OTEL SDK の設定を介して送信されます。Trace を追加の送信先にも送る場合は、必要に応じて Mastra の exporter を追加できます。
+
+### ログの転送（オプション）
+
+bridge は、Mastra のログイベントもグローバルに登録された OTEL `LoggerProvider` へ転送します。Trace と併せてログも接続するには、`NodeSDK` に `logRecordProcessor` を登録します。
+
+```typescript title="instrumentation.ts"
+import { NodeSDK } from '@opentelemetry/sdk-node'
+import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-http'
+import { BatchLogRecordProcessor } from '@opentelemetry/sdk-logs'
+
+const sdk = new NodeSDK({
+  // ...trace config as usual
+  logRecordProcessor: new BatchLogRecordProcessor(
+    new OTLPLogExporter({
+      url: process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT || 'http://localhost:4318/v1/logs',
+    }),
+  ),
+})
+```
+
+Mastra span 内で発生したログは、その span の OTEL コンテキストで送信されます。そのため、Datadog、Grafana、Honeycomb などのバックエンドは、ログを周囲の Trace と自動的に相関付けます。Trace コンテキストがないログには、現在アクティブな OTEL コンテキストが使用されます。
+
+`LoggerProvider` を登録しない場合、ログ送信は何もせず終了しますが、Trace は設定どおりに引き続き動作します。
+
+### アプリケーションを実行する
+
+アプリケーションより前に計装を確実に読み込むため、`--import` フラグを使用します。
+
+```bash
+tsx --import ./instrumentation.ts ./src/index.ts
+```
+
+## セマンティック規約
+
+OtelBridge は、[OpenTelemetry Semantic Conventions for GenAI v1.38.0](https://github.com/open-telemetry/semantic-conventions/tree/v1.38.0/docs/gen-ai)を使用して Mastra span をエクスポートします。これには、標準化された span 名（`chat {model}`、`execute_tool {tool_name}` など）と属性（`gen_ai.usage.input_tokens`、`gen_ai.request.model` など）が含まれます。
+
+span の命名と属性について詳しくは、[OpenTelemetry Exporter のセマンティック規約](/docs/observability/integrations/exporters/otel#opentelemetry-semantic-conventions)を参照してください。
+
+## Trace の階層
+
+OtelBridge を使用すると、OTEL と Mastra の境界をまたいでも Trace の階層が正しく維持されます。
+
+```
+HTTP POST /api/chat (from Hono middleware)
+└── agent.assistant (from Mastra via OtelBridge)
+    ├── chat gpt-5.4 (LLM call)
+    ├── tool.execute search (tool execution)
+    │   └── HTTP GET api.example.com (from OTEL auto-instrumentation)
+    └── chat gpt-5.4 (follow-up LLM call)
+```
+
+## 複数サービスの分散トレーシング
+
+OtelBridge は、サービス境界を越えた Trace の伝播を可能にします。サービス A が HTTP 経由でサービス B を呼び出すと、Trace コンテキストが自動的に伝播します。
+
+```
+Service A: HTTP POST /api/process
+└── HTTP POST service-b/api/analyze (outgoing call)
+
+Service B: HTTP POST /api/analyze (incoming call - same trace!)
+└── agent.analyzer (Mastra agent inherits trace context)
+    └── chat gpt-5.4
+```
+
+両方のサービスに次の設定が必要です。
+
+1. OTEL 計装が設定されている
+1. W3C Trace Context propagator が有効になっている
+1. OtelBridge を使用する Mastra が設定されている
+
+## タグを使用する
+
+タグを使用すると、OTEL バックエンドで Trace を分類およびフィルタリングできます。Agent や Workflow の実行時にタグを追加します。
+
+```typescript
+const result = await agent.generate('Hello', {
+  tracingOptions: {
+    tags: ['production', 'experiment-v2', 'user-request'],
+  },
+})
+```
+
+幅広いバックエンドとの互換性を確保するため、タグは `mastra.tags` span 属性に JSON 文字列としてエクスポートされます。一般的な用途は次のとおりです。
+
+- 環境ラベル：`"production"`、`"staging"`
+- 実験の追跡：`"experiment-v1"`、`"control-group"`
+- 優先度：`"priority-high"`、`"batch-job"`
+
+## トラブルシューティング
+
+Trace が表示されない、または期待どおり接続されない場合は、次を確認してください。
+
+- OTEL SDK が Mastra より前に初期化されていること（`--import` フラグを使用するか、エントリーポイントの先頭で import します）
+- OtelBridge がオブザーバビリティ設定に追加されていること
+- OTEL バックエンドが稼働しており、アクセスできること
+
+## 関連項目
+
+- [トレーシングの概要](/docs/observability/tracing/overview)
+- [OpenTelemetry Exporter](/docs/observability/integrations/exporters/otel)：OTEL バックエンドへ Trace を送信する場合
+- [OtelBridge リファレンス](/reference/observability/tracing/bridges/otel)：API ドキュメント

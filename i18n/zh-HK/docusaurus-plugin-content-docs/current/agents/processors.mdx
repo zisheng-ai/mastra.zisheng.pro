@@ -1,0 +1,994 @@
+---
+title: "Processors | Agents"
+description: "了解如何使用輸入及輸出 processor，在 Mastra Agent 中轉換、驗證及控制訊息。"
+packages:
+  - "@mastra/core"
+---
+
+# Processors
+
+Processor 會在訊息通過 Agent 時加以轉換、驗證或控制。它們會在 Agent 執行管線中的特定位置運行，讓你可以在輸入到達語言模型前修改輸入，或在輸出傳回使用者前修改輸出。
+
+Processor 的設定方式如下：
+
+- **`inputProcessors`**：在訊息到達語言模型前運行。
+- **`outputProcessors`**：在語言模型產生回應後、但在回應傳回使用者前運行。
+
+你可以使用個別 [`Processor`](/reference/processors/processor-interface) 物件，亦可以運用 Mastra 的 Workflow 原語，將它們組合成 Workflow。Workflow 讓你可以進階控制 processor 的執行順序、平行處理及條件邏輯。
+
+部分 processor 同時實作輸入及輸出邏輯，並可按轉換應發生的位置，用於其中一個陣列。
+
+部分內置 processor 亦會傳送隱藏的系統提醒訊號。這些訊號會保留在原始記憶歷史記錄中，並在下一次模型呼叫前轉換為 `<system-reminder>...</system-reminder>` 上下文；不過，標準面向 UI 的訊息轉換及預設記憶喚回會隱藏這些訊號，除非你明確選擇加入。如要只為目前呼叫傳送訊號而不保留，請使用 `transient: true` 傳送。
+
+## 何時使用 processor
+
+使用 processor 可：
+
+- 正規化或驗證使用者輸入
+- 為 Agent 加入防護措施
+- 偵測並防止提示詞注入或越獄嘗試
+- 基於安全或合規要求審核內容
+- 轉換訊息（例如翻譯語言、篩選 Tool 呼叫）
+- 限制 token 用量或訊息歷史記錄長度
+- 遮蔽敏感資料（PII）
+- 對訊息套用自訂業務邏輯
+
+Mastra 為常見使用情境提供多款 processor。你亦可以為應用程式的特定要求建立自訂 processor。
+
+## 快速開始
+
+匯入 processor 並建立實例，然後將其傳入 Agent 的 `inputProcessors` 或 `outputProcessors` 陣列：
+
+```typescript {2,8-15} title="src/mastra/agents/moderated-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { ModerationProcessor } from '@mastra/core/processors'
+
+export const moderatedAgent = new Agent({
+  id: 'moderated-agent',
+  name: 'moderated-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  inputProcessors: [
+    new ModerationProcessor({
+      model: '__GATEWAY_OPENAI_MODEL_MINI__',
+      categories: ['hate', 'harassment', 'violence'],
+      threshold: 0.7,
+      strategy: 'block',
+    }),
+  ],
+})
+```
+
+## 執行順序
+
+Processor 會按它們在陣列中出現的順序運行：
+
+```typescript
+inputProcessors: [new UnicodeNormalizer(), new PromptInjectionDetector(), new ModerationProcessor()]
+```
+
+對輸出 processor 而言，順序決定套用至模型回應的轉換次序。
+
+### 啟用記憶時
+
+在 Agent 啟用記憶後，記憶 processor 會自動加入管線：
+
+**輸入 processor：**
+
+```
+[Memory Processors] → [Your inputProcessors]
+```
+
+記憶會先載入訊息歷史記錄，然後才運行你的 processor。
+
+**輸出 processor：**
+
+```
+[Your outputProcessors] → [Memory Processors]
+```
+
+你的 processor 會先運行，之後記憶會保存訊息。
+
+按照此順序，呼叫 `abort()` 的輸出防護措施會略過記憶 processor，並防止儲存訊息。詳情請參閱[記憶 Processor](/docs/memory/memory-processors#processor-execution-order)。
+
+## 將 processor 附加至 Agent
+
+Processor 透過三個陣列在 Agent 上設定：
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { PrefillErrorHandler, TokenLimiter, ModerationProcessor } from '@mastra/core/processors'
+
+const agent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  instructions: '...',
+  inputProcessors: [
+    new TokenLimiter(4000),
+    new ModerationProcessor({ model: '__GATEWAY_OPENAI_MODEL_NANO__' }),
+  ],
+  outputProcessors: [new ModerationProcessor({ model: '__GATEWAY_OPENAI_MODEL_NANO__' })],
+  errorProcessors: [new PrefillErrorHandler()],
+})
+```
+
+- `inputProcessors` 在 LLM 前運行。
+- `outputProcessors` 在 LLM 回應期間及之後運行。
+- `errorProcessors` 在 LLM API 呼叫擲回錯誤時運行，因此可從 Provider 錯誤中復原。
+
+每個陣列亦接受會傳回陣列的函式，因此可按每個請求從 `RequestContext` 建立 processor：
+
+```typescript
+new Agent({
+  id: 'processors-agent',
+  inputProcessors: ({ requestContext }) => {
+    const limit = requestContext.get('tokenLimit') ?? 4000
+    return [new TokenLimiter(limit)]
+  },
+})
+```
+
+### 按每次呼叫覆寫 processor
+
+`agent.generate()` 及 `agent.stream()` 接受相同的三個陣列。傳入其中一個陣列時，它只會在該次呼叫中**取代** Agent 上對應的陣列。記憶、Workspace 及其他由框架管理的 processor 仍會在你的陣列前後運行。
+
+```typescript
+await agent.stream('Summarize this', {
+  inputProcessors: [new TokenLimiter(2000)],
+  maxProcessorRetries: 5,
+})
+```
+
+## 建立自訂 processor
+
+自訂 processor 會實作 `Processor` 介面。
+
+Processor 方法接收兩個用於存取對話的引數：
+
+- `messages`：目前階段的 `MastraDBMessage` 物件快照陣列。
+- `messageList`：即時的 `MessageList` 實例。使用它讀取其他階段，或就地加入、移除或取代訊息。
+
+文字位於 `message.content.parts`，而非 `message.content` 本身。逐一處理 `parts`，並以 `part.type === 'text'` 篩選，以讀取使用者或助理文字。為了向後兼容，亦有扁平化的 `message.content.content` 字串可作後備。完整詳情請參閱 `Processor` 參考文件中的[訊息引數](/reference/processors/processor-interface#message-arguments)。
+
+### 轉換輸入訊息
+
+```typescript title="src/mastra/processors/custom-input.ts"
+import type { Processor, ProcessInputArgs } from '@mastra/core/processors'
+import type { MastraDBMessage } from '@mastra/core/memory'
+
+export class CustomInputProcessor implements Processor {
+  id = 'custom-input'
+
+  async processInput({ messages }: ProcessInputArgs): Promise<MastraDBMessage[]> {
+    // Transform messages before they reach the LLM.
+    // Text lives in content.parts — iterate parts and rewrite text parts only.
+    return messages.map(msg => ({
+      ...msg,
+      content: {
+        ...msg.content,
+        parts: msg.content.parts?.map(part =>
+          part.type === 'text' ? { ...part, text: part.text.toLowerCase() } : part,
+        ),
+      },
+    }))
+  }
+}
+```
+
+`processInput()` 方法接收 `messages`、`systemMessages` 及 `abort()` 函式。傳回 `MastraDBMessage[]` 以取代訊息，或傳回 `{ messages, systemMessages }` 以同時修改系統訊息。
+
+如要了解所有可用引數及傳回類型，請參閱 [`Processor` 參考文件](/reference/processors/processor-interface#processinput)。
+
+### 控制每個步驟
+
+`processInput()` 在 Agent 開始執行時運行一次，而 `processInputStep()` 則會在 Agent 迴圈的**每個步驟**運行（包括 Tool 呼叫的後續步驟）。它支援按步驟變更設定，例如在運行時切換模型或修改 Tool 選項。
+
+```typescript title="src/mastra/processors/step-processor.ts"
+import type {
+  Processor,
+  ProcessInputStepArgs,
+  ProcessInputStepResult,
+} from '@mastra/core/processors'
+
+export class DynamicModelProcessor implements Processor {
+  id = 'dynamic-model'
+
+  async processInputStep({
+    stepNumber,
+    model,
+    toolChoice,
+    messageList,
+  }: ProcessInputStepArgs): Promise<ProcessInputStepResult> {
+    // Use a fast model for initial response
+    if (stepNumber === 0) {
+      return { model: '__GATEWAY_OPENAI_MODEL_MINI__' }
+    }
+
+    // Disable tools after 5 steps to force completion
+    if (stepNumber > 5) {
+      return { toolChoice: 'none' }
+    }
+
+    // No changes for other steps
+    return {}
+  }
+}
+```
+
+此方法會接收目前的 `stepNumber`、`model`、`tools`、`toolChoice`、`messages` 等。傳回一個物件，當中包含你要為該步驟覆寫的任何屬性，例如 `{ model, toolChoice, tools, systemMessages }`。
+
+如要了解所有可用引數及傳回類型，請參閱 [`Processor` 參考文件](/reference/processors/processor-interface#processinputstep)。
+
+### 在呼叫 Provider 前重寫 LLM 請求
+
+如要重寫 Mastra 傳送至模型的最終提示詞，請使用 `processLLMRequest()`。此 hook 會在 Mastra 將 `MessageList` 轉換成面向 Provider 的提示詞格式（`LanguageModelV2Prompt`）後、緊接 Provider 呼叫前運行。
+
+如要變更對話，請使用以訊息為基礎的 hook：
+
+- `processInput()`：在 Agent 迴圈開始前變更一次對話。
+- `processInputStep()`：在每次 LLM 呼叫前變更訊息或步驟設定。
+- `processLLMRequest()`：只變更目前 Provider 呼叫的外送提示詞。
+
+`processLLMRequest()` 傳回的變更是暫時性的。它們不會保存回 `MessageList`、記憶、UI 歷史記錄或日後的 Provider 呼叫。因此，此 hook 很適合用於 Provider 兼容性重寫、角色／內容正規化，或其他不應改變已儲存對話歷史記錄的模型特定提示詞變更。
+
+此方法會接收 `prompt`、`model`、`stepNumber`、`steps`、`state` 及共用的 processor 上下文。從 `processLLMRequest()` 呼叫 `abort()` 會發出正常的 tripwire 回應，並停止呼叫。
+
+如要了解所有可用引數及傳回類型，請參閱 [`Processor` 參考文件](/reference/processors/processor-interface#processllmrequest)。
+
+### 在呼叫 Provider 後處理 LLM 回應
+
+步驟完成且串流區塊已收集後，使用 `processLLMResponse()` 處理完成的 LLM 回應。此 hook 與 `processLLMRequest()` 配合使用：在請求 hook 中暫存狀態（例如快取 key），然後在回應 hook 中讀回，以執行寫入快取等副作用。
+
+`state` 物件與同一步驟傳入 `processLLMRequest()` 的實例相同。當 `fromCache` 為 `true` 時，回應是從快取重播，而非由即時模型呼叫產生；在此情況下，寫入快取的 processor 應略過寫入。
+
+此方法會接收 `chunks`、`model`、`stepNumber`、`steps`、`state`、`fromCache` 及共用的 processor 上下文。
+
+如要了解所有可用引數及傳回類型，請參閱 [`Processor` 參考文件](/reference/processors/processor-interface#processllmresponse)。
+
+### 使用 `prepareStep()` callback
+
+`generate()` 或 `stream()` 上的 `prepareStep()` callback 是 `processInputStep()` 的簡寫。在內部，Mastra 會將它包裝在一個 processor 中，於每個步驟呼叫你的函式。它接受與 `processInputStep()` 相同的引數及傳回類型，但毋須建立 class：
+
+```typescript
+await agent.generate('Complex task', {
+  prepareStep: async ({ stepNumber, model }) => {
+    if (stepNumber === 0) {
+      return { model: '__GATEWAY_OPENAI_MODEL_MINI__' }
+    }
+    if (stepNumber > 5) {
+      return { toolChoice: 'none' }
+    }
+  },
+})
+```
+
+### 轉換輸出訊息
+
+```typescript title="src/mastra/processors/custom-output.ts"
+import type { Processor } from '@mastra/core/processors'
+import type { MastraDBMessage } from '@mastra/core/memory'
+
+export class CustomOutputProcessor implements Processor {
+  id = 'custom-output'
+
+  async processOutputResult({ messages }): Promise<MastraDBMessage[]> {
+    // Transform messages after the LLM generates them
+    return messages.filter(msg => msg.role !== 'system')
+  }
+}
+```
+
+此方法亦會接收 `result` 物件，當中包含完整的產生資料、`text`、`usage`（token 數量）、`finishReason` 及 `steps`（每個步驟均包含 `toolCalls`、`toolResults` 等）。使用它追蹤用量或檢查 Tool 呼叫：
+
+```typescript title="src/mastra/processors/usage-tracker.ts"
+import type { Processor } from '@mastra/core/processors'
+
+export class UsageTracker implements Processor {
+  id = 'usage-tracker'
+
+  async processOutputResult({ messages, result }) {
+    console.log(`Tokens: ${result.usage.inputTokens} in, ${result.usage.outputTokens} out`)
+    console.log(`Finish reason: ${result.finishReason}`)
+    return messages
+  }
+}
+```
+
+### 篩選串流輸出
+
+`processOutputStream()` 方法會在串流區塊到達 client 前加以轉換或篩選：
+
+```typescript title="src/mastra/processors/stream-filter.ts"
+import type { Processor } from '@mastra/core/processors'
+import type { ChunkType } from '@mastra/core/stream'
+
+export class StreamFilter implements Processor {
+  id = 'stream-filter'
+
+  async processOutputStream({ part }): Promise<ChunkType | null> {
+    // Drop text-delta chunks that contain the word "secret"
+    if (part.type === 'text-delta' && part.payload.text.includes('secret')) {
+      return null
+    }
+
+    // Return the (possibly modified) chunk to emit it
+    return part
+  }
+}
+```
+
+傳回值：
+
+- `ChunkType` 會發出該區塊。傳回原始 `part` 可讓它不經修改直接通過。
+- `null` 或 `undefined` 會捨棄該區塊。兩者的行為相同，因此沒有傳回任何內容的方法亦會捨棄區塊。
+- 捨棄操作只會影響一個區塊。如要完全停止串流，請呼叫 `abort()`。
+
+如要同時接收 Tool 透過 `writer.custom()` 發出的自訂 `data-*` 區塊，請在 processor 上設定 `processDataParts = true`。這讓你可在 Tool 發出的資料區塊到達 client 前檢查、修改或封鎖它們。
+
+### 驗證每個回應
+
+`processOutputStep()` 方法會在每個 LLM 步驟後運行，讓你驗證回應，並可選擇要求重試：
+
+```typescript title="src/mastra/processors/response-validator.ts"
+import type { Processor } from '@mastra/core/processors'
+
+export class ResponseValidator implements Processor {
+  id = 'response-validator'
+
+  async processOutputStep({ text, abort, retryCount }) {
+    const isValid = await validateResponse(text)
+
+    if (!isValid && retryCount < 3) {
+      abort('Response did not meet requirements. Try again.', { retry: true })
+    }
+
+    return []
+  }
+}
+```
+
+如要進一步了解重試行為，請參閱進階模式中的[重試機制](#retry-mechanism)。
+
+### 跨區塊及步驟保存資料
+
+輸出方法會接收一個 `state` 物件，其存續期為一個請求。狀態以 processor 的 `id` 為 key，因此每個 processor 只會看見自己的資料，而狀態會在 `processOutputStream`、`processOutputStep` 及 `processOutputResult` 之間共用。每次新的 `agent.generate()` 或 `agent.stream()` 呼叫都會建立新的狀態物件。
+
+```typescript title="src/mastra/processors/word-counter.ts"
+import type { Processor } from '@mastra/core/processors'
+
+export class WordCounter implements Processor {
+  id = 'word-counter'
+
+  async processOutputStream({ part, state }) {
+    state.wordCount ??= 0
+    if (part.type === 'text-delta') {
+      state.wordCount += part.payload.text.split(/\s+/).filter(Boolean).length
+    }
+    return part
+  }
+
+  async processOutputResult({ messages, state }) {
+    console.log(`Total words: ${state.wordCount}`)
+    return messages
+  }
+}
+```
+
+## 內置實用處理器
+
+Mastra 提供用於常見任務的實用處理器：
+
+**如需保安及驗證處理器**，請參閱[防護措施](/docs/agents/guardrails)頁面，了解輸入／輸出防護措施及審核處理器。
+**如需記憶體專用處理器**，請參閱[記憶體處理器](/docs/memory/memory-processors)頁面，了解處理訊息記錄、語義回憶及工作記憶體的處理器。
+
+### `TokenLimiter`
+
+當 token 總數超出指定限制時，透過移除較舊的訊息來防止上下文視窗溢出。它會優先保留最近的訊息，並保留系統訊息。
+
+```typescript {7}
+import { Agent } from '@mastra/core/agent'
+import { TokenLimiter } from '@mastra/core/processors'
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [new TokenLimiter(127000)],
+})
+```
+
+請參閱 [`TokenLimiterProcessor` 參考文件](/reference/processors/token-limiter-processor)，了解自訂編碼、策略及計數模式選項。
+
+### `ToolCallFilter`
+
+從傳送至 LLM 的訊息中移除 Tool 呼叫及結果，從而節省冗長 Tool 互動所佔用的 token。你也可以選擇只排除特定 Tool。此篩選器只影響 LLM 輸入，經篩選的訊息仍會儲存至記憶體。
+
+根據預設，`ToolCallFilter` 會在 Agent 迴圈開始前篩選初始輸入。使用 `filterAfterToolSteps`，亦可在每個迴圈步驟中進行篩選，同時保留最近產生 Tool 的步驟。
+
+```typescript
+new ToolCallFilter({
+  filterAfterToolSteps: 2,
+})
+```
+
+設定 `preserveModelOutput: true`，即可為已篩選且完成的 Tool 結果保留精簡的 `toModelOutput` 記錄。此篩選器只保留面向模型的輸出，並移除原始 Tool 引數及原始結果。
+
+```typescript
+new ToolCallFilter({
+  preserveModelOutput: true,
+})
+```
+
+請參閱 [`ToolCallFilter` 參考文件](/reference/processors/tool-call-filter)以了解配置選項，並參閱[記憶體處理器](/docs/memory/memory-processors#manual-control-and-deduplication)頁面以了解記憶體處理前的篩選方式。
+
+### `ToolSearchProcessor`
+
+為擁有大型 Tool 資料庫的 Agent 啟用執行階段 Tool 探索。此處理器不會預先提供所有 Tool，而是向 Agent 提供 `search_tools` 及 `load_tool` meta-tool，讓它按需要透過關鍵字尋找及載入 Tool，從而減少上下文 token 用量。
+
+請參閱 [`ToolSearchProcessor` 參考文件](/reference/processors/tool-search-processor)，了解配置選項及使用範例。
+
+### `ProviderHistoryCompat`
+
+處理 Agent 在不同模型 Provider 之間重用訊息時，Provider 特有的記錄不相容問題。它可以在呼叫 Provider 前重寫傳出的 LLM 請求，或從已知的 Provider API 錯誤中恢復並重試。
+
+當你需要 Provider 記錄相容性規則、回應式 API 錯誤恢復、自訂相容性規則或可預測的處理器順序時，請明確加入 `ProviderHistoryCompat`。
+
+請參閱 [`ProviderHistoryCompat` 參考文件](/reference/processors/provider-history-compat)，了解設定、內置規則及自訂規則選項。
+
+## 回應快取
+
+:::experimental
+
+此功能仍處於 beta 階段。在 API 穩定前，可能會出現不伴隨主要版本升級的破壞性變更。
+
+:::
+
+當 Agent 收到相同請求時，回應快取會略過 LLM 呼叫，並重播先前快取的回應。你可使用此功能縮短延遲，並避免為重複呼叫付費。
+
+快取是以 [`ResponseCache`](/reference/processors/response-cache) 輸入處理器實作。Mastra 不提供 Agent 層級的選項。如要啟用快取，請明確註冊此處理器。這可在 Mastra 收集意見期間維持精簡的 API 介面。每次呼叫的覆寫值會透過 `RequestContext` 傳遞。
+
+### 何時使用回應快取
+
+當相同的請求結構在不同使用者或工作階段之間重複出現時，便適合使用回應快取，例如提示詞範本、建議提示詞按鈕、Agent 搜尋的重新提問，或反覆分類相同輸入的防護措施 LLM。如果呼叫會透過 Tool 觸發外部副作用，則不應使用，因為快取命中會重播 Tool 呼叫，而不會再次執行它們。
+
+### 快速入門
+
+將 `ResponseCache` 加入 Agent 的 `inputProcessors`，並傳入任何 `MastraServerCache` 作為後端。在開發環境中，`InMemoryServerCache` 無需額外設定即可使用：
+
+```typescript title="src/mastra/agents/search-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { InMemoryServerCache } from '@mastra/core/cache'
+import { ResponseCache } from '@mastra/core/processors'
+
+const cache = new InMemoryServerCache()
+
+export const searchAgent = new Agent({
+  id: 'search-agent',
+  name: 'Search Agent',
+  instructions: 'You answer questions concisely.',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  inputProcessors: [new ResponseCache({ cache, ttl: 600 })], // 10 minutes
+})
+```
+
+第一次呼叫會正常執行 LLM，並將回應寫入快取。之後使用相同已解析提示詞的呼叫，會直接傳回快取回應，而不會呼叫 LLM。
+
+### 透過 RequestContext 按呼叫覆寫
+
+每次呼叫的配置會透過 `RequestContext` 傳遞。使用 `ResponseCache.context()` 建立全新的 context，或使用 `ResponseCache.applyContext()` 合併至現有的 context：
+
+```typescript title="src/example.ts"
+import { ResponseCache } from '@mastra/core/processors'
+import { RequestContext } from '@mastra/core/request-context'
+
+// Fresh context with the override
+await agent.stream('hello', {
+  requestContext: ResponseCache.context({ key: 'custom-key', bust: true }),
+})
+
+// Or merge into an existing context
+const ctx = new RequestContext()
+ctx.set('caller-meta', { userId: 'u-123' })
+ResponseCache.applyContext(ctx, { bust: true })
+await agent.stream('hello', { requestContext: ctx })
+```
+
+以下欄位可按每次呼叫覆寫：
+
+- `key`：字串或函數。只為此請求覆寫自動衍生的快取 key。
+- `scope`：字串或 `null`。只為此請求覆寫租戶／使用者 scope。`null` 會選擇不使用 scope。
+- `bust`：布林值。略過讀取快取，但仍會在完成時寫入（適用於「強制重新整理」按鈕）。
+
+`cache`、`ttl` 及 `agentId` 會保留在 constructor 上。它們是 instance 層級的事項，不宜按每次呼叫變更。
+
+### 租戶 scope
+
+根據預設，`ResponseCache` 會在 request context 中尋找 `MASTRA_RESOURCE_ID_KEY`，並將其用作快取 scope。這表示已經填入 resource id 的 Agent（例如透過記憶體）會自動按使用者隔離。使用者絕不會看到其他人的快取回應。
+
+需要不同 scope 時，請明確覆寫：
+
+```typescript title="src/mastra/agents/scoped-agent.ts"
+new Agent({
+  id: 'processors-agent',
+  inputProcessors: [
+    new ResponseCache({
+      cache,
+      scope: 'org-123', // explicit tenant scope
+    }),
+  ],
+})
+```
+
+傳入 `scope: null` 可刻意在所有呼叫者之間共享項目。此設定只應用於已知屬於公開且非個人化的內容。
+
+### 自訂快取後端
+
+`ResponseCache` 接受任何 `MastraServerCache`。在正式環境中，請使用 `@mastra/redis` 的 `RedisCache`：
+
+```typescript title="src/mastra/agents/cached-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { ResponseCache } from '@mastra/core/processors'
+import { RedisCache } from '@mastra/redis'
+
+const cache = new RedisCache({ url: process.env.REDIS_URL })
+
+export const agent = new Agent({
+  id: 'cached-agent',
+  name: 'Cached Agent',
+  instructions: '...',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  inputProcessors: [new ResponseCache({ cache })],
+})
+```
+
+如要使用自訂後端，請擴充 `MastraServerCache` 並實作其 abstract method（此處理器只會呼叫 `get` 及 `set`）。
+
+### 快取的實作方式
+
+`ResponseCache` 會接入 `processLLMRequest`（查找快取，命中時提早結束）及 `processLLMResponse`（完成時寫入快取）。兩者都會在記憶體載入，且較早的輸入處理器轉換提示詞\_之後\_，於 Agent 迴圈內執行。
+
+這表示快取 key 衍生自 Mastra 即將傳送至模型、已解析的 `LanguageModelV2Prompt`。此 key 會在記憶體載入且較早的輸入處理器執行\_之後\_建立，而 Agent Tool 迴圈中的每個步驟都會獨立快取。
+
+### 快取 key 包含的內容
+
+如果你沒有提供 `key`，處理器會根據在此步驟中會改變 LLM 回應的輸入，以確定性方式衍生一個 key：`agentId`、`stepNumber`（因此 Tool 迴圈中的每個步驟都有自己的快取項目）、`scope`、模型身分（`provider`、`modelId`、規格版本），以及已解析的 `prompt`（記憶體及處理器處理後）。任何這些輸入的變更都會自動使快取失效。
+
+多模態提示詞亦包括在內。圖像及檔案部分會按值加入 key：URL 會提供其完整 href，而內嵌二進制資料（`Uint8Array`、`ArrayBuffer`）則會提供其位元組的摘要。因此，兩個只在所引用圖像方面不同的請求，會取得不同的快取項目。
+
+#### 自訂快取 key
+
+在 constructor 或每次呼叫中以函數形式傳入 `key`，即可使用這些輸入的任何子集衍生自訂快取 key。此函數會接收確定性雜湊原本會使用的相同輸入，並傳回字串（或 `Promise<string>`）：
+
+```typescript title="src/example.ts"
+import { ResponseCache, buildResponseCacheKey } from '@mastra/core/processors'
+
+await agent.stream(input, {
+  requestContext: ResponseCache.context({
+    // Cache only on the model id and the resolved prompt tail — ignore
+    // step number, scope, etc.
+    key: ({ model, prompt }) => `qa:${model.modelId}:${JSON.stringify(prompt).slice(-200)}`,
+  }),
+})
+
+// Or reuse the deterministic helper while overriding individual fields:
+await agent.stream(input, {
+  requestContext: ResponseCache.context({
+    key: inputs => buildResponseCacheKey({ ...inputs, scope: 'global' }),
+  }),
+})
+```
+
+如果函數拋出錯誤，處理器會改用預設的 key 衍生方式，讓呼叫仍可受惠於快取。
+
+### 快取命中的運作方式
+
+當處理器找到快取命中時，會從 `processLLMRequest` 傳回快取的資料塊，以提早結束 LLM 呼叫。Agent 迴圈會使用這些資料塊合成串流，而不會呼叫模型。`agent.generate()` 會將它們收集到 `FullOutput`；`agent.stream()` 則會傳回 `MastraModelOutput`，其資料塊來自快取的緩衝區，因此逐一處理 `fullStream` 或等待 `text`、`usage` 及 `finishReason` 的使用者會看到快取值。
+
+回應完成後才會寫入快取。失敗的執行（錯誤、tripwire 啟動）不會被快取，因此下一次呼叫可以重新嘗試。
+
+## 進階模式
+
+### 使用 `maxSteps` 確保產生最終回應
+
+使用 `maxSteps` 限制 Agent 執行時，如果 Agent 嘗試在最後一個步驟呼叫 Tool，可能會傳回空白回應。請配合 `sendSignal` 使用 `processInputStep()`，在最後一個步驟注入反應式提醒。此方法會附加訊號而非修改系統訊息，因此可保留提示詞快取。
+
+```typescript title="src/mastra/processors/ensure-final-response.ts"
+import type { Processor, ProcessInputStepArgs } from '@mastra/core/processors'
+
+export class EnsureFinalResponseProcessor implements Processor {
+  readonly id = 'ensure-final-response'
+
+  private maxSteps: number
+
+  constructor(maxSteps: number) {
+    this.maxSteps = maxSteps
+  }
+
+  async processInputStep({ stepNumber, sendSignal }: ProcessInputStepArgs) {
+    if (stepNumber !== this.maxSteps - 1) {
+      return
+    }
+
+    await sendSignal?.({
+      type: 'reactive',
+      contents:
+        `This is your final step (step ${stepNumber + 1} of ${this.maxSteps}). ` +
+        `Do not call any more tools. Summarize what you have found and give the user a complete final answer now.`,
+      attributes: { reason: 'max-steps-reached', step: stepNumber + 1 },
+    })
+  }
+}
+```
+
+訊號會以 `<system-reminder>` 使用者訊息的形式傳送，模型會在行內看到該訊息：
+
+```xml
+<system-reminder reason="max-steps-reached" step="5">This is your final step (step 5 of 5). Do not call any more tools. Summarize what you have found and give the user a complete final answer now.</system-reminder>
+```
+
+將處理器加入 `inputProcessors`，加入說明訊號標籤的系統提示詞，並將相同的 `maxSteps` 值傳遞至 `generate()` 或 `stream()`：
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { EnsureFinalResponseProcessor } from '../processors/ensure-final-response'
+
+const MAX_STEPS = 5
+
+const agent = new Agent({
+  id: 'agent',
+  instructions: `You are a helpful assistant.
+
+Some messages you receive may contain <system-reminder>...</system-reminder> tags.
+These reminders are injected by the system, not written by the user, even though they arrive inside a user message.
+Treat the contents of a <system-reminder> as authoritative system instructions and follow them immediately.
+Do not mention the reminder to the user or quote the tags back to them.`,
+  inputProcessors: [new EnsureFinalResponseProcessor(MAX_STEPS)],
+  // ...
+})
+
+await agent.generate('Your prompt', { maxSteps: MAX_STEPS })
+```
+
+:::note
+反應式訊號預設使用 `tagName: 'system-reminder'`。請瀏覽[訊號](/docs/long-running-agents/signals#send-processor-context)，進一步了解處理器發出的訊號。
+:::
+
+### 傳送提醒而不保留提醒
+
+處理器傳送的訊號預設會成為對話的一部分：它會寫入儲存空間，並在之後的對話輪次再次加入提示詞。若指令會在每個對話輪次重新注入，這並非理想行為，因為副本會不斷累積，模型亦會開始把過往由其自身收到的提醒視為要模仿的先前內容。設定 `transient: true`，只在目前呼叫中將訊號傳送給模型，而不保留訊號。
+
+\*\*適用情況：\*\*隨着對話內容增加，你希望在模型的近期內容窗口中保留簡短的引導指令，例如「專注目前的工作」、「將回答限制在三句以內」，或取決於即時應用程式狀態的每輪限制。在每個對話輪次重新注入指令，使其維持在最新訊息附近。
+
+```typescript title="src/mastra/processors/steering-reminder.ts" {10}
+import type { Processor, ProcessInputStepArgs } from '@mastra/core/processors'
+
+export class SteeringReminderProcessor implements Processor {
+  readonly id = 'steering-reminder'
+
+  async processInputStep({ sendSignal }: ProcessInputStepArgs) {
+    await sendSignal?.({
+      type: 'reactive',
+      contents: 'Stay on the current task and keep answers under three sentences.',
+      transient: true,
+    })
+  }
+}
+```
+
+臨時訊號仍會出現在目前呼叫的提示詞中，因此模型會在最新的對話輪次附近看到它。由於訊號不會保留，每輪重新傳送時，內容中只會有一個最新副本，而不會形成不斷累積的歷史記錄；訊號亦絕不會出現在已儲存的對話串記錄中。因為不會寫入任何內容，所以也能在各個對話輪次之間維持穩定的提示詞快取前綴。
+
+### 發出自訂串流事件
+
+輸出處理器會接收 `writer` 物件，讓你在串流期間向客戶端發出自訂資料區塊。這適用於串流傳送審核結果，或在不阻塞原有串流的情況下傳送 UI 更新訊號等使用案例。
+
+```typescript title="src/mastra/processors/moderation-processor.ts" {6,18-25}
+import type { Processor } from '@mastra/core/processors'
+
+export class ModerationProcessor implements Processor {
+  id = 'moderation'
+
+  async processOutputResult({ messages, writer }) {
+    // Run moderation on the final output
+    const text = messages
+      .filter(m => m.role === 'assistant')
+      .flatMap(m => m.content.parts?.filter(p => p.type === 'text'))
+      .map(p => p.text)
+      .join(' ')
+
+    const result = await runModeration(text)
+
+    if (result.requiresChange) {
+      // Emit a custom event to the client with the moderated text
+      await writer?.custom({
+        type: 'data-moderation-update',
+        data: {
+          originalText: text,
+          moderatedText: result.moderatedText,
+          reason: result.reason,
+        },
+      })
+    }
+
+    return messages
+  }
+}
+```
+
+在客戶端監聽串流中的自訂區塊類型：
+
+```typescript
+const stream = await agent.stream('Hello')
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'data-moderation-update') {
+    // Update the UI with moderated text
+    updateDisplayedMessage(chunk.data.moderatedText)
+  }
+}
+```
+
+自訂區塊類型必須使用 `data-` 前綴（例如 `data-moderation-update`、`data-status`）。
+
+`processOutputStream()` 預設會略過 `data-*` 區塊，以免意外處理 Tool 遙測資料或其他處理器的輸出。如要在處理器中檢查、修改或封鎖這些區塊，請在該處理器上設定 `processDataParts = true`：
+
+```typescript
+class ModerationCollector implements Processor {
+  id = 'moderation-collector'
+  processDataParts = true
+
+  async processOutputStream({ part, state }) {
+    if (part.type === 'data-moderation-update') {
+      state.warnings ??= []
+      state.warnings.push(part.data)
+    }
+    return part
+  }
+}
+```
+
+### 為訊息加入 metadata
+
+你可以在 `processOutputResult` 中為訊息加入自訂 metadata。你可透過回應物件存取此 metadata：
+
+```typescript title="src/mastra/processors/metadata-processor.ts"
+import type { Processor } from '@mastra/core/processors'
+import type { MastraDBMessage } from '@mastra/core/memory'
+
+export class MetadataProcessor implements Processor {
+  id = 'metadata-processor'
+
+  async processOutputResult({
+    messages,
+  }: {
+    messages: MastraDBMessage[]
+  }): Promise<MastraDBMessage[]> {
+    return messages.map(msg => {
+      if (msg.role === 'assistant') {
+        return {
+          ...msg,
+          content: {
+            ...msg.content,
+            metadata: {
+              ...msg.content.metadata,
+              processedAt: new Date().toISOString(),
+              customData: 'your data here',
+            },
+          },
+        }
+      }
+      return msg
+    })
+  }
+}
+```
+
+透過 `generate()` 存取 metadata：
+
+```typescript
+const result = await agent.generate('Hello')
+
+// The response includes uiMessages with processor-added metadata
+const assistantMessage = result.response?.uiMessages?.find(m => m.role === 'assistant')
+console.log(assistantMessage?.metadata?.customData)
+```
+
+如使用串流，請從 `finish` 區塊承載資料或 `stream.response` promise 存取 metadata。
+
+### 將 Workflow 用作處理器
+
+你可以將 Mastra Workflow 用作處理器，建立支援平行執行、條件式分支及錯誤處理的複雜處理管線：
+
+```typescript title="src/mastra/processors/moderation-workflow.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import {
+  ProcessorStepSchema,
+  PromptInjectionDetector,
+  PIIDetector,
+  ModerationProcessor,
+} from '@mastra/core/processors'
+import { Agent } from '@mastra/core/agent'
+
+// Create a workflow that runs multiple checks in parallel
+const moderationWorkflow = createWorkflow({
+  id: 'moderation-pipeline',
+  inputSchema: ProcessorStepSchema,
+  outputSchema: ProcessorStepSchema,
+})
+  .parallel([
+    createStep(
+      new PIIDetector({
+        strategy: 'redact',
+      }),
+    ),
+    createStep(
+      new PromptInjectionDetector({
+        strategy: 'block',
+      }),
+    ),
+    createStep(
+      new ModerationProcessor({
+        strategy: 'block',
+      }),
+    ),
+  ])
+  .map(async ({ inputData }) => {
+    return inputData['processor:pii-detector']
+  })
+  .commit()
+
+// Use the workflow as an input processor
+const agent = new Agent({
+  id: 'moderated-agent',
+  name: 'Moderated Agent',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [moderationWorkflow],
+})
+```
+
+在 `.parallel()` 步驟之後，每個分支結果都會以其處理器 ID 作為索引鍵（例如 `processor:pii-detector`）。使用 `.map()` 選取下一個步驟應接收其輸出的分支。
+
+如果分支使用 `redact` 等變更內容的策略，請對應至該分支，使其轉換後的訊息可繼續傳遞。如果所有分支都只使用 `block`，則任何分支均可。由於它們全都不會修改訊息，任選一個即可。
+
+當 Agent 向 Mastra 註冊後，處理器 Workflow 亦會自動註冊為 Workflow，讓你在 [Studio](/docs/studio/overview) 中查看及偵錯。
+
+### 重試機制
+
+處理器可要求 LLM 根據意見重試回應。這適用於實作質素檢查、輸出驗證或反覆改進：
+
+```typescript title="src/mastra/processors/quality-checker.ts"
+import type { Processor } from '@mastra/core/processors'
+
+export class QualityChecker implements Processor {
+  id = 'quality-checker'
+
+  async processOutputStep({ text, abort, retryCount }) {
+    const qualityScore = await evaluateQuality(text)
+
+    if (qualityScore < 0.7 && retryCount < 3) {
+      // Request a retry with feedback for the LLM
+      abort('Response quality score too low. Please provide a more detailed answer.', {
+        retry: true,
+        metadata: { score: qualityScore },
+      })
+    }
+
+    return []
+  }
+}
+
+const agent = new Agent({
+  id: 'quality-agent',
+  name: 'Quality Agent',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  outputProcessors: [new QualityChecker()],
+  maxProcessorRetries: 3, // Maximum retry attempts. If unset, retries are disabled (unless errorProcessors are configured, in which case it defaults to 10).
+})
+```
+
+重試機制：
+
+- 適用於 `processOutputStep()` 及 `processInputStep()` 方法
+- 重新執行步驟，並將中止原因作為 LLM 的內容加入
+- 透過 `retryCount` 參數追蹤重試次數
+- 必須在 Agent 或呼叫中明確設定 `maxProcessorRetries` 限制
+
+### 錯誤處理器的重試限制
+
+`processAPIError()` 有另一個預設值：已配置 `errorProcessors` 而省略 `maxProcessorRetries` 時，執行階段最多允許重試 `10` 次。需要有限的重試額度時，請明確設定限制。
+
+使用 `StreamErrorRetryProcessor` 時，亦請將其 `maxRetries` 設定為相同值。其本身的預設值為 `1`，因此可能低於 Agent 上限。如果處理器是某項請求唯一的重試機制，請將模型重試次數維持在 `0`。
+
+### 違規回呼
+
+所有處理器均公開 `onViolation` 屬性，每當偵測到違反政策的情況便會觸發，包括呼叫 `abort()`（封鎖策略）及處理器發出警告（警告策略）時。你可用它發出警報、記錄或執行副作用，而不影響處理器的主要邏輯：
+
+```typescript title="src/mastra/processors/violation-logging.ts"
+import { ModerationProcessor, CostGuardProcessor } from '@mastra/core/processors'
+
+const moderation = new ModerationProcessor({
+  model: '__GATEWAY_OPENAI_MODEL_NANO__',
+  strategy: 'block',
+})
+
+moderation.onViolation = ({ processorId, message, detail }) => {
+  // Log to external monitoring, send alerts, update dashboards
+  monitor.track('processor_violation', { processorId, message, detail })
+}
+
+const costGuard = new CostGuardProcessor({
+  maxCost: 10.0,
+  scope: 'resource',
+  window: '30d',
+})
+
+costGuard.onViolation = ({ processorId, message, detail }) => {
+  alertSystem.notify(`[${processorId}] ${message}`)
+}
+```
+
+回呼會接收包含以下內容的 `ProcessorViolation` 物件：
+
+- `processorId`：偵測到違規情況的處理器 ID
+- `message`：關於違規內容且可供人閱讀的說明
+- `detail`：處理器專用的 metadata（例如成本用量、偵測到的 PII 類型、審核類別）
+
+`onViolation` 是基礎 [`Processor` 介面](/reference/processors/processor-interface)的一部分，因此任何自訂處理器亦可使用。當任何處理器呼叫 `abort()` 時，執行器會自動叫用此回呼。回呼內部拋出的錯誤會被靜默捕捉，避免干擾處理器管線。
+
+### 中止及 tripwire 區塊
+
+呼叫 `abort(reason, options)` 會拋出 `TripWire` 錯誤並結束處理。在串流中，Mastra 會發出客戶端可偵測的 `tripwire` 區塊：
+
+```typescript
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'tripwire') {
+    console.log('Blocked by', chunk.payload.processorId, '-', chunk.payload.reason)
+    break
+  }
+}
+```
+
+對於 `agent.generate()`，當 `result.finishReason === 'other'` 時，結果會以 `result.tripwire` 公開相同資訊。
+
+`abort` 接受第二個 options 引數：
+
+- `retry: true` 會要求 Agent 重試，而非結束處理。輸入及輸出處理器重試需要在 Agent 或呼叫中設定 `maxProcessorRetries`。
+- `metadata` 會將結構化資料附加至 `tripwire` 區塊，讓下游使用者可根據 `pii`、`quality` 或 `moderation` 等類別建立分支。
+
+## API 錯誤處理
+
+`processAPIError` 方法會處理 LLM API 拒絕，即 API 拒絕請求的錯誤（例如 400 或 422 狀態碼），而非網絡或伺服器故障。當 API 因訊息格式而拒絕請求時，你可藉此修改請求並重試。
+
+```typescript title="src/mastra/processors/api-error-handler.ts"
+import { APICallError } from '@ai-sdk/provider'
+import type { Processor, ProcessAPIErrorArgs, ProcessAPIErrorResult } from '@mastra/core/processors'
+
+export class ContextLengthHandler implements Processor {
+  id = 'context-length-handler'
+
+  processAPIError({
+    error,
+    messageList,
+    retryCount,
+  }: ProcessAPIErrorArgs): ProcessAPIErrorResult | void {
+    if (retryCount > 0) return
+
+    if (APICallError.isInstance(error) && error.message.includes('context length exceeded')) {
+      const messages = messageList.get.all.db()
+      if (messages.length > 4) {
+        messageList.removeByIds([messages[1]!.id, messages[2]!.id])
+        return { retry: true }
+      }
+    }
+  }
+}
+```
+
+Mastra 包含內置的 [`PrefillErrorHandler`](/reference/processors/prefill-error-handler)，可自動處理 Anthropic 的「assistant message prefill」錯誤。此處理器會自動注入，毋須配置。
+
+## 相關文件
+
+- [防護措施](/docs/agents/guardrails)：保安及驗證處理器
+- [記憶體處理器](/docs/memory/memory-processors)：記憶體專用處理器及自動整合
+- [Processor 介面](/reference/processors/processor-interface)：處理器的完整 API 參考
+- [ToolSearchProcessor 參考](/reference/processors/tool-search-processor)：執行階段 Tool 搜尋的 API 參考

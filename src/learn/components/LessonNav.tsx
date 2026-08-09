@@ -10,7 +10,7 @@ type LessonNavProps = {
 }
 
 export function LessonNav({ prev, next, className }: LessonNavProps) {
-  const { isSimplifiedChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
+  const { isSimplifiedChinese, isTaiwanChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
   const prevPublished = prev && prev.status === 'published'
   const nextPublished = next && next.status === 'published'
 
@@ -33,7 +33,7 @@ export function LessonNav({ prev, next, className }: LessonNavProps) {
               <span className="ml-1 text-xs">
                 {isSimplifiedChinese
                   ? '（预计于 2026 年 3 月上旬推出）'
-                  : isHongKongChinese
+                  : isTaiwanChinese || isHongKongChinese
                     ? '（預計於 2026 年 3 月上旬推出）'
                     : isJapanese
                       ? '（2026 年 3 月上旬公開予定）'
@@ -62,7 +62,7 @@ export function LessonNav({ prev, next, className }: LessonNavProps) {
               <span className="ml-1 text-xs">
                 {isSimplifiedChinese
                   ? '（预计于 2026 年 3 月上旬推出）'
-                  : isHongKongChinese
+                  : isTaiwanChinese || isHongKongChinese
                     ? '（預計於 2026 年 3 月上旬推出）'
                     : isJapanese
                       ? '（2026 年 3 月上旬公開予定）'

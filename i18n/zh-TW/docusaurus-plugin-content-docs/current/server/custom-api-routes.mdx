@@ -1,0 +1,348 @@
+---
+title: "自訂 API 路由 | Server"
+description: "從 Mastra Server 公開額外的 HTTP 端點。"
+packages:
+  - "@mastra/core"
+  - "@mastra/ai-sdk"
+---
+
+# 自訂 API 路由
+
+根據預設，Mastra 會透過其 Server 自動公開已註冊的 Agent 與 Workflow。若需要額外行為，你可以定義自己的 HTTP 路由。
+
+路由可透過 `@mastra/core/server` 提供的輔助函式 `registerApiRoute()` 建立。路由可以與 `Mastra` 執行個體放在同一個檔案中，但將兩者分開有助於保持設定簡潔。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/my-custom-route', {
+        method: 'GET',
+        handler: async c => {
+          const mastra = c.get('mastra')
+          const agent = await mastra.getAgent('my-agent')
+
+          return c.json({ message: 'Custom route' })
+        },
+      }),
+    ],
+  },
+})
+```
+
+註冊後，即可從 Server 根路徑存取自訂路由。例如：
+
+```bash
+curl http://localhost:4111/my-custom-route
+```
+
+每個路由的處理常式都會接收 Hono `Context`。在處理常式中，你可以存取 `Mastra` 執行個體，以取得或呼叫 Agent 與 Workflow。
+
+## Middleware
+
+若要加入路由專用的 Middleware，請在呼叫 `registerApiRoute()` 時傳入 `middleware` 陣列。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/my-custom-route', {
+        method: 'GET',
+        middleware: [
+          async (c, next) => {
+            console.log(`${c.req.method} ${c.req.url}`)
+            await next()
+          },
+        ],
+        handler: async c => {
+          return c.json({ message: 'Custom route with middleware' })
+        },
+      }),
+    ],
+  },
+})
+```
+
+## OpenAPI 文件
+
+自訂路由可以包含 OpenAPI 中繼資料，使其與 Mastra Server 路由一同顯示在 Swagger UI 中。你可以在 `/api/openapi.json` 存取 OpenAPI 規格，其中會列出自訂路由與內建路由。請傳入包含標準 OpenAPI 操作欄位的 `openapi` 選項。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+import { z } from 'zod'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/items/:itemId', {
+        method: 'GET',
+        openapi: {
+          summary: 'Get item by ID',
+          description: 'Retrieves a single item by its unique identifier',
+          tags: ['Items'],
+          parameters: [
+            {
+              name: 'itemId',
+              in: 'path',
+              required: true,
+              description: 'The item ID',
+              schema: { type: 'string' },
+            },
+          ],
+          responses: {
+            200: {
+              description: 'Item found',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      name: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+            404: {
+              description: 'Item not found',
+            },
+          },
+        },
+        handler: async c => {
+          const itemId = c.req.param('itemId')
+          return c.json({ id: itemId, name: 'Example Item' })
+        },
+      }),
+    ],
+  },
+})
+```
+
+### 使用 Zod Schema
+
+產生 OpenAPI 文件時，`openapi` 設定中的 Zod Schema 會轉換為 JSON Schema：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+import { z } from 'zod'
+
+const ItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  price: z.number(),
+})
+
+const CreateItemSchema = z.object({
+  name: z.string().min(1),
+  price: z.number().positive(),
+})
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/items', {
+        method: 'POST',
+        openapi: {
+          summary: 'Create a new item',
+          tags: ['Items'],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: CreateItemSchema,
+              },
+            },
+          },
+          responses: {
+            201: {
+              description: 'Item created',
+              content: {
+                'application/json': {
+                  schema: ItemSchema,
+                },
+              },
+            },
+          },
+        },
+        handler: async c => {
+          const body = await c.req.json()
+          return c.json({ id: 'new-id', ...body }, 201)
+        },
+      }),
+    ],
+  },
+})
+```
+
+### 在 Swagger UI 中檢視
+
+在開發模式（`mastra dev`）下執行，或在建置選項中設定 `swaggerUI: true` 時，自訂路由會顯示在 `/swagger-ui` 的 Swagger UI 中。
+
+```typescript
+export const mastra = new Mastra({
+  server: {
+    build: {
+      swaggerUI: true, // Enable in production builds
+    },
+    apiRoutes: [
+      // Your routes...
+    ],
+  },
+})
+```
+
+## 驗證
+
+在 Mastra Server 上設定驗證後，自訂 API 路由預設需要驗證。若要讓路由可公開存取，請設定 `requiresAuth: false`：
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+import { MastraJwtAuth } from '@mastra/auth'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraJwtAuth({
+      secret: process.env.MASTRA_JWT_SECRET,
+    }),
+    apiRoutes: [
+      // Protected route (default behavior)
+      registerApiRoute('/protected-data', {
+        method: 'GET',
+        handler: async c => {
+          // Access authenticated user from request context
+          const user = c.get('requestContext').get('user')
+          return c.json({ message: 'Authenticated user', user })
+        },
+      }),
+
+      // Public route (no authentication required)
+      registerApiRoute('/webhooks/github', {
+        method: 'POST',
+        requiresAuth: false, // Explicitly opt out of authentication
+        handler: async c => {
+          const payload = await c.req.json()
+          // Process webhook without authentication
+          return c.json({ received: true })
+        },
+      }),
+    ],
+  },
+})
+```
+
+### 驗證行為
+
+- **未設定驗證**：所有路由（內建與自訂）皆為公開
+- **已設定驗證**：
+  - Mastra 提供的路由（`/api/agents/*`、`/api/workflows/*` 等）需要驗證
+  - 自訂路由預設需要驗證
+  - 自訂路由可透過 `requiresAuth: false` 選擇停用驗證
+
+### 存取使用者資訊
+
+請求通過驗證後，即可在請求 context 中取得使用者物件：
+
+```typescript
+registerApiRoute('/user-profile', {
+  method: 'GET',
+  handler: async c => {
+    const requestContext = c.get('requestContext')
+    const user = requestContext.get('user')
+
+    return c.json({ user })
+  },
+})
+```
+
+如需驗證 Provider 的詳細資訊，請參閱 [Auth 文件](/docs/server/auth)。
+
+## 用戶端中斷連線後繼續產生內容
+
+內建的串流輔助函式（例如 [`chatRoute()`](/reference/ai-sdk/chat-route)）會將傳入請求的 `AbortSignal` 轉送至 `agent.stream()`。當瀏覽器中斷連線應取消模型呼叫時，這是合適的預設行為。
+
+對於應在用戶端中斷連線時停止的自訂串流路由，請將 `c.req.raw.signal` 傳給 `agent.stream()` 等長時間執行的工作。當用戶端連線關閉時，Mastra 的 Node 型 Adapter 也會停止讀取自訂路由所串流的 `Response` 內容。若串流回應內容的錯誤並非由用戶端中斷連線造成，仍會透過 Adapter 的一般錯誤處理機制傳遞。在 Hono 中，中斷連線的行為取決於主機 runtime 是否將連線關閉事件轉送至 `request.signal`。
+
+```typescript title="src/mastra/index.ts"
+registerApiRoute('/stream', {
+  method: 'GET',
+  handler: async c => {
+    const stream = await agent.stream(prompt, {
+      abortSignal: c.req.raw.signal,
+    })
+
+    return stream.toTextStreamResponse()
+  },
+})
+```
+
+如果希望 Server 即使用戶端中斷連線後仍繼續產生內容並保存最終回應，請以底層的 `MastraModelOutput` 建立自訂路由。啟動 Agent 串流時不要轉送 `c.req.raw.signal`，接著在背景呼叫 `consumeStream()`，讓內容產生作業在 Server 端繼續執行。
+
+```typescript title="src/mastra/index.ts"
+import {
+  createUIMessageStream,
+  createUIMessageStreamResponse,
+  InferUIMessageChunk,
+  UIMessage,
+} from 'ai'
+import { toAISdkStream } from '@mastra/ai-sdk'
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/chat/persist/:agentId', {
+        method: 'POST',
+        handler: async c => {
+          const { messages, memory } = await c.req.json()
+          const mastra = c.get('mastra')
+          const agent = mastra.getAgent(c.req.param('agentId'))
+
+          const stream = await agent.stream(messages, {
+            memory,
+            // Do not pass c.req.raw.signal if this route should keep running
+            // after the client disconnects.
+          })
+
+          void stream.consumeStream().catch(error => {
+            mastra.getLogger()?.error('Background stream consumption failed', { error })
+          })
+
+          const uiStream = createUIMessageStream({
+            originalMessages: messages,
+            execute: async ({ writer }) => {
+              for await (const part of toAISdkStream(stream, { from: 'agent' })) {
+                writer.write(part as InferUIMessageChunk<UIMessage>)
+              }
+            },
+          })
+
+          return createUIMessageStreamResponse({ stream: uiStream })
+        },
+      }),
+    ],
+  },
+})
+```
+
+:::note
+
+只有在確實希望 HTTP 用戶端離線後工作仍繼續執行時，才使用此模式。如果希望中斷連線時取消內容產生作業，請繼續使用 `chatRoute()`，或自行轉送請求的 `AbortSignal`。
+
+:::
+
+## 相關資源
+
+- [registerApiRoute() 參考文件](/reference/server/register-api-route)：完整 API 參考文件
+- [Server Middleware](/docs/server/middleware)：全域 Middleware 設定
+- [Mastra Server](/docs/server/mastra-server)：Server 設定選項

@@ -1,0 +1,238 @@
+---
+title: "Storage の概要"
+description: Agent、Workflow、Observability、Evals、スケジュール、Memory のランタイム状態を永続化するために、Mastra の Storage を設定します。
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+  - "@mastra/mongodb"
+  - "@mastra/oracledb"
+  - "@mastra/pg"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Storage の概要
+
+Storage は Mastra ランタイムの永続化レイヤーです。プロセスの再起動後も、Memory、Workflow の状態、Observability データ、Eval の結果、スケジュール、長時間実行される Agent の状態を利用できるようにします。
+
+Storage は次の機能を支えます。
+
+- [Memory](/docs/memory/overview)：メッセージ履歴、スレッド、リソース、working memory。
+- [Workflow](/docs/workflows/overview)：中断および再開された Workflow 実行の永続的なスナップショット。
+- [Observability](/docs/observability/overview)：Trace、Span、メトリクス、ログ、フィードバック。
+- [Evals](/docs/evals/overview)：スコア、データセット、実験、評価結果。
+- [長時間実行される Agent](/docs/long-running-agents/durable-agents)：バックグラウンドタスク、スケジュール、目標、スレッドの状態。
+
+## Storage を設定する場面
+
+再起動後も状態を保持する必要がある場合や、複数のプロセスで状態を共有する場合は、永続 Storage アダプターを設定します。永続 Storage を使用すると、セッションをまたいで Studio から状態を確認することもできます。デフォルトのインメモリストアはテストや短時間のローカル実験には便利ですが、プロセスが終了するとデータが失われます。
+
+アプリケーションに次の動作が必要な場合は、Storage を使用してください。
+
+- Agent が過去のメッセージやユーザー情報を記憶する。
+- Workflow が再起動後に中断した箇所から再開する。
+- Trace、メトリクス、ログ、スコア、フィードバックを分析用に保持する。
+- デプロイをまたいでスケジュールやバックグラウンドタスクを継続する。
+- 複数のランタイムプロセスが同じ状態を読み書きする。
+
+## Storage の仕組み
+
+Mastra の Storage は**ドメイン**単位で構成されます。各ドメインは1種類のランタイムデータを管理し、Storage アダプターは1つ以上のドメインを実装します。
+
+| ドメイン | 保存するデータ |
+| - | - |
+| `memory` | スレッド、メッセージ、リソース、working memory、その他の Agent Memory の状態。 |
+| `workflows` | 実行の中断と再開に使用する Workflow のスナップショット。 |
+| `observability` | Trace、Span、メトリクス、ログ、フィードバック。 |
+| `scores` | Eval のスコアレコード。 |
+| `datasets` | Eval と実験で使用するデータセットレコードおよびデータセット項目。 |
+| `experiments` | 実験の実行と項目ごとの実験結果。 |
+| `backgroundTasks` | バックグラウンドタスクのレコードと実行状態。 |
+| `schedules` | スケジュール定義とトリガー履歴。 |
+| `threadState` | 永続的なタスク、目標、スレッドの状態。 |
+
+アダプターが対応するドメインはそれぞれ異なります。ドメインの全一覧と組み込みスキーマについては、[Storage の概要リファレンス](/reference/storage/overview)を参照してください。
+
+## データ特性に応じてバックエンドを選ぶ
+
+ドメインごとに、書き込むデータやクエリ方法は異なります。ドメインのアクセスパターンに応じてバックエンドを選択してください。
+
+- `memory`：Memory を使用する Agent の呼び出しごとに行を読み書きします。libSQL、PostgreSQL、MongoDB などのトランザクションデータベースを使用してください。
+- `observability`：大量のテレメトリを書き込み、集計クエリを頻繁に実行します。専用の Observability ストアか、ClickHouse や DuckDB などのオンライン分析処理（OLAP）バックエンドを使用してください。
+- `workflows`：実行の再開時に利用できる必要がある永続的なスナップショットを保存します。信頼性の高い永続データベースを使用してください。
+- `scores`、`datasets`、`experiments`：比較的低頻度の評価データを保存します。このデータは後で分析するために読み取られることがよくあります。
+- `schedules`：スケジュール定義と実行履歴を保存します。schedules ドメインを実装するアダプターを使用してください。
+
+ドメインごとに運用上の要件が異なる場合は、[複合 Storage](#composite-storage) を使用して各ドメインを適切なバックエンドにルーティングします。
+
+## ローカルで始める
+
+ローカル開発では、ファイルベースのデータベースで libSQL を使用します。別途データベースサーバーを用意する必要がなく、再起動後も状態が保持されます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+})
+```
+
+:::tip[Studio とデータベースを共有する]
+
+アプリケーションと並行して `mastra dev` を実行する場合は、両方のプロセスが同じデータベースにアクセスできるよう、絶対パスを使用してください。
+
+```typescript
+url: 'file:/absolute/path/to/your/project/mastra.db'
+```
+
+`file:./mastra.db` のような相対パスは、プロセスごとの作業ディレクトリを基準に解決されます。作業ディレクトリは異なる場合があります。
+
+:::
+
+Mastra は初回使用時に必要な Storage 構造を初期化します。
+
+## 本番環境向けに設定する
+
+本番環境では、永続的なマネージドデータベースを使用します。PostgreSQL はトランザクションを伴うランタイム状態に適しており、マネージドサービスとして広く利用できるため、多くのチームに適したデフォルトです。
+
+本番環境での指針は次のとおりです。
+
+- バックアップ、監視、コネクションプーリングを備えたマネージドデータベースを使用する。
+- `file:./mastra.db` のようなローカルファイルデータベースは、複数プロセスで構成される本番デプロイでは使用しない。
+- 特に `observability` など、データ量の多いドメインは[複合 Storage](#composite-storage) で専用バックエンドにルーティングする。
+- Storage アダプターまたは複合ストアに[保持](/reference/storage/retention)ポリシーを設定し、スケジューラーまたはメンテナンスジョブから `storage.prune()` を呼び出す。
+- アプリケーションで使用するドメインに応じて Provider を選ぶ。たとえばスケジュールには、`schedules` ドメインを実装するアダプターが必要です。
+
+## 設定のスコープ
+
+Storage は Mastra インスタンス単位または Agent 単位で設定できます。
+
+### インスタンス単位の Storage
+
+インスタンス単位の Storage は、同じ Mastra インスタンスに登録された Agent、Workflow、Observability、Evals、スケジュール、その他のランタイム機能で共有されます。
+
+<Tabs>
+  <TabItem value="postgresql" label="PostgreSQL">
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core'
+    import { PostgresStore } from '@mastra/pg'
+
+    export const mastra = new Mastra({
+      storage: new PostgresStore({
+        id: 'mastra-storage',
+        connectionString: process.env.DATABASE_URL,
+      }),
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="mongodb" label="MongoDB">
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core'
+    import { MongoDBStore } from '@mastra/mongodb'
+
+    export const mastra = new Mastra({
+      storage: new MongoDBStore({
+        id: 'mastra-storage',
+        uri: process.env.MONGODB_URI,
+        dbName: process.env.MONGODB_DB_NAME,
+      }),
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+ランタイムドメインの大半で同じデータベースを共有できる場合は、インスタンス単位の Storage を使用します。
+
+### Agent 単位の Storage
+
+Agent 単位の Storage は `Memory` インスタンスに設定します。その Agent の Memory データに限り、インスタンス単位の Storage より優先されます。
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { PostgresStore } from '@mastra/pg'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support agent',
+  instructions: 'Answer customer support questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new PostgresStore({
+      id: 'support-agent-storage',
+      connectionString: process.env.SUPPORT_AGENT_DATABASE_URL,
+    }),
+  }),
+})
+```
+
+Agent の Memory を分離する必要がある場合や、別の Memory バックエンドが必要な場合は、Agent 単位の Storage を使用します。
+
+## 複合 Storage
+
+[`MastraCompositeStore`](/reference/storage/composite) は、ドメインを異なるバックエンドにルーティングします。すべてのドメインに1つのデータベースが適しているとは限らない場合に使用してください。
+
+次の例では、デフォルトストアに libSQL を使用し、Workflow の状態を PostgreSQL にルーティングします。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { LibSQLStore } from '@mastra/libsql'
+import { WorkflowsPG } from '@mastra/pg'
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite-storage',
+    default: new LibSQLStore({
+      id: 'default-storage',
+      url: 'file:./mastra.db',
+    }),
+    domains: {
+      workflows: new WorkflowsPG({
+        connectionString: process.env.DATABASE_URL,
+      }),
+    },
+  }),
+})
+```
+
+`observability` を専用の分析バックエンドにルーティングすることもできます。Observability 固有の例については、[Observability クイックスタート](/docs/observability/overview#quickstart)を参照してください。
+
+## 対応 Provider
+
+各 Provider のページには、インストール手順、設定パラメーター、使用例が掲載されています。
+
+- [libSQL](/reference/storage/libsql)
+- [PostgreSQL](/reference/storage/postgresql)
+- [MongoDB](/reference/storage/mongodb)
+- [OracleDB](/reference/storage/oracledb)
+- [Upstash](/reference/storage/upstash)
+- [Redis](/reference/storage/redis)
+- [Cloudflare D1](/reference/storage/cloudflare-d1)
+- [Cloudflare KV & Durable Objects](/reference/storage/cloudflare)
+- [Convex](/reference/storage/convex)
+- [DynamoDB](/reference/storage/dynamodb)
+- [LanceDB](/reference/storage/lance)
+- [Microsoft SQL Server](/reference/storage/mssql)
+- [Google Cloud Spanner](/reference/storage/spanner)
+
+:::tip
+
+libSQL は別のデータベースサーバーを起動する必要がないため、ローカル開発を最も手軽に始められます。
+
+:::
+
+## 次のステップ
+
+- [複合 Storage](/reference/storage/composite)
+- [Storage の保持](/reference/storage/retention)
+- [Storage スキーマ](/reference/storage/overview)
+- [Memory](/docs/memory/overview)
+- [Observability Storage](/docs/observability/overview#storage)

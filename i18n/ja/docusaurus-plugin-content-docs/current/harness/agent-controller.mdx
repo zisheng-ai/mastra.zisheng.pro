@@ -1,0 +1,385 @@
+---
+title: "AgentController | Harness"
+description: "分離された Session、永続的な Thread、モード、承認、Subagent、Channel を備えた対話型 Agent アプリケーションを構築します。"
+packages:
+  - "@mastra/core"
+---
+
+# AgentController
+
+:::experimental
+
+[`AgentController`](/reference/agent-controller/agent-controller-class) 機能はベータ段階です。ベータを終了するまでは、マイナーバージョンで破壊的変更が加わる可能性があります。
+
+:::
+
+`AgentController` は、対話型 Agent アプリケーション向けの共有ランタイムホストです。モード、モデル、ストレージ、Workspace、Tool の承認、Subagent、Channel を調整します。各ユーザーまたは進行中のタスクは、分離された [`Session`](/reference/agent-controller/session) を通じて作業します。
+
+[Mastra Code](https://code.mastra.ai) は AgentController の代表的な実装です。複数モデル、永続的な会話、計画してから実行する Workflow に対応した、ターミナルベースのコーディング Agent です。手順については、[コーディング Agent の構築](/guides/guide/coding-agent)を参照してください。
+
+## AgentController を使用する場合
+
+アプリケーションに次の機能が必要な場合は、AgentController を使用します。
+
+- 1 つの会話 Thread を共有する複数の Agent モード（例：計画 → 構築 → レビュー）
+- UI と Agent ループの間の制御レイヤー（モデルの切り替え、状態の永続化、Thread の管理）
+- Human-in-the-loop による制御のための Tool 承認フローと権限ポリシー
+- 制限された Tool で特定のサブタスクを委譲する Subagent のオーケストレーション
+- 再起動後も保持される Thread と選択済みの Thread 設定、および Session ごとに分離されたライブ状態
+
+これらはすべて、Agent ループ、Tool、Memory の全機能を公開する [Agent クラス](/docs/agents/overview)を基盤として独自に構築することもできます。AgentController は、Agent が 1 回限りのエンドポイントではなく共同作業者として動作する継続的な Session に、規約に基づくデフォルトを提供します。完全な制御やリクエスト・レスポンス形式の呼び出しが必要な場合は、Agent クラスを直接使用してください。周辺のランタイムを構築せずに共同作業型 Session のモデルを利用したい場合は、AgentController を使用してください。
+
+## クイックスタート
+
+基盤となる [`Agent`](/reference/agents/agent)、ストレージ、[`Workspace`](/reference/workspace/workspace-class) を作成します。[`controller.init()`](/reference/agent-controller/agent-controller-class#init) を一度呼び出してから、[`controller.createSession()`](/reference/agent-controller/agent-controller-class#createsessionoptions) で Session を作成します。[`session.subscribe()`](/reference/agent-controller/session#subscribelistener) で購読し、[`session.sendMessage()`](/reference/agent-controller/session#sendmessage-content-files-requestcontext-) で作業を送信します。
+
+```typescript title="src/mastra/agent-controller.ts"
+import { Agent } from '@mastra/core/agent'
+import { AgentController } from '@mastra/core/agent-controller'
+import { LocalFilesystem, Workspace } from '@mastra/core/workspace'
+import { LibSQLStore } from '@mastra/libsql'
+
+const agent = new Agent({
+  id: 'assistant',
+  name: 'Assistant',
+  instructions: 'Help the user plan and complete tasks.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const controller = new AgentController({
+  id: 'assistant-controller',
+  agent,
+  storage: new LibSQLStore({
+    id: 'agent-controller-storage',
+    url: 'file:./mastra.db',
+  }),
+  workspace: new Workspace({
+    id: 'assistant-workspace',
+    filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  }),
+  modes: [
+    {
+      id: 'plan',
+      name: 'Plan',
+      metadata: { default: true },
+      instructions: 'Reason about the task before making changes.',
+    },
+    {
+      id: 'build',
+      name: 'Build',
+      instructions: 'Implement the approved plan.',
+    },
+  ],
+})
+
+await controller.init()
+
+const session = await controller.createSession({
+  resourceId: 'user-123',
+})
+
+const unsubscribe = session.subscribe(event => {
+  if (event.type === 'message_update') {
+    console.log(event.message)
+  }
+})
+
+await session.sendMessage({ content: 'Plan a small TypeScript CLI.' })
+unsubscribe()
+```
+
+多数の Session で同じ Controller を使用します。現在の Session を Controller に保存したり、Controller レベルのメッセージメソッドを通じて作業をルーティングしたりしないでください。
+
+## ランタイムモデルを理解する
+
+Controller、Session、Thread のライフタイムは異なります。
+
+- **Controller**：設定とランタイムサービスの共有ホストです。一度初期化して再利用します。
+- **Session**：1 人のユーザー、1 つのタスク、または並行作業のスコープに対応する、分離されたライブランタイムです。アクティブなモード、モデル、状態、イベントバス、実行状態、許可、現在の Thread との関連付けを所有します。
+- **Thread**：メッセージと Thread 設定を含む、保存された会話です。ストレージを設定すると、Controller やプロセスが再作成されても Thread を保持できます。
+
+Session はライブ状態です。任意の [`session.state`](/reference/agent-controller/session#state)、権限の許可、保留中の承認、進行中の実行は、プロセスの再作成後に自動では保持されません。Thread のメッセージと、モードやモードごとのモデル選択など一部の Thread 設定は、ストレージを通じて永続化できます。
+
+## Session と Thread
+
+`createSession()` は、`resourceId` と任意の `scope` に基づいて取得または作成を行います。
+
+```typescript
+const webSession = await controller.createSession({
+  resourceId: 'user-123',
+  scope: 'web',
+})
+
+const sameWebSession = await controller.createSession({
+  resourceId: 'user-123',
+  scope: 'web',
+})
+
+const workerSession = await controller.createSession({
+  resourceId: 'user-123',
+  scope: 'background-worker',
+})
+
+console.log(webSession === sameWebSession) // true
+console.log(webSession === workerSession) // false
+```
+
+スコープが異なる Session は、それぞれ別のイベントバス、実行ループ、状態、モードとモデルの選択、現在の Thread との関連付けを持ちます。保存された Thread は引き続き共有の `resourceId` に属します。
+
+ホストが Session を特定の Thread に関連付ける必要がある場合は、`threadId` を渡します。Controller は既存の Thread に切り替え、存在しなければその ID で作成します。この動作は、`createSession()` がキャッシュ済みの Session を返す場合にも適用されます。
+
+```typescript
+const session = await controller.createSession({
+  resourceId: 'user-123',
+  scope: 'web',
+  threadId: 'support-ticket-42',
+})
+```
+
+1 つのライブ Session を会話間で移動するには、[`session.thread.create()`](/reference/agent-controller/session#sessionthreadcreate-title-id-) と [`session.thread.switch()`](/reference/agent-controller/session#sessionthreadswitch-threadid-emitevent-) を使用します。
+
+## モードとモデルを切り替える
+
+モードを変更すると、Session や Thread を置き換えずに、共有の基盤 Agent が使用する instructions と Tool が変わります。モード固有の Tool と可視性を Controller で設定します。
+
+```typescript
+const modes = [
+  {
+    id: 'plan',
+    name: 'Plan',
+    metadata: { default: true },
+    instructions: 'Investigate the task and propose a plan.',
+    additionalTools: { searchDocs },
+    availableTools: ['searchDocs', 'submit_plan'],
+    transitionsTo: 'build',
+  },
+  {
+    id: 'build',
+    name: 'Build',
+    instructions: 'Implement the approved plan.',
+  },
+]
+```
+
+`tools` と `additionalTools` は、モード固有の Tool を追加するための相互排他的な入力です。Controller に共有の基盤 Agent がある場合、どちらの入力でも、その Tool が Agent の Tool に重ねて追加されます。モードで最終的に公開する Tool 名を制限するには、`availableTools` を使用します。権限による拒否は、この許可リストよりも優先されます。
+
+ライブ Session を切り替えるには、[`session.mode.switch()`](/reference/agent-controller/session#sessionmodeswitch-modeid-) を使用します。アクティブなモードは、[`session.mode.get()`](/reference/agent-controller/session#sessionmodeget) または [`session.mode.resolve()`](/reference/agent-controller/session#sessionmoderesolve) で取得します。
+
+```typescript
+await session.mode.switch({ modeId: 'build' })
+
+console.log(session.mode.get()) // "build"
+console.log(session.mode.resolve().instructions)
+```
+
+モデルは [`session.model.switch()`](/reference/agent-controller/session#sessionmodelswitch-modelid-scope-modeid-) で個別に切り替え、アクティブな選択は [`session.model.get()`](/reference/agent-controller/session#sessionmodelget) で取得します。Thread スコープの選択はモードごとに保存され、Session がそのモードに戻ると復元されます。
+
+```typescript
+await session.model.switch({
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+  scope: 'thread',
+})
+
+console.log(session.model.get())
+```
+
+Thread 設定に書き込まないインメモリの選択には、`scope: 'global'` を使用します。
+
+## Thread と状態を管理する
+
+保存された会話を [`session.thread.list()`](/reference/agent-controller/session#sessionthreadlistoptions) で一覧表示します。
+
+```typescript
+const thread = await session.thread.create({ title: 'Release planning' })
+const threads = await session.thread.list()
+
+await session.thread.switch({ threadId: thread.id })
+console.log(threads.length)
+```
+
+Session に関連付けられた構造化ライブ状態には、`session.state` を使用します。[`session.state.get()`](/reference/agent-controller/session#sessionstateget) で読み取り、[`session.state.set()`](/reference/agent-controller/session#sessionstatesetupdates) で更新を書き込みます。検証とデフォルトが必要な場合は、Controller に `stateSchema` と `initialState` を定義します。
+
+```typescript
+console.log(session.state.get())
+
+await session.state.set({ activeProject: 'docs-site' })
+```
+
+`session.state.get()` はスナップショットを返します。`set()` は更新を検証し、Session の状態にマージします。ホストが明示的に永続化して復元しない限り、この状態はライブ Session データとして扱ってください。
+
+## Tool を承認し、中断を再開する
+
+権限ポリシーは、Tool を許可するか、拒否するか、承認のために UI へ送るかを決定します。カスタム Tool をカテゴリーに割り当てるには、Controller の `toolCategoryResolver` を使用します。
+
+```typescript
+const controller = new AgentController({
+  toolCategoryResolver: toolName => {
+    if (toolName === 'delete_project') return 'execute'
+    return null
+  },
+})
+```
+
+カテゴリーポリシーは [`session.permissions.setForCategory()`](/reference/agent-controller/session#sessionpermissionssetforcategory-category-policy-)、Tool ポリシーは [`session.permissions.setForTool()`](/reference/agent-controller/session#sessionpermissionssetfortool-toolname-policy-) で設定します。
+
+```typescript
+await session.permissions.setForCategory({
+  category: 'execute',
+  policy: 'ask',
+})
+
+await session.permissions.setForTool({
+  toolName: 'delete_project',
+  policy: 'deny',
+})
+```
+
+ポリシーが `ask` に解決された場合は、承認イベントを購読し、[`session.respondToToolApproval()`](/reference/agent-controller/session#respondtotoolapproval-decision-toolcallid-requestcontext-declinecontext-) でユーザーの決定を返します。
+
+```typescript
+session.subscribe(event => {
+  if (event.type === 'tool_approval_required') {
+    session.respondToToolApproval({
+      toolCallId: event.toolCallId,
+      decision: 'approve',
+    })
+  }
+})
+```
+
+`always_allow_category` を選択すると、そのライブ Session の残りの期間、Tool のカテゴリーが許可されます。Session の許可は、プロセスレベルの永続的な権限ではありません。
+
+代わりに、[`ask_user`](/reference/tools/ask-user-tool) や [`submit_plan`](/reference/tools/submit-plan-tool) などの対話型 Tool は、再開可能な Tool の中断を使用します。[`session.respondToToolSuspension()`](/reference/agent-controller/session#respondtotoolsuspension-resumedata-toolcallid-requestcontext-) で再開します。
+
+```typescript
+session.subscribe(event => {
+  if (event.type === 'tool_suspended' && event.toolName === 'ask_user') {
+    void session.respondToToolSuspension({
+      toolCallId: event.toolCallId,
+      resumeData: 'Use SQLite.',
+    })
+  }
+})
+```
+
+`submit_plan` では、`{ action: 'approved' }` または `{ action: 'rejected', feedback }` で再開します。計画が承認されると、実行を続ける前に `transitionsTo` で設定されたモードへ切り替わる場合があります。
+
+## Subagent に委譲する
+
+利用可能な Subagent の種類を Controller に設定します。組み込みの `subagent` Tool は、その定義を使用して特定のタスクを委譲できます。
+
+```typescript
+const controller = new AgentController({
+  tools: {
+    searchDocs,
+  },
+  subagents: [
+    {
+      id: 'code-reviewer',
+      name: 'Code reviewer',
+      description: 'Review a change for correctness and regressions.',
+      instructions: 'Inspect the change and report actionable findings.',
+      allowedControllerTools: ['searchDocs'],
+      allowedWorkspaceTools: ['view', 'find_files'],
+      defaultModelId: '__GATEWAY_OPENAI_MODEL_MINI__',
+    },
+  ],
+})
+```
+
+通常の Subagent は、設定された instructions と制限付き Tool セットで開始します。子が親の Thread を複製し、親 Agent の instructions と Tool で実行する必要がある場合は、`forked: true` を設定します。Fork された Subagent は親のプロンプト接頭辞を保持し、定義内の instructions、Tool、許可リスト、デフォルトモデルを無視します。また、Controller に Memory が必要です。
+
+デフォルトの Subagent モデル、または特定の Agent 種類用のモデルを保存するには、[`session.subagents.model.set()`](/reference/agent-controller/session#sessionsubagentsmodelset-modelid-agenttype-) を使用します。選択内容は [`session.subagents.model.get()`](/reference/agent-controller/session#sessionsubagentsmodelget-agenttype-) で取得します。
+
+```typescript
+await session.subagents.model.set({
+  modelId: '__GATEWAY_OPENAI_MODEL_MINI__',
+})
+
+await session.subagents.model.set({
+  agentType: 'code-reviewer',
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+})
+
+const reviewerModel = session.subagents.model.get({
+  agentType: 'code-reviewer',
+})
+```
+
+これらの選択内容は Thread 設定に書き込まれます。Agent 種類ごとの選択は、Session のデフォルト Subagent モデルより優先されます。
+
+## チャット Channel を接続する
+
+Channel アダプターを Controller に渡し、[`Mastra`](/reference/core/mastra-class) インスタンスに登録します。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { AgentController } from '@mastra/core/agent-controller'
+import { createSlackAdapter } from '@chat-adapter/slack'
+
+const controller = new AgentController({
+  id: 'support-controller',
+  agent,
+  storage,
+  workspace,
+  modes,
+  channels: {
+    adapters: {
+      slack: createSlackAdapter(),
+    },
+    resolveResourceId: ({ thread, message, defaultResourceId }) => {
+      if (thread.isDM) return message.author.userId
+      return defaultResourceId
+    },
+    onSessionStart: async ({ session, thread }) => {
+      const plan = await billing.planFor(thread.resourceId)
+      await session.model.switch({ modelId: plan.modelId })
+    },
+  },
+})
+
+export const mastra = new Mastra({
+  agentControllers: { controller },
+  storage,
+})
+```
+
+各プラットフォームの Webhook を、Controller 固有のルートに向けます。
+
+```text
+/api/agent-controllers/<CONTROLLER_ID>/channels/<PLATFORM>/webhook
+```
+
+外部チャットの各 Thread は、1 つの Controller Session と Mastra Thread に対応します。デフォルトでは、新しい Session はアダプターのチャット Thread ID から派生し、`channel:` という接頭辞が付いたリソース ID を使用します。ダイレクトメッセージを既存のアプリケーションユーザーに割り当てる場合や、別の Memory 所有者を選択する場合は、`resolveResourceId` を使用します。このコールバックは新しい Thread にのみ影響し、既存の Thread は保存済みのリソース ID を保持します。
+
+Channel Session はコードではなく Controller によって作成されるため、その設定には `onSessionStart` を使用します。Session が対応する Thread に関連付けられた後、最初のメッセージを処理する前に、Session ごとに一度実行されます。Channel Session で設定できないモデル、Memory 設定、Session 状態を適用するために使用します。同じ Thread の後続メッセージは Session を再利用し、このコールバックを再度呼び出しません。エラーはログに記録された後に握りつぶされるため、設定できなかった Session でもメッセージに応答します。
+
+Controller の Channel Session と自動承認の状態はメモリ内に保持されるため、長時間稼働するサーバーを使用してください。保留中の承認とライブ Session 状態は、プロセスの再起動後には保持されません。承認コントロールを表示できないアダプターは、実行が中断されたままにならないよう、承認プロンプトを表示せずに Tool を自動実行します。
+
+アダプターのセットアップとプラットフォーム固有の Webhook 設定については、[Channel](/docs/capabilities/channels/overview)を参照してください。
+
+## UI を接続する
+
+増分更新を受け取るには、Session のイベントを購読します。UI で完全なレンダリングスナップショットが必要な場合は、[`session.displayState.get()`](/reference/agent-controller/session#sessiondisplaystateget) で集約済みの表示状態を取得します。
+
+```typescript
+const unsubscribe = session.subscribe(event => {
+  if (event.type === 'display_state_changed') {
+    render(event.displayState)
+  }
+})
+
+render(session.displayState.get())
+
+// Call when the UI disconnects.
+unsubscribe()
+```
+
+購読は Session ごとに分離されています。同じ Controller 上の別の Session からのイベントは、このリスナーには配信されません。完全な TUI の例については、[コーディング Agent の構築](/guides/guide/coding-agent)ガイドを参照してください。
+
+## 関連情報
+
+- [Agent](/docs/agents/overview)
+- [Workspace](/docs/workspace/overview)
+- [Observational Memory](/docs/memory/observational-memory)
+- [Channel](/docs/capabilities/channels/overview)

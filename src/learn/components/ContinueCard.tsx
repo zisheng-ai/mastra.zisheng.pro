@@ -11,7 +11,7 @@ type ContinueCardProps = {
 }
 
 export function ContinueCard({ storage, lessons, className }: ContinueCardProps) {
-  const { isSimplifiedChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
+  const { isSimplifiedChinese, isTaiwanChinese, isHongKongChinese, isJapanese } = useLocalizedLearnContent()
   // Find the first published lesson the user hasn't watched yet
   const nextLesson = lessons.find(l => l.status === 'published' && !storage.lessons[l.slug]?.watched)
   if (!nextLesson) return null
@@ -33,7 +33,7 @@ export function ContinueCard({ storage, lessons, className }: ContinueCardProps)
         <p className="text-xs font-medium tracking-wide text-(--mastra-text-tertiary) uppercase">
           {isSimplifiedChinese
             ? '继续学习'
-            : isHongKongChinese
+            : isTaiwanChinese || isHongKongChinese
               ? '繼續學習'
               : isJapanese
                 ? '学習を続ける'
@@ -44,11 +44,13 @@ export function ContinueCard({ storage, lessons, className }: ContinueCardProps)
           <p className="mt-0.5 text-sm text-(--mastra-text-tertiary)">
             {isSimplifiedChinese
               ? '从此处继续播放：'
-              : isHongKongChinese
-                ? '由這裏繼續播放：'
-                : isJapanese
-                  ? '動画を再開：'
-                  : 'Resume video at '}
+              : isTaiwanChinese
+                ? '從這裡繼續播放：'
+                : isHongKongChinese
+                  ? '由這裏繼續播放：'
+                  : isJapanese
+                    ? '動画を再開：'
+                    : 'Resume video at '}
             {formatSeconds(progress.seconds)}
           </p>
         )}

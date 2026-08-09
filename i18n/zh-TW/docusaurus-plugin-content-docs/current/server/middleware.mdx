@@ -1,0 +1,249 @@
+---
+title: "Middleware | 伺服器"
+description: "套用自訂 middleware 函式以攔截請求。"
+packages:
+  - "@mastra/core"
+  - "@mastra/server"
+---
+
+# Middleware
+
+Mastra 伺服器可在叫用 API 路由處理常式之前或之後執行自訂 middleware 函式。這適合用於驗證、記錄、注入請求專屬的 context，或新增 CORS 標頭等用途。
+
+Middleware 會接收 [Hono](https://hono.dev) `Context`（`c`）與 `next` 函式。若回傳 `Response`，請求會立即中止。呼叫 `next()` 則會繼續處理下一個 middleware 或路由處理常式。
+
+```typescript
+import { Mastra } from '@mastra/core'
+
+export const mastra = new Mastra({
+  server: {
+    middleware: [
+      {
+        handler: async (c, next) => {
+          // Example: Add authentication check
+          const authHeader = c.req.header('Authorization')
+          if (!authHeader) {
+            return new Response('Unauthorized', { status: 401 })
+          }
+
+          await next()
+        },
+        path: '/api/*',
+      },
+      // Add a global request logger
+      async (c, next) => {
+        console.log(`${c.req.method} ${c.req.url}`)
+        await next()
+      },
+    ],
+  },
+})
+```
+
+如要將 middleware 附加至單一路由，請將 `middleware` 選項傳給 `registerApiRoute`：
+
+```typescript
+registerApiRoute('/my-custom-route', {
+  method: 'GET',
+  middleware: [
+    async (c, next) => {
+      console.log(`${c.req.method} ${c.req.url}`)
+      await next()
+    },
+  ],
+  handler: async c => {
+    const mastra = c.get('mastra')
+    return c.json({ message: 'Hello, world!' })
+  },
+})
+```
+
+## 常見範例
+
+### 使用 `RequestContext`
+
+你可以在執行階段伺服器 middleware 中擷取請求資訊，以填入 `RequestContext`。在此範例中，系統會根據 Cloudflare `CF-IPCountry` 標頭設定 `temperature-unit`，確保回應符合使用者所在地區的慣用格式。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RequestContext } from '@mastra/core/request-context'
+import { testWeatherAgent } from './agents/test-weather-agent'
+
+export const mastra = new Mastra({
+  agents: { testWeatherAgent },
+  server: {
+    middleware: [
+      async (context, next) => {
+        const country = context.req.header('CF-IPCountry')
+        const requestContext = context.get('requestContext')
+
+        requestContext.set('temperature-unit', country === 'US' ? 'fahrenheit' : 'celsius')
+
+        await next()
+      },
+    ],
+  },
+})
+```
+
+### 驗證
+
+```typescript prettier:false
+{
+  handler: async (c, next) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+
+    // Validate token here
+    await next();
+  },
+  path: '/api/*',
+}
+```
+
+### 授權（使用者隔離）
+
+驗證會確認使用者身分，授權則控制使用者可存取的內容。若未限定資源 ID 的範圍，通過驗證的使用者可能會猜測 ID 或操控 `resourceId` 參數，進而存取其他使用者的執行緒。
+
+若要將記憶體與執行緒範圍限定為通過驗證的使用者，最簡單的方式是在驗證設定中使用 `mapUserToResourceId` 回呼：
+
+```typescript
+import { Mastra } from '@mastra/core'
+
+export const mastra = new Mastra({
+  server: {
+    auth: {
+      authenticateToken: async token => {
+        return verifyToken(token) // { id: 'user-123', orgId: 'org-456', ... }
+      },
+      mapUserToResourceId: user => user.id,
+    },
+  },
+})
+```
+
+驗證成功後，系統會使用通過驗證的使用者物件呼叫 `mapUserToResourceId`。回傳值會在請求 context 上設為 `MASTRA_RESOURCE_ID_KEY`，且適用於所有伺服器轉接器（Hono、Express、Next.js 等）。
+
+資源 ID 不一定要是 `user.id`。常見模式如下：
+
+```typescript
+// Org-scoped
+mapUserToResourceId: user => `${user.orgId}:${user.id}`
+
+// From a JWT claim
+mapUserToResourceId: user => user.tenantId
+
+// Composite key
+mapUserToResourceId: user => `${user.workspaceId}:${user.projectId}:${user.id}`
+```
+
+設定資源 ID 後，伺服器會自動：
+
+- **篩選執行緒清單**，只回傳使用者擁有的執行緒
+- **驗證執行緒存取權**，若存取其他使用者的執行緒則回傳 403
+- **強制建立執行緒時**使用已驗證的使用者 ID
+- **驗證訊息操作**（包括刪除），確保訊息屬於使用者擁有的執行緒
+
+即使用戶端傳入 `?resourceId=other-user-id`，驗證設定的值仍具有優先權。嘗試存取其他使用者擁有的執行緒或訊息時，會回傳 403 錯誤。
+
+#### 進階：在 middleware 中設定資源 ID
+
+針對更複雜的情境（例如從資料庫查詢資源 ID），你可以直接在 middleware 中設定 `MASTRA_RESOURCE_ID_KEY`：
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { MASTRA_RESOURCE_ID_KEY } from '@mastra/core/request-context'
+import { getAuthenticatedUser } from '@mastra/server/auth'
+
+export const mastra = new Mastra({
+  server: {
+    auth: {
+      authenticateToken: async token => verifyToken(token),
+    },
+    middleware: [
+      {
+        path: '/api/*',
+        handler: async (c, next) => {
+          const token = c.req.header('Authorization')
+          if (!token) {
+            return c.json({ error: 'Unauthorized' }, 401)
+          }
+
+          const user = await getAuthenticatedUser<{ id: string }>({
+            mastra: c.get('mastra'),
+            token,
+            request: c.req.raw,
+          })
+          const requestContext = c.get('requestContext')
+
+          if (!user) {
+            return c.json({ error: 'Unauthorized' }, 401)
+          }
+
+          requestContext.set(MASTRA_RESOURCE_ID_KEY, user.id)
+          return next()
+        },
+      },
+    ],
+  },
+})
+```
+
+`server.middleware` 會在 Mastra 的各路由驗證檢查之前執行。當 middleware 需要已驗證的使用者時，請呼叫 `getAuthenticatedUser()`，透過已設定的驗證 Provider 解析使用者，且不會變更預設路由的驗證流程。
+
+#### 使用 `MASTRA_THREAD_ID_KEY`
+
+你也可以設定 `MASTRA_THREAD_ID_KEY`，覆寫用戶端提供的執行緒 ID：
+
+```typescript
+import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from '@mastra/core/request-context'
+
+// Force operations to use a specific thread
+requestContext.set(MASTRA_THREAD_ID_KEY, validatedThreadId)
+```
+
+若你已透過其他方式驗證特定執行緒，並希望將操作限制於該執行緒，此設定便很實用。
+
+### CORS 支援
+
+```typescript prettier:false
+{
+  handler: async (c, next) => {
+    c.header('Access-Control-Allow-Origin', '*');
+    c.header(
+      'Access-Control-Allow-Methods',
+      'GET, POST, PUT, DELETE, OPTIONS',
+    );
+    c.header(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization',
+    );
+
+    if (c.req.method === 'OPTIONS') {
+      return new Response(null, { status: 204 });
+    }
+
+    await next();
+  },
+}
+```
+
+### 請求記錄
+
+```typescript prettier:false
+{
+  handler: async (c, next) => {
+    const start = Date.now();
+    await next();
+    const duration = Date.now() - start;
+    console.log(`${c.req.method} ${c.req.url} - ${duration}ms`);
+  },
+}
+```
+
+# 相關內容
+
+- [請求 Context](/docs/server/request-context)
+- [保留鍵](/docs/server/request-context#reserved-keys)

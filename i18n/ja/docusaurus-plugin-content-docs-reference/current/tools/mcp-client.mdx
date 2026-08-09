@@ -1,0 +1,1448 @@
+---
+title: "リファレンス: MCPClient | Tools and MCP"
+description: 複数の Model Context Protocol サーバーとその Tool を管理するクラス、MCPClient の API リファレンスです。
+packages:
+  - "@mastra/core"
+  - "@mastra/mcp"
+---
+
+# MCPClient
+
+`MCPClient` クラスを使うと、Mastra アプリケーションで複数の MCP サーバー接続とその Tool を管理できます。接続のライフサイクルと Tool の名前空間を管理し、設定した全サーバーの Tool にアクセスできます。
+
+## コンストラクター
+
+MCPClient クラスの新しいインスタンスを作成します。
+
+```typescript prettier:false
+constructor({
+  id?: string;
+  servers: Record<string, MastraMCPServerDefinition>;
+  timeout?: number;
+}: MCPClientOptions)
+```
+
+### MCPClientOptions
+
+<br />
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: true,
+    description:
+      '設定インスタンスの任意の一意識別子です。同じ設定で複数のインスタンスを作成する場合に、メモリリークを防ぐために使用します。',
+  },
+  {
+    name: 'servers',
+    type: 'Record<string, MastraMCPServerDefinition>',
+    description: 'サーバー設定のマップです。各キーは一意のサーバー識別子、値はサーバー設定です。',
+  },
+  {
+    name: 'timeout',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '60000',
+    description: '個別のサーバー設定で上書きされない限り、全サーバーに適用されるグローバルタイムアウトです（ミリ秒）。',
+  },
+]}
+/>
+
+### `MastraMCPServerDefinition`
+
+`servers` マップ内の各サーバーは、`MastraMCPServerDefinition` 型で設定します。Transport の種類は指定されたパラメーターから判定されます。
+
+- `command` を指定すると、Stdio transport を使用します。
+- `url` を指定すると、まず Streamable HTTP transport を試し、初回接続に失敗した場合は従来の SSE transport にフォールバックします。
+
+<br />
+
+<PropertiesTable
+  content={[
+  {
+    name: 'command',
+    type: 'string',
+    isOptional: true,
+    description: 'Stdio サーバー向け: 実行するコマンドです。',
+  },
+  {
+    name: 'args',
+    type: 'string[]',
+    isOptional: true,
+    description: 'Stdio サーバー向け: コマンドに渡す引数です。',
+  },
+  {
+    name: 'env',
+    type: 'Record<string, string>',
+    isOptional: true,
+    description: 'Stdio サーバー向け: コマンドに設定する環境変数です。',
+  },
+  {
+    name: 'inheritDefaultEnv',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'true',
+    description:
+      'Stdio サーバー向け: サブプロセス環境を MCP SDK のデフォルト継承環境から開始するかどうかです。デフォルトではプロセス環境全体ではなく、厳選された許可リストを使用します。POSIX では HOME、LOGNAME、PATH、SHELL、TERM、USER、Windows では APPDATA、HOMEDRIVE、HOMEPATH、LOCALAPPDATA、PATH、PROCESSOR_ARCHITECTURE、SYSTEMDRIVE、SYSTEMROOT、TEMP、USERNAME、USERPROFILE を継承します。`false` にすると、`env` に明示した変数だけがサブプロセスへ渡されます。PATH のないサブプロセスでは、絶対パスでないコマンドの起動に失敗する場合があります。',
+  },
+  {
+    name: 'url',
+    type: 'URL',
+    isOptional: true,
+    description: 'HTTP サーバー（Streamable HTTP または SSE）向け: サーバーの URL です。',
+  },
+  {
+    name: 'requestInit',
+    type: 'RequestInit',
+    isOptional: true,
+    description: 'HTTP サーバー向け: fetch API のリクエスト設定です。',
+  },
+  {
+    name: 'eventSourceInit',
+    type: 'EventSourceInit',
+    isOptional: true,
+    description:
+      'SSE フォールバック向け: SSE 接続のカスタム fetch 設定です。SSE でカスタムヘッダーを使う場合に必要です。',
+  },
+  {
+    name: 'fetch',
+    type: 'MastraFetchLike',
+    isOptional: true,
+    description:
+      'HTTP サーバー向け: すべてのネットワークリクエストで使うカスタム fetch 実装です。受信リクエストからのリクエストスコープデータ（認証 Cookie、Bearer token など）を含む、省略可能な第 3 引数 `requestContext` を受け取ります。指定すると、すべての HTTP リクエストにこの関数が使われます。動的な認証ヘッダーの追加、リクエストスコープの認証情報の MCP サーバーへの転送、リクエストごとの動作のカスタマイズ、リクエストやレスポンスのインターセプトと変更が可能です。`fetch` を指定した場合、これらをカスタム fetch 関数内で処理できるため、`requestInit`、`eventSourceInit`、`authProvider` は省略可能になります。',
+  },
+  {
+    name: 'allowedHosts',
+    type: 'string[]',
+    isOptional: true,
+    description:
+      'HTTP サーバー向け: このサーバーの代理としてクライアントが接続できるホストを明示的に許可するリストです。各項目は URL のホスト（URL がデフォルト以外のポートを持つ場合はホスト名とポート）と照合されます。例: `"api.example.com"`、`"localhost:8080"`。完全一致で、ホスト名の大文字と小文字は区別しません。ワイルドカードには対応せず、URL スキームも確認しません。空の配列はすべてのリクエストを拒否します。未設定の場合、制限はありません。適用の詳細は後述のセキュリティセクションを参照してください。',
+  },
+  {
+    name: 'logger',
+    type: 'LogHandler',
+    isOptional: true,
+    description: 'ログ記録用の省略可能な追加ハンドラーです。',
+  },
+  {
+    name: 'timeout',
+    type: 'number',
+    isOptional: true,
+    description: 'サーバー固有のタイムアウトです（ミリ秒）。',
+  },
+  {
+    name: 'capabilities',
+    type: 'ClientCapabilities',
+    isOptional: true,
+    description: 'サーバー固有の capability 設定です。',
+  },
+  {
+    name: 'authProvider',
+    type: 'OAuthClientProvider',
+    isOptional: true,
+    description:
+      'HTTP サーバー向け: token の自動更新と OAuth フローを管理する OAuth 認証 Provider です。すぐに使える実装には MCPOAuthClientProvider を使用します。',
+  },
+  {
+    name: 'enableServerLogs',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'true',
+    description: 'このサーバーのログ記録を有効にするかどうかです。',
+  },
+  {
+    name: 'forwardInstructions',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'false',
+    description:
+      'Agent がこのサーバーの Tool を使う際、この MCP サーバーが提示する instructions を Agent の system prompt に追加するかどうかです。デフォルトでは無効です。instructions は Agent の system prompt に挿入されるため、信頼できるサーバーでのみ有効にしてください。',
+  },
+  {
+    name: 'instructionsMaxLength',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '512',
+    description: 'Agent の system prompt に追加するサーバー instructions の最大文字数です。',
+  },
+  {
+    name: 'requireToolApproval',
+    type: 'boolean | (params: RequireToolApprovalContext) => boolean | Promise<boolean>',
+    isOptional: true,
+    description:
+      'このサーバーの Tool を実行する前に人の承認を必須にします。`true` にすると、すべての Tool で承認が必要です。関数を指定すると、Tool 名、引数、request context、サーバーが提示した Tool annotation を受け取って呼び出され、承認が必要かを動的に判断します。',
+  },
+]}
+/>
+
+## Tool の承認
+
+サーバー定義で `requireToolApproval` を使うと、そのサーバーの Tool を実行する前に人の承認を必須にできます。既存の [human-in-the-loop](/docs/workflows/human-in-the-loop) 承認フローと連携します。
+
+### すべての Tool で承認を必須にする
+
+`requireToolApproval` を `true` にすると、サーバー上のすべての Tool で承認が必要になります。
+
+```typescript
+const mcp = new MCPClient({
+  servers: {
+    github: {
+      url: new URL('http://localhost:3000/mcp'),
+      requireToolApproval: true,
+    },
+  },
+})
+```
+
+### 関数による動的な承認
+
+関数を渡すと、呼び出しごとに承認の要否を判断できます。この関数は Tool 名、モデルが渡した引数、受信リクエストの request context、Tool の MCP `annotations`（サーバーが提示している場合）を受け取ります。
+
+```typescript
+const mcp = new MCPClient({
+  servers: {
+    github: {
+      url: new URL('http://localhost:3000/mcp'),
+      requireToolApproval: ({ toolName, args, requestContext }) => {
+        // Read-only tools don't need approval
+        if (toolName === 'list_repos') return false
+        // Destructive tools with force flag always need approval
+        if (toolName === 'delete_repo') return args.force === true
+        // Non-admin users need approval for everything else
+        return requestContext?.userRole !== 'admin'
+      },
+    },
+  },
+})
+```
+
+非同期関数も使用できます。受信リクエストの `requestContext` を受け取るため、認証確認など、リクエスト単位のロジックに利用できます。
+
+### 信頼できるサーバーの Tool annotation を使う
+
+MCP サーバーを信頼できる場合は、その [Tool annotation](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#tool-annotations)（`readOnlyHint`、`destructiveHint`、`idempotentHint`、`openWorldHint`、`title`）に基づいて承認を判断できます。
+
+```typescript
+const mcp = new MCPClient({
+  servers: {
+    github: {
+      url: new URL('http://localhost:3000/mcp'),
+      requireToolApproval: ({ annotations }) => {
+        // Skip approval for tools the server has marked read-only
+        if (annotations?.readOnlyHint) return false
+        // Always require approval for destructive tools
+        if (annotations?.destructiveHint) return true
+        return true
+      },
+    },
+  },
+})
+```
+
+MCP 仕様では、**信頼できるサーバーから送られた場合を除き、クライアントは Tool annotation を信頼できないものとして扱わなければなりません**。annotation は参考情報にすぎず、セキュリティ境界にはなりません。悪意のあるサーバーや不具合のあるサーバーは、実際には違っていても Tool が読み取り専用だと主張できます。annotation を使って承認要件を緩和するのは、信頼できるサーバーに限ってください。
+
+同じ annotation は、`listTools()` と `listToolsets()` が返す Tool の `tool.mcp.annotations` にも公開されます。Tool を Agent に組み込む際に確認できます。
+
+## サーバー instructions
+
+MCP サーバーが初期化時に instructions を提示すると、`MCPClient` はそのサーバー用に保存します。instructions の Agent の system prompt への転送は**明示的に有効化**する必要があります。サーバーに `forwardInstructions: true` を設定すると、`listTools()` または `listToolsets()` 経由でその Tool を使う Agent が instructions を自動的に受け取ります。
+
+instructions はサーバー名ごとにまとめられ、各サーバーにつき `instructionsMaxLength` 文字までに切り詰められます。
+
+```typescript
+const mcp = new MCPClient({
+  servers: {
+    db: {
+      url: new URL('http://localhost:3000/mcp'),
+      forwardInstructions: true,
+      instructionsMaxLength: 512,
+    },
+  },
+})
+
+const agent = new Agent({
+  id: 'db-agent',
+  name: 'DB Agent',
+  instructions: 'Help with database changes.',
+  model,
+  tools: await mcp.listTools(),
+})
+```
+
+`forwardInstructions` を省略した場合（デフォルト）も instructions はキャッシュされ、[`getServerInstructions()`](#getserverinstructions) で確認できますが、Agent の system prompt には追加されません。
+
+> **セキュリティ上の注意:** サーバー instructions は、長さの切り詰めを除いてそのまま Agent の system prompt に転送されます。悪意のある、または侵害された MCP サーバーは、Agent が信頼できるシステム指示として扱う instructions を挿入できます。`forwardInstructions` は信頼できるサーバーでのみ有効にしてください。サードパーティ製サーバーの instructions を転送する前に、`getServerInstructions()` で確認することを推奨します。
+
+## セキュリティ
+
+### Stdio サーバーのサブプロセス環境
+
+Stdio サブプロセスは、親プロセスの環境全体を継承しません。デフォルトでは、MCP SDK が厳選した許可リスト（POSIX: `HOME`、`LOGNAME`、`PATH`、`SHELL`、`TERM`、`USER`、Windows: `APPDATA`、`HOMEDRIVE`、`HOMEPATH`、`LOCALAPPDATA`、`PATH`、`PROCESSOR_ARCHITECTURE`、`SYSTEMDRIVE`、`SYSTEMROOT`、`TEMP`、`USERNAME`、`USERPROFILE`）と、`env` に設定した変数をマージした環境から開始します。API key などの機密変数は、明示的に渡さない限り継承されません。
+
+より厳密に分離するには `inheritDefaultEnv: false` を設定し、設定した `env` の項目だけをサブプロセスに渡します。
+
+```typescript
+const mcp = new MCPClient({
+  servers: {
+    myTool: {
+      command: '/usr/local/bin/my-mcp-server',
+      inheritDefaultEnv: false,
+      env: { MY_TOOL_API_KEY: process.env.MY_TOOL_API_KEY! },
+    },
+  },
+})
+```
+
+`env` に指定した変数はそのまま転送されます。そのため、信頼できないソース（ユーザーが提供した設定ファイルなど）から取得したサーバー設定は、信頼できない入力として扱ってください。
+
+### `allowedHosts` で接続先ホストを制限する
+
+HTTP サーバーの URL が信頼できない設定に由来する場合、攻撃者が管理する URL によってクライアントが内部サービスへ接続させられる可能性があります（server-side request forgery）。このようなサーバーでは `allowedHosts` を設定し、クライアントが接続できるホストを制限します。
+
+```typescript
+const mcp = new MCPClient({
+  servers: {
+    remote: {
+      url: new URL(untrustedConfig.serverUrl),
+      allowedHosts: ['api.example.com'],
+    },
+  },
+})
+```
+
+適用の詳細:
+
+- デフォルトの fetch 経路では、各リダイレクト先を含む許可されていないホストへのリクエストは、送信**前**にブロックされます。リダイレクトは手動で追跡され（最大 5 回）、各接続先が検証されます。別の origin へ移る場合は `Authorization` ヘッダーを引き継ぎません（スキーム、ホスト、ポートのいずれかが変わると削除され、標準の fetch の動作に準拠します）。
+- カスタム `fetch`（またはカスタム `eventSourceInit.fetch`）を指定した場合も、最初の URL はリクエスト前に確認されます。ただし、リダイレクト先は `response.url` を使って**事後**検証されます。外部へのリクエストが発生する可能性があり、最終 URL が許可されていないホストを指す場合はレスポンスが破棄されます。手動で作成した `Response` の `response.url` が空の場合、この事後確認は行われません。
+- `authProvider` 経由の OAuth リクエスト（認可サーバーの metadata discovery、token exchange、refresh）も検証されます。認可サーバーが MCP サーバーと別のホストで動作する場合は、そのホストも `allowedHosts` に追加してください。
+- ブロックされたホストへの接続は明確なエラーで失敗し、再接続ロジックによる再試行は行われません。
+
+`allowedHosts` は意図的に最小限の機能だけを備えています。ホストを完全一致で照合し、ワイルドカードやスキームの確認には対応しません。スキームの確認や IP アドレス範囲のルールなど、より高度なポリシーが必要な場合は、クライアントの全リクエストで呼び出されるカスタム `fetch` 実装を指定してください。
+
+### Tool のレスポンスを信頼できない入力として扱う
+
+MCP サーバーが返す Tool の結果は、モデルへの入力として Agent のコンテキストに渡されます。悪意のある、または侵害されたサーバーは、Tool の出力を prompt injection に利用できます。Transport client は Tool のレスポンスをサニタイズしません。サニタイズポリシーは Agent 層で適用します。Mastra の [input and output processor](/docs/agents/processors) を使うと、コンテンツがモデルに届く前後で検査、変換、ブロックできます。サードパーティ製サーバーを使う際は、これに `requireToolApproval` と前述の `forwardInstructions` に関するセキュリティ上の注意を組み合わせてください。
+
+## メソッド
+
+### `listTools()`
+
+設定したすべてのサーバーから全 Tool を取得します。競合を防ぐため、Tool 名にはサーバー名の名前空間が付きます（`serverName_toolName` 形式）。
+Agent の定義に渡すことを想定しています。
+
+```ts
+new Agent({ id: 'agent', tools: await mcp.listTools() })
+```
+
+### `listToolsWithErrors()`
+
+設定済みの全サーバーからすべての Tool を取得し、Tool 名をサーバー名で名前空間化します。接続または Tool の一覧取得に失敗したサーバーごとのエラーも返します。
+
+```typescript
+const { tools, errors } = await mcp.listToolsWithErrors()
+
+new Agent({ id: 'agent', tools })
+console.log(errors)
+```
+
+### `listToolsets()`
+
+名前空間化された Tool 名（`serverName.toolName` 形式）を Tool の実装に対応付けたオブジェクトを返します。
+実行時に generate または stream メソッドへ渡すことを想定しています。
+
+```typescript
+const res = await agent.stream(prompt, {
+  toolsets: await mcp.listToolsets(),
+})
+```
+
+### `getServerInstructions()`
+
+設定済みの各 MCP サーバーについて、現在判明している instructions を返します。未接続のサーバーや instructions を公開していないサーバーには `undefined` を返します。
+
+```typescript prettier:false
+getServerInstructions(): Record<string, string | undefined>
+```
+
+例：
+
+```typescript
+await mcp.listTools()
+
+const instructionsByServer = mcp.getServerInstructions()
+console.log(instructionsByServer.db)
+```
+
+### `authenticate()`
+
+リダイレクト URL がループバックアドレスを指す `MCPOAuthClientProvider` を設定したサーバーに対し、対話型 OAuth 認可コードフローを実行します。ローカルのコールバックサーバーを起動し、Provider の `onRedirectToAuthorization` コールバックを介して認可 URL を渡し、ブラウザーから認可コードが返るのを待ってトークンと交換し、再接続します。[対話型ブラウザー認証](#interactive-browser-authentication)を参照してください。
+
+省略可能な `timeoutMs` は、ブラウザーから認可コードが返らずフローを拒否するまでの待機時間を制限します。デフォルトは 5 分です。
+
+```typescript prettier:false
+async authenticate(serverName: string, options?: { timeoutMs?: number }): Promise<void>
+```
+
+### `getServerAuthState()`
+
+設定済みサーバーの OAuth 認可状態を返します。接続試行が認可エラーで拒否された後は `'needs-auth'`、サーバーが Provider の認証情報を受け入れた後は `'authorized'` です。それ以外のサーバーには `undefined` を返します（`authProvider` がない場合や、未接続の場合）。
+
+```typescript prettier:false
+getServerAuthState(serverName: string): 'needs-auth' | 'authorized' | undefined
+```
+
+### `cancelAuthentication()`
+
+サーバーで進行中の `authenticate()` フローをキャンセルし、放棄されたブラウザー認証によってクライアントが無期限に待機するのを防ぎます。コールバックサーバーがバインドする前のセットアップ段階を含めてフローを中止し、待受中のローカルコールバックサーバーを閉じます。保留中の `authenticate()` 呼び出しは拒否されます。フローをキャンセルした場合は `true`、進行中のフローがなければ `false` を返します。
+
+その後の `getServerAuthState()` は、フローの進行状況によって異なります。`401` で拒否された後にキャンセルしたフローは `'needs-auth'` のままで、すぐに再試行できます。接続を試行する前のセットアップ中にキャンセルした場合、状態は変更されません（通常は `undefined`）。
+
+```typescript prettier:false
+async cancelAuthentication(serverName: string): Promise<boolean>
+```
+
+### `disconnect()`
+
+すべての MCP サーバーから切断し、リソースを解放します。
+
+```typescript prettier:false
+async disconnect(): Promise<void>
+```
+
+### `toMCPServerProxies()`
+
+設定済みサーバーごとの `MCPClientServerProxy` インスタンスを格納したマップを返します。各 Proxy は基盤のクライアント接続を `MCPServerBase` インスタンスとしてラップするため、外部（Mastra 以外）の MCP サーバーを `mcpServers` に登録して Studio に表示できます。
+
+```typescript prettier:false
+async toMCPServerProxies(): Promise<Record<string, MCPClientServerProxy>>
+```
+
+結果を `mcpServers` 設定として `Mastra` にスプレッドします。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { MCPClient } from '@mastra/mcp'
+
+const mcpClient = new MCPClient({
+  servers: {
+    'color-mixer': {
+      command: 'node',
+      args: ['path/to/color-mixer-server.js'],
+    },
+  },
+})
+
+export const mastra = new Mastra({
+  mcpServers: {
+    ...(await mcpClient.toMCPServerProxies()),
+  },
+})
+```
+
+MCP Apps 拡張などの機能を実装した外部 MCP サーバーを、Mastra の `MCPServer` でラップせずに Studio へ接続する場合に便利です。
+
+### `resources` プロパティ
+
+`MCPClient` インスタンスの `resources` プロパティから、リソース関連の操作へアクセスできます。
+
+```typescript
+const mcpClient = new MCPClient({/* ...servers configuration... */})
+
+// Access resource methods via mcpClient.resources
+const allResourcesByServer = await mcpClient.resources.list()
+const templatesByServer = await mcpClient.resources.templates()
+// ... and so on for other resource methods.
+```
+
+#### `resources.list()`
+
+接続済みの全 MCP サーバーから利用可能なリソースをすべて取得し、サーバー名別にまとめます。
+
+```typescript prettier:false
+async list(): Promise<Record<string, Resource[]>>
+```
+
+例：
+
+```typescript
+const resourcesByServer = await mcpClient.resources.list()
+for (const serverName in resourcesByServer) {
+  console.log(`Resources from ${serverName}:`, resourcesByServer[serverName])
+}
+```
+
+#### `resources.templates()`
+
+接続済みの全 MCP サーバーから利用可能なリソーステンプレートをすべて取得し、サーバー名別にまとめます。
+
+```typescript prettier:false
+async templates(): Promise<Record<string, ResourceTemplate[]>>
+```
+
+例：
+
+```typescript
+const templatesByServer = await mcpClient.resources.templates()
+for (const serverName in templatesByServer) {
+  console.log(`Templates from ${serverName}:`, templatesByServer[serverName])
+}
+```
+
+#### `resources.read(serverName: string, uri: string)`
+
+サーバーから指定したリソースの内容を読み取ります。
+
+```typescript prettier:false
+async read(serverName: string, uri: string): Promise<ReadResourceResult>
+```
+
+- `serverName`: サーバーの識別子（コンストラクターの `servers` オプションで使用するキー）。
+- `uri`: 読み取るリソースの URI。
+
+例：
+
+```typescript
+const content = await mcpClient.resources.read('myWeatherServer', 'weather://current')
+console.log('Current weather:', content.contents[0].text)
+```
+
+#### `resources.subscribe(serverName: string, uri: string)`
+
+サーバー上の指定したリソースの更新を購読します。
+
+```typescript prettier:false
+async subscribe(serverName: string, uri: string): Promise<object>
+```
+
+例：
+
+```typescript
+await mcpClient.resources.subscribe('myWeatherServer', 'weather://current')
+```
+
+#### `resources.unsubscribe(serverName: string, uri: string)`
+
+サーバー上の指定したリソースの更新購読を解除します。
+
+```typescript prettier:false
+async unsubscribe(serverName: string, uri: string): Promise<object>
+```
+
+例：
+
+```typescript
+await mcpClient.resources.unsubscribe('myWeatherServer', 'weather://current')
+```
+
+#### `resources.onUpdated(serverName: string, handler: (params: { uri: string }) => void)`
+
+指定したサーバーで購読中のリソースが更新されたときに呼び出される通知ハンドラーを設定します。
+
+```typescript prettier:false
+async onUpdated(serverName: string, handler: (params: { uri: string }) => void): Promise<void>
+```
+
+例：
+
+```typescript
+mcpClient.resources.onUpdated('myWeatherServer', params => {
+  console.log(`Resource updated on myWeatherServer: ${params.uri}`)
+  // You might want to re-fetch the resource content here
+  // await mcpClient.resources.read("myWeatherServer", params.uri);
+})
+```
+
+#### `resources.onListChanged(serverName: string, handler: () => void)`
+
+指定したサーバーで利用可能なリソースの一覧が変わったときに呼び出される通知ハンドラーを設定します。
+
+```typescript prettier:false
+async onListChanged(serverName: string, handler: () => void): Promise<void>
+```
+
+例：
+
+```typescript
+mcpClient.resources.onListChanged('myWeatherServer', () => {
+  console.log('Resource list changed on myWeatherServer.')
+  // You should re-fetch the list of resources
+  // await mcpClient.resources.list();
+})
+```
+
+### `elicitation` プロパティ
+
+`MCPClient` インスタンスの `elicitation` プロパティから、Elicitation 関連の操作へアクセスできます。Elicitation により、MCP サーバーはユーザーへ構造化情報を要求できます。
+
+```typescript
+const mcpClient = new MCPClient({/* ...servers configuration... */})
+
+// Set up elicitation handler
+mcpClient.elicitation.onRequest('serverName', async request => {
+  // Handle elicitation request from server
+  console.log('Server requests:', request.message)
+  console.log('Schema:', request.requestedSchema)
+
+  // Return user response
+  return {
+    action: 'accept',
+    content: { name: 'John Doe', email: 'john@example.com' },
+  }
+})
+```
+
+#### `elicitation.onRequest(serverName: string, handler: ElicitationHandler)`
+
+接続済みの MCP サーバーから Elicitation リクエストが送信されたときに呼び出されるハンドラー関数を設定します。ハンドラーはリクエストを受け取り、レスポンスを返す必要があります。
+
+##### `ElicitationHandler` 関数
+
+ハンドラー関数は、次のプロパティを持つリクエストオブジェクトを受け取ります。
+
+- `message`: 必要な情報を説明する、人が読めるメッセージ
+- `requestedSchema`: 期待するレスポンスの構造を定義する JSON スキーマ
+
+ハンドラーは、次のプロパティを持つ `ElicitResult` を返す必要があります。
+
+- `action`: `'accept'`、`'decline'`、`'cancel'` のいずれか
+- `content`: ユーザーのデータ（action が `'accept'` の場合のみ）
+
+**例：**
+
+```typescript
+mcpClient.elicitation.onRequest('serverName', async request => {
+  console.log(`Server requests: ${request.message}`)
+
+  // Example: Simple user input collection
+  if (request.requestedSchema.properties.name) {
+    // Simulate user accepting and providing data
+    return {
+      action: 'accept',
+      content: {
+        name: 'Alice Smith',
+        email: 'alice@example.com',
+      },
+    }
+  }
+
+  // Simulate user declining the request
+  return { action: 'decline' }
+})
+```
+
+**対話型の完全な例：**
+
+```typescript
+import { MCPClient } from '@mastra/mcp'
+import { createInterface } from 'readline'
+
+const readline = createInterface({
+  input: process.stdin,
+  output: process.stdout,
+})
+
+function askQuestion(question: string): Promise<string> {
+  return new Promise(resolve => {
+    readline.question(question, answer => resolve(answer.trim()))
+  })
+}
+
+const mcpClient = new MCPClient({
+  servers: {
+    interactiveServer: {
+      url: new URL('http://localhost:3000/mcp'),
+    },
+  },
+})
+
+// Set up interactive elicitation handler
+await mcpClient.elicitation.onRequest('interactiveServer', async request => {
+  console.log(`\n📋 Server Request: ${request.message}`)
+  console.log('Required information:')
+
+  const schema = request.requestedSchema
+  const properties = schema.properties || {}
+  const required = schema.required || []
+  const content: Record<string, any> = {}
+
+  // Collect input for each field
+  for (const [fieldName, fieldSchema] of Object.entries(properties)) {
+    const field = fieldSchema as any
+    const isRequired = required.includes(fieldName)
+
+    let prompt = `${field.title || fieldName}`
+    if (field.description) prompt += ` (${field.description})`
+    if (isRequired) prompt += ' *required*'
+    prompt += ': '
+
+    const answer = await askQuestion(prompt)
+
+    // Handle cancellation
+    if (answer.toLowerCase() === 'cancel') {
+      return { action: 'cancel' }
+    }
+
+    // Validate required fields
+    if (answer === '' && isRequired) {
+      console.log(`❌ ${fieldName} is required`)
+      return { action: 'decline' }
+    }
+
+    if (answer !== '') {
+      content[fieldName] = answer
+    }
+  }
+
+  // Confirm submission
+  console.log('\n📝 You provided:')
+  console.log(JSON.stringify(content, null, 2))
+
+  const confirm = await askQuestion('\nSubmit this information? (yes/no/cancel): ')
+
+  if (confirm.toLowerCase() === 'yes' || confirm.toLowerCase() === 'y') {
+    return { action: 'accept', content }
+  } else if (confirm.toLowerCase() === 'cancel') {
+    return { action: 'cancel' }
+  } else {
+    return { action: 'decline' }
+  }
+})
+```
+
+### `prompts` プロパティ
+
+`MCPClient` インスタンスの `prompts` プロパティから、プロンプト関連の操作へアクセスできます。
+
+```typescript
+const mcpClient = new MCPClient({/* ...servers configuration... */})
+
+// Access prompt methods via mcpClient.prompts
+const allPromptsByServer = await mcpClient.prompts.list()
+const { prompt, messages } = await mcpClient.prompts.get({
+  serverName: 'myWeatherServer',
+  name: 'current',
+})
+```
+
+#### `prompts.list()`
+
+接続済みの全 MCP サーバーから利用可能なプロンプトをすべて取得し、サーバー名別にまとめます。
+
+```typescript prettier:false
+async list(): Promise<Record<string, Prompt[]>>
+```
+
+例：
+
+```typescript
+const promptsByServer = await mcpClient.prompts.list()
+for (const serverName in promptsByServer) {
+  console.log(`Prompts from ${serverName}:`, promptsByServer[serverName])
+}
+```
+
+#### `prompts.get({ serverName, name, args?, version? })`
+
+サーバーから指定したプロンプトとそのメッセージを取得します。
+
+```typescript prettier:false
+async get({
+  serverName,
+  name,
+  args?,
+  version?,
+}: {
+  serverName: string;
+  name: string;
+  args?: Record<string, any>;
+  version?: string;
+}): Promise<{ prompt: Prompt; messages: PromptMessage[] }>
+```
+
+例：
+
+```typescript
+const { prompt, messages } = await mcpClient.prompts.get({
+  serverName: 'myWeatherServer',
+  name: 'current',
+  args: { location: 'London' },
+})
+console.log(prompt)
+console.log(messages)
+```
+
+#### `prompts.onListChanged(serverName: string, handler: () => void)`
+
+指定したサーバーで利用可能なプロンプトの一覧が変わったときに呼び出される通知ハンドラーを設定します。
+
+```typescript prettier:false
+async onListChanged(serverName: string, handler: () => void): Promise<void>
+```
+
+例：
+
+```typescript
+mcpClient.prompts.onListChanged('myWeatherServer', () => {
+  console.log('Prompt list changed on myWeatherServer.')
+  // You should re-fetch the list of prompts
+  // await mcpClient.prompts.list();
+})
+```
+
+### `tools` プロパティ
+
+`MCPClient` インスタンスの `tools` プロパティで、Tool 一覧の変更通知を購読できます。Tool の取得には `listTools()` または `listToolsets()` を使用します。
+
+#### `tools.onListChanged(serverName: string, handler: () => void)`
+
+指定したサーバーで利用可能な Tool の一覧が変わったとき（たとえば、実行時にサーバーが Tool を追加または削除したとき）に呼び出される通知ハンドラーを設定します。
+
+```typescript prettier:false
+async onListChanged(serverName: string, handler: () => void): Promise<void>
+```
+
+例：
+
+```typescript
+await mcpClient.tools.onListChanged('myWeatherServer', async () => {
+  console.log('Tool list changed on myWeatherServer.')
+  // You should re-fetch the tools
+  // const tools = await mcpClient.listTools();
+})
+```
+
+### `progress` プロパティ
+
+`MCPClient` インスタンスの `progress` プロパティで、Tool の実行中に MCP サーバーが発行する進捗通知を購読できます。
+
+```typescript
+const mcpClient = new MCPClient({
+  servers: {
+    myServer: {
+      url: new URL('http://localhost:4111/api/mcp/myServer/mcp'),
+      // Enabled by default; set to false to disable
+      enableProgressTracking: true,
+    },
+  },
+})
+
+// Subscribe to progress updates for a specific server
+await mcpClient.progress.onUpdate('myServer', params => {
+  console.log('📊 Progress:', params.progress, '/', params.total)
+  if (params.message) console.log('Message:', params.message)
+  if (params.progressToken) console.log('Token:', params.progressToken)
+})
+```
+
+#### `progress.onUpdate(serverName: string, handler)`
+
+指定したサーバーから進捗更新を受け取るハンドラー関数を登録します。
+
+```typescript prettier:false
+async onUpdate(
+  serverName: string,
+  handler: (params: {
+    progressToken: string;
+    progress: number;
+    total?: number;
+    message?: string;
+  }) => void,
+): Promise<void>
+```
+
+注記：
+
+- `enableProgressTracking` が true（デフォルト）の場合、Tool 呼び出しに `progressToken` が含まれ、更新を特定の実行と関連付けられます。
+- Tool の実行時に `runId` を渡すと、`progressToken` として使用されます。
+
+サーバーの進捗追跡を無効にするには、次のようにします。
+
+```typescript
+const mcpClient = new MCPClient({
+  servers: {
+    myServer: {
+      url: new URL('http://localhost:4111/api/mcp/myServer/mcp'),
+      enableProgressTracking: false,
+    },
+  },
+})
+```
+
+## 情報要求（Elicitation）
+
+Elicitation は、MCP サーバーがユーザーに構造化された情報を要求できる機能です。サーバーが追加データを必要とする場合、Elicitation リクエストを送信し、クライアントがユーザーに入力を求めて処理できます。Tool 呼び出し中の利用が一般的です。
+
+### Elicitation の仕組み
+
+1. **サーバーリクエスト**: MCP サーバーの Tool が、メッセージとスキーマを指定して `server.elicitation.sendRequest()` を呼び出す
+1. **クライアントハンドラー**: Elicitation ハンドラー関数がリクエストとともに呼び出される
+1. **ユーザー操作**: ハンドラーが UI や CLI などからユーザー入力を収集する
+1. **レスポンス**: ハンドラーがユーザーの応答（accept、decline、cancel）を返す
+1. **Tool の続行**: サーバーの Tool がレスポンスを受け取り、実行を続ける
+
+### Elicitation の設定
+
+Elicitation を使用する Tool を呼び出す前に、Elicitation ハンドラーを設定する必要があります。
+
+```typescript
+import { MCPClient } from '@mastra/mcp'
+
+const mcpClient = new MCPClient({
+  servers: {
+    interactiveServer: {
+      url: new URL('http://localhost:3000/mcp'),
+    },
+  },
+})
+
+// Set up elicitation handler
+mcpClient.elicitation.onRequest('interactiveServer', async request => {
+  // Handle the server's request for user input
+  console.log(`Server needs: ${request.message}`)
+
+  // Your logic to collect user input
+  const userData = await collectUserInput(request.requestedSchema)
+
+  return {
+    action: 'accept',
+    content: userData,
+  }
+})
+```
+
+### レスポンスの種類
+
+Elicitation ハンドラーは、次の 3 種類のレスポンスのいずれかを返す必要があります。
+
+- **Accept**: ユーザーがデータを入力し、送信を確定した
+
+  ```typescript
+  return {
+    action: 'accept',
+    content: { name: 'John Doe', email: 'john@example.com' },
+  }
+  ```
+
+- **Decline**: ユーザーが情報の提供を明示的に拒否した
+
+  ```typescript
+  return { action: 'decline' }
+  ```
+
+- **Cancel**: ユーザーがリクエストを閉じるかキャンセルした
+  ```typescript
+  return { action: 'cancel' }
+  ```
+
+### スキーマに基づく入力収集
+
+`requestedSchema` は、サーバーが必要とするデータの構造を定義します。
+
+```typescript
+await mcpClient.elicitation.onRequest('interactiveServer', async request => {
+  const { properties, required = [] } = request.requestedSchema
+  const content: Record<string, any> = {}
+
+  for (const [fieldName, fieldSchema] of Object.entries(properties || {})) {
+    const field = fieldSchema as any
+    const isRequired = required.includes(fieldName)
+
+    // Collect input based on field type and requirements
+    const value = await promptUser({
+      name: fieldName,
+      title: field.title,
+      description: field.description,
+      type: field.type,
+      required: isRequired,
+      format: field.format,
+      enum: field.enum,
+    })
+
+    if (value !== null) {
+      content[fieldName] = value
+    }
+  }
+
+  return { action: 'accept', content }
+})
+```
+
+### ベストプラクティス
+
+- **Elicitation を必ず処理する**: Elicitation を使用する可能性がある Tool を呼び出す前にハンドラーを設定する
+- **入力を検証する**: 必須フィールドが入力されていることを確認する
+- **ユーザーの選択を尊重する**: decline と cancel のレスポンスを適切に処理する
+- **明確な UI を用意する**: 要求する情報とその理由を明示する
+- **セキュリティを確保する**: 機密情報を求めるリクエストを自動承認しない
+
+## OAuth 認証
+
+[MCP Auth Specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) に準拠した OAuth 認証が必要な MCP サーバーへ接続するには、`MCPOAuthClientProvider` を使用します。
+
+```typescript
+import { MCPClient, MCPOAuthClientProvider } from '@mastra/mcp'
+
+// Create an OAuth provider
+const oauthProvider = new MCPOAuthClientProvider({
+  redirectUrl: 'http://localhost:3000/oauth/callback',
+  clientMetadata: {
+    redirect_uris: ['http://localhost:3000/oauth/callback'],
+    client_name: 'My MCP Client',
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+  },
+  onRedirectToAuthorization: url => {
+    // Handle authorization redirect (open browser, redirect response, etc.)
+    console.log(`Please visit: ${url}`)
+  },
+})
+
+// Use the provider with MCPClient
+const client = new MCPClient({
+  servers: {
+    protectedServer: {
+      url: new URL('https://mcp.example.com/mcp'),
+      authProvider: oauthProvider,
+    },
+  },
+})
+```
+
+サーバーごとに専用の `MCPOAuthClientProvider` インスタンスを使用してください。Provider は認証中のセッションと認証情報の状態をサーバー単位で保持するため、複数のサーバーで同じインスタンスを共有すると、各認証フローが互いの状態を上書きします。保護されたサーバーを複数設定する場合は、サーバーごとに個別の Provider を作成します。
+
+### ブラウザーを使用した対話型認証
+
+認証が必要なためサーバーが接続を拒否すると、クライアントは即座に失敗せず、`'needs-auth'` 状態を記録します。`authenticate()` を呼び出すと認証フローが完了します。このメソッドは Provider のループバックリダイレクト URL で 1 回限りのコールバックサーバーを起動し、ポートが使用中の場合は後続のポートへ順番にフォールバックします。その後、SDK が実行時に検出とクライアント登録を行います。`onRedirectToAuthorization` は認証 URL を受け取るため、アプリケーションでユーザーのブラウザーを開けます。ブラウザーから認証コードが返されると、トークン交換が完了します。
+
+```typescript
+import { MCPClient, MCPOAuthClientProvider } from '@mastra/mcp'
+
+const oauthProvider = new MCPOAuthClientProvider({
+  redirectUrl: 'http://127.0.0.1:5533/oauth/callback',
+  clientMetadata: {
+    redirect_uris: ['http://127.0.0.1:5533/oauth/callback'],
+    client_name: 'My MCP Client',
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+  },
+  onRedirectToAuthorization: url => {
+    // Open the user's browser at the consent page
+    console.log(`Please visit: ${url}`)
+  },
+})
+
+const mcp = new MCPClient({
+  servers: {
+    protectedServer: {
+      url: new URL('https://mcp.example.com/mcp'),
+      authProvider: oauthProvider,
+    },
+  },
+})
+
+try {
+  await mcp.listTools()
+} catch {
+  if (mcp.getServerAuthState('protectedServer') === 'needs-auth') {
+    await mcp.authenticate('protectedServer')
+  }
+}
+```
+
+同じサーバーに対する複数の `authenticate()` 呼び出しは、進行中のフローに合流します。異なるサーバーは個別に認証されます。有効なトークンが保存されている場合、ブラウザーを開かずに再接続します。
+
+認証フローを独自に制御するホストは、エクスポートされた `createOAuthCallbackServer` ヘルパーで認証コードを取得できます。このヘルパーは 1 回限りのループバックサーバーをバインドし、OAuth の `state` パラメーターを検証して、コードを返します。通常の HTTP サーバーを作成するため、ローカルのループバックリダイレクト専用です。HTTPS リダイレクト URL を使用する Web アプリケーションでは、このヘルパーを使わず、独自のコールバックエンドポイントをホストして Provider を直接操作する必要があります。
+
+```typescript
+import { createOAuthCallbackServer, getCallbackUrlCandidates } from '@mastra/mcp'
+
+// getCallbackUrlCandidates() lists every URL the helper may bind, so register
+// all of them as redirect_uris during client registration to cover port fallback.
+const redirectUris = getCallbackUrlCandidates('http://127.0.0.1:5533/oauth/callback').map(url =>
+  url.toString(),
+)
+
+const server = await createOAuthCallbackServer({
+  redirectUrl: 'http://127.0.0.1:5533/oauth/callback',
+  state: expectedState,
+})
+
+// server.url reflects the port actually bound — use it as the redirect_uri.
+try {
+  const { code } = await server.waitForCode()
+  // Exchange the code here.
+} finally {
+  await server.close()
+}
+```
+
+### 簡易 Token Provider
+
+テスト時や、有効なアクセストークンをすでに取得している場合は、次のように設定します。
+
+```typescript
+import { MCPClient, createSimpleTokenProvider } from '@mastra/mcp'
+
+const provider = createSimpleTokenProvider('your-access-token', {
+  redirectUrl: 'http://localhost:3000/callback',
+  clientMetadata: {
+    redirect_uris: ['http://localhost:3000/callback'],
+    client_name: 'Test Client',
+  },
+})
+
+const client = new MCPClient({
+  servers: {
+    testServer: {
+      url: new URL('https://mcp.example.com/mcp'),
+      authProvider: provider,
+    },
+  },
+})
+```
+
+### カスタム Token Storage
+
+セッションをまたいでトークンを永続化するには、`OAuthStorage` インターフェースを実装します。
+
+```typescript
+import { MCPOAuthClientProvider, OAuthStorage } from '@mastra/mcp'
+
+class DatabaseOAuthStorage implements OAuthStorage {
+  constructor(
+    private db: Database,
+    private userId: string,
+  ) {}
+
+  async set(key: string, value: string): Promise<void> {
+    await this.db.query(
+      'INSERT INTO oauth_tokens (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET value = ?',
+      [this.userId, key, value, value],
+    )
+  }
+
+  async get(key: string): Promise<string | undefined> {
+    const result = await this.db.query(
+      'SELECT value FROM oauth_tokens WHERE user_id = ? AND key = ?',
+      [this.userId, key],
+    )
+    return result?.[0]?.value
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.db.query('DELETE FROM oauth_tokens WHERE user_id = ? AND key = ?', [
+      this.userId,
+      key,
+    ])
+  }
+}
+
+const provider = new MCPOAuthClientProvider({
+  redirectUrl: 'http://localhost:3000/callback',
+  clientMetadata: {/* ... */},
+  storage: new DatabaseOAuthStorage(db, 'user-123'),
+})
+```
+
+## 使用例
+
+### 静的な Tool 設定
+
+アプリ全体で MCP サーバーへの接続を 1 つだけ使用する Tool では、`listTools()` を使って Tool を Agent に渡します。
+
+```typescript
+import { MCPClient } from '@mastra/mcp'
+import { Agent } from '@mastra/core/agent'
+
+const mcp = new MCPClient({
+  servers: {
+    stockPrice: {
+      command: 'npx',
+      args: ['tsx', 'stock-price.ts'],
+      env: {
+        API_KEY: 'your-api-key',
+      },
+      log: logMessage => {
+        console.log(`[${logMessage.level}] ${logMessage.message}`)
+      },
+    },
+    weather: {
+      url: new URL('http://localhost:8080/sse'),
+    },
+  },
+  timeout: 30000, // Global 30s timeout
+})
+
+// Create an agent with access to all tools
+const agent = new Agent({
+  id: 'multi-tool-agent',
+  name: 'Multi-tool Agent',
+  instructions: 'You have access to multiple tool servers.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: await mcp.listTools(),
+})
+
+// Example of using resource methods
+async function checkWeatherResource() {
+  try {
+    const weatherResources = await mcp.resources.list()
+    if (weatherResources.weather && weatherResources.weather.length > 0) {
+      const currentWeatherURI = weatherResources.weather[0].uri
+      const weatherData = await mcp.resources.read('weather', currentWeatherURI)
+      console.log('Weather data:', weatherData.contents[0].text)
+    }
+  } catch (error) {
+    console.error('Error fetching weather resource:', error)
+  }
+}
+checkWeatherResource()
+
+// Example of using prompt methods
+async function checkWeatherPrompt() {
+  try {
+    const weatherPrompts = await mcp.prompts.list()
+    if (weatherPrompts.weather && weatherPrompts.weather.length > 0) {
+      const currentWeatherPrompt = weatherPrompts.weather.find(p => p.name === 'current')
+      if (currentWeatherPrompt) {
+        console.log('Weather prompt:', currentWeatherPrompt)
+      } else {
+        console.log('Current weather prompt not found')
+      }
+    }
+  } catch (error) {
+    console.error('Error fetching weather prompt:', error)
+  }
+}
+checkWeatherPrompt()
+```
+
+### 動的な Toolset
+
+ユーザーごとに新しい MCP 接続が必要な場合は、`listToolsets()` を使い、stream または generate の呼び出し時に Tool を追加します。
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { MCPClient } from '@mastra/mcp'
+
+// Create the agent first, without any tools
+const agent = new Agent({
+  id: 'multi-tool-agent',
+  name: 'Multi-tool Agent',
+  instructions: 'You help users check stocks and weather.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+// Later, configure MCP with user-specific settings
+const mcp = new MCPClient({
+  servers: {
+    stockPrice: {
+      command: 'npx',
+      args: ['tsx', 'stock-price.ts'],
+      env: {
+        API_KEY: 'user-123-api-key',
+      },
+      timeout: 20000, // Server-specific timeout
+    },
+    weather: {
+      url: new URL('http://localhost:8080/sse'),
+      requestInit: {
+        headers: {
+          Authorization: `Bearer user-123-token`,
+        },
+      },
+    },
+  },
+})
+
+// Pass all toolsets to stream() or generate()
+const response = await agent.stream('How is AAPL doing and what is the weather?', {
+  toolsets: await mcp.listToolsets(),
+})
+```
+
+## インスタンス管理
+
+`MCPClient` クラスには、複数のインスタンスを管理するためのメモリリーク防止機能が組み込まれています。
+
+1. `id` を指定せずに同じ設定のインスタンスを複数作成すると、メモリリークを防ぐためエラーが発生します
+1. 同じ設定のインスタンスが複数必要な場合は、各インスタンスに一意の `id` を指定します
+1. 同じ設定でインスタンスを再作成する前に、`await configuration.disconnect()` を呼び出します
+1. インスタンスが 1 つだけ必要な場合は、再作成を避けるため設定を上位スコープに移すことを検討してください
+
+たとえば、`id` を指定せずに同じ設定のインスタンスを複数作成しようとすると、次のようになります。
+
+```typescript
+// First instance - OK
+const mcp1 = new MCPClient({
+  servers: {/* ... */},
+})
+
+// Second instance with same config - Will throw an error
+const mcp2 = new MCPClient({
+  servers: {/* ... */},
+})
+
+// To fix, either:
+// 1. Add unique IDs
+const mcp3 = new MCPClient({
+  id: 'instance-1',
+  servers: {/* ... */},
+})
+
+// 2. Or disconnect before recreating
+await mcp1.disconnect()
+const mcp4 = new MCPClient({
+  servers: {/* ... */},
+})
+```
+
+## サーバーのライフサイクル
+
+MCPClient はサーバー接続を適切に処理します。
+
+1. 複数サーバーへの接続を自動管理
+1. 開発中のエラーメッセージを防ぐ安全なサーバー終了処理
+1. 切断時の適切なリソース解放
+
+## 実行時に定義する認証でカスタム fetch を使用する
+
+HTTP サーバーでは、カスタム `fetch` 関数を指定して、実行時に定義する認証やリクエストのインターセプトを処理できます。ほかのカスタム動作にも対応できます。リクエストごとにトークンを更新する場合や、受信リクエストのユーザー認証情報を MCP サーバーへ転送する場合に特に便利です。
+
+カスタム `fetch` 関数は、省略可能な第 3 引数 `requestContext` を受け取ります。これにより、ミドルウェアで設定された、または Agent/Tool の実行時に渡されたリクエストスコープのデータ（認証 Cookie、Bearer トークンなど）へアクセスできます。初回接続のハンドシェイク中、`requestContext` は `null` です。
+
+`fetch` を指定すると、これらの処理をカスタム fetch 関数内で実装できるため、`requestInit`、`eventSourceInit`、`authProvider` は省略可能になります。
+
+```typescript
+const mcpClient = new MCPClient({
+  servers: {
+    apiServer: {
+      url: new URL('https://api.example.com/mcp'),
+      fetch: async (url, init, requestContext) => {
+        const headers = new Headers(init?.headers)
+        // Forward auth cookie from the incoming request
+        const cookie = requestContext?.get('cookie')
+        if (cookie) {
+          headers.set('cookie', cookie)
+        }
+        return fetch(url, { ...init, headers })
+      },
+    },
+  },
+})
+
+// Use with an agent — requestContext is automatically forwarded
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'My Agent',
+  instructions: 'You are a helpful assistant.',
+  model: openai('gpt-5.4'),
+  tools: await mcpClient.listTools(),
+})
+
+await agent.generate('Hello!', {
+  requestContext: myRequestContext, // forwarded to the custom fetch
+})
+```
+
+## カスタム fetch 内で認証エラーを処理する
+
+認証を利用できない場合でも、カスタム `fetch` は `throw` すべきではありません。MCP SDK の Streamable HTTP transport は、サーバーからプッシュされる通知を受信するため、長時間維持される `GET /mcp` の「standalone listener」ストリームをバックグラウンドで開きます。このストリームでエラーが発生すると指数バックオフで再試行されるため、`fetch` の throw や正常に閉じられたストリームによって、約 1 秒に 1 回の無限再接続ループが生じることがあります。
+
+代わりに、合成した `Response` を返します。[MCP Streamable HTTP 仕様](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports)では、サーバーが GET SSE ストリームを提供しない場合に返すシグナルとして `405 Method Not Allowed` を定義しています。SDK はこれを終了ステータスとして扱い、listener を正常に停止します。サーバーが通知をプッシュしない場合は、これを使って listener を無効にします。
+
+次のパターンでは、POST リクエスト時に認証トークンを待機して送信ヘッダーに追加し、合成した 405 で GET listener を短絡します。
+
+```typescript
+async function waitForToken(timeoutMs = 5000): Promise<string | null> {
+  // Replace with your token lookup. Return null if no token is available.
+  return getAuthToken({ timeoutMs })
+}
+
+const mcpClient = new MCPClient({
+  servers: {
+    apiServer: {
+      url: new URL('https://api.example.com/mcp'),
+      fetch: async (url, init) => {
+        const method = (init?.method || 'GET').toUpperCase()
+
+        // The SDK opens a background GET stream for server-pushed notifications.
+        // If your server does not use it, short-circuit with 405 to stop reconnect attempts.
+        if (method === 'GET') {
+          return new Response(null, { status: 405, statusText: 'Method Not Allowed' })
+        }
+
+        // POST: wait for the token, then forward the request with an Authorization header.
+        const token = await waitForToken()
+        if (!token) {
+          // Forward the request without a token and let the server reject it.
+          // The SDK surfaces non-2xx POST responses as errors to the caller of
+          // tools/list, tools/call, etc., which is the desired behavior here.
+          return fetch(url, init)
+        }
+
+        const headers = new Headers(init?.headers)
+        headers.set('authorization', `Bearer ${token}`)
+        return fetch(url, { ...init, headers })
+      },
+    },
+  },
+})
+```
+
+GET listener に `405` を返すのは、サーバーがクライアントへ通知をプッシュしない場合だけです。サーバーが standalone GET ストリームを使用する場合は、`GET` リクエストにも認証トークンを追加してリクエストを通過させます。
+
+## SSE リクエストヘッダーを使用する
+
+従来の SSE MCP transport を使用する場合、MCP SDK の不具合により、`requestInit` と `eventSourceInit` の両方を設定する必要があります。代わりにカスタム `fetch` 関数を使うと、POST リクエストと SSE 接続の両方に自動的に適用されます。
+
+```ts
+// Option 1: Using requestInit and eventSourceInit (required for SSE)
+const sseClient = new MCPClient({
+  servers: {
+    exampleServer: {
+      url: new URL('https://your-mcp-server.com/sse'),
+      // Note: requestInit alone isn't enough for SSE
+      requestInit: {
+        headers: {
+          Authorization: 'Bearer your-token',
+        },
+      },
+      // This is also required for SSE connections with custom headers
+      eventSourceInit: {
+        fetch(input: Request | URL | string, init?: RequestInit) {
+          const headers = new Headers(init?.headers || {})
+          headers.set('Authorization', 'Bearer your-token')
+          return fetch(input, {
+            ...init,
+            headers,
+          })
+        },
+      },
+    },
+  },
+})
+
+// Option 2: Using custom fetch (simpler, works for both Streamable HTTP and SSE)
+const sseClientWithFetch = new MCPClient({
+  servers: {
+    exampleServer: {
+      url: new URL('https://your-mcp-server.com/sse'),
+      fetch: async (url, init) => {
+        const headers = new Headers(init?.headers || {})
+        headers.set('Authorization', 'Bearer your-token')
+        return fetch(url, {
+          ...init,
+          headers,
+        })
+      },
+    },
+  },
+})
+```
+
+## 関連情報
+
+- MCP サーバーの作成方法は、[MCPServer のドキュメント](./mcp-server)を参照してください。
+- Model Context Protocol の詳細は、[@modelcontextprotocol/sdk のドキュメント](https://github.com/modelcontextprotocol/typescript-sdk)を参照してください。

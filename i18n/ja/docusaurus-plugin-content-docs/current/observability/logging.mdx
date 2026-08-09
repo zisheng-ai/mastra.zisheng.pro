@@ -1,0 +1,166 @@
+---
+title: "ログ | Observability"
+description: Mastra でログを使用して実行を監視し、アプリケーションの動作を記録して、AI アプリケーションの精度を高める方法を説明します。
+packages:
+  - "@mastra/loggers"
+  - "@mastra/observability"
+---
+
+# ログ
+
+Mastra のログシステムは、関数の実行、入力データ、出力レスポンスを構造化形式で記録します。
+
+Mastra platform にデプロイすると、ログはダッシュボードに表示されます。セルフホスト環境やカスタム環境では、設定した transport に応じて、ログをファイルや外部サービスへ送信できます。
+
+<Inject>
+  **AI Agent 向け：** Studio を開いたり一時的なスクリプトを書いたりせずに直近のエラーログを直接確認するには、`npx mastra api log list '{"level":"error","page":0,"perPage":50}'` を実行してください。このコマンドを使用するには、Observability のログ設定を有効にした Mastra サーバーが稼働している必要があります。`npx mastra dev` でローカルサーバーを起動するか、`--url` で接続可能なサーバーのベース URL を指定してください。別のフィルターを作成する前に、`npx mastra api log list --schema` を実行してください。API CLI の探索、接続先指定、スキーマ、認証、エラー処理に関する詳しいガイダンスを利用するには、`npx skills add mastra-ai/skills --skill mastra` で Mastra の Skill をインストールしてください。
+</Inject>
+
+## `PinoLogger` によるログの設定
+
+CLI を使用して[新しい Mastra プロジェクトを初期化する](/guides/getting-started/quickstart)と、デフォルトで `PinoLogger` が含まれます。
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { PinoLogger } from '@mastra/loggers'
+
+export const mastra = new Mastra({
+  logger: new PinoLogger({
+    name: 'Mastra',
+    level: 'info',
+  }),
+})
+```
+
+利用可能なすべての設定オプションについては、[PinoLogger](/reference/logging/pino-logger)を参照してください。
+
+## Observability storage へのログ記録
+
+[Observability](/docs/observability/overview) を設定すると、logger のすべての呼び出しが Observability storage に自動転送されます。これにより、アプリケーションと Mastra の内部コンポーネントから呼び出される `debug`、`info`、`warn`、`error`、`trackException` がすべて Trace とともに保存されます。
+
+コードを変更する必要はありません。Mastra は設定された logger をラップし、元の logger（コンソール、ファイル、カスタム transport）と Observability システムの両方へ同時に書き込みます。
+
+### Observability のログレベル設定
+
+コンソール logger とは別に、Observability storage に保存するログレベルを制御できます。Observability インスタンス設定に `logging` オプションを追加します。
+
+```typescript {12-15} title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { PinoLogger } from '@mastra/loggers'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+
+export const mastra = new Mastra({
+  logger: new PinoLogger({ name: 'Mastra', level: 'debug' }),
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-app',
+        exporters: [new MastraStorageExporter()],
+        logging: {
+          enabled: true, // set to false to disable log forwarding
+          level: 'info', // minimum level: 'debug' | 'info' | 'warn' | 'error' | 'fatal'
+        },
+      },
+    },
+  }),
+})
+```
+
+この例では、コンソール logger は `debug` 以上の全レベルを出力しますが、Observability storage に書き込まれるのは `info` 以上だけです。これにより、開発中はコンソールへ詳細に出力しながら、ストレージを整理された状態に保てます。
+
+| オプション | 型 | デフォルト | 説明 |
+| - | - | - | - |
+| `enabled` | `boolean` | `true` | `false` に設定すると、Observability storage へのすべてのログ転送を無効にします。 |
+| `level` | `LogLevel` | `'debug'` | 最小 severity レベル。このレベル未満のログは破棄されます。 |
+
+### ログのクエリ
+
+Observability storage に書き込まれたログは、Mastra client SDK からクエリできます。
+
+```typescript
+import { MastraClient } from '@mastra/client-js'
+
+const client = new MastraClient()
+
+const logs = await client.listLogsVNext({
+  filters: { level: 'error' },
+  pagination: { page: 1, perPage: 50 },
+  orderBy: { field: 'timestamp', direction: 'desc' },
+})
+```
+
+DuckDB や ClickHouse などの永続ストレージバックエンドを使用すると、再起動後もログが保持され、履歴分析に利用できます。
+
+## ログのカスタマイズ
+
+Mastra では、ワークフローステップと Tool のどちらからも利用できる `mastra.getLogger()` メソッドを通じて logger インスタンスへアクセスできます。logger は標準の severity レベルである `debug`、`info`、`warn`、`error` をサポートします。
+
+### ワークフローステップからのログ記録
+
+ワークフローステップ内では、`execute` 関数の `mastra` パラメーターから logger にアクセスします。ステップの実行に関連するメッセージを記録できます。
+
+```typescript {6-7} title="src/mastra/workflows/test-workflow.ts" prettier:false
+import { createWorkflow, createStep } from "@mastra/core/workflows";
+import { z } from "zod";
+
+const step1 = createStep({
+  execute: async ({ mastra }) => {
+    const logger = mastra.getLogger();
+    logger.info("workflow info log");
+
+    return {
+      output: ""
+    };
+  }
+});
+
+export const testWorkflow = createWorkflow({...})
+  .then(step1)
+  .commit();
+```
+
+### Tool からのログ記録
+
+同様に、Tool でも `mastra` パラメーターから logger インスタンスへアクセスできます。実行中の Tool 固有の動作を記録するために使用します。
+
+```typescript {6-7} title="src/mastra/tools/test-tool.ts"
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const testTool = createTool({
+  execute: async (inputData, context) => {
+    const logger = context?.mastra.getLogger()
+    logger?.info('tool info log')
+
+    return {
+      output: '',
+    }
+  },
+})
+```
+
+### 追加データを含むログ記録
+
+Logger メソッドは、追加データを渡す省略可能な第2引数を受け取ります。Observability storage でログをフィルタリングできるように、構造化オブジェクトを渡してください。
+
+```typescript {9} title="src/mastra/workflows/test-workflow.ts" prettier:false
+import { createWorkflow, createStep } from "@mastra/core/workflows";
+import { z } from "zod";
+
+const step1 = createStep({
+  execute: async ({ mastra }) => {
+    const testAgent = mastra.getAgent("testAgent");
+    const logger = mastra.getLogger();
+    
+    logger.info("workflow info log", { agent: testAgent });
+
+    return {
+      output: ""
+    };
+  }
+});
+
+export const testWorkflow = createWorkflow({...})
+  .then(step1)
+  .commit();
+```
