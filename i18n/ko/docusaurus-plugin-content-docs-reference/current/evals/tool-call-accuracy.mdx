@@ -1,0 +1,574 @@
+---
+title: "참고: Tool 호출 정확도 채점자 | 평가"
+description: "LLM 출력이 사용 가능한 옵션에서 올바른 Tool를 호출하는지 여부를 평가하는 Mastra의 Tool 호출 정확도 점수 측정기에 대한 문서입니다."
+packages:
+  - "@mastra/evals"
+---
+
+# Tool 호출 정확도 채점자
+
+Mastra는 LLM이 사용 가능한 옵션에서 올바른 Tool를 선택하는지 여부를 평가하기 위해 두 가지 Tool 호출 정확도 점수를 제공합니다.
+
+1. **코드 기반 득점자**- 정확한 공구 매칭을 이용한 결정론적 평가
+2. **LLM 기반 채점자**- AI를 활용한 의미론적 평가로 적합성 평가
+
+## 득점자 중에서 선택 {/* #choosing-between-scorers */}
+
+### 다음과 같은 경우에 코드 기반 채점자를 사용하십시오. {/* #use-the-code-based-scorer-when */}
+
+* 당신은 필요**deterministic, reproducible** results
+* 테스트하고 싶으신가요?**exact tool matching**
+* 유효성을 검사해야 합니다.**specific tool sequences**
+* 속도와 비용이 우선입니다(LLM 호출 없음)
+* 자동화된 테스트를 실행 중입니다.
+
+### 다음과 같은 경우 LLM 기반 채점자를 사용하세요. {/* #use-the-llm-based-scorer-when */}
+
+* 당신은 필요**semantic understanding** of appropriateness
+* Tool 선택은 다음에 따라 달라집니다.**context and intent**
+* 처리하고 싶으신가요?**edge cases** like clarification requests
+* 당신은 필요**explanations** for scoring decisions
+* 평가하고 계시네요**production agent behavior**
+
+## 코드 기반 Tool 호출 정확도 채점기 {/* #code-based-tool-call-accuracy-scorer */}
+
+그만큼`createToolCallAccuracyScorerCode()` function from `@mastra/evals/scorers/prebuilt` provides deterministic binary scoring based on exact tool matching and supports both strict and lenient evaluation modes, as well as tool calling order validation.
+
+### 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'expectedTool',
+  type: 'string',
+  description:
+    'The name of the tool that should be called for the given task. Ignored when expectedToolOrder is provided.',
+  required: false,
+},
+{
+  name: 'strictMode',
+  type: 'boolean',
+  description:
+    'Controls evaluation strictness. For single tool mode: only exact single tool calls accepted. For order checking mode: tools must match exactly with no extra tools allowed.',
+  required: false,
+  default: 'false',
+},
+{
+  name: 'expectedToolOrder',
+  type: 'string[]',
+  description:
+    'Array of tool names in the expected calling order. When provided, enables order checking mode and ignores expectedTool parameter.',
+  required: false,
+},
+]}
+/>
+
+이 함수는 MastraScorer 클래스의 인스턴스를 반환합니다. 참조[MastraScorer reference](./mastra-scorer) for details on the `.run()` method and its input/output.
+
+### 평가 모드 {/* #evaluation-modes */}
+
+코드 기반 채점기는 두 가지 모드로 작동합니다.
+
+#### 단일 Tool 모드 {/* #single-tool-mode */}
+
+언제`expectedToolOrder` isn't provided, the scorer evaluates single tool selection:
+
+* **표준 모드(strictMode: false)**: 반품`1` if the expected tool is called, regardless of other tools
+* **엄격 모드(strictMode: true)**: 반품`1` only if exactly one tool is called and it matches the expected tool
+
+#### 주문 확인 모드 {/* #order-checking-mode */}
+
+언제`expectedToolOrder` is provided, the scorer validates tool calling sequence:
+
+* **엄격한 순서(strictMode: true)**: Tool는 추가 Tool 없이 지정된 순서대로 정확하게 호출되어야 합니다.
+* **유연한 주문(strictMode: false)**: 예상 Tool는 올바른 상대 순서로 나타나야 합니다(추가 Tool 허용).
+
+## 코드 기반 채점 세부정보 {/* #code-based-scoring-details */}
+
+* **바이너리 점수**: 항상 0 또는 1을 반환합니다.
+* **결정론적**: 동일한 입력은 항상 동일한 출력을 생성합니다.
+* **빠른**: 외부 API 호출 없음
+
+### 코드 기반 채점자 옵션 {/* #code-based-scorer-options */}
+
+```typescript
+// Standard mode - passes if expected tool is called
+const lenientScorer = createCodeScorer({
+  expectedTool: 'search-tool',
+  strictMode: false,
+})
+
+// Strict mode - only passes if exactly one tool is called
+const strictScorer = createCodeScorer({
+  expectedTool: 'search-tool',
+  strictMode: true,
+})
+
+// Order checking with strict mode
+const strictOrderScorer = createCodeScorer({
+  expectedTool: 'step1-tool',
+  expectedToolOrder: ['step1-tool', 'step2-tool', 'step3-tool'],
+  strictMode: true, // no extra tools allowed
+})
+```
+
+### 코드 기반 채점자 결과 {/* #code-based-scorer-results */}
+
+```typescript prettier:false
+{
+  runId: string,
+  preprocessStepResult: {
+    expectedTool: string,
+    actualTools: string[],
+    strictMode: boolean,
+    expectedToolOrder?: string[],
+    hasToolCalls: boolean,
+    correctToolCalled: boolean,
+    correctOrderCalled: boolean | null,
+    toolCallInfos: ToolCallInfo[]
+  },
+  score: number // Always 0 or 1
+}
+```
+
+## 코드 기반 채점기의 예 {/* #code-based-scorer-examples */}
+
+코드 기반 채점기는 정확한 Tool 일치를 기반으로 결정론적 이진 채점(0 또는 1)을 제공합니다.
+
+### 올바른 Tool 선택 {/* #correct-tool-selection */}
+
+```typescript title="src/example-correct-tool.ts"
+const scorer = createToolCallAccuracyScorerCode({
+  expectedTool: 'weather-tool',
+})
+
+// Simulate LLM input and output with tool call
+const inputMessages = [
+  createTestMessage({
+    content: 'What is the weather like in New York today?',
+    role: 'user',
+    id: 'input-1',
+  }),
+]
+
+const output = [
+  createTestMessage({
+    content: 'Let me check the weather for you.',
+    role: 'assistant',
+    id: 'output-1',
+    toolInvocations: [
+      createToolInvocation({
+        toolCallId: 'call-123',
+        toolName: 'weather-tool',
+        args: { location: 'New York' },
+        result: { temperature: '72°F', condition: 'sunny' },
+        state: 'result',
+      }),
+    ],
+  }),
+]
+
+const run = createAgentTestRun({ inputMessages, output })
+const result = await scorer.run(run)
+
+console.log(result.score) // 1
+console.log(result.preprocessStepResult?.correctToolCalled) // true
+```
+
+### 엄격 모드 평가 {/* #strict-mode-evaluation */}
+
+정확히 하나의 Tool가 호출되는 경우에만 통과합니다.
+
+```typescript title="src/example-strict-mode.ts"
+const strictScorer = createToolCallAccuracyScorerCode({
+  expectedTool: 'weather-tool',
+  strictMode: true,
+})
+
+// Multiple tools called - fails in strict mode
+const output = [
+  createTestMessage({
+    content: 'Let me help you with that.',
+    role: 'assistant',
+    id: 'output-1',
+    toolInvocations: [
+      createToolInvocation({
+        toolCallId: 'call-1',
+        toolName: 'search-tool',
+        args: {},
+        result: {},
+        state: 'result',
+      }),
+      createToolInvocation({
+        toolCallId: 'call-2',
+        toolName: 'weather-tool',
+        args: { location: 'New York' },
+        result: { temperature: '20°C' },
+        state: 'result',
+      }),
+    ],
+  }),
+]
+
+const result = await strictScorer.run(run)
+console.log(result.score) // 0 - fails because multiple tools were called
+```
+
+### Tool 주문 확인 {/* #tool-order-validation */}
+
+Tool가 특정 순서로 호출되는지 확인합니다.
+
+```typescript title="src/example-order-validation.ts"
+const orderScorer = createToolCallAccuracyScorerCode({
+  expectedTool: 'auth-tool', // ignored when order is specified
+  expectedToolOrder: ['auth-tool', 'fetch-tool'],
+  strictMode: true, // no extra tools allowed
+})
+
+const output = [
+  createTestMessage({
+    content: 'I will authenticate and fetch the data.',
+    role: 'assistant',
+    id: 'output-1',
+    toolInvocations: [
+      createToolInvocation({
+        toolCallId: 'call-1',
+        toolName: 'auth-tool',
+        args: { token: 'abc123' },
+        result: { authenticated: true },
+        state: 'result',
+      }),
+      createToolInvocation({
+        toolCallId: 'call-2',
+        toolName: 'fetch-tool',
+        args: { endpoint: '/data' },
+        result: { data: ['item1'] },
+        state: 'result',
+      }),
+    ],
+  }),
+]
+
+const result = await orderScorer.run(run)
+console.log(result.score) // 1 - correct order
+```
+
+### 유연한 주문 모드 {/* #flexible-order-mode */}
+
+예상되는 Tool가 상대적 순서를 유지하는 한 추가 Tool를 허용합니다.
+
+```typescript title="src/example-flexible-order.ts"
+const flexibleOrderScorer = createToolCallAccuracyScorerCode({
+  expectedTool: 'auth-tool',
+  expectedToolOrder: ['auth-tool', 'fetch-tool'],
+  strictMode: false, // allows extra tools
+})
+
+const output = [
+  createTestMessage({
+    content: 'Performing comprehensive operation.',
+    role: 'assistant',
+    id: 'output-1',
+    toolInvocations: [
+      createToolInvocation({
+        toolCallId: 'call-1',
+        toolName: 'auth-tool',
+        args: { token: 'abc123' },
+        result: { authenticated: true },
+        state: 'result',
+      }),
+      createToolInvocation({
+        toolCallId: 'call-2',
+        toolName: 'log-tool', // Extra tool - OK in flexible mode
+        args: { message: 'Starting fetch' },
+        result: { logged: true },
+        state: 'result',
+      }),
+      createToolInvocation({
+        toolCallId: 'call-3',
+        toolName: 'fetch-tool',
+        args: { endpoint: '/data' },
+        result: { data: ['item1'] },
+        state: 'result',
+      }),
+    ],
+  }),
+]
+
+const result = await flexibleOrderScorer.run(run)
+console.log(result.score) // 1 - auth-tool comes before fetch-tool
+```
+
+## LLM 기반 Tool 호출 정확도 채점기 {/* #llm-based-tool-call-accuracy-scorer */}
+
+그만큼`createToolCallAccuracyScorerLLM()` function from `@mastra/evals/scorers/prebuilt` uses an LLM to evaluate whether the tools called by an agent are appropriate for the user request, providing semantic evaluation rather than exact matching.
+
+### 매개변수 {/* #parameters-1 */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'model',
+  type: 'MastraModelConfig',
+  description: 'The LLM model to use for evaluating tool appropriateness',
+  required: true,
+},
+{
+  name: 'availableTools',
+  type: 'Array<{name: string, description: string}>',
+  description: 'List of available tools with their descriptions for context',
+  required: true,
+},
+]}
+/>
+
+### 특징 {/* #features */}
+
+LLM 기반 채점자는 다음을 제공합니다.
+
+* **의미론적 평가**: 상황과 사용자 의도를 이해합니다.
+* **적합성 평가**: "유용한" Tool와 "적절한" Tool를 구별합니다.
+* **설명 처리**: Agent이 설명을 적절하게 요청하는 경우를 인식합니다.
+* **누락된 Tool 감지**: 호출되어야 하는 Tool를 식별합니다.
+* **추론 생성**: 채점 결정에 대한 설명을 제공합니다.
+
+### 평가과정 {/* #evaluation-process */}
+
+1. **Tool 호출 추출**: Agent 출력에 언급된 Tool를 식별합니다.
+2. **적합성 분석**: 사용자 요청에 따라 각 Tool를 평가합니다.
+3. **점수 생성**: 적절한 Tool 호출과 전체 Tool 호출을 기준으로 점수를 계산합니다.
+4. **추론 생성**: 사람이 읽을 수 있는 설명을 제공합니다.
+
+## LLM 기반 점수 세부 정보 {/* #llm-based-scoring-details */}
+
+* **분수 점수**: 0.0에서 1.0 사이의 값을 반환합니다.
+* **상황 인식**: 사용자의 의도와 적절성을 고려
+* **설명**: 점수에 대한 추론 제공
+
+### LLM 기반 채점자 옵션 {/* #llm-based-scorer-options */}
+
+```typescript prettier:false
+// Basic configuration
+const basicLLMScorer = createLLMScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  availableTools: [
+    { name: 'tool1', description: 'Description 1' },
+    { name: 'tool2', description: 'Description 2' }
+  ]
+});
+
+// With different model
+const customModelScorer = createLLMScorer({
+  model: '__GATEWAY_OPENAI_MODEL_BASE__', // More powerful model for complex evaluations
+  availableTools: [...]
+});
+```
+
+### LLM 기반 채점자 결과 {/* #llm-based-scorer-results */}
+
+```typescript prettier:false
+{
+  runId: string,
+  score: number,  // 0.0 to 1.0
+  reason: string, // Human-readable explanation
+  analyzeStepResult: {
+    evaluations: Array<{
+      toolCalled: string,
+      wasAppropriate: boolean,
+      reasoning: string
+    }>,
+    missingTools?: string[]
+  }
+}
+```
+
+## LLM 기반 득점자 예 {/* #llm-based-scorer-examples */}
+
+LLM 기반 채점자는 AI를 사용하여 Tool 선택이 사용자의 요청에 적합한지 평가합니다.
+
+### 기본 LLM 평가 {/* #basic-llm-evaluation */}
+
+```typescript title="src/example-llm-basic.ts"
+const llmScorer = createToolCallAccuracyScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  availableTools: [
+    {
+      name: 'weather-tool',
+      description: 'Get current weather information for any location',
+    },
+    {
+      name: 'calendar-tool',
+      description: 'Check calendar events and scheduling',
+    },
+    {
+      name: 'search-tool',
+      description: 'Search the web for general information',
+    },
+  ],
+})
+
+const inputMessages = [
+  createTestMessage({
+    content: 'What is the weather like in San Francisco today?',
+    role: 'user',
+    id: 'input-1',
+  }),
+]
+
+const output = [
+  createTestMessage({
+    content: 'Let me check the current weather for you.',
+    role: 'assistant',
+    id: 'output-1',
+    toolInvocations: [
+      createToolInvocation({
+        toolCallId: 'call-123',
+        toolName: 'weather-tool',
+        args: { location: 'San Francisco', date: 'today' },
+        result: { temperature: '68°F', condition: 'foggy' },
+        state: 'result',
+      }),
+    ],
+  }),
+]
+
+const run = createAgentTestRun({ inputMessages, output })
+const result = await llmScorer.run(run)
+
+console.log(result.score) // 1.0 - appropriate tool usage
+console.log(result.reason) // "The agent correctly used the weather-tool to address the user's request for weather information."
+```
+
+### 부적절한 Tool 사용 처리 {/* #handling-inappropriate-tool-usage */}
+
+```typescript title="src/example-llm-inappropriate.ts"
+const inputMessages = [
+  createTestMessage({
+    content: 'What is the weather in Tokyo?',
+    role: 'user',
+    id: 'input-1',
+  }),
+]
+
+const inappropriateOutput = [
+  createTestMessage({
+    content: 'Let me search for that information.',
+    role: 'assistant',
+    id: 'output-1',
+    toolInvocations: [
+      createToolInvocation({
+        toolCallId: 'call-456',
+        toolName: 'search-tool', // Less appropriate than weather-tool
+        args: { query: 'Tokyo weather' },
+        result: { results: ['Tokyo weather data...'] },
+        state: 'result',
+      }),
+    ],
+  }),
+]
+
+const run = createAgentTestRun({ inputMessages, output: inappropriateOutput })
+const result = await llmScorer.run(run)
+
+console.log(result.score) // 0.5 - partially appropriate
+console.log(result.reason) // "The agent used search-tool when weather-tool would have been more appropriate for a direct weather query."
+```
+
+### 설명 요청 평가 {/* #evaluating-clarification-requests */}
+
+LLM 채점자는 Agent이 설명을 적절하게 요청하는 경우를 인식합니다.
+
+```typescript prettier:false title="src/example-llm-clarification.ts"
+const vagueInput = [
+  createTestMessage({
+    content: 'I need help with something',
+    role: 'user',
+    id: 'input-1'
+  })
+];
+
+const clarificationOutput = [
+  createTestMessage({
+    content: 'I'd be happy to help! Could you please provide more details about what you need assistance with?',
+    role: 'assistant',
+    id: 'output-1',
+    // No tools called - asking for clarification instead
+  })
+];
+
+const run = createAgentTestRun({
+  inputMessages: vagueInput,
+  output: clarificationOutput
+});
+const result = await llmScorer.run(run);
+
+console.log(result.score); // 1.0 - appropriate to ask for clarification
+console.log(result.reason); // "The agent appropriately asked for clarification rather than calling tools with insufficient information."
+```
+
+## 두 득점자 비교 {/* #comparing-both-scorers */}
+
+다음은 동일한 데이터에 대해 두 채점자를 모두 사용하는 예입니다.
+
+```typescript title="src/example-comparison.ts"
+import {
+  createToolCallAccuracyScorerCode as createCodeScorer,
+  createToolCallAccuracyScorerLLM as createLLMScorer,
+} from '@mastra/evals/scorers/prebuilt'
+
+// Setup both scorers
+const codeScorer = createCodeScorer({
+  expectedTool: 'weather-tool',
+  strictMode: false,
+})
+
+const llmScorer = createLLMScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  availableTools: [
+    { name: 'weather-tool', description: 'Get weather information' },
+    { name: 'search-tool', description: 'Search the web' },
+  ],
+})
+
+// Test data
+const run = createAgentTestRun({
+  inputMessages: [
+    createTestMessage({
+      content: 'What is the weather?',
+      role: 'user',
+      id: 'input-1',
+    }),
+  ],
+  output: [
+    createTestMessage({
+      content: 'Let me find that information.',
+      role: 'assistant',
+      id: 'output-1',
+      toolInvocations: [
+        createToolInvocation({
+          toolCallId: 'call-1',
+          toolName: 'search-tool',
+          args: { query: 'weather' },
+          result: { results: ['weather data'] },
+          state: 'result',
+        }),
+      ],
+    }),
+  ],
+})
+
+// Run both scorers
+const codeResult = await codeScorer.run(run)
+const llmResult = await llmScorer.run(run)
+
+console.log('Code Scorer:', codeResult.score) // 0 - wrong tool
+console.log('LLM Scorer:', llmResult.score) // 0.3 - partially appropriate
+console.log('LLM Reason:', llmResult.reason) // Explains why search-tool is less appropriate
+```
+
+## 관련된 {/* #related */}
+
+* [답변 관련성 득점자](./answer-relevancy)
+* [완전성 득점자](./completeness)
+* [성실성 득점자](./faithfulness)
+* [맞춤 채점자](/docs/evals/custom-scorers)

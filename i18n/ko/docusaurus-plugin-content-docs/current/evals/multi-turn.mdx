@@ -1,0 +1,183 @@
+---
+title: "다중 턴 평가 | 평가"
+description: "공유 스레드에서 순차적 입력을 전송하여 여러 차례의 대화에서 Agent 동작을 평가합니다."
+packages:
+  - "@mastra/core"
+---
+
+# 다중 턴 평가
+
+다중 턴 평가는 대화 전반에 걸쳐 Agent 동작을 테스트합니다. 싱글 대신`input`, 당신은`inputs`정렬. 각 항목은 동일한 스레드의 Agent에 순차적으로 전송되며 득점자는 모든 턴에서 누적된 출력을 확인합니다.
+
+## 다중 턴 평가를 사용하는 경우 {/* #when-to-use-multi-turn-evals */}
+
+* Agent는 Memory를 사용하고 이전 턴의 컨텍스트를 기억해야 합니다.
+* Agent은 이전 응답에 따라 후속 질문을 처리합니다.
+* 대화 전체에서 Tool 호출 순서를 확인해야 합니다.
+* Agent는 다단계 Workflow(검색, 확인, 실행)를 실행합니다.
+
+## 빠른 시작 {/* #quickstart */}
+
+```typescript title="src/evals/conversation-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { weatherAgent } from '../agents'
+
+const result = await runEvals({
+  data: [
+    {
+      inputs: [
+        'What is the weather in Brooklyn?',
+        'What about tomorrow?',
+        'Compare the two forecasts.',
+      ],
+    },
+  ],
+  target: weatherAgent,
+  scorers: [checks.calledTool('get_weather', { times: 2 }), checks.includes('Brooklyn')],
+})
+```
+
+각 턴이 실행됩니다.`agent.generate()` with the same thread ID, so the agent sees the full conversation history. Scorers receive the accumulated output messages from all turns.
+
+## 교차 호출을 위해서는 Memory가 필요합니다. {/* #memory-is-required-for-cross-turn-recall */}
+
+다중 턴 리콜은 Agent에 따라 다릅니다.**memory store configured**. The shared thread ID is what lets each turn see the earlier ones, but a thread only persists history when the agent has memory. If the agent has no memory configured, the turns still run sequentially and their outputs still accumulate for scoring, but the agent won't recall earlier turns (each input runs in isolation). `runEvals` logs a warning when you use `inputs` on an agent without memory.
+
+`runEvals`대화 ID를 관리합니다. 공유된 대화 내용을 생성합니다.`threadId` and injects a `resourceId` (Mastra memory scopes messages by resource + thread, so both are required for recall to work). By default the resource is derived from the generated thread so each conversation is isolated. To pin a specific resource, for example to reuse an existing user's memory, pass `targetOptions.memory.resource`; `runEvals` still owns the thread, so you don't provide one:
+
+```typescript
+await runEvals({
+  target: weatherAgent,
+  data: [{ inputs: ['What is the weather in Brooklyn?', 'What about tomorrow?'] }],
+  scorers: [checks.similarity('weather forecast')],
+  targetOptions: { memory: { resource: 'user-42' } },
+})
+```
+
+보다[Memory](/docs/memory/overview) for how to configure a memory store.
+
+## 작동 원리 {/* #how-it-works */}
+
+데이터 항목에`inputs` array, `runEvals`:
+
+1. 새로운 스레드를 생성합니다(고유`threadId`) and resource for the conversation (a caller-provided `targetOptions.memory.resource` is preserved)
+2. 다음을 통해 각 입력을 순차적으로 보냅니다.`agent.generate()` on that thread
+3. 턴에 걸쳐 모든 출력 메시지를 누적합니다.
+4. 평가를 위해 누적된 전체 출력을 채점자에게 전달합니다.
+
+득점자는 모든 턴을 포함하여 전체 대화 결과를 봅니다.
+
+## 점수 의미론 {/* #scoring-semantics */}
+
+다중 회전 항목에 대한 채점자를 작성할 때 이러한 세부 사항이 중요합니다.
+
+* **`run.output`매 턴마다 누적된 출력입니다.**&#xCD9C;력 기반 채점자:`checks.includes`, `checks.calledTool`, `checks.similarity`, and similar: evaluate the whole conversation. For example, `checks.calledTool('get_weather', { times: 2 })` counts calls across all turns.
+* **`run.input`는 첫 번째 턴의 입력일 뿐입니다.**&#xC785;력과 출력을 비교하는 채점자(성실성, 답변 관련성 및 기타 입력 관련 LLM 채점자)는 전체 대화가 아닌 첫 번째 사용자 메시지만 볼 수 있습니다. 멀티 턴에 대한 출력 기반 검사를 선호하거나 누적된 점수를 읽는 스코어러를 구축합니다.`run.output` directly.
+
+## 턴별 어설션`turns` {/* #per-turn-assertions-with-turns */}
+
+그만큼`inputs` form scores the **accumulated** output as a whole, a single score over every turn's output. That can hide per-turn failures: an output-based check like `checks.includes('Brooklyn')` passes if *any* turn mentions Brooklyn, even when the follow-up turn is broken.
+
+다음을 주장해야 할 때**specific turn** behaved correctly, use `turns` instead. Each turn is an object with its own `input` and optional `gates`/`scorers` that evaluate **only that turn's** input and output:
+
+```typescript title="src/evals/per-turn-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+import { weatherAgent } from '../agents'
+
+const result = await runEvals({
+  data: [
+    {
+      turns: [
+        {
+          input: 'What is the weather in Brooklyn?',
+          gates: [checks.calledTool('get_weather')],
+        },
+        {
+          // The follow-up must call the tool again — it can't be satisfied
+          // by the first turn's tool call.
+          input: 'What about tomorrow?',
+          gates: [checks.calledTool('get_weather')],
+          scorers: [{ scorer: checks.similarity('tomorrow forecast'), threshold: 0.5 }],
+        },
+      ],
+    },
+  ],
+  target: weatherAgent,
+})
+
+result.verdict // 'passed' | 'scored' | 'failed'
+result.turnResults // per-turn gate/threshold/scorer outcomes
+```
+
+의미론:
+
+* 턴당 게이트 또는 득점원이 본다.**only that turn's** `run.input` and `run.output`: never the accumulated conversation. This fixes both blind spots of `inputs`: the wrong turn can't satisfy a check, and `run.input` is correct for each turn.
+* 턴별 결과는[verdict](/docs/evals/gates-and-verdicts): a failing turn gate makes the verdict `failed`. A missed turn threshold (with gates passing) makes it `scored`.
+* `result.turnResults[i]`매 턴마다 보고한다`gateResults`, `thresholdResults`, and `scores`, so a failure points at the exact turn. Across multiple conversations, turn results are averaged by turn index.
+* 없는 차례`gates` or `scorers` advances the conversation.
+* 최상위 수준`scorers`/`gates` still run as a whole over the accumulated output, so you can combine "this turn must call the tool" with "the answer mentions Brooklyn."
+* Agent에 저장소가 구성되어 있으면 각 턴별 득점자/게이트 결과가 최상위 점수처럼 유지되므로 턴별 결과가 점수 저장소에 표시됩니다. 저장된 각 턴당 점수는 해당 턴 인덱스(`metadata.turnIndex`), shares the conversation's `threadId`, and links to that turn's own trace span.
+
+사용`inputs` when a single whole-conversation score over the whole conversation is enough. Use `turns` when correctness depends on individual turns. `turns` can't be combined with `input` or `inputs` in the same data item.
+
+## 게이트 및 임계값과 결합 {/* #combining-with-gates-and-thresholds */}
+
+다회전 데이터 항목은 다음과 함께 작동합니다.[gates and verdicts](/docs/evals/gates-and-verdicts). Use output-based scorers so gating reflects the full conversation:
+
+```typescript title="src/evals/memory-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { checks } from '@mastra/evals/checks'
+
+const result = await runEvals({
+  data: [
+    {
+      inputs: ['My favorite city is Brooklyn.', 'What is the weather in my favorite city?'],
+    },
+  ],
+  target: weatherAgent,
+  gates: [checks.calledTool('get_weather')],
+  scorers: [{ scorer: checks.similarity('Brooklyn weather forecast'), threshold: 0.5 }],
+})
+
+result.verdict // 'passed' | 'scored' | 'failed'
+```
+
+## 싱글턴과 멀티턴 혼합 {/* #mixing-single-turn-and-multi-turn */}
+
+싱글`runEvals` call can include both single-turn and multi-turn data items:
+
+```typescript title="src/evals/mixed-eval.ts"
+const result = await runEvals({
+  data: [
+    { input: 'What is the weather in Brooklyn?' },
+    {
+      inputs: ['My favorite city is Brooklyn.', 'What is the weather in my favorite city?'],
+    },
+  ],
+  target: weatherAgent,
+  scorers: [checks.includes('Brooklyn')],
+})
+```
+
+단일 회전 항목 사용`input` as usual. Multi-turn items use `inputs`, `input` can be omitted entirely.
+
+## 확인 {/* #validation */}
+
+`runEvals`던진다`MastraError` if `inputs` is present but empty:
+
+```typescript
+// Throws: 'inputs' must be a non-empty array
+await runEvals({
+  data: [{ inputs: [] }],
+  target: myAgent,
+  scorers: [myScorer],
+})
+```
+
+## 관련된 {/* #related */}
+
+* [`runEvals()`참조](/reference/evals/run-evals): 전체 API`runEvals` parameters and returns
+* [게이트 및 평결](/docs/evals/gates-and-verdicts): 엄격한 요구 사항 및 품질 기준을 적용합니다.
+* [빠른 점검](/docs/evals/quick-checks): Zero-LLM 구성 가능 마이크로 스코어러

@@ -1,0 +1,142 @@
+---
+title: "빠른 점검 | 평가"
+description: "Agent 출력 텍스트 및 Tool 사용에 대한 빠르고 결정적인 어설션을 위한 Zero-LLM 마이크로 스코어러입니다."
+packages:
+  - "@mastra/evals"
+---
+
+# 빠른 점검
+
+빠른 확인은 "출력에 X가 포함되어 있음" 또는 "Tool Y라는 Agent"와 같은 일반적인 주장에 대해 구성 가능한 마이크로 점수 측정기입니다. LLM이 필요하지 않고 즉시 실행되며 동일한 네트워크에 연결됩니다.`scorers: [...]`다른 득점원처럼 배열합니다.
+
+## 빠른 확인을 사용해야 하는 경우 {/* #when-to-use-quick-checks */}
+
+빠르고 결정적인 어설션이 필요한 경우 빠른 확인을 사용하세요.
+
+* 출력 텍스트에 특정 문자열이 포함되거나 제외되는지 확인
+* Agent가 특정 Tool를 호출(또는 회피)하는지 확인
+* Tool 호출 순서 및 개수 제한 확인
+* 비용이 전혀 들지 않는 바이너리 검사를 통한 게이트 CI 파이프라인
+* 계층화된 평가를 위해 LLM 기반 채점자와 결합
+
+주관적 또는 의미론적 평가의 경우 다음을 사용하세요.[LLM-based scorers](/docs/evals/built-in-scorers) instead.
+
+## 빠른 시작 {/* #quickstart */}
+
+```typescript title="src/evals/weather-checks.ts"
+import { checks } from '@mastra/evals/checks'
+import { runEvals } from '@mastra/core/evals'
+import { weatherAgent } from '../agents'
+
+const result = await runEvals({
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  target: weatherAgent,
+  scorers: [checks.includes('Brooklyn'), checks.calledTool('get_weather'), checks.noToolErrors()],
+})
+
+console.log(result.scores)
+// { 'check-includes': 1, 'check-called-tool': 1, 'check-no-tool-errors': 1 }
+```
+
+## 사용 가능한 수표 {/* #available-checks */}
+
+Quick Check는 다음 범주에 속합니다.
+
+### 텍스트 확인 {/* #text-checks */}
+
+이 채점자는 Agent의 텍스트 출력을 평가합니다.
+
+| 확인 | 그것이 하는 일 | 점수 |
+| - | - | - |
+|`checks.includes(str)` | Output contains substring | 1 or 0 |
+| `checks.excludes(str)` | Output doesn't contain substring | 1 or 0 |
+| `checks.equals(str)` | Output exactly equals string | 1 or 0 |
+| `checks.matches(regex)` | Output matches regular expression | 1 or 0 |
+| `checks.similarity(str)` | Dice coefficient similarity to string | 0-1 (or binary with `threshold`) |
+
+### Tool 호출 확인 {/* #tool-call-checks */}
+
+이러한 채점자는 Agent 실행에서 Tool 사용을 평가합니다.
+
+| 확인 | 그것이 하는 일 | 점수 |
+| - | - | - |
+|`checks.calledTool(name)` | Tool was called at least N times | 1 or 0 |
+| `checks.didNotCall(name)` | Tool wasn't called | 1 or 0 |
+| `checks.toolOrder([...])` | Tools called in expected order | 1 or 0 |
+| `checks.maxToolCalls(n)` | No more than N tool calls total | 1 or 0 |
+| `checks.usedNoTools()` | No tools called at all | 1 or 0 |
+| `checks.noToolErrors()` | No tool invocations had errors | 1 or 0 |
+
+## LLM 채점자와 수표 결합 {/* #combining-checks-with-llm-scorers */}
+
+단일의 LLM 기반 채점자를 사용하여 수표 작성`runEvals` call. Use checks for deterministic gates and LLM scorers for qualitative evaluation:
+
+```typescript title="src/evals/layered-eval.ts"
+import { checks } from '@mastra/evals/checks'
+import { createFaithfulnessScorer } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+import { myAgent } from '../agents'
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'What is the weather in Brooklyn?',
+      context: ['Brooklyn weather data: sunny, 72°F'],
+    },
+  ],
+  target: myAgent,
+  scorers: [
+    // Deterministic checks (instant, free)
+    checks.includes('Brooklyn'),
+    checks.calledTool('get_weather'),
+    checks.excludes('error'),
+    checks.noToolErrors(),
+
+    // LLM-based scorer (semantic, costs tokens)
+    createFaithfulnessScorer({ model: '__GATEWAY_OPENAI_MODEL_MINI__' }),
+  ],
+})
+```
+
+## 실시간 채점에서 수표 사용 {/* #using-checks-in-live-scoring */}
+
+지속적인 모니터링을 위해 Agent에 검사를 첨부합니다.
+
+```typescript title="src/agents/weather-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { checks } from '@mastra/evals/checks'
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: 'Answer weather questions using the get_weather tool.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { get_weather: weatherTool },
+  scorers: {
+    noErrors: {
+      scorer: checks.noToolErrors(),
+      sampling: { type: 'ratio', rate: 1 },
+    },
+    mentionCity: {
+      scorer: checks.includes('Brooklyn'),
+      sampling: { type: 'ratio', rate: 0.5 },
+    },
+  },
+})
+```
+
+## 수표 작동 방식 {/* #how-checks-work */}
+
+각 수표는 표준입니다.`createScorer()` instance with a `preprocess` step and a `generateScore` step. They follow the same [four-step pipeline](/docs/evals/custom-scorers#the-four-step-pipeline) as any other scorer:
+
+1. **전처리**: Agent 실행에서 관련 데이터(텍스트 내용, Tool 호출)를 추출하고 정규화합니다.
+2. **생성점수**: 전처리된 결과를 점수(일반적으로 이진수 1 또는 0)로 변환합니다.
+
+수표는 건너뛰기 때문에`analyze` and `generateReason` steps and make no LLM calls, they run in microseconds. Visit the [Quick Checks reference](/reference/evals/checks) for the full API, including all parameters and options for each check.
+
+## 관련된 {/* #related */}
+
+* [빠른 확인 참조](/reference/evals/checks)
+* [내장 득점자](/docs/evals/built-in-scorers)
+* [맞춤 채점자](/docs/evals/custom-scorers)
+* [`runEvals()` 참조](/reference/evals/run-evals)

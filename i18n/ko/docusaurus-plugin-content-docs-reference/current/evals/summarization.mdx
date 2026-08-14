@@ -1,0 +1,289 @@
+---
+title: "참고: 요약 득점자 | 평가"
+description: "Mastra의 요약 득점자에 대한 문서입니다. 요약이 원본 텍스트에 충실하고 원본에 명시된 정보를 보존하는지 평가합니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# 요약 득점자
+
+그만큼`createSummarizationScorer()`함수는 두 축, 즉 모든 주장이 소스 텍스트에 의해 뒷받침되는지 여부와 소스가 명시한 정보를 보존하는지 여부에 대한 요약을 평가하는 채점자를 생성합니다. 최종 점수는 둘 중 낮은 것이기 때문에 요약은 충실하지만 공허하거나, 철저하지만 틀리다고 해서 통과할 수 없습니다.
+
+요약은 텍스트를 전달하는 Agent의 마지막 메시지이며, 소스 텍스트는 기본적으로 실행 입력의 첫 번째 사용자 메시지로 설정됩니다. 통과하다`source` or `sourceExtractor`요약되는 텍스트가 Tool 결과와 같은 다른 곳에 있는 경우.
+
+## 사용예 {/* #usage-example */}
+
+요약된 문서에 대해 요약 점수를 매깁니다.
+
+```typescript title="src/mastra/scorers/summarization.ts"
+import { createSummarizationScorer } from '@mastra/evals/scorers/prebuilt'
+
+const scorer = createSummarizationScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const result = await scorer.run({
+  input: {
+    inputMessages: [{ id: '1', role: 'user', content: sourceDocument }],
+  },
+  output: [{ id: '2', role: 'assistant', content: summary }],
+})
+
+console.log(result.score)
+console.log(result.reason)
+```
+
+## 요약 평가 {/* #summarization-evaluation */}
+
+Agent이 텍스트를 압축할 때 이 채점기를 사용하세요.
+
+* 문서 및 성적표 요약
+* 스레드 및 이메일 요약 지원
+* 긴 입력을 짧은 출력으로 압축하는 모든 단계
+
+## 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'model',
+  type: 'MastraModelConfig',
+  description: 'The language model to use for judging claims and coverage questions',
+},
+{
+  name: 'options',
+  type: 'SummarizationMetricOptions',
+  description: 'Configuration options for the scorer',
+  isOptional: true,
+  properties: [
+    {
+      type: 'SummarizationMetricOptions',
+      parameters: [
+        {
+          name: 'source',
+          type: 'string',
+          description: 'Text the summary is judged against. Defaults to the user message of the run input',
+          isOptional: true,
+        },
+        {
+          name: 'sourceExtractor',
+          type: '(input, output) => string',
+          description:
+            'Function to derive the source text from the run input and output. Takes precedence over source',
+          isOptional: true,
+        },
+        {
+          name: 'maxQuestions',
+          type: 'number',
+          description: 'Upper bound on the coverage questions drawn from the source (default: 10)',
+          isOptional: true,
+        },
+        {
+          name: 'scale',
+          type: 'number',
+          description: 'Scale factor to multiply the final score (default: 1)',
+          isOptional: true,
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+## `.run()`보고 {/* #run-returns */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'score',
+  type: 'number',
+  description:
+    'Summarization score between 0 and scale (default 0-1), the lower of the alignment and coverage scores',
+},
+{
+  name: 'reason',
+  type: 'string',
+  description:
+    'Human-readable explanation naming the axis that produced the score and the claims or questions behind it. Both axis scores appear in the text',
+},
+{
+  name: 'preprocessStepResult',
+  type: 'object',
+  description: 'The alignment verdicts and the questions drawn from the source',
+  properties: [
+    {
+      type: 'object',
+      parameters: [
+        {
+          name: 'alignment',
+          type: '{ claim: string; supported: boolean; reason: string }[]',
+          description: 'One verdict per claim the summary makes',
+        },
+        {
+          name: 'questions',
+          type: 'string[]',
+          description: 'The coverage questions drawn from the source text',
+        },
+      ],
+    },
+  ],
+},
+{
+  name: 'analyzeStepResult',
+  type: 'object',
+  description: 'The coverage verdicts',
+  properties: [
+    {
+      type: 'object',
+      parameters: [
+        {
+          name: 'coverage',
+          type: '{ question: string; answered: boolean; reason: string }[]',
+          description: 'One verdict per question, answered from the summary alone',
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+축 점수는 저장되지 않고 이러한 평결에서 파생됩니다. 정렬은`alignment` entries with `supported: true`, and coverage is the share of `questions` whose `coverage` entry has `answered: true`.
+
+## 채점 세부정보 {/* #scoring-details */}
+
+### 2축 평가 {/* #two-axis-evaluation */}
+
+채점자는 3단계 파이프라인을 실행합니다.
+
+1. **소스 판단**: 요약의 주장을 추출하여 소스와 비교하여 확인하고, 소스에서 폐쇄형 질문을 가져옵니다. 모든 질문은 소스가 "예"라고 대답하도록 작성되었습니다.
+2. **적용 범위**: 각 질문은 요약만을 사용하여 답변됩니다.
+3. **채점**: 두 비율을 계산하여 낮은 쪽이 점수가 됩니다.
+
+적용 범위 단계는 소스 텍스트를 수신하지 않는 별도의 Model 호출로 실행됩니다. 출처를 볼 수 있는 판사는 요약이 아닌 출처에서 질문에 답할 것이며, 이는 이 축이 측정하기 위해 존재하는 누락을 숨길 것입니다.
+
+### 채점 공식 {/* #scoring-formula */}
+
+```
+Alignment    = supported_claims / total_claims
+Coverage     = answered_questions / total_questions
+Summarization = min(Alignment, Coverage) × scale
+```
+
+요약에서 주장이 나오지 않거나 소스에서 질문이 나오지 않으면 점수는 0입니다.
+
+### 점수 해석 {/* #score-interpretation */}
+
+이 범위는 기본값을 가정합니다.`scale` of 1. When using a custom scale, multiply accordingly.
+
+* **0.9-1.0**: 훌륭한 요약, 출처에 충실하고 주요 내용을 다루고 있음
+* **0.7-0.8**: 약간의 누락이 있거나 지원되지 않는 세부 사항이 있는 좋은 요약
+* **0.4-0.6**: 중요한 정보가 누락되었거나 출처에서 벗어나는 정도의 요약
+* **0.1-0.3**: 요약이 좋지 않음, 대부분의 출처가 손실되었거나 모순됨
+* **0.0**: 요약에는 판단할 만한 내용이 없거나 어떤 주장도 뒷받침하지 못했습니다. 질문에 대답하지 않은 요약도 이 점수를 받습니다.
+
+### 두 축 읽기 {/* #reading-the-two-axes */}
+
+두 축 모두 실행 결과에 대한 판정을 남깁니다. 즉, 전처리 단계의 정렬 판정과 분석 단계의 적용 범위 판정입니다. 각 평결에는 그것이 속한 주장이나 질문과 그 이유가 담겨 있습니다. 낮은 정렬 점수는 낮은 적용 범위 점수와 다른 의미를 갖습니다.
+
+* 높은 적용 범위와 낮은 정렬 점수는 요약이 세부 사항을 만들어내거나 왜곡한다는 것을 의미합니다.
+* 높은 정렬과 낮은 적용 범위 점수는 요약이 정확하지만 너무 많은 부분이 누락되었음을 의미합니다.
+
+이유 필드는 점수를 생성한 축의 이름을 지정합니다.
+
+### 점수에서 제외되는 것 {/* #what-the-score-leaves-out */}
+
+길이는 점수에 영향을 미치지 않습니다. 소스 단어를 단어별로 반복하는 요약은 모든 주장을 뒷받침하고 모든 질문에 답하므로 점수는 1입니다. 압축이 테스트 대상의 일부인 경우 길이 확인을 추가하세요.
+
+### 비용 {/* #cost */}
+
+각 평가에서는 세 가지 Model 호출이 이루어집니다.`maxQuestions` bounds the coverage half of the work, which otherwise grows with source length. Raise it for long documents where ten questions can't represent the content.
+
+## 득점자 구성 {/* #scorer-configuration */}
+
+### 실행 입력 요약 {/* #summarizing-the-run-input */}
+
+```typescript
+const scorer = createSummarizationScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+### 다른 곳의 문서 요약 {/* #summarizing-a-document-from-elsewhere */}
+
+```typescript
+import { extractToolResults } from '@mastra/evals/scorers/utils'
+
+const scorer = createSummarizationScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    sourceExtractor: (input, output) => {
+      return extractToolResults(output)
+        .filter(({ toolName }) => toolName === 'fetchDocument')
+        .map(({ result }) => String(result))
+        .join('\n\n')
+    },
+    maxQuestions: 20,
+  },
+})
+```
+
+## 예 {/* #example */}
+
+문서 세트에 대해 요약 Agent를 평가합니다.
+
+```typescript title="src/example-summarization.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createSummarizationScorer } from '@mastra/evals/scorers/prebuilt'
+import { summarizerAgent } from './agent'
+
+const scorer = createSummarizationScorer({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: { maxQuestions: 10 },
+})
+
+const result = await runEvals({
+  target: summarizerAgent,
+  scorers: [scorer],
+  data: [
+    {
+      input:
+        'The company was founded in 1995 by John Smith. It started with 10 employees and grew to 500 by 2020. The company is based in Seattle.',
+    },
+  ],
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+자세한 내용은`runEvals`, see the [runEvals reference](/reference/evals/run-evals).
+
+이 득점자를 Agent에 추가하려면 다음을 참조하세요.[Scorers overview](/docs/evals/overview#adding-scorers-to-agents) guide.
+
+## 신실함과의 비교 {/* #comparison-with-faithfulness */}
+
+| 사용 사례 | 요약 | 충실함 |
+| - | - | - |
+|**What it measures** | Support and coverage together | Support only |
+| **Judged against** | The source text being condensed | Retrieved context or tool results |
+| **Catches omission** | Yes | No |
+| **Needs the full source** | Yes | No, context alone is enough |
+
+사용`faithfulness` when the question is whether an answer stays grounded in retrieved context. Use `summarization` when the output is meant to stand in for a longer text.
+
+## 관련된 {/* #related */}
+
+* [성실성 득점자](/reference/evals/faithfulness): 문맥에 따른 답변 근거성을 측정합니다.
+* [완전성 득점자](/reference/evals/completeness): Model 없이 요소 커버리지를 비교합니다.
+* [콘텐츠 유사성 점수 측정기](/reference/evals/content-similarity): Model 없이 텍스트 유사성을 비교합니다.
+* [맞춤 채점자](/docs/evals/custom-scorers): 나만의 평가 지표 만들기

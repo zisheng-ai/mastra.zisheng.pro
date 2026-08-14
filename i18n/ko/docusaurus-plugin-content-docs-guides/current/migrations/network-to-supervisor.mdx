@@ -1,0 +1,270 @@
+---
+title: "마이그레이션: .network()를 감독 Agent로 | 마이그레이션 가이드"
+description: "더 나은 다중 Agent 조정을 위해 .stream() 및 .generate()를 사용하여 .network()에서 감독자 Agent로 마이그레이션하는 방법을 알아보세요."
+---
+
+# 다음에서 마이그레이션`.network()`감독 Agent에게
+
+다음을 사용하는 감독자 Agent`Agent.stream()` and `Agent.generate()`여러 Agent를 조정하고 이전 Agent를 대체하는 데 권장되는 접근 방식입니다.`.network()`API. 이 가이드는 마이그레이션의 각 단계를 안내합니다.
+
+:::경고\[.network() 지원 중단]
+
+`.network()`더 이상 사용되지 않으며 향후 릴리스에서 제거될 예정입니다. 기존 코드는 그때까지 계속 작동하지만 현재 개발은 감독자 Agent에 중점을 두고 있습니다. 가능한 한 빨리 감독 Agent으로 마이그레이션하세요.
+
+:::
+
+## 바꾸다`.network()` with `.stream()` or `.generate()` {/* #replace-network-with-stream-or-generate */}
+
+핵심 변화는 교체입니다`.network()` calls with `.stream()` (for streaming) or `.generate()` (for non-streaming). The agent configuration stays the same. You still define `agents`, `workflows`, `tools`, 그리고`memory`Agent에. 차이점은 호출하는 방법과 결과를 처리하는 방법입니다.
+
+와 함께`.network()`, you iterated over custom event types like `network-execution-event-step-finish`. With `.stream()`, you use the standard `textStream` or `fullStream` iterators.
+
+**전에:**
+
+```typescript
+const result = await routingAgent.network('Research AI in education')
+
+for await (const chunk of result) {
+  if (chunk.type === 'network-execution-event-step-finish') {
+    console.log(chunk.payload.result)
+  }
+}
+```
+
+**후에:**
+
+```typescript
+const stream = await supervisorAgent.stream('Research AI in education', {
+  maxSteps: 10,
+})
+
+for await (const chunk of stream.textStream) {
+  process.stdout.write(chunk)
+}
+```
+
+그만큼`maxSteps` option limits how many iterations the supervisor can take. This replaces the implicit iteration limit in `.network()`.
+
+스트리밍이 아닌 사용 사례의 경우 다음을 사용하세요.`generate()` with the same options:
+
+```typescript
+const result = await supervisorAgent.generate('Research AI in education', {
+  maxSteps: 10,
+})
+
+console.log(result.text)
+```
+
+## 명확한 감독자 지침 작성 {/* #write-clear-supervisor-instructions */}
+
+와 함께`.network()`, the routing agent relied on generic instructions and primitive descriptions to decide what to call. Supervisor agents work the same way, but clear and specific instructions improve delegation accuracy.
+
+당신의 상사의`instructions` should identify the available resources and when to use each one. They should also explain how to coordinate those resources and recognize when the task is complete.
+
+**전에:**
+
+```typescript
+const routingAgent = new Agent({
+  id: 'routing-agent',
+  instructions: 'You are a network of researchers and writers...',
+  agents: { researchAgent, writingAgent },
+  memory: new Memory(),
+})
+```
+
+**후에:**
+
+```typescript
+const supervisorAgent = new Agent({
+  id: 'supervisor-agent',
+  instructions: `You coordinate research and writing tasks using specialized agents.
+
+Available resources:
+- researchAgent: Gathers factual data and sources (returns bullet points)
+- writingAgent: Transforms research into narrative content (returns full paragraphs)
+
+Delegation strategy:
+1. For research requests: Delegate to researchAgent first
+2. For writing requests: Delegate to writingAgent (provide research if available)
+3. For complex requests: Delegate to researchAgent first, then writingAgent
+
+Success criteria:
+- All user questions are fully answered
+- Response is well-formatted and complete
+- If information is incomplete, continue iterating`,
+  agents: { researchAgent, writingAgent },
+  memory: new Memory(),
+})
+```
+
+## 하위 Agent에 설명 추가 {/* #add-descriptions-to-subagents */}
+
+각 하위 Agent에는`description` field that explains its purpose and return format. The description should also state when to use the subagent. The supervisor uses these descriptions to decide which agent to delegate to.
+
+```typescript
+const researchAgent = new Agent({
+  id: 'research-agent',
+  description: `Specializes in gathering factual information and data on any topic.
+    Returns concise bullet-point summaries with key facts and sources.
+    Does not write full articles or narrative content.`,
+})
+
+const writingAgent = new Agent({
+  id: 'writing-agent',
+  description: `Transforms research material into well-structured written content.
+    Produces full paragraphs and complete articles.
+    Best used after research has been gathered.`,
+})
+```
+
+## 이벤트 처리 업데이트 {/* #update-event-handling */}
+
+특정 항목을 처리하는 경우`.network()` events, update them to use the standard stream chunk types:
+
+| `.network()` event | Supervisor agent chunk |
+| - | - |
+| `routing-agent-start` | `step-start` |
+| `routing-agent-end` | `step-finish` |
+| `agent-execution-start` | `step-start` (when delegating) |
+| `agent-execution-event-text-delta` | `text-delta` |
+| `agent-execution-event-finish` | `step-finish` |
+| `network-execution-event-step-finish` | `step-finish` + `finishReason: 'stop'` |
+| `network-object` | `object-delta`(구조화된 출력 사용) |
+|`network-object-result` | `object`(구조화된 출력 사용) |
+
+## 위임 후크 추가 {/* #add-delegation-hooks */}
+
+감독 Agent를 사용하면 위임 수명 주기에 연결하여 위임을 모니터링, 수정 또는 거부할 수 있습니다. 이러한 후크는 Agent의`defaultOptions` or passed per-call.
+
+`onDelegationStart`감독자가 하위 Agent에게 위임하기 전에 호출됩니다. Prompt를 수정하거나 하위 Agent의 단계를 제한할 수 있습니다. 후크는 위임을 완전히 거부할 수도 있습니다.
+
+```typescript
+const stream = await supervisorAgent.stream('Research AI in education', {
+  maxSteps: 10,
+  delegation: {
+    onDelegationStart: async context => {
+      console.log(`Delegating to: ${context.primitiveId}`)
+
+      if (context.primitiveId === 'research-agent') {
+        return {
+          proceed: true,
+          modifiedPrompt: `${context.prompt}\n\nFocus on 2024-2025 data.`,
+          modifiedMaxSteps: 5,
+        }
+      }
+
+      if (context.iteration > 8) {
+        return {
+          proceed: false,
+          rejectionReason: 'Max iterations reached. Synthesize current findings.',
+        }
+      }
+
+      return { proceed: true }
+    },
+  },
+})
+```
+
+`onDelegationComplete`위임이 완료된 후에 호출됩니다. 결과를 확인하고 전화하세요`context.bail()` when the supervisor loop should stop. You can also return feedback that gets saved to the supervisor's memory:
+
+```typescript
+const stream = await supervisorAgent.stream('Research AI in education', {
+  maxSteps: 10,
+  delegation: {
+    onDelegationComplete: async context => {
+      if (context.error) {
+        context.bail() // Stop further delegations
+        return {
+          feedback: `Delegation to ${context.primitiveId} failed: ${context.error}. Try a different approach.`,
+        }
+      }
+    },
+  },
+})
+```
+
+## 메시지 필터링 추가 {/* #add-message-filtering */}
+
+기본적으로 하위 Agent는 감독자로부터 전체 대화 컨텍스트를 받습니다. 사용`messageFilter` to control what messages are shared. For example, remove sensitive data or limit the number of messages:
+
+```typescript
+const stream = await supervisorAgent.stream('Research AI in education', {
+  maxSteps: 10,
+  delegation: {
+    messageFilter: ({ messages, primitiveId, prompt }) => {
+      return messages
+        .filter(msg => {
+          const content =
+            typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+          return !content.includes('confidential')
+        })
+        .slice(-10)
+    },
+  },
+})
+```
+
+## 반복 모니터링 추가 {/* #add-iteration-monitoring */}
+
+`onIterationComplete`감독자 루프가 반복될 때마다 호출됩니다. 이를 사용하여 진행 상황을 기록하거나 상담사를 안내하는 피드백을 제공하세요. 후크는 실행을 조기에 중지할 수도 있습니다.
+
+```typescript
+const stream = await supervisorAgent.stream('Research AI in education', {
+  maxSteps: 10,
+  onIterationComplete: async context => {
+    console.log(`Iteration ${context.iteration}/${context.maxIterations}`)
+
+    if (!context.text.includes('recommendations')) {
+      return {
+        continue: true,
+        feedback: 'Please include specific recommendations in your analysis.',
+      }
+    }
+
+    if (context.text.length > 1000 && context.finishReason === 'stop') {
+      return { continue: false }
+    }
+
+    return { continue: true }
+  },
+})
+```
+
+## 작업 완료 점수 추가 {/* #add-task-completion-scoring */}
+
+작업 완료 채점자는 작업이 완료되었는지 자동으로 확인합니다. 검증이 실패하면 감독자는 계속해서 반복합니다. 실패한 득점자의 피드백이 대화 컨텍스트에 포함되어 하위 Agent가 누락된 내용을 확인할 수 있습니다.
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+
+const taskCompleteScorer = createScorer({
+  id: 'task-complete',
+  name: 'Task Completeness',
+}).generateScore(async context => {
+  const text = (context.run.output || '').toString()
+  const hasAnalysis = text.includes('analysis')
+  const hasRecommendations = text.includes('recommendation')
+  return hasAnalysis && hasRecommendations ? 1 : 0
+})
+
+const stream = await supervisorAgent.stream('Research AI in education', {
+  maxSteps: 10,
+  isTaskComplete: {
+    scorers: [taskCompleteScorer],
+    strategy: 'all',
+    onComplete: async result => {
+      console.log('Task complete:', result.complete)
+    },
+  },
+})
+```
+
+## 또한보십시오 {/* #see-also */}
+
+* [감독자 Agent](/docs/capabilities/subagents)
+* [Agent 네트워크](/docs/agents/networks)
+* [Agent.stream() 참조](/reference/streaming/agents/stream)
+* [Agent.generate() 참조](/reference/agents/generate)
+* [대리인 승인](/docs/agents/agent-approval)
+* [가이드: 연구 코디네이터](/guides/guide/research-coordinator)

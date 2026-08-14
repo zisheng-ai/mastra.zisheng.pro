@@ -1,0 +1,216 @@
+---
+title: "더 나은 인증 | 인증"
+description: "Better Auth(자체 호스팅, 오픈 소스 인증)를 사용하여 Mastra 서버를 인증하세요."
+packages:
+  - "@mastra/auth-better-auth"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# 더 나은 인증
+
+그만큼`@mastra/auth-better-auth`패키지는 Better Auth를 사용하여 Mastra에 대한 인증을 제공합니다. Better Auth 인스턴스를 사용하여 들어오는 요청을 확인하고 다음을 통해 Mastra 서버와 통합됩니다.`server.auth`옵션.
+
+## 전제조건 {/* #prerequisites */}
+
+이 예에서는 Better Auth를 사용합니다. Better Auth 인스턴스가 구성되어 있고 환경 변수가 설정되어 있는지 확인하세요.
+
+```env title=".env"
+# Required by Better Auth
+BETTER_AUTH_SECRET=...   # at least 32 chars
+BETTER_AUTH_URL=http://localhost:3000
+
+# Example DB URL used by the snippet below (adjust for your setup)
+DATABASE_URL=postgres://...
+```
+
+:::메모
+
+Better Auth에서는 설정을 권장합니다.`baseURL` explicitly (or via `BETTER_AUTH_URL`) for security and stability.
+
+:::
+
+Better Auth 핸들러를 아직 마운트하지 않은 경우(앱이 사용자를 로그인하거나 세션을 생성할 수 있도록) 다음을 따르세요.[Better Auth installation guide](https://www.better-auth.com/docs/installation) to mount the `/api/auth/*` route (or your configured base path).
+
+## 설치 {/* #installation */}
+
+설치하다`@mastra/auth-better-auth` package:
+
+```bash npm2yarn
+npm install @mastra/auth-better-auth
+```
+
+## 사용예 {/* #usage-example */}
+
+먼저 Better Auth 인스턴스를 만듭니다.
+
+```ts title="lib/auth.ts"
+import { betterAuth } from 'better-auth'
+
+export const auth = betterAuth({
+  database: {
+    provider: 'postgresql',
+    url: process.env.DATABASE_URL!,
+  },
+  emailAndPassword: {
+    enabled: true,
+  },
+  baseURL: process.env.BETTER_AUTH_URL,
+  secret: process.env.BETTER_AUTH_SECRET,
+})
+```
+
+그런 다음 Mastra와 함께 사용하십시오.
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthBetterAuth } from '@mastra/auth-better-auth'
+import { auth } from '@/lib/auth'
+
+const mastraAuth = new MastraAuthBetterAuth({
+  auth,
+})
+
+export const mastra = new Mastra({
+  server: {
+    auth: mastraAuth,
+  },
+})
+```
+
+방문하다[MastraAuthBetterAuth](/reference/auth/better-auth) for all available configuration options.
+
+## 맞춤 인증 {/* #custom-authorization */}
+
+```ts
+const mastraAuth = new MastraAuthBetterAuth({
+  auth,
+  async authorizeUser(user) {
+    // Example: only allow verified emails
+    return user?.user?.emailVerified === true
+  },
+})
+```
+
+## 경로 구성 {/* #route-configuration */}
+
+```ts
+const mastraAuth = new MastraAuthBetterAuth({
+  auth,
+  public: ['/health', '/api/status'],
+  protected: ['/api/*', '/admin/*'],
+})
+```
+
+### 일치 규칙 {/* #matching-rules */}
+
+* `public`그리고`protected` accept exact paths, wildcard patterns (like `/api/*`), and path params (like `/users/:id`).
+* 메소드별 규칙의 경우 다음과 같은 튜플을 사용하세요.`["/api/agents", ["GET", "POST"]]`.
+* 경로가 둘 다 일치하는 경우`public` and `protected`, `public` wins and no auth is required.
+* 둘 다 일치하지 않으면 경로는 기본적으로 보호되는 것으로 간주됩니다(경로가 명시적으로 표시되지 않는 한).`requiresAuth: false`).
+
+## 클라이언트 측 설정 {/* #client-side-setup */}
+
+인증이 활성화되면 Mastra의 내장 경로에 대한 요청에 인증이 필요합니다. 실제로 이는 클라이언트가 Better Auth 설정에서 인증된 요청에 사용하는 모든 자격 증명을 보내야 함을 의미합니다.
+
+### 쿠키 세션(권장) {/* #cookie-session-recommended */}
+
+Better Auth 설정에서 쿠키를 사용하는 경우 자격 증명을 보내도록 클라이언트를 구성하세요. 교차 출처 요청의 경우(예: Next.js`:3000` calling Mastra on `:4111`), enable CORS credentials on the Mastra server:
+
+```ts title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  server: {
+    auth: mastraAuth,
+    cors: {
+      origin: 'http://localhost:3000', // your frontend origin
+      credentials: true,
+    },
+  },
+})
+```
+
+그런 다음 자격 증명을 포함하도록 클라이언트를 구성합니다.
+
+```ts
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  baseUrl: 'http://localhost:4111',
+  credentials: 'include',
+})
+```
+
+API를 직접 호출하는 경우 자격 증명을`fetch` as well:
+
+```ts
+await fetch('http://localhost:4111/api/agents/weatherAgent/generate', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+  },
+  credentials: 'include',
+  body: JSON.stringify({ messages: 'Weather in London' }),
+})
+```
+
+### 무기명 토큰 {/* #bearer-token */}
+
+서명된 세션 토큰을 Bearer 토큰으로 전달할 수 있습니다. Better Auth 클라이언트 세션에서 이를 검색하여`Authorization` header:
+
+```ts
+import { MastraClient } from '@mastra/client-js'
+import { authClient } from './auth-client' // your Better Auth client
+
+const session = await authClient.getSession()
+
+export const mastraClient = new MastraClient({
+  baseUrl: 'http://localhost:4111',
+  headers: {
+    Authorization: `Bearer ${session.data?.session.token}`,
+  },
+})
+```
+
+방문하다[Mastra Client SDK](/docs/server/mastra-client) for more configuration options.
+
+### 인증된 요청 만들기 {/* #making-authenticated-requests */}
+
+<Tabs>
+  <TabItem value="react" label="React">
+    ```tsx title="src/components/test-agent.tsx"
+    import { mastraClient } from '../lib/mastra-client'
+
+    export const TestAgent = () => {
+      async function handleClick() {
+        const agent = mastraClient.getAgent('weatherAgent')
+
+        const response = await agent.generate('Weather in London')
+
+        console.log(response)
+      }
+
+      return <button onClick={handleClick}>Test Agent</button>
+    }
+    ```
+  </TabItem>
+
+  <TabItem value="curl" label="cURL">
+    ```bash
+    curl -X POST http://localhost:4111/api/agents/weatherAgent/generate \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer <your-token>" \
+      -d '{
+        "messages": "Weather in London"
+      }'
+    ```
+  </TabItem>
+</Tabs>
+
+## 문제 해결 {/* #troubleshooting */}
+
+* **모든 요청에 ​​401**: Better Auth 핸들러가 마운트되었고 앱이 유효한 세션을 생성할 수 있는지 확인하세요. 클라이언트가 세션 쿠키나`Authorization: Bearer <signed-token>` header.
+* **쿠키가 교차 출처로 전송되지 않음**: 세트`credentials: "include"` in `MastraClient` and configure `server.cors` with your frontend origin and `credentials: true`.
+* **전달자 토큰이 거부됨**: 완전히 서명된 세션 토큰을 전달해야 합니다(`authClient.getSession()`), not a raw or unsigned token.
+* **기본 URL 문제**: 세트`baseURL` in `betterAuth({ ... })` or set `BETTER_AUTH_URL`.
+* **DB 연결 오류**: 확인하다`DATABASE_URL` and database provider configuration.

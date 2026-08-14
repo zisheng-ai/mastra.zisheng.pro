@@ -1,0 +1,454 @@
+---
+title: "작업기억 | Memory"
+description: "지속적인 사용자 데이터, 기본 설정을 저장하기 위해 Mastra에서 작업 Memory를 구성하는 방법을 알아보세요."
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+  - "@mastra/mongodb"
+  - "@mastra/oracledb"
+  - "@mastra/pg"
+  - "@mastra/upstash"
+---
+
+# 작업기억
+
+하는 동안[message history](/docs/memory/message-history)그리고[의미적 회상](./semantic-recall)Agent가 대화를 기억하도록 돕고, 작업 기억을 통해 상호 작용 전반에 걸쳐 사용자에 대한 지속적인 정보를 유지할 수 있습니다.
+
+작업 Memory는 Agent의 활성 스크래치 패드입니다. 즉, 사용자나 작업에 대해 계속 사용할 수 있는 주요 정보입니다. 대화 중에 사람의 이름, 선호도 또는 기타 중요한 세부 정보를 유지할 수 있습니다.
+
+이는 항상 관련성이 있고 Agent가 항상 사용할 수 있어야 하는 진행 중인 상태를 유지하는 데 유용합니다.
+
+당신이 사용하는 경우[Observational Memory](/docs/memory/observational-memory), `observationalMemory.observation.manageWorkingMemory` lets OM update working memory for the agent.
+
+:::팁\[📹 보기]
+
+보다[Mastra working memory](https://www.youtube.com/watch?v=UMy_JHLf1n8\&pp=ygUVbWFzdHJhIHdvcmtpbmcgbWVtb3J5) to see how agents keep persistent user context available across interactions.
+
+:::
+
+작업 Memory는 두 가지 다른 범위에서 지속될 수 있습니다.
+
+* **리소스 범위**(기본값): 동일한 사용자에 대한 모든 대화 스레드에서 Memory가 유지됩니다.
+* **스레드 범위**: 대화 스레드마다 Memory가 격리됩니다.
+
+**요구 사항:**&#xBC94;위 간 전환은 Agent가 다른 범위의 Memory를 볼 수 없음을 의미합니다. 스레드 범위 Memory는 리소스 범위 Memory와 완전히 분리됩니다.
+
+## 빠른 시작 {/* #quickstart */}
+
+다음은 작업 Memory가 있는 Agent를 설정하는 최소한의 예입니다.
+
+```typescript {11-15}
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+
+// Create agent with working memory enabled
+const agent = new Agent({
+  id: 'personal-assistant',
+  name: 'PersonalAssistant',
+  instructions: 'You are a helpful personal assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    options: {
+      workingMemory: {
+        enabled: true,
+      },
+    },
+  }),
+})
+```
+
+## 작동 원리 {/* #how-it-works */}
+
+작업 Memory는 Agent가 지속적으로 관련 정보를 저장하기 위해 시간이 지남에 따라 업데이트할 수 있는 마크다운 텍스트 블록입니다.
+
+## Memory 지속성 범위 {/* #memory-persistence-scopes */}
+
+작업 Memory는 두 가지 다른 범위에서 작동할 수 있으므로 대화 전반에 걸쳐 Memory가 지속되는 방식을 선택할 수 있습니다.
+
+### 리소스 범위 Memory(기본값) {/* #resource-scoped-memory-default */}
+
+기본적으로 작업 Memory는 동일한 사용자(resourceId)에 대한 모든 대화 스레드에서 지속되므로 영구 사용자 Memory를 활성화합니다.
+
+```typescript
+const memory = new Memory({
+  storage,
+  options: {
+    workingMemory: {
+      enabled: true,
+      scope: 'resource', // Memory persists across all user threads
+      template: `# User Profile
+- **Name**:
+- **Location**:
+- **Interests**:
+- **Preferences**:
+- **Long-term Goals**:
+`,
+    },
+  },
+})
+```
+
+**사용 사례:**
+
+* 사용자 선호도를 기억하는 개인 비서
+* 고객 상황을 유지하는 고객 서비스 봇
+* 학생의 진도를 추적하는 교육용 애플리케이션
+
+### Agent와 함께 사용 {/* #usage-with-agents */}
+
+리소스 범위 Memory를 사용하는 경우 다음을 전달해야 합니다.`resource` parameter in the memory options:
+
+```typescript
+// Resource-scoped memory requires resource
+const response = await agent.generate('Hello!', {
+  memory: {
+    thread: 'conversation-123',
+    resource: 'user-alice-456', // Same user across different threads
+  },
+})
+```
+
+### 스레드 범위 Memory {/* #thread-scoped-memory */}
+
+스레드 범위 Memory는 작업 Memory를 개별 대화 스레드로 격리합니다. 각 스레드는 자체적으로 격리된 Memory를 유지합니다.
+
+```typescript
+const memory = new Memory({
+  storage,
+  options: {
+    workingMemory: {
+      enabled: true,
+      scope: 'thread', // Memory is isolated per thread
+      template: `# User Profile
+- **Name**:
+- **Interests**:
+- **Current Goal**:
+`,
+    },
+  },
+})
+```
+
+**사용 사례:**
+
+* 별도의 주제에 대한 다양한 대화
+* 임시 또는 세션별 정보
+* 각 스레드에 작업 Memory가 필요하지만 스레드가 일시적이고 서로 관련되지 않는 Workflow
+
+## 스토리지 어댑터 지원 {/* #storage-adapter-support */}
+
+리소스 범위 작업 Memory에는 다음을 지원하는 특정 스토리지 어댑터가 필요합니다.`mastra_resources` table:
+
+### 지원되는 스토리지 어댑터 {/* #supported-storage-adapters */}
+
+* **libSQL** (`@mastra/libsql`)
+* **포스트그레SQL** (`@mastra/pg`)
+* **오라클DB** (`@mastra/oracledb`)
+* **업스태시** (`@mastra/upstash`)
+* **몽고DB** (`@mastra/mongodb`)
+
+## 맞춤 템플릿 {/* #custom-templates */}
+
+템플릿은 Agent에게 작업 Memory에서 추적하고 업데이트할 정보를 안내합니다. Mastra는 사용자가 템플릿을 제공하지 않을 때 기본 템플릿을 사용합니다. 가장 관련성이 높은 정보를 기억할 수 있도록 Agent 사용 사례에 대한 사용자 지정 템플릿을 정의하세요. 여러 사용자가 공유하는 스레드에 대해서는 다음을 참조하세요.[Multi-user threads](./multi-user-threads).
+
+다음은 맞춤 템플릿의 예입니다. 이 예에서 Agent는 사용자가 다음 정보가 포함된 메시지를 보내는 즉시 사용자 이름, 위치, 시간대 등을 저장합니다.
+
+```typescript {5-28}
+const memory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: `
+# User Profile
+
+## Personal info
+
+- Name:
+- Location:
+- Timezone:
+
+## Preferences
+
+- Communication Style: [e.g., Formal, Casual]
+- Project Goal:
+- Key Deadlines:
+  - [Deadline 1]: [Date]
+  - [Deadline 2]: [Date]
+
+## Session state
+
+- Last Task Discussed:
+- Open Questions:
+  - [Question 1]
+  - [Question 2]
+`,
+    },
+  },
+})
+```
+
+## 효과적인 템플릿 디자인 {/* #designing-effective-templates */}
+
+잘 구성된 템플릿은 Agent이 구문 분석하고 업데이트할 수 있도록 정보를 간단하게 유지합니다. 치료하다
+보조자가 최신 상태로 유지하기를 원하는 짧은 형식의 템플릿입니다.
+
+* **짧고 집중된 라벨.**&#xB2E8;락이나 매우 긴 제목은 피하세요. 라벨을 간략하게 유지하세요(예:`## Personal Info` or `- Name:`) so updates are readable and less likely to be truncated.
+* **일관된 대소문자를 사용하세요.**&#xC77C;관되지 않은 대소문자 사용(`Timezone:` vs `timezone:`) can cause messy
+  updates. Stick to Title Case or lower case for headings and bullet labels.
+* **자리표시자 텍스트를 최소화하세요.**&#xB2E4;음과 같은 힌트를 사용하세요.`[e.g., Formal]` or `[Date]` to help the LLM
+  fill in the correct spots.
+* **매우 긴 값을 축약합니다.**&#xC9E7;은 형식만 필요한 경우 다음과 같은 지침을 포함하세요.`- Name: [First name or nickname]` or `- Address (short):` rather than the full legal text.
+* **업데이트 규칙을 언급하십시오.`instructions`.**&#xC5B8;제, 어떻게 부분을 채우거나 지울지 지시할 수 있습니다.
+  Agent의 템플릿을 직접`instructions` field.
+
+### 대체 템플릿 스타일 {/* #alternative-template-styles */}
+
+몇 가지 항목만 필요한 경우 더 짧은 단일 블록을 사용하십시오.
+
+```typescript
+const basicMemory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: `User Facts:\n- Name:\n- Favorite Color:\n- Current Topic:`,
+    },
+  },
+})
+```
+
+좀 더 서술적인 스타일을 선호한다면 주요 사실을 짧은 단락 형식으로 저장할 수도 있습니다.
+
+```typescript
+const paragraphMemory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: `Important Details:\n\nKeep a short paragraph capturing the user's important facts (name, main goal, current task).`,
+    },
+  },
+})
+```
+
+## 구조화된 작업 기억 {/* #structured-working-memory */}
+
+Markdown 템플릿 대신 구조화된 스키마를 사용하여 작업 Memory를 정의할 수도 있습니다. 이를 통해 추적해야 하는 정확한 필드와 유형을 지정할 수 있습니다.[Standard JSON Schema](https://standardschema.dev/json-schema) ([Zod](https://zod.dev/), [Valibot](https://valibot.dev/), [ArkType](https://arktype.io/), etc.). When using a schema, the agent will see and update working memory as a JSON object matching your schema.
+
+**요구 사항:**&#xB2E4;음 중 하나를 지정해야 합니다.`template` or `schema`, but not both.
+
+### 예: 스키마 기반 작업 Memory {/* #example-schema-based-working-memory */}
+
+```typescript
+import { z } from 'zod'
+import { Memory } from '@mastra/memory'
+
+const userProfileSchema = z.object({
+  name: z.string().optional(),
+  location: z.string().optional(),
+  timezone: z.string().optional(),
+  preferences: z
+    .object({
+      communicationStyle: z.string().optional(),
+      projectGoal: z.string().optional(),
+      deadlines: z.array(z.string()).optional(),
+    })
+    .optional(),
+})
+
+const memory = new Memory({
+  options: {
+    workingMemory: {
+      enabled: true,
+      schema: userProfileSchema,
+      // template: ... (do not set)
+    },
+  },
+})
+```
+
+스키마가 제공되면 Agent는 작업 Memory를 JSON 개체로 받습니다. 예를 들어:
+
+```json
+{
+  "name": "Sam",
+  "location": "Berlin",
+  "timezone": "CET",
+  "preferences": {
+    "communicationStyle": "Formal",
+    "projectGoal": "Launch MVP",
+    "deadlines": ["2025-07-01"]
+  }
+}
+```
+
+### 스키마 기반 Memory에 대한 의미 체계 병합 {/* #merge-semantics-for-schema-based-memory */}
+
+스키마 기반 작업 Memory 사용**merge semantics**, meaning the agent only needs to include fields it wants to add or update. Existing fields are preserved automatically.
+
+* **개체 필드가 ​​심층적으로 병합되었습니다.**&#xC81C;공된 필드만 업데이트됩니다. 다른 것들은 변함없이 그대로 유지된다
+* **필드를 다음으로 설정`null` to delete it:**&#xC774;렇게 하면 Memory에서 필드가 명시적으로 제거됩니다.
+* **어레이가 완전히 교체됩니다.**&#xBC30;열 필드가 제공되면 기존 배열을 대체합니다(배열은 요소별로 병합되지 않음).
+
+## 템플릿과 스키마 중에서 선택 {/* #choosing-between-template-and-schema */}
+
+* 사용**template** (Markdown) if you want the agent to maintain memory as a free-form text block, such as a user profile or scratchpad. Templates use **replace semantics**: the agent must provide the complete memory content on each update.
+* 사용**schema** if you need structured, type-safe data that can be validated and programmatically accessed as JSON. The `workingMemory.schema` field accepts any `PublicSchema`-compatible schema (including Zod v3, Zod v4, JSON Schema, or already-standard schemas). Schemas use **merge semantics**: the agent only provides fields to update, and existing fields are preserved.
+* 한 번에 하나의 모드만 활성화할 수 있습니다. 두 모드 모두 설정`template` and `schema` isn't supported.
+
+## 예: 다단계 보존 {/* #example-multi-step-retention */}
+
+아래는 방법을 간략하게 나타낸 것입니다.`User Profile` template updates across a short user
+conversation:
+
+```nohighlight
+# User Profile
+
+## Personal info
+
+- Name:
+- Location:
+- Timezone:
+
+--- After user says "My name is **Sam** and I'm from **Berlin**" ---
+
+# User Profile
+- Name: Sam
+- Location: Berlin
+- Timezone:
+
+--- After user adds "By the way I'm normally in **CET**" ---
+
+# User Profile
+- Name: Sam
+- Location: Berlin
+- Timezone: CET
+```
+
+이제 Agent이 다음을 참조할 수 있습니다.`Sam` or `Berlin` in later responses without requesting the information
+again because it has been stored in working memory.
+
+Agent가 예상대로 작업 Memory를 제대로 업데이트하지 않는 경우 시스템을 추가할 수 있습니다.
+에 대한 지침*how* and *when* to use this template in your agent's `instructions` setting.
+
+## 초기 작업 Memory 설정 {/* #setting-initial-working-memory */}
+
+Agent는 일반적으로 다음을 통해 작업 Memory를 업데이트합니다.`updateWorkingMemory` tool, you can also set initial working memory programmatically when creating or updating threads. This is useful for injecting user data (like their name, preferences, or other info) that you want available to the agent without passing it in every request.
+
+### 스레드 메타데이터를 통해 작업 Memory 설정 {/* #setting-working-memory-via-thread-metadata */}
+
+스레드 생성 시 메타데이터를 통해 초기 작업 Memory를 제공할 수 있습니다.`workingMemory` key:
+
+```typescript title="src/app/medical-consultation.ts"
+// Create a thread with initial working memory
+const thread = await memory.createThread({
+  threadId: 'thread-123',
+  resourceId: 'user-456',
+  title: 'Medical Consultation',
+  metadata: {
+    workingMemory: `# Patient Profile
+- Name: John Doe
+- Blood Type: O+
+- Allergies: Penicillin
+- Current Medications: None
+- Medical History: Hypertension (controlled)
+`,
+  },
+})
+
+// The agent will now have access to this information in all messages
+await agent.generate("What's my blood type?", {
+  memory: {
+    thread: thread.id,
+    resource: 'user-456',
+  },
+})
+// Response: "Your blood type is O+."
+```
+
+### 프로그래밍 방식으로 작업 Memory 업데이트 {/* #updating-working-memory-programmatically */}
+
+기존 스레드의 작업 Memory를 업데이트할 수도 있습니다.
+
+```typescript title="src/app/medical-consultation.ts"
+// Update thread metadata to add/modify working memory
+await memory.updateThread({
+  id: 'thread-123',
+  title: thread.title,
+  metadata: {
+    ...thread.metadata,
+    workingMemory: `# Patient Profile
+- Name: John Doe
+- Blood Type: O+
+- Allergies: Penicillin, Ibuprofen  // Updated
+- Current Medications: Lisinopril 10mg daily  // Added
+- Medical History: Hypertension (controlled)
+`,
+  },
+})
+```
+
+### 직접 Memory 업데이트 {/* #direct-memory-update */}
+
+또는`updateWorkingMemory` method directly:
+
+```typescript title="src/app/medical-consultation.ts"
+await memory.updateWorkingMemory({
+  threadId: 'thread-123',
+  resourceId: 'user-456', // Required for resource-scoped memory
+  workingMemory: 'Updated memory content...',
+})
+```
+
+## 읽기 전용 작업 Memory {/* #read-only-working-memory */}
+
+일부 시나리오에서는 Agent가 작업 Memory 데이터를 수정하지 않고도 작업 Memory 데이터에 액세스할 수 있기를 원할 수 있습니다. 이는 다음과 같은 경우에 유용합니다.
+
+* **라우팅 Agent**컨텍스트가 필요하지만 사용자 프로필을 업데이트해서는 안 됩니다.
+* **서브 Agent**Memory를 참조해야 하지만 소유하지는 않는 다중 Agent 시스템에서
+
+읽기 전용 모드를 활성화하려면 다음을 설정하십시오.`readOnly: true` in the memory options:
+
+```typescript
+const response = await agent.generate('What do you know about me?', {
+  memory: {
+    thread: 'conversation-123',
+    resource: 'user-alice-456',
+    options: {
+      readOnly: true, // Working memory is provided but cannot be updated
+    },
+  },
+})
+```
+
+## 상태 신호 선택(실험적) {/* #opt-in-to-state-signals-experimental */}
+
+기본적으로 작업 Memory는 시스템 메시지의 일부로 Model에 도달합니다. 다음과 같이 제공하도록 선택할 수 있습니다.[state signal](/docs/long-running-agents/signals) instead by setting `useStateSignals: true`:
+
+```typescript
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'mastra-storage', url: 'file:./mastra.db' }),
+  options: {
+    workingMemory: {
+      enabled: true,
+      template: '# User\n- name:\n- location:',
+      useStateSignals: true, // experimental: deliver as state signal
+    },
+  },
+})
+```
+
+변경사항:
+
+* **저장공간은 동일합니다.**&#xB3D9;일한 리소스/스레드`workingMemory` field is read and written.
+* **Tool는 동일한 모양이며 새 이름으로 표시됩니다.**&#xC4F0;기는 여전히 동일한 기본 Tool를 통해 진행됩니다. 이 경로에는 다음과 같이 등록되어 있습니다.`setWorkingMemory` (instead of `updateWorkingMemory`). The rename keeps legacy strip filters from removing tool-call parts so they persist as a normal audit trail and the next model step picks the new value up automatically.
+* **배달만 가능합니다.**&#xC2DC;스템 Prompt로 접는 대신,`Memory` auto-attaches a `WorkingMemoryStateProcessor` that emits the current working memory as a `state` signal with `stateId: 'working-memory'`.
+
+표준 상태 신호 이점인 스레드 범위 추적 메타데이터,`cacheKey` dedup so identical snapshots are only emitted once, and `contextWindow.hasSnapshot` re-injection when an older snapshot rolls out of the window.
+
+기본값(`useStateSignals: false`) keeps the existing system-message behavior unchanged. `useStateSignals` isn't supported with template working memory `version: 'vnext'`.
+
+## 예 {/* #examples */}
+
+* [템플릿을 사용한 작업 Memory](https://github.com/mastra-ai/mastra/tree/main/examples/memory-with-template)
+* [스키마를 사용한 작업 Memory](https://github.com/mastra-ai/mastra/tree/main/examples/memory-with-schema)
+* [리소스별 작업 Memory](https://github.com/mastra-ai/mastra/tree/main/examples/memory-per-resource-example): 리소스 범위 Memory 지속성을 보여주는 완전한 예

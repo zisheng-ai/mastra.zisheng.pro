@@ -1,0 +1,221 @@
+---
+title: "가이드: 코드 검토 봇 구축"
+description: "작업 공간 기술을 사용하여 코딩 표준을 적용하고 일관된 PR 피드백을 제공하는 자동화된 코드 검토 봇을 구축하세요."
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# 코드 검토 봇 구축
+
+이 가이드에서는 작업 영역 기술을 사용하여 끌어오기 요청을 자동으로 검토하는 코드 검토 봇을 구축합니다. 봇은 기술 파일에서 코딩 표준을 로드하고 구조화된 피드백을 제공합니다. 기술 디렉터리가 있는 작업 공간을 만들고[Agent Skill](https://agentskills.io)검토 지침 및 참조 파일이 포함되어 있습니다. 그런 다음 자동화된 검토를 수행하는 Agent에 기술을 연결합니다.
+
+## 전제조건 {/* #prerequisites */}
+
+* Node.js`v22.13.0` or later installed
+* 지원되는 API 키[Model Provider](/models)
+* 기존 Mastra 프로젝트(다음을 따르세요.[installation guide](/guides/getting-started/quickstart) to set up a new project)
+
+## 작업공간 만들기 {/* #create-the-workspace */}
+
+당신의`src/mastra/index.ts` file, import the [`Workspace`](/reference/workspace/workspace-class) and [`LocalFilesystem`](/reference/workspace/local-filesystem) classes. On the `Workspace` instance, configure the `skills`기술 디렉토리를 가리키는 옵션. 그만큼`skills`디렉토리는 파일 시스템 내부에 위치합니다.`basePath`.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+// highlight-start
+import { resolve } from 'node:path'
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+// highlight-end
+
+// highlight-start
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({
+    basePath: resolve(import.meta.dirname, '../../workspace'),
+  }),
+  skills: ['skills'],
+})
+// highlight-end
+
+export const mastra = new Mastra({
+  // highlight-next-line
+  workspace,
+})
+```
+
+프로젝트 루트에 다음이라는 새 폴더를 만듭니다.`workspace`. Inside that, create a `skills` folder. This is where you'll define the code standards skill in the next step.
+
+## 코드 표준 기술 만들기 {/* #create-the-code-standards-skill */}
+
+스킬은 다음을 포함하는 구조화된 디렉터리입니다.`SKILL.md` file with instructions for the agent. The code standards skill defines the review process and references a style guide.
+
+내부에`workspace/skills`, create a new folder called `code-standards`. Create a file called `SKILL.md` and add the review instructions.
+
+```markdown title="workspace/skills/code-standards/SKILL.md"
+---
+name: code-standards
+description: Automated code review standards and checks
+---
+
+# Code Review Standards
+
+Review code systematically using these steps:
+
+1. **Critical Issues**: Security vulnerabilities, memory leaks, logic bugs, missing error handling
+2. **Code Quality**: Functions over 50 lines, code duplication, confusing names, missing types
+3. **Style Guide**: Check references/style-guide.md for naming and organization
+4. **Linting**: Flag common issues like use of `var`, leftover `console.log` statements, and `debugger` statements
+
+Provide feedback in this format:
+
+**Summary**: One sentence overview
+
+**Critical Issues**: List with line numbers
+
+**Suggestions**: Improvements that would help
+
+**Positive Notes**: What the code does well
+```
+
+내부에`workspace/skills/code-standards`, create a `references` folder to hold reference materials for the skill. Author a style guide file that outlines the project's coding conventions with the file name `style-guide.md`.
+
+````markdown title="workspace/skills/code-standards/references/style-guide.md"
+# Style Guide
+
+## Naming
+
+- Variables/Functions: `camelCase`
+- Constants: `UPPER_SNAKE_CASE`
+- Files: `kebab-case.ts`
+- Booleans: Start with `is`, `has`, `should`
+
+## Code organization
+
+```typescript
+// 1. Imports
+import { foo } from 'bar'
+
+// 2. Constants
+const MAX_SIZE = 100
+
+// 3. Types
+interface User {
+  id: string
+}
+
+// 4. Functions
+function doSomething() {}
+
+// 5. Exports
+export { doSomething }
+```
+
+## Error handling
+
+Always handle errors explicitly - never silently catch.
+
+## Comments
+
+Write "why" not "what".
+````
+
+## 리뷰 Agent 만들기 {/* #create-the-review-agent */}
+
+이제 코드 표준 기술을 사용하는 코드 검토 봇 Agent를 만들 차례입니다. 다음 위치에 새 파일을 생성하세요.`src/mastra/agents/code-reviewer.ts` and define the agent:
+
+```typescript title="src/mastra/agents/code-reviewer.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const codeReviewer = new Agent({
+  id: 'code-reviewer',
+  name: 'Code Review Bot',
+  instructions: `You are an automated code reviewer.
+
+When asked to review code:
+1. Activate the 'code-standards' skill
+2. Follow the review process from the skill
+3. Check against the style guide in skill references
+4. Be constructive and specific with line numbers`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+Agent를 내부로 가져와 정의합니다.`src/mastra/index.ts` and registering it with the `Mastra` instance:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { resolve } from 'node:path'
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+// highlight-next-line
+import { codeReviewer } from './agents/code-reviewer'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({
+    basePath: resolve(import.meta.dirname, '../../workspace'),
+  }),
+  skills: ['skills'],
+})
+
+export const mastra = new Mastra({
+  workspace,
+  // highlight-next-line
+  agents: { codeReviewer },
+})
+```
+
+## 봇 테스트 {/* #test-the-bot */}
+
+시작[Studio](/docs/studio/overview) and interact with the code review bot to see it in action.
+
+```bash npm2yarn
+npm run dev
+```
+
+열려 있는[localhost:4111](http://localhost:4111) and navigate to the code reviewer agent.
+
+채팅 입력 내에서 다음과 같은 검토용 코드 조각을 제공합니다.
+
+```text
+Review this code:
+
+function getData(id) {
+  var result = fetch('/api/data/' + id);
+  console.log(result);
+  return result;
+}
+```
+
+봇이 다음을 활성화해야 합니다.`code-standards` skill and provide structured feedback. Since agent responses are non-deterministic, your output may vary, but you should see something similar to:
+
+```md
+**Summary**: Function has several issues with variable declaration,
+debugging statements, and missing error handling.
+
+**Critical Issues**:
+
+- Missing error handling for fetch (line 2)
+- No async/await for asynchronous operation (line 2)
+
+**Suggestions**:
+
+- Use const instead of var (line 2)
+- Remove console.log before committing (line 3)
+- Add TypeScript type for id parameter
+- Use template literals instead of concatenation
+
+**Positive Notes**:
+
+- Function name is clear and descriptive
+```
+
+## 다음 단계 {/* #next-steps */}
+
+이 봇을 다음으로 확장할 수 있습니다.
+
+* 다양한 언어 또는 프레임워크에 대한 기술 추가
+* 보안 점검 및 성과 검토를 위한 기술 생성
+* 자동 PR 검토를 위해 GitHub Actions와 통합
+* 인라인 피드백을 남기는 PR 댓글 봇 구축
+
+자세히 알아보기:
+
+* [Agent 기술 사양](https://agentskills.io)

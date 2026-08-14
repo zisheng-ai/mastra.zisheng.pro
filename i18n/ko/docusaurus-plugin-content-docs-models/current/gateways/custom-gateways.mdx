@@ -1,0 +1,613 @@
+---
+title: "사용자 정의 게이트웨이 | Model | 마스트라"
+description: "개인 또는 전문 LLM 배포를 위한 사용자 정의 Model 게이트웨이 생성"
+---
+
+# 커스텀 Model 게이트웨이
+
+사용자 정의 Model 게이트웨이를 사용하면 개인 또는 전문 LLM 공급자 통합을 구현할 수 있습니다.`MastraModelGatewayInterface`인터페이스 또는`MastraModelGateway`기본 클래스.
+
+## 개요 {/* #overview */}
+
+게이트웨이는 언어 Model에 액세스하기 위한 공급자별 논리를 처리합니다.
+
+* 공급자 구성 및 Model 검색
+* 인증 및 API Key 관리
+* API 엔드포인트의 URL 구성
+* 언어 Model 인스턴스 생성
+
+다음을 지원하기 위해 사용자 정의 게이트웨이를 만듭니다.
+
+* 개인 또는 기업 LLM 배포
+* 사용자 정의 인증 체계
+* 전문화된 라우팅 로직
+* 고유 ID를 사용한 게이트웨이 버전 관리
+
+## 사용자 정의 게이트웨이 생성 {/* #creating-a-custom-gateway */}
+
+구현하다`MastraModelGatewayInterface` for a plain object gateway, or extend `MastraModelGateway` when you want base class defaults.
+
+```typescript
+import { type MastraModelGatewayInterface, type ProviderConfig } from '@mastra/core/llm';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible-v5';
+
+const myPrivateGateway: MastraModelGatewayInterface = {
+  id: 'private',
+  name: 'My Private Gateway',
+  async fetchProviders(): Promise<Record<string, ProviderConfig>> {
+    return {
+      'my-provider': {
+        name: 'My Provider',
+        models: ['__GATEWAY_OPENAI_MODEL__'],
+        apiKeyEnvVar: 'MY_API_KEY',
+        gateway: 'private',
+        url: 'https://api.myprovider.com/v1',
+      },
+    };
+  },
+  buildUrl() {
+    return 'https://api.myprovider.com/v1';
+  },
+  async getApiKey() {
+    return process.env.MY_API_KEY ?? '';
+  },
+  async resolveLanguageModel({ modelId, providerId, apiKey }) {
+    return createOpenAICompatible({
+      name: providerId,
+      apiKey,
+      baseURL: 'https://api.myprovider.com/v1',
+    }).chatModel(modelId);
+  },
+};
+```
+
+다음 예에서는`MastraModelGateway` class:
+
+```typescript
+import { MastraModelGateway, type ProviderConfig } from '@mastra/core/llm';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible-v5';
+import type { LanguageModelV2 } from '@ai-sdk/provider-v5';
+
+class MyPrivateGateway extends MastraModelGateway {
+  // Required: Unique identifier for the gateway
+  // This ID is used as the prefix for all providers from this gateway
+  readonly id = 'private';
+
+  // Required: Human-readable name
+  readonly name = 'My Private Gateway';
+
+  /**
+   * Fetch provider configurations from your gateway
+   * Returns a record of provider configurations
+   */
+  async fetchProviders(): Promise<Record<string, ProviderConfig>> {
+    return {
+      'my-provider': {
+        name: 'My Provider',
+        models: ['__GATEWAY_OPENAI_MODEL__', '__GATEWAY_ANTHROPIC_MODEL_SONNET__'],
+        apiKeyEnvVar: 'MY_API_KEY',
+        gateway: this.id,
+        url: 'https://api.myprovider.com/v1',
+      },
+    };
+  }
+
+  /**
+   * Build the API URL for a model
+   * @param modelId - Full model ID (e.g., "private/my-provider/model-1")
+   * @param envVars - Environment variables (optional)
+   */
+  buildUrl(modelId: string, envVars?: Record<string, string>): string {
+    return 'https://api.myprovider.com/v1';
+  }
+
+  /**
+   * Get the API key for authentication
+   * @param modelId - Full model ID
+   */
+  async getApiKey(modelId: string): Promise<string> {
+    const apiKey = process.env.MY_API_KEY;
+    if (!apiKey) {
+      throw new Error(`Missing MY_API_KEY environment variable`);
+    }
+    return apiKey;
+  }
+
+  /**
+   * Create a language model instance
+   * @param args - Model ID, provider ID, and API key
+   */
+  async resolveLanguageModel({
+    modelId,
+    providerId,
+    apiKey,
+  }: {
+    modelId: string;
+    providerId: string;
+    apiKey: string;
+  }): Promise<LanguageModelV2> {
+    const baseURL = this.buildUrl(`${providerId}/${modelId}`);
+
+    return createOpenAICompatible({
+      name: providerId,
+      apiKey,
+      baseURL,
+      supportsStructuredOutputs: true,
+    }).chatModel(modelId);
+  }
+}
+```
+
+### 게이트웨이 소유 인증 {/* #gateway-owned-authentication */}
+
+추가하다`resolveAuth` when the gateway owns credential lookup. Mastra uses this hook before falling back to `getApiKey()`.
+
+```typescript
+const myPrivateGateway: MastraModelGatewayInterface = {
+  // ...gateway fields and methods
+  async resolveAuth() {
+    const apiKey = process.env.MY_API_KEY;
+    return apiKey ? { apiKey, source: 'gateway' } : undefined;
+  },
+};
+```
+
+## 사용자 정의 게이트웨이 등록 {/* #registering-custom-gateways */}
+
+### 초기화 중 {/* #during-initialization */}
+
+Mastra 인스턴스를 생성할 때 게이트웨이를 레코드로 전달합니다.
+
+```typescript
+import { Mastra } from '@mastra/core';
+
+const mastra = new Mastra({
+  gateways: {
+    myGateway: new MyPrivateGateway(),
+    anotherGateway: new AnotherGateway(),
+  },
+});
+```
+
+### 초기화 후 {/* #after-initialization */}
+
+다음을 사용하여 동적으로 게이트웨이 추가`addGateway`:
+
+```typescript
+const mastra = new Mastra();
+
+// Add with explicit key
+mastra.addGateway(new MyPrivateGateway(), 'myGateway');
+
+// Add using gateway's ID
+mastra.addGateway(new MyPrivateGateway());
+// Stored with key 'my-private-gateway' (the gateway's id)
+```
+
+## 사용자 정의 게이트웨이 사용 {/* #using-custom-gateways */}
+
+게이트웨이 ID를 접두사로 사용하는 사용자 지정 게이트웨이의 참조 Model:
+
+```typescript
+import { Agent } from '@mastra/core/agent';
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'My Agent',
+  instructions: 'You are a helpful assistant',
+  model: 'private/my-provider/__GATEWAY_OPENAI_MODEL__', // Uses MyPrivateGateway
+});
+
+mastra.addAgent(agent, 'myAgent');
+```
+
+Agent를 생성하거나 Model을 사용할 때 Mastra의 Model 라우터는 Model ID를 기반으로 적절한 게이트웨이를 자동으로 선택합니다. 게이트웨이 ID는 접두사 역할을 합니다. 일치하는 사용자 지정 게이트웨이가 없으면 기본 제공 게이트웨이로 대체됩니다.
+
+### TypeScript 자동 완성 {/* #typescript-autocomplete */}
+
+#### 개발 중 자동 유형 생성 {/* #automatic-type-generation-in-development */}
+
+개발 모드(`MASTRA_DEV=true`), Mastra automatically generates TypeScript types for your custom gateways.
+
+1. **환경 변수 설정**:
+   ```bash
+   export MASTRA_DEV=true
+   ```
+
+2. **게이트웨이 등록**:
+   ```typescript
+   const mastra = new Mastra({
+     gateways: {
+       myGateway: new MyPrivateGateway(),
+     },
+   });
+   ```
+
+3. **유형이 자동으로 생성됩니다.**:
+   * 게이트웨이를 추가하면 Mastra는 GatewayRegistry와 동기화됩니다.
+   * 레지스트리는 사용자 정의 게이트웨이에서 공급자를 가져옵니다.
+   * TypeScript 유형은 다음에서 재생성됩니다.`~/.cache/mastra/`
+   * IDE는 몇 초 안에 새로운 유형을 선택합니다.
+
+4. **이제 자동완성이 작동합니다**:
+   ```typescript
+   const agent = new Agent({
+     model: 'my-gateway-id/my-provider/model-1', // Full autocomplete!
+   });
+   ```
+
+#### 작동 원리 {/* #how-it-works */}
+
+GatewayRegistry는 다음과 같은 시간별 동기화를 실행합니다.
+
+* 통화`fetchProviders()` on all registered gateways
+* TypeScript 유형 정의를 생성합니다.
+* 글로벌 캐시와 프로젝트 모두에 기록합니다.`dist/` directory
+* TypeScript 서버가 자동으로 변경 사항을 선택합니다.
+
+:::팁
+게이트웨이를 처음 추가하는 경우 유형이 생성되는 데 몇 초 정도 걸릴 수 있습니다. 후속 업데이트는 매 시간마다 백그라운드에서 발생합니다.
+:::
+
+#### 수동 유형 생성 대안 {/* #manual-type-generation-alternatives */}
+
+개발 모드에서 실행 중이 아니거나 즉각적인 유형 업데이트가 필요한 경우:
+
+**옵션 1: 유형 어설션 사용(가장 간단함)**
+
+```typescript
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  instructions: 'You are a helpful assistant',
+  model: 'private/my-provider/model-1' as any, // Bypass type checking
+});
+```
+
+**옵션 2: 사용자 정의 유형 공용체 만들기(유형 안전)**
+
+```typescript
+import type { ModelRouterModelId } from '@mastra/core/llm';
+
+// Define your custom model IDs
+type CustomModelId =
+  | 'private/my-provider/model-1'
+  | 'private/my-provider/model-2'
+  | 'private/my-provider/model-3';
+
+// Combine with built-in models
+type AllModelIds = ModelRouterModelId | CustomModelId;
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  instructions: 'You are a helpful assistant',
+  model: 'private/my-provider/model-1' satisfies AllModelIds,
+});
+```
+
+**옵션 3: ModelRouterModelId를 전역으로 확장(고급)**
+
+```typescript
+// In a types.d.ts file in your project
+// The import is required: it makes this file a module, so the block below
+// merges into the existing types instead of replacing the module.
+import '@mastra/core/llm';
+
+declare module '@mastra/core/llm' {
+  interface ProviderModelsMap {
+    'my-provider': readonly ['model-1', 'model-2', 'model-3'];
+  }
+}
+```
+
+이는 사용자 정의 Model을 포함하도록 내장 유형을 확장하여 완전한 자동 완성 지원을 제공합니다.
+
+## 게이트웨이 관리 {/* #gateway-management */}
+
+### getGateway(키) {/* #getgatewaykey */}
+
+등록 키로 게이트웨이를 검색합니다.
+
+```typescript
+const gateway = mastra.getGateway('myGateway');
+console.log(gateway.name); // 'My Private Gateway'
+```
+
+### getGatewayById(ID) {/* #getgatewaybyidid */}
+
+고유 ID로 게이트웨이를 검색합니다.
+
+```typescript
+const gateway = mastra.getGatewayById('my-private-gateway');
+console.log(gateway.name); // 'My Private Gateway'
+```
+
+이는 다음과 같은 경우에 유용합니다.
+
+* 게이트웨이에는 등록 키와 다른 명시적 ID가 있습니다.
+* 여러 인스턴스에서 ID로 게이트웨이를 찾아야 합니다.
+* 게이트웨이 버전 관리 지원(예:`'gateway-v1'`, `'gateway-v2'`)
+
+### 목록게이트웨이() {/* #listgateways */}
+
+등록된 모든 게이트웨이를 가져옵니다.
+
+```typescript
+const gateways = mastra.listGateways();
+console.log(Object.keys(gateways)); // ['myGateway', 'anotherGateway']
+```
+
+## 게이트웨이 속성 {/* #gateway-properties */}
+
+### 필수의 {/* #required */}
+
+| 부동산 | 유형 | 설명 |
+|------------|------|-------------|
+|`id` | `string` | Unique identifier for the gateway, used as the gateway prefix for the model string |
+| `name` | `string` | Human-readable gateway name |
+
+### 행동 양식 {/* #methods */}
+
+| 방법 | 설명 |
+|---------|-------------|
+|`fetchProviders()` | Fetch provider configurations |
+| `buildUrl(modelId, envVars?)` | Build API URL for a model |
+| `getApiKey(modelId)` | Get API key for authentication |
+| `resolveLanguageModel(args)` | Create language model instance |
+| `getId()` | Get gateway ID (returns `id` or `name`) |
+
+## 공급자 구성 {/* #provider-configuration */}
+
+그만큼`fetchProviders()` method returns a record of `ProviderConfig` objects:
+
+```typescript
+interface ProviderConfig {
+  name: string;                    // Display name
+  models: string[];                // Available model IDs
+  apiKeyEnvVar: string | string[]; // Environment variable(s) for API key
+  gateway: string;                 // Gateway identifier
+  url?: string;                    // Optional API base URL
+  apiKeyHeader?: string;           // Optional custom auth header
+  docUrl?: string;                 // Optional documentation URL
+}
+```
+
+## 게이트웨이 ID와 키 {/* #gateway-ids-vs-keys */}
+
+차이점 이해:
+
+* **열쇠**: Mastra에 게이트웨이를 추가할 때 사용되는 등록키(레코드키)
+* **ID**: 게이트웨이의 고유 식별자(경유)`id` property or `name` if not set)
+
+```typescript
+class VersionedGateway extends MastraModelGateway {
+  readonly id = 'my-gateway-v2';     // Unique ID for versioning and prefixing
+  readonly name = 'My Gateway';       // Display name
+}
+
+const mastra = new Mastra({
+  gateways: {
+    currentGateway: new VersionedGateway(), // Key: 'currentGateway'
+  },
+});
+
+// Retrieve by key
+const byKey = mastra.getGateway('currentGateway');
+
+// Retrieve by ID
+const byId = mastra.getGatewayById('my-gateway-v2');
+
+// Both return the same gateway
+console.log(byKey === byId); // true
+```
+
+## Model ID 형식 {/* #model-id-format */}
+
+사용자 정의 게이트웨이를 통해 액세스되는 Model은 다음 형식을 따릅니다.
+
+```
+[gatewayId]/[provider]/[model]
+```
+
+예:
+
+* `private/my-provider/model-1`
+
+## 고급 예 {/* #advanced-example */}
+
+캐싱이 포함된 토큰 기반 게이트웨이:
+
+```typescript
+class TokenGateway extends MastraModelGateway {
+  readonly id = 'token-gateway-v1';
+  readonly name = 'Token Gateway';
+
+  private tokenCache: Map<string, { token: string; expiresAt: number }> = new Map();
+
+  async fetchProviders(): Promise<Record<string, ProviderConfig>> {
+    const response = await fetch('https://api.gateway.com/providers');
+    const data = await response.json();
+
+    return {
+      provider: {
+        name: data.name,
+        models: data.models,
+        apiKeyEnvVar: 'GATEWAY_TOKEN',
+        gateway: this.id,
+      },
+    };
+  }
+
+  async buildUrl(modelId: string, envVars?: Record<string, string>): Promise<string> {
+    const token = await this.getApiKey(modelId);
+    const siteId = envVars?.SITE_ID || process.env.SITE_ID;
+
+    const response = await fetch(`https://api.gateway.com/sites/${siteId}/token`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const { url } = await response.json();
+    return url;
+  }
+
+  async getApiKey(modelId: string): Promise<string> {
+    const cached = this.tokenCache.get(modelId);
+
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.token;
+    }
+
+    const token = process.env.GATEWAY_TOKEN;
+    if (!token) {
+      throw new Error('Missing GATEWAY_TOKEN');
+    }
+
+    // Cache token for 1 hour
+    this.tokenCache.set(modelId, {
+      token,
+      expiresAt: Date.now() + 3600000,
+    });
+
+    return token;
+  }
+
+  async resolveLanguageModel({ modelId, providerId, apiKey }: {
+    modelId: string;
+    providerId: string;
+    apiKey: string;
+  }): Promise<LanguageModelV2> {
+    const baseURL = await this.buildUrl(`${providerId}/${modelId}`);
+
+    return createOpenAICompatible({
+      name: providerId,
+      apiKey,
+      baseURL,
+      supportsStructuredOutputs: true,
+    }).chatModel(modelId);
+  }
+}
+```
+
+## 오류 처리 {/* #error-handling */}
+
+일반적인 오류 시나리오에 대한 설명 오류를 제공합니다.
+
+```typescript
+class RobustGateway extends MastraModelGateway {
+  // ... properties
+
+  async getApiKey(modelId: string): Promise<string> {
+    const apiKey = process.env.MY_API_KEY;
+
+    if (!apiKey) {
+      throw new Error(
+        `Missing MY_API_KEY environment variable for model: ${modelId}. ` +
+        `Please set MY_API_KEY in your environment.`
+      );
+    }
+
+    return apiKey;
+  }
+
+  async buildUrl(modelId: string, envVars?: Record<string, string>): Promise<string> {
+    const baseUrl = envVars?.BASE_URL || process.env.BASE_URL;
+
+    if (!baseUrl) {
+      throw new Error(
+        `No base URL configured for model: ${modelId}. ` +
+        `Set BASE_URL environment variable or pass it in envVars.`
+      );
+    }
+
+    return baseUrl;
+  }
+}
+```
+
+## 사용자 정의 게이트웨이 테스트 {/* #testing-custom-gateways */}
+
+테스트 구조 예시:
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import { Mastra } from '@mastra/core';
+
+describe('MyPrivateGateway', () => {
+  beforeEach(() => {
+    process.env.MY_API_KEY = 'test-key';
+  });
+
+  it('should fetch providers', async () => {
+    const gateway = new MyPrivateGateway();
+    const providers = await gateway.fetchProviders();
+
+    expect(providers['my-provider']).toBeDefined();
+    expect(providers['my-provider'].models).toContain('model-1');
+  });
+
+  it('should integrate with Mastra', () => {
+    const mastra = new Mastra({
+      gateways: {
+        private: new MyPrivateGateway(),
+      },
+    });
+
+    const gateway = mastra.getGateway('private');
+    expect(gateway.name).toBe('My Private Gateway');
+  });
+
+  it('should resolve models by ID', () => {
+    const mastra = new Mastra({
+      gateways: {
+        key: new MyPrivateGateway(),
+      },
+    });
+
+    const gateway = mastra.getGatewayById('my-private-gateway');
+    expect(gateway).toBeDefined();
+  });
+});
+```
+
+## 모범 사례 {/* #best-practices */}
+
+1. **버전 관리를 위해 설명 ID 사용**: 명시적으로 설정`id` values when you need to version your gateways
+   ```typescript
+   readonly id = 'my-gateway-v1';
+   ```
+
+2. **적절한 오류 처리 구현**: 조치 가능한 메시지와 함께 설명 오류 발생
+
+3. **비용이 많이 드는 작업을 캐시하세요.**: 적절한 경우 토큰, URL 또는 공급자 구성을 캐시합니다.
+
+4. **환경 변수 검증**: 필수 환경 변수를 확인하세요.`getApiKey` and `buildUrl`
+
+5. **게이트웨이 문서화**: 게이트웨이의 목적과 구성을 설명하는 JSDoc 주석을 추가합니다.
+
+6. **명명 규칙을 따르세요**: 공급자와 Model에 명확하고 일관된 이름을 사용합니다.
+
+7. **비동기 작업 처리**: 사용`async/await` for network requests and I/O operations
+
+8. **철저한 테스트**: 모든 게이트웨이 메소드에 대한 단위 테스트 작성
+
+## Studio에서 커스텀 게이트웨이만 표시 {/* #showing-only-custom-gateways-in-studio */}
+
+기본적으로**Studio** lists every external model provider (such as OpenAI, Anthropic, and Gemini) alongside any custom gateways you register. To hide the external providers, set the `AUTO_BLOCK_EXTERNAL_PROVIDERS` environment variable:
+
+```bash
+AUTO_BLOCK_EXTERNAL_PROVIDERS=true
+```
+
+이 변수가 다음으로 설정되면`true` or `1`, Mastra returns only the providers from gateways you register yourself. The static provider registry and the built-in gateways (`models.dev`, `netlify`, and `mastra`) are hidden from the model picker. This is useful when you route all model traffic through a single private gateway and don't want the other providers to appear.
+
+이 변수가 설정되고 사용자 지정 게이트웨이가 등록되지 않은 경우 Model 선택기가 비어 있습니다. 해당 Model을 노출하려면 하나 이상의 사용자 정의 게이트웨이를 등록하세요.
+
+## 내장 게이트웨이 {/* #built-in-gateways */}
+
+Mastra에는 참조 구현으로 내장 게이트웨이가 포함되어 있습니다.
+
+* **Netlify게이트웨이**: Netlify AI Gateway와 토큰 교환 연동
+* **ModelDevGateway**: models.dev의 OpenAI 호환 공급자 레지스트리
+
+보다[Netlify](/models/gateways/netlify), [OpenRouter](/models/gateways/openrouter), and [Vercel](/models/gateways/vercel) for examples of gateway usage.

@@ -99,7 +99,7 @@ const config: Config = {
   // published under locale-specific paths and self-canonicalize.
   i18n: {
     defaultLocale: 'en',
-    locales: ['zh-CN', 'en', 'ja', 'zh-TW', 'zh-HK'],
+    locales: ['zh-CN', 'en', 'fr', 'ja', 'ko', 'zh-TW', 'zh-HK'],
     localeConfigs: {
       'zh-CN': {
         label: '简体中文',
@@ -110,6 +110,11 @@ const config: Config = {
         label: 'English',
         htmlLang: 'en',
         baseUrl: '/en/',
+      },
+      fr: {
+        label: 'Français',
+        htmlLang: 'fr',
+        baseUrl: '/fr/',
       },
       'zh-TW': {
         label: '繁體中文（台灣）',
@@ -125,6 +130,11 @@ const config: Config = {
         label: '日本語',
         htmlLang: 'ja',
         baseUrl: '/ja/',
+      },
+      ko: {
+        label: '한국어',
+        htmlLang: 'ko',
+        baseUrl: '/ko/',
       },
     },
   },

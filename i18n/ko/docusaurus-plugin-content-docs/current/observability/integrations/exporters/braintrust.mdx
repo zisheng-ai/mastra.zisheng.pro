@@ -1,0 +1,163 @@
+---
+title: "Braintrust 수출업체 | 통합 | Observability"
+description: "평가 및 모니터링을 위해 Braintrust에 추적 보내기"
+packages:
+  - "@mastra/braintrust"
+  - "@mastra/observability"
+---
+
+# Braintrust 수출업체
+
+[브레인트러스트](https://www.braintrust.dev/)LLM 지원 품질을 측정하고 개선하는 데 도움이 되는 평가 및 모니터링 플랫폼입니다. Braintrust 내보내기는 추적을 Braintrust로 보내 체계적인 평가, 점수 매기기 및 실험을 가능하게 합니다.
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/braintrust@latest
+```
+
+## 구성 {/* #configuration */}
+
+### 전제조건 {/* #prerequisites */}
+
+1. **브레인트러스트 계정**: 가입하세요[braintrust.dev](https://www.braintrust.dev/)
+2. **프로젝트**: 추적을 위한 프로젝트 생성 또는 선택
+3. **API 키**: Braintrust 설정 → API 키에서 생성
+4. **환경 변수**: 자격 증명을 설정합니다.
+
+```bash title=".env"
+BRAINTRUST_API_KEY=sk-xxxxxxxxxxxxxxxx
+
+# Optional
+BRAINTRUST_ENDPOINT=https://api.braintrust.dev  # Custom endpoint if needed
+```
+
+### 제로 구성 설정 {/* #zero-config-setup */}
+
+환경 변수가 설정된 경우 구성 없이 내보내기를 사용합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { BraintrustExporter } from '@mastra/braintrust'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      braintrust: {
+        serviceName: 'my-service',
+        exporters: [new BraintrustExporter()],
+      },
+    },
+  }),
+})
+```
+
+### 명시적 구성 {/* #explicit-configuration */}
+
+자격 증명을 직접 전달할 수도 있습니다(환경 변수보다 우선 적용됨).
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { BraintrustExporter } from '@mastra/braintrust'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      braintrust: {
+        serviceName: 'my-service',
+        exporters: [
+          new BraintrustExporter({
+            apiKey: process.env.BRAINTRUST_API_KEY,
+            projectName: 'my-project',
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+### 완전한 구성 {/* #complete-configuration */}
+
+```typescript
+new BraintrustExporter({
+  // Required
+  apiKey: process.env.BRAINTRUST_API_KEY!,
+
+  // Optional settings
+  projectName: 'my-project', // Default: 'mastra-tracing'
+  endpoint: 'https://api.braintrust.dev', // Custom endpoint if needed
+  logLevel: 'info', // Diagnostic logging: debug | info | warn | error
+})
+```
+
+## Braintrust 평가에 추적 연결 {/* #attach-traces-to-braintrust-evals */}
+
+애플리케이션이 사용할 때 Braintrust SDK를 직접 설치하세요.`Eval()`, `logger.traced()`, or `currentSpan`:
+
+```bash npm2yarn
+npm install braintrust@latest
+```
+
+Braintrust 내에서 Mastra를 실행하는 경우`Eval()` or `logger.traced()`, pass the Braintrust logger and `currentSpan` resolver to the exporter. Import `currentSpan` from the same `braintrust` package instance that creates the eval or traced span.
+
+이는 앱이 실행될 때 Mastra가 활성 Braintrust 범위 아래에 범위를 연결하는 데 도움이 됩니다.`@mastra/braintrust` resolve different installed copies of the Braintrust SDK.
+
+내보내기는 Braintrust SDK v2 및 v3의 호환 가능한 로거 및 범위 개체를 허용합니다. 애플리케이션의 Braintrust SDK 버전이 설치된 버전과 일치할 필요는 없습니다.`@mastra/braintrust`.
+
+```typescript title="src/mastra/index.ts"
+import { currentSpan, initLogger } from 'braintrust'
+import { BraintrustExporter } from '@mastra/braintrust'
+
+const logger = initLogger({
+  projectName: 'my-project',
+  apiKey: process.env.BRAINTRUST_API_KEY,
+})
+
+const exporter = new BraintrustExporter({
+  braintrustLogger: logger,
+  currentSpan,
+})
+```
+
+Braintrust 평가 작업 내에서 구성된 Mastra 인스턴스를 사용합니다. 그만큼`currentSpan` resolver above reads the active span created by `Eval()`.
+
+```typescript title="src/evals/braintrust.ts"
+import { Eval } from 'braintrust'
+import { mastra } from '../mastra'
+
+await Eval('my-project', {
+  data: () => [{ input: 'Say hello', expected: 'Hello' }],
+  task: async input => {
+    const agent = mastra.getAgent('assistant')
+    return (await agent.generate(input)).text
+  },
+  scores: [],
+})
+```
+
+애플리케이션이 직접 Braintrust 종속성을 v2에서 v3으로 업그레이드하고 Nunjucks Prompt 템플릿을 사용하는 경우 다음을 따르세요.[Braintrust v2 to v3 migration guide](https://www.braintrust.dev/docs/sdks/typescript/migrations/v2-to-v3).
+
+## 반환된 Braintrust 쿼리`spanId` {/* #querying-braintrust-with-returned-spanid */}
+
+Mastra는 반환된 값을 사용합니다.`spanId` as both the Braintrust row ID and span ID. Use it to find the corresponding Braintrust span by `id` or `span_id`.
+
+Braintrust v3는 별도의 W3C 추적 ID를 저장합니다.`root_span_id`, so the returned Mastra `spanId` isn't the Braintrust `root_span_id`.
+
+```typescript title="src/mastra/usage.ts"
+const result = await agent.stream('Summarize this ticket')
+
+console.log('Mastra trace ID:', result.traceId)
+console.log('Braintrust row and span ID:', result.spanId)
+
+// Use result.spanId in your Braintrust lookup/query path
+```
+
+동일하게 적용됩니다`agent.generate()` and workflow run results (`run.start()`, `run.stream()` final state, `run.resume()`).
+
+## 관련된 {/* #related */}
+
+* [추적 개요](/docs/observability/tracing/overview)
+* [브레인트러스트 문서](https://www.braintrust.dev/docs)

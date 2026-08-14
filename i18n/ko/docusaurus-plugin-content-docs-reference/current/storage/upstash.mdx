@@ -1,0 +1,175 @@
+---
+title: "참고: Upstash 스토리지 | 저장"
+description: "Mastra의 Upstash 스토리지 구현에 대한 문서입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+  - "@mastra/upstash"
+---
+
+# 업스태시 스토리지
+
+Upstash 스토리지 구현은 Upstash의 Redis 호환 키-값 저장소를 사용하여 서버리스 친화적인 스토리지 솔루션을 제공합니다.
+
+:::경고\[가격]
+
+Upstash와 함께 Mastra를 사용하는 경우 종량제 Model은 Agent 대화 중에 생성되는 Redis 명령의 양이 많아 예상치 못한 높은 비용이 발생할 수 있습니다. 우리는**fixed pricing plan** for predictable costs. See [Upstash pricing](https://upstash.com/pricing/redis)자세한 내용과[GitHub 문제 #5850](https://github.com/mastra-ai/mastra/issues/5850)맥락을 위해.
+
+:::
+
+:::경고\[관측성이 지원되지 않음]
+
+업스태시 스토리지**doesn't support the observability domain**. Traces from the `MastraStorageExporter` can't be persisted to Upstash, and [Studio's](/docs/studio/overview) observability features won't work with Upstash as your only storage provider. To enable observability, use [composite storage](/reference/storage/composite#specialized-storage-for-observability) to route observability data to a supported provider like ClickHouse.
+
+:::
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/upstash@latest
+```
+
+## 용법 {/* #usage */}
+
+```typescript
+import { UpstashStore } from '@mastra/upstash'
+
+const storage = new UpstashStore({
+  id: 'upstash-storage',
+  url: process.env.UPSTASH_URL,
+  token: process.env.UPSTASH_TOKEN,
+})
+```
+
+## 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'url',
+  type: 'string',
+  description: 'Upstash Redis URL',
+  isOptional: false,
+},
+{
+  name: 'token',
+  type: 'string',
+  description: 'Upstash Redis authentication token',
+  isOptional: false,
+},
+{
+  name: 'prefix',
+  type: 'string',
+  description: 'Key prefix for all stored items',
+  isOptional: true,
+  defaultValue: 'mastra:',
+},
+]}
+/>
+
+## 추가 참고사항 {/* #additional-notes */}
+
+### 주요 구조 {/* #key-structure */}
+
+Upstash 스토리지 구현은 키-값 구조를 사용합니다.
+
+* 스레드 키:`{prefix}thread:{threadId}`
+* 메시지 키:`{prefix}message:{messageId}`
+* 메타데이터 키:`{prefix}metadata:{entityId}`
+
+### 서버리스 이점 {/* #serverless-benefits */}
+
+Upstash 스토리지는 특히 서버리스 배포에 적합합니다.
+
+* 연결 관리가 필요하지 않습니다
+* 요청당 지불 가격
+* 글로벌 복제 옵션
+* 엣지 호환
+
+### 데이터 지속성 {/* #data-persistence */}
+
+Upstash는 다음을 제공합니다.
+
+* 자동 데이터 지속성
+* 특정 시점 복구
+* 지역 간 복제 옵션
+
+### 성능 고려 사항 {/* #performance-considerations */}
+
+최적의 성능을 위해서는:
+
+* 적절한 키 접두사를 사용하여 데이터 구성
+* Redis Memory 사용량 모니터링
+* 필요한 경우 데이터 만료 정책을 고려하세요.
+
+## 사용예 {/* #usage-example */}
+
+### Agent에 Memory 추가 {/* #adding-memory-to-an-agent */}
+
+Agent에 Upstash Memory를 추가하려면`Memory` class and create a new `storage` key using `UpstashStore` and a new `vector` key using `UpstashVector`. The configuration can point to either a remote service or a local setup.
+
+```typescript title="src/mastra/agents/example-upstash-agent.ts"
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+import { UpstashStore } from '@mastra/upstash'
+
+export const upstashAgent = new Agent({
+  id: 'upstash-agent',
+  name: 'Upstash Agent',
+  instructions:
+    'You are an AI agent with the ability to automatically recall memories from previous interactions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new UpstashStore({
+      id: 'upstash-agent-storage',
+      url: process.env.UPSTASH_REDIS_REST_URL!,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+    }),
+    options: {
+      generateTitle: true, // Explicitly enable automatic title generation
+    },
+  }),
+})
+```
+
+### Agent 사용 {/* #using-the-agent */}
+
+사용`memoryOptions` to scope recall for this request. Set `lastMessages: 5` to limit recency-based recall, and use `semanticRecall` to fetch the `topK: 3` most relevant messages, including `messageRange: 2` neighboring messages for context around each match.
+
+```typescript title="src/test-upstash-agent.ts"
+import 'dotenv/config'
+
+import { mastra } from './mastra'
+
+const threadId = '123'
+const resourceId = 'user-456'
+
+const agent = mastra.getAgent('upstashAgent')
+
+const message = await agent.stream('My name is Mastra', {
+  memory: {
+    thread: threadId,
+    resource: resourceId,
+  },
+})
+
+await message.textStream.pipeTo(new WritableStream())
+
+const stream = await agent.stream("What's my name?", {
+  memory: {
+    thread: threadId,
+    resource: resourceId,
+  },
+  memoryOptions: {
+    lastMessages: 5,
+    semanticRecall: {
+      topK: 3,
+      messageRange: 2,
+    },
+  },
+})
+
+for await (const chunk of stream.textStream) {
+  process.stdout.write(chunk)
+}
+```

@@ -1,0 +1,371 @@
+---
+title: "참조: SlackProvider | 채널 제공자"
+description: "Slack 앱을 생성하고 OAuth를 처리하며 Agent에 메시지를 라우팅하는 관리형 Slack 통합인 SlackProvider에 대한 API 참조입니다."
+packages:
+  - "@mastra/slack"
+---
+
+# Slack공급자
+
+`SlackProvider`Agent를 Slack에 연결하기 위한 관리 경로입니다. 등록하세요`Mastra.channels`매니페스트 API를 통해 Slack 앱을 프로비저닝하고, OAuth 설치 흐름을 실행하고, 구성 토큰을 순환하고, Slack 이벤트를 Agent에 라우팅합니다. Mastra가 앱 생성 및 설치를 소유하게 하려는 경우에 사용하세요. Slack 앱을 생성하고 범위 및 웹후크를 직접 구성하는 하위 수준 경로의 경우 다음을 사용합니다.[`createSlackAdapter`](/docs/capabilities/channels/slack)대리인의`channels.adapters`대신에.
+
+## 사용예 {/* #usage-example */}
+
+공급자를 등록하십시오.`Mastra` constructor. The refresh token is single-use and rotates on startup. The resulting access tokens are persisted to `Mastra.storage`.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { SlackProvider } from '@mastra/slack'
+
+export const mastra = new Mastra({
+  storage,
+  channels: {
+    slack: new SlackProvider({
+      refreshToken: process.env.SLACK_APP_CONFIG_REFRESH_TOKEN,
+      baseUrl: process.env.MASTRA_BASE_URL,
+    }),
+  },
+})
+```
+
+생성 시 자격 증명을 사용할 수 없는 경우(예: 편집기 UI를 통해 입력하거나 볼트에서 로드한 경우) 해당 자격 증명 없이 공급자를 구성하고 호출합니다.[`configure()`](#configurecredentials) later:
+
+```typescript title="src/mastra/index.ts"
+const slack = new SlackProvider()
+
+await slack.configure({
+  refreshToken: process.env.SLACK_APP_CONFIG_REFRESH_TOKEN,
+})
+```
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+`SlackProviderConfig`Slack 관련 필드, Slack 어댑터 재정의(`toolDisplay`, `streaming`, `typingStatus`), and a curated subset of [`ChannelConfig`](/reference/agents/channels) options (such as `handlers`, `inlineMedia`, 그리고`state`) 연결된 모든 Agent에게 전달됩니다. 모든 필드는 선택 사항입니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'refreshToken',
+  type: 'string',
+  isOptional: true,
+  description:
+    'Slack App Configuration refresh token, used for automatic token rotation. Single-use; each rotation returns a new pair. Can also be provided later via `configure()`. If omitted, the provider starts unconfigured and cannot create apps until `configure()` is called or tokens are loaded from storage. Generate it under "Your App Configuration Tokens" at api.slack.com/apps.',
+},
+{
+  name: 'token',
+  type: 'string',
+  isOptional: true,
+  description:
+    'Slack App Configuration access token for programmatic app creation. Optional, because the provider rotates to a fresh token on startup using `refreshToken`.',
+},
+{
+  name: 'baseUrl',
+  type: 'string',
+  isOptional: true,
+  description:
+    'Public base URL for webhook and OAuth callbacks. Required when calling `connect()` to create apps. Can also be set via `setBaseUrl()` or auto-detected from the Mastra server config. For local development, use a tunnel such as `cloudflared`.',
+},
+{
+  name: 'encryptionKey',
+  type: 'string',
+  isOptional: true,
+  description:
+    'Encryption key for sensitive stored data (client secret, signing secret, bot token). Use a 32+ character random string. Can be set via the `MASTRA_ENCRYPTION_KEY` env var. If omitted, secrets are stored in plaintext (not recommended for production).',
+},
+{
+  name: 'storage',
+  type: 'ChannelsStorage',
+  isOptional: true,
+  description:
+    "Custom storage for installations. Defaults to Mastra's `ChannelsStorage` from the global storage. Throws if no persistent storage is available.",
+},
+{
+  name: 'redirectPath',
+  type: 'string',
+  isOptional: true,
+  defaultValue: '"/"',
+  description: 'Path to redirect to after OAuth completion.',
+},
+{
+  name: 'onInstall',
+  type: '(installation: SlackInstallation) => Promise<void>',
+  isOptional: true,
+  description: 'Called when a workspace successfully installs the app.',
+},
+{
+  name: 'streaming',
+  type: 'StreamingConfig | false',
+  isOptional: true,
+  defaultValue: 'true',
+  description:
+    "Stream agent text deltas to Slack as they're generated. Pass `{ updateIntervalMs }` to customize the post-and-edit interval, or `false` to buffer text until step-finish. Disabling streaming restricts `toolDisplay` to static modes.",
+},
+{
+  name: 'textFormat',
+  type: "'markdown' | 'plain'",
+  isOptional: true,
+  defaultValue: "'markdown'",
+  description:
+    "Dialect for the agent's final reply text, forwarded to the Slack adapter. `'markdown'` (the default) posts replies as markdown so Slack renders bold text, links, and tables natively. `'plain'` posts literal plain text, the escape hatch for agents prompted to emit Slack mrkdwn. Applies to buffered replies (`streaming: false`) and the streaming fallback; native streaming is always markdown.",
+},
+{
+  name: 'toolDisplay',
+  type: 'ToolDisplay',
+  isOptional: true,
+  defaultValue: "'grouped'",
+  description:
+    "How tool calls are rendered in Slack: `'cards'`, `'text'`, `'timeline'`, `'grouped'`, `'hidden'`, or a function. `'hidden'` suppresses tool call/result rendering entirely. `'timeline'` and `'grouped'` require streaming. With `streaming: false`, only static modes are available and the default is `'cards'`.",
+},
+{
+  name: 'typingStatus',
+  type: 'boolean | TypingStatusFn',
+  isOptional: true,
+  defaultValue: 'true',
+  description:
+    'Show a typing indicator while the agent works. Set `false` to disable, or pass a function to return custom status text per stream chunk (return `undefined` to fall back to the default for that chunk).',
+},
+{
+  name: 'waitUntil',
+  type: 'WaitUntilFn',
+  isOptional: true,
+  description:
+    "Returns a `waitUntil` for the current Slack webhook request. Required on serverless runtimes where Hono can't bridge the platform's `ExecutionContext` (Vercel, AWS Lambda). Without it, the invocation freezes after the 200 ack and kills the run mid-flight. Pass the bare `waitUntil(promise)` from your platform SDK (for example, `@vercel/functions`). Cloudflare Workers and Netlify users typically don't need this.",
+},
+{
+  name: 'resolveWaitUntil',
+  type: 'WaitUntilResolver',
+  isOptional: true,
+  description:
+    "Resolve `waitUntil` from the request's Hono `Context` when the runtime exposes it through the request and core's default doesn't cover it. Resolution order: `waitUntil` → `resolveWaitUntil` → core default.",
+},
+{
+  name: 'handlers',
+  type: 'ChannelHandlers',
+  isOptional: true,
+  description:
+    'Override built-in event handlers (`onDirectMessage`, `onMention`). Forwarded to `AgentChannels` for every agent connected via this provider.',
+},
+{
+  name: 'inlineMedia',
+  type: "ChannelConfig['inlineMedia']",
+  isOptional: true,
+  description: 'Which media types to send inline to the model.',
+},
+{
+  name: 'inlineLinks',
+  type: "ChannelConfig['inlineLinks']",
+  isOptional: true,
+  description: 'Promote URLs in message text to file parts.',
+},
+{
+  name: 'threadContext',
+  type: "ChannelConfig['threadContext']",
+  isOptional: true,
+  description: 'Fetch recent thread messages from Slack when the agent joins mid-conversation.',
+},
+{
+  name: 'tools',
+  type: "ChannelConfig['tools']",
+  isOptional: true,
+  description:
+    'Whether the channel exposes channel tools (`add_reaction`, `remove_reaction`) via `AgentChannels.getTools()`. These tools are never added to the agent automatically — pass them explicitly via `tools: { ...channels.getTools() }` to use them.',
+},
+{
+  name: 'state',
+  type: "ChannelConfig['state']",
+  isOptional: true,
+  description:
+    "State adapter for message deduplication, locking, and subscriptions. Defaults to the `MastraStateAdapter` backed by the Mastra instance's configured storage, so subscriptions persist across restarts.",
+},
+{
+  name: 'chatOptions',
+  type: "ChannelConfig['chatOptions']",
+  isOptional: true,
+  description: 'Additional options passed directly to the Chat SDK.',
+},
+{
+  name: 'logger',
+  type: "SlackAdapterConfig['logger']",
+  isOptional: true,
+  description: "Logger forwarded to the underlying `SlackAdapter`. Defaults to the adapter's `ConsoleLogger`.",
+},
+]}
+/>
+
+## 행동 양식 {/* #methods */}
+
+### Agent 연결 {/* #agent-connections */}
+
+#### `connect(agentId, options?)` {/* #connectagentid-options */}
+
+매니페스트 API를 통해 Agent용 새 Slack 앱을 생성하고 사용자를 리디렉션할 인증 URL과 함께 OAuth 결과를 반환합니다. 필요하다`baseUrl` to be set. If a pending installation already exists for the agent, returns its existing authorization URL instead of creating a duplicate app.
+
+```typescript
+const result = await slack.connect('support-agent', {
+  name: 'Support Bot',
+})
+
+// Redirect the user to result.authorizationUrl to install the app
+```
+
+보고:`Promise<ChannelConnectResult>`
+
+```typescript
+interface ChannelConnectResult {
+  type: 'oauth'
+  installationId: string
+  authorizationUrl: string
+}
+```
+
+`SlackConnectOptions`직렬화 가능하며 저장된 Agent에 대해 저장할 수 있습니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'name',
+  type: 'string',
+  isOptional: true,
+  description: 'Display name for the Slack bot. Defaults to the agent name, then the agent ID.',
+},
+{
+  name: 'description',
+  type: 'string',
+  isOptional: true,
+  description: 'Bot description shown in Slack. Defaults to "{name} - Powered by Mastra".',
+},
+{
+  name: 'iconUrl',
+  type: 'string',
+  isOptional: true,
+  description:
+    'URL to a square image (min 512x512) for the app icon. Downloaded and uploaded to Slack automatically.',
+},
+{
+  name: 'manifest',
+  type: '(defaults: SlackAppManifest) => SlackAppManifest',
+  isOptional: true,
+  description:
+    'Customize the Slack app manifest before it is sent to the Manifest API. Receives the default manifest and returns the final one. Use it for custom scopes, additional events, or interactivity settings.',
+},
+{
+  name: 'redirectUrl',
+  type: 'string',
+  isOptional: true,
+  description:
+    "URL to redirect to after successful OAuth completion. Defaults to the provider's `redirectPath` or `/`.",
+},
+]}
+/>
+
+#### `disconnect(agentId)` {/* #disconnectagentid */}
+
+해당 앱을 삭제하고 스토리지에서 설치를 제거하여 Slack에서 Agent의 연결을 끊습니다.
+
+```typescript
+await slack.disconnect('support-agent')
+```
+
+보고:`Promise<void>`
+
+#### `getInstallation(agentId)` {/* #getinstallationagentid */}
+
+Agent에 대한 Slack 설치를 반환합니다. 또는`null` if none exists.
+
+```typescript
+const installation = await slack.getInstallation('support-agent')
+```
+
+보고:`Promise<SlackInstallation | null>`
+
+#### `listInstallations()` {/* #listinstallations */}
+
+활성 및 보류 중을 포함하여 모든 Slack 설치(공개 정보만)를 나열합니다.
+
+```typescript
+const installations = await slack.listInstallations()
+```
+
+보고:`Promise<ChannelInstallationInfo[]>`
+
+### 구성 {/* #configuration */}
+
+#### `configure(credentials)` {/* #configurecredentials */}
+
+런타임 시 Slack 앱 구성 자격 증명을 제공하거나 지웁니다. 생성 시 자격 증명을 사용할 수 없는 경우 이를 사용합니다. 통과하다`null` to clear credentials and delete stored tokens.
+
+```typescript
+// Provide credentials (persists to storage immediately)
+await slack.configure({ refreshToken: 'xoxe-1-...' })
+
+// Clear credentials and stored tokens
+await slack.configure(null)
+```
+
+보고:`Promise<void>`
+
+#### `setBaseUrl(baseUrl)` {/* #setbaseurlbaseurl */}
+
+웹훅 및 OAuth 콜백에 사용되는 공개 기본 URL을 설정합니다. 생성 시 URL을 알 수 없고 서버 구성에서 자동 감지할 수 없는 경우 이 방법을 사용하세요.
+
+```typescript
+slack.setBaseUrl('https://abc123.trycloudflare.com')
+```
+
+#### `initialize()` {/* #initialize */}
+
+재생성`SlackAdapter` for each active installation in storage and injects `AgentChannels` into the corresponding agent so it receives Slack events on startup. Doesn't auto-provision new apps. Use `connect()` to create one. Mastra calls this automatically, so you rarely call it directly.
+
+```typescript
+await slack.initialize()
+```
+
+보고:`Promise<void>`
+
+## 기본 매니페스트 {/* #default-manifest */}
+
+언제`connect()` builds a Slack app, the generated manifest requests a default set of bot scopes and event subscriptions. Override them with the `manifest` option on `connect()`.
+
+| 기본 봇 범위 | 기본 봇 이벤트 |
+| - | - |
+|`chat:write` | `app_mention` |
+| `chat:write.public` | `message.channels` |
+| `im:write` | `message.groups` |
+| `channels:history` | `message.im` |
+| `channels:read` | `message.mpim` |
+| `groups:history` | |
+| `groups:read` | |
+| `im:history` | |
+| `im:read` | |
+| `mpim:history` | |
+| `mpim:read` | |
+| `app_mentions:read` | |
+| `users:read` | |
+| `reactions:write` | |
+| `files:read` | |
+| `assistant:write` | |
+
+## 공급자에 액세스 {/* #accessing-the-provider */}
+
+다음을 입력하여 등록된 공급자에 액세스합니다.`channels` getter, keyed by the id you registered it under:
+
+```typescript
+const result = await mastra.channels.slack.connect('support-agent')
+```
+
+키가 런타임에만 알려진 경우 문자열 ID로 키를 찾고 구체적인 유형을 전달합니다.
+
+```typescript
+const slack = mastra.getChannelProvider<SlackProvider>('slack')
+const result = await slack.connect('support-agent')
+```
+
+## 저장 요구 사항 {/* #storage-requirement */}
+
+`SlackProvider`영구 저장이 필요합니다.`Mastra` to encrypt and persist installations and rotating configuration tokens. The constructor throws if no persistent storage is available and no custom `storage` is passed.
+
+## 관련된 {/* #related */}
+
+* [채널 제공자](/reference/channels/channel-provider): 인터페이스`SlackProvider` implements
+* [채널](/docs/capabilities/channels/overview): 개념, 플랫폼 설정 및`createSlackAdapter` path
+* [채널 참조](/reference/agents/channels):`channels` config on the `Agent` constructor

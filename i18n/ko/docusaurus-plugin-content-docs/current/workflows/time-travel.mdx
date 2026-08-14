@@ -1,0 +1,318 @@
+---
+title: "시간 여행 | Workflow"
+description: "Mastra의 시간 이동 디버깅을 사용하여 특정 지점에서 Workflow 단계를 다시 실행합니다."
+packages:
+  - "@mastra/core"
+---
+
+# 시간여행
+
+시간 여행을 사용하면 저장된 스냅샷 데이터나 사용자가 제공하는 사용자 정의 컨텍스트를 사용하여 특정 단계부터 시작하여 Workflow를 다시 실행할 수 있습니다.
+
+이는 실패한 Workflow를 디버깅하거나, 다른 입력으로 개별 단계를 테스트하거나, 전체 Workflow를 다시 실행하지 않고 오류를 복구하는 데 유용합니다. 또한 시간 여행을 사용하여 특정 단계부터 시작하여 아직 실행되지 않은 Workflow를 실행할 수도 있습니다.
+
+## 시간 여행의 작동 방식 {/* #how-time-travel-works */}
+
+당신이 전화할 때`timeTravel()` on a workflow run:
+
+1. Workflow는 스토리지에서 기존 스냅샷을 로드합니다(사용 가능한 경우).
+2. 대상 단계 이전의 단계 결과는 스냅샷 또는 제공된 컨텍스트에서 재구성됩니다.
+3. 제공된 또는 재구성된 입력 데이터를 사용하여 지정된 단계부터 실행이 시작됩니다.
+4. Workflow는 해당 시점부터 계속 완료됩니다.
+
+시간 여행은 지속된 Workflow 스냅샷에 의존하므로 스토리지를 구성해야 합니다.
+
+## 기본 사용법 {/* #basic-usage */}
+
+사용`run.timeTravel()` to re-execute a workflow from a specific step:
+
+```typescript
+import { mastra } from './mastra'
+
+const workflow = mastra.getWorkflow('myWorkflow')
+const run = await workflow.createRun()
+
+const result = await run.timeTravel({
+  step: 'step2',
+  inputData: { previousStepResult: 'custom value' },
+})
+```
+
+## 목표 단계 지정 {/* #specifying-the-target-step */}
+
+단계 참조 또는 단계 ID를 사용하여 대상 단계를 지정할 수 있습니다.
+
+### 단계 참조 사용 {/* #using-step-reference */}
+
+```typescript
+const result = await run.timeTravel({
+  step: step2,
+  inputData: { value: 10 },
+})
+```
+
+### 단계 ID 사용 {/* #using-step-id */}
+
+```typescript
+const result = await run.timeTravel({
+  step: 'step2',
+  inputData: { value: 10 },
+})
+```
+
+### 중첩된 Workflow 단계 {/* #nested-workflow-steps */}
+
+중첩된 Workflow 내부 단계의 경우 점 표기법, 단계 IDS 배열 또는 단계 참조 배열을 사용합니다.
+
+```typescript
+// Using dot notation
+const result = await run.timeTravel({
+  step: 'nestedWorkflow.step3',
+  inputData: { value: 10 },
+})
+
+// Using array of step IDs
+const result = await run.timeTravel({
+  step: ['nestedWorkflow', 'step3'],
+  inputData: { value: 10 },
+})
+
+// Using array of step references
+const result = await run.timeTravel({
+  step: [nestedWorkflow, step3],
+  inputData: { value: 10 },
+})
+```
+
+## 실행 컨텍스트 제공 {/* #providing-execution-context */}
+
+시간 여행 시 이전 단계의 상태를 지정하는 컨텍스트를 제공할 수 있습니다.
+
+```typescript {3-13}
+const result = await run.timeTravel({
+  step: 'step2',
+  context: {
+    step1: {
+      status: 'success',
+      payload: { value: 0 },
+      output: { step1Result: 2 },
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+    },
+  },
+})
+```
+
+컨텍스트 개체에는 단계 ID로 입력된 단계 결과가 포함됩니다. 각 단계 결과에는 다음이 포함됩니다.
+
+* `status`: 단계의 실행 상태(`success`, `failed`, `suspended`)
+* `payload`: 단계에 전달된 입력 데이터
+* `output`: 단계의 출력 데이터(성공적인 단계의 경우)
+* `startedAt`: 단계가 시작된 타임스탬프
+* `endedAt`: 단계가 종료된 타임스탬프(완료된 단계의 경우)
+* `suspendPayload`: 데이터가 전달되었습니다.`suspend()` (for suspended steps)
+* `resumePayload`: 데이터가 전달되었습니다.`resume()` (for resumed steps)
+
+## 실패한 Workflow 다시 실행 {/* #re-running-failed-workflows */}
+
+시간 이동은 실패한 Workflow 실행을 디버깅하고 복구하는 데 특히 유용합니다.
+
+```typescript
+const workflow = mastra.getWorkflow('myWorkflow')
+const run = await workflow.createRun()
+
+// Initial run fails at step2
+const failedResult = await run.start({
+  inputData: { value: 1 },
+})
+
+if (failedResult.status === 'failed') {
+  // Re-run from step2 with corrected input
+  const recoveredResult = await run.timeTravel({
+    step: 'step2',
+    inputData: { step1Result: 5 }, // Provide corrected input
+  })
+}
+```
+
+## 일시 중단된 Workflow를 통한 시간 여행 {/* #time-travel-with-suspended-workflows */}
+
+이전 단계에서 일시 중단된 Workflow를 재개하기 위해 시간 여행을 할 수 있습니다.
+
+```typescript
+const run = await workflow.createRun()
+
+// Start workflow - suspends at promptAgent step
+const initialResult = await run.start({
+  inputData: { input: 'test' },
+})
+
+if (initialResult.status === 'suspended') {
+  // Time travel back to an earlier step with resume data
+  const result = await run.timeTravel({
+    step: 'getUserInput',
+    resumeData: {
+      userInput: 'corrected input',
+    },
+  })
+}
+```
+
+## 시간 여행 결과 스트리밍 {/* #streaming-time-travel-results */}
+
+사용`timeTravelStream()` to receive streaming events during time travel execution:
+
+```typescript
+const run = await workflow.createRun()
+
+const stream = run.timeTravelStream({
+  step: 'step2',
+  inputData: { value: 10 },
+})
+
+for await (const event of stream.fullStream) {
+  console.log(event.type, event.payload)
+}
+
+const result = await stream.result
+
+if (result.status === 'success') {
+  console.log(result.result)
+}
+```
+
+## 초기 상태의 시간 여행 {/* #time-travel-with-initial-state */}
+
+Workflow 수준 상태를 설정하기 위해 시간 이동 시 초기 상태를 제공할 수 있습니다.
+
+```typescript
+const result = await run.timeTravel({
+  step: 'step2',
+  inputData: { value: 10 },
+  initialState: {
+    counter: 5,
+    metadata: { source: 'time-travel' },
+  },
+})
+```
+
+## 오류 처리 {/* #error-handling */}
+
+시간 여행은 특정 상황에서 오류를 발생시킵니다.
+
+### Workflow 실행 중 {/* #running-workflow */}
+
+현재 실행 중인 Workflow로 시간 여행을 할 수 없습니다.
+
+```typescript
+try {
+  await run.timeTravel({ step: 'step2' })
+} catch (error) {
+  // "This workflow run is still running, cannot time travel"
+}
+```
+
+### 잘못된 단계 ID {/* #invalid-step-id */}
+
+Workflow에 대상 단계가 없으면 시간 이동이 발생합니다.
+
+```typescript
+try {
+  await run.timeTravel({ step: 'nonExistentStep' })
+} catch (error) {
+  // "Time travel target step not found in execution graph: 'nonExistentStep'. Verify the step id/path."
+}
+```
+
+### 잘못된 입력 데이터 {/* #invalid-input-data */}
+
+언제`validateInputs` is enabled, time travel validates the input data against the step's schema:
+
+```typescript
+try {
+  await run.timeTravel({
+    step: 'step2',
+    inputData: { invalidField: 'value' },
+  })
+} catch (error) {
+  // "Invalid inputData: \n- step1Result: Required"
+}
+```
+
+## 중첩된 Workflow 컨텍스트 {/* #nested-workflows-context */}
+
+중첩된 Workflow로 시간 이동하는 경우 상위 및 중첩된 Workflow 단계 모두에 대한 컨텍스트를 제공할 수 있습니다.
+
+```typescript
+const result = await run.timeTravel({
+  step: 'nestedWorkflow.step3',
+  context: {
+    step1: {
+      status: 'success',
+      payload: { value: 0 },
+      output: { step1Result: 2 },
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+    },
+    nestedWorkflow: {
+      status: 'running',
+      payload: { step1Result: 2 },
+      startedAt: Date.now(),
+    },
+  },
+  nestedStepsContext: {
+    nestedWorkflow: {
+      step2: {
+        status: 'success',
+        payload: { step1Result: 2 },
+        output: { step2Result: 3 },
+        startedAt: Date.now(),
+        endedAt: Date.now(),
+      },
+    },
+  },
+})
+```
+
+## 사용 사례 {/* #use-cases */}
+
+### 실패한 단계 디버깅 {/* #debugging-failed-steps */}
+
+문제를 진단하려면 동일하거나 수정된 ​​입력으로 실패한 단계를 다시 실행하십시오.
+
+```typescript
+const result = await run.timeTravel({
+  step: failedStepId,
+  context: originalContext, // Use context from the failed run
+})
+```
+
+### 새 Workflow 실행 시 단계 논리 테스트 {/* #testing-step-logic-on-new-workflow-run */}
+
+새 Workflow 실행 시 특정 입력으로 개별 단계를 테스트합니다. 처음부터 Workflow 실행을 시작하지 않고도 단계 논리를 테스트하는 데 유용합니다.
+
+```typescript
+const result = await run.timeTravel({
+  step: 'processData',
+  inputData: { testData: 'specific test case' },
+})
+```
+
+### 일시적인 오류 복구 {/* #recovering-from-transient-failures */}
+
+일시적인 문제(네트워크 오류, 속도 제한)로 인해 실패한 단계를 다시 실행하세요.
+
+```typescript
+// After fixing the external service issue
+const result = await run.timeTravel({
+  step: 'callExternalApi',
+  inputData: savedInputData,
+})
+```
+
+## 관련된 {/* #related */}
+
+* [스냅샷](/docs/workflows/snapshots)
+* [일시중단 및 재개](/docs/workflows/suspend-and-resume)
+* [오류 처리](/docs/workflows/error-handling)
+* [제어 흐름](/docs/workflows/control-flow)

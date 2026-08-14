@@ -1,0 +1,265 @@
+---
+title: "Langfuse 수출업체 | 통합 | Observability"
+description: "LLM 관찰 및 분석을 위해 Langfuse에 추적 보내기"
+packages:
+  - "@mastra/langfuse"
+  - "@mastra/observability"
+---
+
+# Langfuse 수출업체
+
+[랭퓨즈](https://langfuse.com/)LLM 애플리케이션을 위해 특별히 설계된 오픈 소스 관찰 플랫폼입니다. Langfuse 내보내기는 추적을 Langfuse로 보내 Model 성능, 토큰 사용, 대화 흐름에 대한 자세한 통찰력을 제공합니다.
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/langfuse@latest
+```
+
+## 구성 {/* #configuration */}
+
+### 전제조건 {/* #prerequisites */}
+
+1. **랭퓨즈 계정**: 가입하세요[cloud.langfuse.com](https://cloud.langfuse.com) or deploy self-hosted
+2. **API 키**: Langfuse 설정 → API 키에서 공개/비밀 키 쌍을 생성합니다.
+3. **환경 변수**: 자격 증명을 설정하세요
+
+```bash title=".env"
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com  # Or your self-hosted URL
+```
+
+### 제로 구성 설정 {/* #zero-config-setup */}
+
+환경 변수가 설정된 경우 구성 없이 내보내기를 사용합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { LangfuseExporter } from '@mastra/langfuse'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      langfuse: {
+        serviceName: 'my-service',
+        exporters: [new LangfuseExporter()],
+      },
+    },
+  }),
+})
+```
+
+### 명시적 구성 {/* #explicit-configuration */}
+
+자격 증명을 직접 전달할 수도 있습니다(환경 변수보다 우선 적용됨).
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { LangfuseExporter } from '@mastra/langfuse'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      langfuse: {
+        serviceName: 'my-service',
+        exporters: [
+          new LangfuseExporter({
+            publicKey: process.env.LANGFUSE_PUBLIC_KEY!,
+            secretKey: process.env.LANGFUSE_SECRET_KEY!,
+            baseUrl: process.env.LANGFUSE_BASE_URL,
+            environment: process.env.NODE_ENV,
+            release: process.env.GIT_COMMIT,
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+## 구성 옵션 {/* #configuration-options */}
+
+### 실시간 대 배치 모드 {/* #realtime-vs-batch-mode */}
+
+Langfuse 내보내기는 추적 전송을 위한 두 가지 모드를 지원합니다.
+
+#### 실시간 모드(개발) {/* #realtime-mode-development */}
+
+디버깅에 이상적인 추적은 Langfuse 대시보드에 즉시 나타납니다.
+
+```typescript
+new LangfuseExporter({
+  publicKey: process.env.LANGFUSE_PUBLIC_KEY!,
+  secretKey: process.env.LANGFUSE_SECRET_KEY!,
+  realtime: true, // Flush after each event
+})
+```
+
+#### 배치 모드(생산) {/* #batch-mode-production */}
+
+자동 일괄 처리로 성능 향상:
+
+```typescript
+new LangfuseExporter({
+  publicKey: process.env.LANGFUSE_PUBLIC_KEY!,
+  secretKey: process.env.LANGFUSE_SECRET_KEY!,
+  realtime: false, // Default - batch traces
+})
+```
+
+#### 대용량 추적을 위한 일괄 튜닝 {/* #batch-tuning-for-high-volume-traces */}
+
+초당 많은 범위를 생성하는 자체 호스팅 Langfuse 배포 또는 스트리밍 실행의 경우 OTEL 배치 크기와 플러시 간격을 조정하여 Langfuse 수집 끝점에 대한 요청 압력을 줄일 수 있습니다.
+
+```typescript
+new LangfuseExporter({
+  publicKey: process.env.LANGFUSE_PUBLIC_KEY!,
+  secretKey: process.env.LANGFUSE_SECRET_KEY!,
+  flushAt: 500, // Maximum spans per OTEL export batch
+  flushInterval: 20, // Maximum seconds between flushes
+})
+```
+
+대용량 스팬 유형을 완전히 억제하려면(예:`MODEL_CHUNK` spans from streamed responses), use the observability-level [`excludeSpanTypes` option](/reference/observability/tracing/span-filtering) rather than configuring the exporter:
+
+```typescript
+import { SpanType } from '@mastra/core/observability'
+
+new Observability({
+  configs: {
+    langfuse: {
+      serviceName: 'my-service',
+      exporters: [new LangfuseExporter()],
+      excludeSpanTypes: [SpanType.MODEL_CHUNK],
+    },
+  },
+})
+```
+
+### 완전한 구성 {/* #complete-configuration */}
+
+```typescript
+new LangfuseExporter({
+  // Required credentials
+  publicKey: process.env.LANGFUSE_PUBLIC_KEY!,
+  secretKey: process.env.LANGFUSE_SECRET_KEY!,
+
+  // Optional settings
+  baseUrl: process.env.LANGFUSE_BASE_URL, // Default: https://cloud.langfuse.com
+  realtime: process.env.NODE_ENV === 'development', // Dynamic mode selection
+  flushAt: 500, // Maximum spans per OTEL export batch
+  flushInterval: 20, // Maximum seconds between flushes
+  logLevel: 'info', // Diagnostic logging: debug | info | warn | error
+
+  // Langfuse-specific settings
+  environment: process.env.NODE_ENV, // Shows in Langfuse UI for filtering
+  release: process.env.GIT_COMMIT, // Git commit hash for version tracking
+})
+```
+
+## Agent당 범위 지정 평가자 {/* #scoping-evaluators-per-agent */}
+
+Langfuse 평가자(예: LLM-as-a-Judge)는 특정 추적에 대해서만 실행되도록 필터링할 수 있습니다. Mastra Langfuse 내보내기는 자동으로 각 추적의 범위를 추적을 시작한 Agent 또는 Workflow로 지정하므로 추적 수준 필터가 올바른 실행을 확인합니다.
+
+루트 범위가 다음인 모든 추적에 대해`AGENT_RUN`, the exporter sets:
+
+* `langfuse.trace.name`: Agent 이름(또는 이름이 설정되지 않은 경우 ID)
+* `langfuse.trace.metadata.agentId`: Agent ID
+* `langfuse.trace.metadata.agentName`: Agent 이름
+
+동일하게 적용됩니다`WORKFLOW_RUN` root spans, which set `langfuse.trace.metadata.workflowId` and `langfuse.trace.metadata.workflowName`.
+
+평가자의 범위를 특정 Agent로 지정하려면 Langfuse에서 필터를 구성하십시오.
+
+* **추적 이름**: Agent 이름과 같습니다(예:`weather-agent`).
+* **메타데이터**: `agentId` equals the agent id.
+
+Langfuse 평가기 필터의 추적 이름 드롭다운에는 표시되는 모든 고유 값이 나열되므로 각 Agent는 최소한 하나의 추적을 생성하면 자체 항목으로 표시됩니다.
+
+맞춤설정을 하시면`traceName` via `mastra.metadata.traceName`, your value takes precedence over the default agent name.
+
+## 커스텀 추적 메타데이터 {/* #custom-trace-metadata */}
+
+Langfuse는 최상위 메타데이터로만 추적을 필터링하고 그룹화합니다. 중첩된 메타데이터 키는 필터링이나 그룹화에 사용할 수 없습니다.
+
+자신만의 최상위 메타데이터를 추가하려면 아래에서 키를 설정하세요.`langfuse` in your span metadata. The exporter forwards each key to `langfuse.trace.metadata.<key>`, where it becomes filterable in Langfuse:
+
+```typescript
+const tracingOptions = {
+  metadata: {
+    langfuse: {
+      customerId: 'cust_123',
+      tier: 'enterprise',
+    },
+  },
+}
+```
+
+이 예제에서는`langfuse.trace.metadata.customerId` and `langfuse.trace.metadata.tier`.
+
+참고:
+
+* 예약된`prompt` key is used for [prompt linking](#prompt-linking) and isn't forwarded as trace metadata.
+* 예약된 ID 키`agentId`, `agentName`, `workflowId`, and `workflowName` are set from the root span and take precedence over custom values with the same name.
+* Langfuse는 추적 메타데이터 속성을 문자열로 매핑하므로 값은 문자열로 전송됩니다. 숫자, 부울 및 객체는 JSON으로 직렬화됩니다. Langfuse Cloud는 수집 시 원래 유형으로 복원합니다.
+
+## Prompt 연결 {/* #prompt-linking */}
+
+LLM 세대를 다음에 저장된 Prompt에 연결할 수 있습니다.[Langfuse Prompt Management](https://langfuse.com/docs/prompt-management). It enables version tracking and metrics for your prompts.
+
+### 도우미 사용(권장) {/* #using-the-helper-recommended */}
+
+사용`withLangfusePrompt` with `buildTracingOptions` for the cleanest API:
+
+```typescript title="src/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { buildTracingOptions } from '@mastra/observability'
+import { LangfuseExporter, withLangfusePrompt } from '@mastra/langfuse'
+
+const exporter = new LangfuseExporter()
+
+// Fetch the prompt from Langfuse Prompt Management via the client
+const prompt = await exporter.client.prompt.get('customer-support', { type: 'text' })
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  instructions: prompt.compile(), // Use the prompt text from Langfuse
+  model: '__GATEWAY_OPENAI_MODEL__',
+  defaultGenerateOptions: {
+    tracingOptions: buildTracingOptions(
+      withLangfusePrompt({ name: prompt.name, version: prompt.version }),
+    ),
+  },
+})
+```
+
+그만큼`withLangfusePrompt` helper accepts `name` and `version` fields for prompt linking. Langfuse v5 requires both fields.
+
+### 수동 필드 {/* #manual-fields */}
+
+Langfuse SDK를 사용하지 않는 경우 수동 필드를 전달할 수도 있습니다.
+
+```typescript
+const tracingOptions = buildTracingOptions(withLangfusePrompt({ name: 'my-prompt', version: 1 }))
+```
+
+### Prompt 개체 필드 {/* #prompt-object-fields */}
+
+Prompt 개체에는 두 가지가 모두 필요합니다.`name` and `version`:
+
+| 필드 | 유형 | 설명 |
+| - | - | - |
+|`name` | string | The prompt name in Langfuse |
+| `version` | number | The prompt version number |
+
+설정 시`MODEL_GENERATION` span, the Langfuse exporter automatically links the generation to the corresponding prompt.
+
+## 관련된 {/* #related */}
+
+* [추적 개요](/docs/observability/tracing/overview)
+* [랭퓨즈 문서](https://langfuse.com/docs)
+* [Langfuse Prompt 관리](https://langfuse.com/docs/prompt-management)

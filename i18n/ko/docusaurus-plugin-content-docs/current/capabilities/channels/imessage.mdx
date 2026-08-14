@@ -1,0 +1,150 @@
+---
+title: "아이메시지 | 채널"
+description: "채널 어댑터를 통해 iMessage 메시지를 수신하도록 Mastra Agent를 구성합니다."
+packages:
+  - "@mastra/core"
+---
+
+# 아이메시지
+
+iMessage 채널을 사용하면 Mastra Agent가 iMessage에서 직접 메시지와 그룹 메시지를 받을 수 있습니다. Mastra는 Agent 연결, 웹훅 경로 및 게이트웨이 수신기를 처리합니다. Photon iMessage 어댑터 문서에서는 번호 프로비저닝, 자격 증명 및 웹후크 등록을 다룹니다.
+
+## 어댑터 설치 {/* #install-the-adapter */}
+
+Photon iMessage 어댑터를 설치합니다:
+
+```bash npm2yarn
+npm install @photon-ai/chat-adapter-imessage
+```
+
+## Agent 구성 {/* #agent-configuration */}
+
+추가하다`createiMessageAdapter()` to the agent's `channels.adapters` object:
+
+```typescript title="src/mastra/agents/imessage-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createiMessageAdapter } from '@photon-ai/chat-adapter-imessage'
+
+export const imessageAgent = new Agent({
+  id: 'imessage-agent',
+  name: 'iMessage Agent',
+  instructions: 'Answer questions and help with tasks over iMessage.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  channels: {
+    adapters: {
+      imessage: {
+        adapter: createiMessageAdapter(),
+        toolDisplay: 'text',
+      },
+    },
+    threadContext: { maxMessages: 0 },
+  },
+})
+```
+
+Mastra 인스턴스에 Agent를 등록합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { imessageAgent } from './agents/imessage-agent'
+
+export const mastra = new Mastra({
+  agents: { imessageAgent },
+})
+```
+
+사용`imessage` as the adapter key. Mastra derives the webhook path and the `platform` value on `requestContext` from this key.
+
+`toolDisplay: 'text'`iMessage에는 승인 및 거부 작업을 위한 대화형 카드가 없기 때문에 메시지의 Tool 호출에 대해 설명합니다.`threadContext: { maxMessages: 0 }` skips the platform history lookup Mastra runs when an agent is first mentioned in a group chat, which the adapter can't perform. Both override defaults that assume platform features iMessage lacks.
+
+## 어댑터 설정 {/* #adapter-setup */}
+
+따라가다[Photon iMessage adapter docs](https://github.com/photon-hq/vercel-chat-adapter-imessage) for iMessage-specific setup, including number provisioning, hosted and self-hosted modes, and webhook registration. The adapter picks its mode from the environment variables you set.
+
+호스팅 서비스의 경우 다음 위치에 프로젝트를 생성하세요.[app.photon.codes](https://app.photon.codes) and use the project credentials:
+
+```bash title=".env"
+IMESSAGE_PROJECT_ID=your-project-id
+IMESSAGE_PROJECT_SECRET=your-project-secret
+IMESSAGE_WEBHOOK_SECRET=your-webhook-signing-secret
+```
+
+자체 호스팅 서버의 경우 다음과 같이 작성된 gRPC 주소에서 어댑터를 가리킵니다.`host:port`. The adapter strips any URL scheme and appends `:443` to a bare host:
+
+```bash title=".env"
+IMESSAGE_SERVER_URL=imessage.example.com:443
+IMESSAGE_API_KEY=your-server-token
+IMESSAGE_PHONE=+15551234567
+```
+
+`IMESSAGE_PHONE`선택 사항이며 자체 호스팅 서버에 여러 번호가 있는 경우 메시지를 라우팅합니다. 이 값을 다음으로 전달할 수도 있습니다.`createiMessageAdapter()` directly, including a `credentials` function that resolves the project ID and secret at first use from a secret store.
+
+## 웹훅 URL {/* #webhook-url */}
+
+Mastra는 Agent ID 및 어댑터 키에서 iMessage 웹후크 경로를 생성합니다.
+
+```text
+/api/agents/imessage-agent/channels/imessage/webhook
+```
+
+공개 Mastra 서버 URL을 기본 URL로 사용하십시오.
+
+```text
+https://your-app.example.com/api/agents/imessage-agent/channels/imessage/webhook
+```
+
+이 URL을[Photon dashboard](https://app.photon.codes), then set the signing secret it returns as `IMESSAGE_WEBHOOK_SECRET`. The secret is shown once at registration. The adapter verifies the signature on every delivery and rejects requests that don't match. Webhooks are available in hosted mode only.
+
+Photon은 백오프를 통해 실패한 전달을 재시도하고 최소한 한 번 전달하므로 동일한 메시지가 두 번 도착할 수 있습니다. Chat SDK는 채널 상태 어댑터를 사용하여 반복을 삭제하고 Mastra의 기본값은 해당 중복 제거 키를 Memory에 유지합니다. 여기에는 단일 장기 실행 서버가 포함됩니다.
+
+다시 시작한 후에도 반복이 Agent에 도달하거나 재시도가 다른 인스턴스로 라우팅되는 서버리스에 도달할 수 있습니다. 공유 상태 어댑터 전달`channels.state` so dedup keys are visible everywhere. Install one alongside the adapter:
+
+```bash npm2yarn
+npm install @chat-adapter/state-redis
+```
+
+`createRedisState()`읽는다`REDIS_URL` environment variable:
+
+```typescript title="src/mastra/agents/imessage-agent.ts"
+import { createRedisState } from '@chat-adapter/state-redis'
+
+channels: {
+  adapters: {
+    imessage: {
+      adapter: createiMessageAdapter(),
+      toolDisplay: 'text',
+    },
+  },
+  threadContext: { maxMessages: 0 },
+  state: createRedisState(),
+},
+```
+
+이는 동일한 메시지를 두 번 처리하는 것이 사용자에게 표시되는 부작용이 있는 Tool의 경우 가장 중요합니다.
+
+:::메모
+
+Photon은 공개 HTTPS 엔드포인트에만 전달합니다. 다음 주소로 배송되지 않습니다.`http://`, to private addresses like `localhost`, or through a redirect. For local development, use a tunnel as described in the [Channels overview](/docs/capabilities/channels/overview#webhook-routes).
+
+:::
+
+## 게이트웨이 리스너 {/* #gateway-listener */}
+
+어댑터는 웹후크를 수신하는 대신 열린 연결을 유지하고 메시지를 실시간으로 스트리밍할 수 있습니다. 이는 호스팅 모드와 자체 호스팅 모드 모두에서 작동합니다.
+
+Mastra는 초기화 중에 이 리스너를 시작하고 삭제되면 다시 연결하므로 장기 실행 서버에서는 크론 작업이나 추가 경로가 필요하지 않습니다. 세트`gateway: false` on the adapter config to turn it off when you use webhooks:
+
+```typescript title="src/mastra/agents/imessage-agent.ts"
+imessage: {
+  adapter: createiMessageAdapter(),
+  toolDisplay: 'text',
+  gateway: false,
+},
+```
+
+서버리스 플랫폼에서는 웹후크를 선호합니다. 게이트웨이 수신기에는 활성 상태로 유지되는 프로세스가 필요합니다. 보다[Serverless deployment](/docs/capabilities/channels/overview#serverless-deployment).
+
+## 관련된 {/* #related */}
+
+* [채널 개요](/docs/capabilities/channels/overview)
+* [더](/docs/capabilities/channels/other-adapters)

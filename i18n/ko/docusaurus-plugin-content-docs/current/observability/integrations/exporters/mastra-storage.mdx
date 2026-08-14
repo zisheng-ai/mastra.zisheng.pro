@@ -1,0 +1,258 @@
+---
+title: "Mastra Storage 수출업체 | 통합 | Observability"
+description: "개발 및 디버깅을 위해 로컬로 추적 저장"
+packages:
+  - "@mastra/observability"
+---
+
+# Mastra Storage 수출업체
+
+그만큼`MastraStorageExporter`구성된 저장소 백엔드에 대한 추적을 유지하여 Studio를 통해 액세스할 수 있도록 합니다. 외부 서비스가 필요하지 않습니다.
+
+:::메모
+
+`MastraStorageExporter`이전에 호출되었습니다`DefaultExporter`. The original `DefaultExporter`클래스는 여전히 다음에서 내보내집니다.`@mastra/observability`이전 버전과의 호환성을 위해 더 이상 사용되지 않습니다. 새로운 코드는 다음을 사용해야 합니다.`MastraStorageExporter`.
+
+:::
+
+:::경고\[생산 Observability]
+Observability 데이터는 프로덕션 환경에서 범용 데이터베이스를 빠르게 압도할 수 있습니다. 트래픽이 많은 애플리케이션의 경우 관찰성 스토리지 도메인을 다음으로 라우팅합니다.[ClickHouse](/reference/storage/clickhouse) through [composite storage](/reference/storage/composite). See [Production Recommendations](#production-recommendations) for details.
+:::
+
+## 구성 {/* #configuration */}
+
+### 전제조건 {/* #prerequisites */}
+
+1. **스토리지 백엔드**: 스토리지 공급자(libSQL, PostgreSQL 등)를 구성합니다.
+2. **사진관**: 로컬에서 추적을 보기 위해 설치
+
+### 기본 설정 {/* #basic-setup */}
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+import { LibSQLStore } from '@mastra/libsql'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db', // Required for trace persistence
+  }),
+  observability: new Observability({
+    configs: {
+      local: {
+        serviceName: 'my-service',
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+### 권장 구성 {/* #recommended-configuration */}
+
+Observability 구성에 MastraStorageExporter를 포함합니다.
+
+```typescript
+import { Mastra } from '@mastra/core'
+import {
+  Observability,
+  MastraStorageExporter,
+  MastraPlatformExporter,
+  SensitiveDataFilter,
+} from '@mastra/observability'
+import { LibSQLStore } from '@mastra/libsql'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'mastra',
+        exporters: [
+          new MastraStorageExporter(), // Persists observability events to Mastra Storage
+          new MastraPlatformExporter(), // Sends observability events to Mastra platform (requires MASTRA_PLATFORM_ACCESS_TOKEN)
+        ],
+        spanOutputProcessors: [new SensitiveDataFilter()],
+      },
+    },
+  }),
+})
+```
+
+## 사진관 {/* #studio */}
+
+Studio를 통해 추적에 액세스합니다.
+
+1. 스튜디오 시작
+2. Observability으로 이동
+3. 지역 흔적 필터링 및 검색
+4. 자세한 SPAN 정보 확인
+
+## 추적 전략 {/* #tracing-strategies */}
+
+MastraStorageExporter는 스토리지 공급자를 기반으로 최적의 추적 전략을 자동으로 선택합니다. 필요한 경우 이 선택을 재정의할 수도 있습니다.
+
+### 사용 가능한 전략 {/* #available-strategies */}
+
+| 전략 | 설명 | 사용 사례 |
+| - | - | - |
+|**realtime** | Process each event immediately | Development, debugging, low traffic |
+| **batch-with-updates** | Buffer events and batch write with full lifecycle support | Low volume Production |
+| **insert-only** | Only process completed spans, ignore updates | High volume Production |
+
+### 전략 구성 {/* #strategy-configuration */}
+
+```typescript
+new MastraStorageExporter({
+  strategy: 'auto', // Default - let storage provider decide
+  // or explicitly set:
+  // strategy: 'realtime' | 'batch-with-updates' | 'insert-only'
+
+  // Batching configuration (applies to both batch-with-updates and insert-only)
+  maxBatchSize: 1000, // Max spans per batch
+  maxBatchWaitMs: 5000, // Max wait before flushing
+  maxBufferSize: 10000, // Max spans to buffer
+})
+```
+
+## 스토리지 Provider 지원 {/* #storage-provider-support */}
+
+다양한 스토리지 공급자는 다양한 추적 전략을 지원합니다. 일부 공급자는 프로덕션 워크로드에 대한 Observability을 지원하는 반면 다른 공급자는 주로 로컬 개발을 위한 것입니다.
+
+전략을 다음과 같이 설정하면`'auto'`, the `MastraStorageExporter` automatically selects the optimal strategy for the storage provider. If you set an explicit strategy that the storage provider doesn't support, the exporter logs a warning and falls back to the provider's preferred strategy.
+
+### Observability 지원 Provider {/* #providers-with-observability-support */}
+
+| 스토리지 제공자 | 선호하는 전략 | 지원되는 전략 | 권장 용도 |
+| - | - | - | - |
+|**[ClickHouse](/reference/storage/clickhouse)** | insert-only | insert-only | Production (high-volume) |
+| **[PostgreSQL](/reference/storage/postgresql)** | batch-with-updates | batch-with-updates, insert-only | Production (low volume) |
+| **[MSSQL](/reference/storage/mssql)** | batch-with-updates | batch-with-updates, insert-only | Production (low volume) |
+| **[MongoDB](/reference/storage/mongodb)** | batch-with-updates | batch-with-updates, insert-only | Production (low volume) |
+| **[OracleDB](/reference/storage/oracledb)** | batch-with-updates | batch-with-updates, insert-only | Production (low volume) |
+| **[libSQL](/reference/storage/libsql)** | batch-with-updates | batch-with-updates, insert-only | Default storage, good for development |
+
+### Observability 지원이 없는 공급자 {/* #providers-without-observability-support */}
+
+다음 스토리지 Provider**don't support** the observability domain. If you're using one of these providers and need observability, use [composite storage](/reference/storage/composite) to route observability data to a supported provider:
+
+* [볼록한](/reference/storage/convex)
+* [DynamoDB](/reference/storage/dynamodb)
+* [클라우드플레어 D1](/reference/storage/cloudflare-d1)
+* [Cloudflare 내구성 개체](/reference/storage/cloudflare)
+* [업스태시](/reference/storage/upstash)
+* [랜스DB](/reference/storage/lance)
+
+### 전략 이점 {/* #strategy-benefits */}
+
+* **실시간**: 즉각적인 가시성, 디버깅에 가장 적합
+* **일괄 업데이트**: 처리량 10~100배 향상, 전체 수명주기
+* **삽입 전용**: 데이터베이스 운영을 70% 추가로 줄여 분석에 적합
+
+## 생산 권장 사항 {/* #production-recommendations */}
+
+관측 가능성 데이터는 프로덕션 환경에서 빠르게 증가합니다. 단일 Agent 상호 작용으로 수백 개의 범위가 생성될 수 있으며 트래픽이 많은 애플리케이션은 하루에 수천 개의 추적을 생성할 수 있습니다. 대부분의 범용 데이터베이스는 쓰기 중심의 추가 전용 워크로드에 최적화되어 있지 않습니다.
+
+### 권장 사항: 대량 생산을 위한 ClickHouse {/* #recommended-clickhouse-for-high-volume-production */}
+
+[클릭하우스](/reference/storage/clickhouse)대용량 분석 워크로드를 위해 설계된 컬럼형 데이터베이스입니다. 다음과 같은 이유로 프로덕션 Observability을 위해 권장되는 선택입니다.
+
+* **쓰기에 최적화됨**: 초당 수백만 개의 삽입을 처리합니다.
+* **효율적인 압축**: 추적 데이터 저장 비용 절감
+* **빠른 쿼리**: 컬럼형 스토리지를 통해 빠른 추적 조회 및 집계가 가능합니다.
+* **시계열 네이티브**: 시간 기반 데이터 보존 및 파티셔닝 지원 내장
+
+### 복합 스토리지 사용 {/* #using-composite-storage */}
+
+관측 가능성을 지원하지 않는 공급자(예: Convex 또는 DynamoDB)를 사용 중이거나 성능을 최적화하려는 경우 다음을 사용하세요.[composite storage](/reference/storage/composite#specialized-storage-for-observability) to route observability data to ClickHouse while keeping other data in your primary database.
+
+## 일괄 처리 동작 {/* #batching-behavior */}
+
+### 플러시 트리거 {/* #flush-triggers */}
+
+두 배치 전략 모두에 대해(`batch-with-updates` and `insert-only`), traces are flushed to storage when any of these conditions are met:
+
+1. **크기 트리거**: 버퍼 도달`maxBatchSize` spans
+2. **시간 트리거**: `maxBatchWaitMs` elapsed since first event
+3. **비상 플러시**: 버퍼 접근`maxBufferSize` limit
+4. **일시 휴업**: 보류 중인 모든 이벤트를 강제로 플러시합니다.
+
+### 오류 처리 {/* #error-handling */}
+
+MastraStorageExporter에는 프로덕션 사용을 위한 안정적인 오류 처리 기능이 포함되어 있습니다.
+
+* **재시도 로직**: 지수 백오프(500ms, 1s, 2s, 4s)
+* **일시적인 오류**: 백오프를 통한 자동 재시도
+* **지속적인 실패**: 4번의 시도 실패 후 배치 삭제
+* **버퍼 오버플로**: 스토리지 중단 시 Memory 문제 방지
+
+## 삭제된 관측 가능성 이벤트 {/* #dropped-observability-events */}
+
+`DefaultExporter`관측 가능성 데이터를 유지할 수 없는 경우 구조화된 드롭 이벤트를 내보냅니다. 수출업자 또는 교량 등록`onDroppedEvent` to forward these drops to alerting or monitoring.
+
+이벤트가 삭제되는 두 가지 이유는 다음과 같습니다.
+
+* `unsupported-storage`: 저장소 공급자가 신호 유형을 구현하지 않습니다.
+* `retry-exhausted`: 내보내기가 최대 배치를 재시도했습니다.`maxRetries` times and then dropped it.
+
+다음 예에서는 모니터링 엔드포인트에 삭제 세부 정보를 전달하는 방법을 보여줍니다.
+
+```typescript title="src/mastra/observability.ts"
+import { BaseExporter } from '@mastra/observability'
+import type { ObservabilityDropEvent, TracingEvent } from '@mastra/core/observability'
+
+class DropAlertExporter extends BaseExporter {
+  name = 'drop-alerts'
+
+  async onDroppedEvent(event: ObservabilityDropEvent) {
+    await fetch('https://monitoring.example.com/observability-drops', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        count: event.count,
+        signal: event.signal,
+        reason: event.reason,
+        exporterName: event.exporterName,
+      }),
+    })
+  }
+
+  protected async _exportTracingEvent(_event: TracingEvent) {}
+}
+```
+
+## 구성 예 {/* #configuration-examples */}
+
+```typescript
+// Zero config - recommended for most users
+new MastraStorageExporter()
+
+// Development override
+new MastraStorageExporter({
+  strategy: 'realtime', // Immediate visibility for debugging
+})
+
+// High-throughput production
+new MastraStorageExporter({
+  maxBatchSize: 2000, // Larger batches
+  maxBatchWaitMs: 10000, // Wait longer to fill batches
+  maxBufferSize: 50000, // Handle longer outages
+})
+
+// Low-latency production
+new MastraStorageExporter({
+  maxBatchSize: 100, // Smaller batches
+  maxBatchWaitMs: 1000, // Flush quickly
+})
+```
+
+## 관련된 {/* #related */}
+
+* [추적 개요](/docs/observability/tracing/overview)
+* [MastraPlatform수출자](/docs/observability/integrations/exporters/mastra-platform)
+* [복합 스토리지](/reference/storage/composite): 여러 스토리지 Provider 결합
+* [스토리지 구성](/docs/storage/overview)

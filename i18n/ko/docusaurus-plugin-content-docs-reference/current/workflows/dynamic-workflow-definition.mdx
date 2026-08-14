@@ -1,0 +1,301 @@
+---
+title: "참조: 동적 Workflow 정의 | Workflow"
+description: "동적 Workflow를 유지하고 등록하는 데 사용되는 JSON 정의 형식에 대한 참조입니다."
+packages:
+  - "@mastra/core"
+---
+
+# 동적 Workflow 정의
+
+:::실험적
+
+동적 Workflow는 베타 버전입니다. API가 안정될 때까지 주요 버전 변경 없이 주요 변경 사항이 발생할 수 있습니다.
+
+:::
+
+동적 Workflow 정의는 JSON과 호환됩니다.`DynamicWorkflowGraph` accepted by [`Mastra.addDynamicWorkflow()`](/reference/core/addDynamicWorkflow), the stored-workflow server routes, and the Client SDK workflows API.
+
+보다[Dynamic workflows](/docs/workflows/dynamic-workflows) for a complete setup and usage example.
+
+## 정의 필드 {/* #definition-fields */}
+
+| 필드 | 유형 | 필수 | 설명 |
+| - | - | - | - |
+|`id` | `string` | Yes | Unique workflow ID. This is also the ID used to retrieve and run the workflow. |
+| `description` | `string`| 아니요 | 사람이 읽을 수 있는 설명 |
+|`inputSchema` | `JsonSchema`| 예 | Workflow 입력에 대한 JSON 스키마 |
+|`outputSchema` | `JsonSchema`| 예 | Workflow 출력에 대한 JSON 스키마 |
+|`stateSchema` | `JsonSchema`| 아니요 | 공유 Workflow 상태에 대한 JSON 스키마 |
+|`requestContextSchema` | `JsonSchema`| 아니요 | 요청 컨텍스트에서 읽은 값에 대한 JSON 스키마 |
+|`metadata` | `Record<string, unknown>`| 아니요 | 스토리지를 통해 보존되는 임의의 JSON 메타데이터 |
+|`graph` | `SerializedStepFlowEntry[]`| 예 | Workflow를 구성하는 단계 항목 |
+
+스키마는 Zod 대신 JSON 스키마를 사용하므로 정의는 JSON을 통해 왕복될 수 있습니다. Mastra는 Workflow우를 등록할 때 각 스키마를 Zod로 변환합니다.
+
+```json
+{
+  "id": "greeting-workflow",
+  "description": "Returns a greeting for the supplied name",
+  "inputSchema": {
+    "type": "object",
+    "properties": { "name": { "type": "string" } },
+    "required": ["name"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": { "message": { "type": "string" } },
+    "required": ["message"]
+  },
+  "graph": [
+    {
+      "type": "mapping",
+      "id": "create-greeting",
+      "mapConfig": "{\"message\":{\"template\":\"Hello, ${initData.name}!\"}}"
+    }
+  ]
+}
+```
+
+## 그래프 항목 {/* #graph-entries */}
+
+항목`graph` run in order. Each entry receives the previous entry's output, and the first entry receives the workflow input.
+
+| 응모유형 | 설명 |
+| - | - |
+|`agent` | Invoke a registered agent |
+| `tool` | Invoke a registered tool |
+| `mapping` | Reshape data between steps |
+| `workflow` | Invoke a registered workflow as a nested step |
+| `parallel` | Run several steps concurrently and merge their outputs |
+| `conditional` | Run every branch whose predicate is true, concurrently |
+| `foreach` | Run one step per item of an array input |
+| `loop` | Repeat a step while or until a predicate holds |
+| `sleep` | Pause for a fixed duration |
+| `sleepUntil` | Pause until a fixed date |
+
+다음을 사용하는 코드 정의 Workflow[`.agent()`](/reference/workflows/workflow-methods/agent) and [`.tool()`](/reference/workflows/workflow-methods/tool) produce the same declarative entries when serialized.
+
+### Agent 단계 {/* #agent-steps */}
+
+안`agent` entry invokes a registered agent by ID. Agent steps accept `{ prompt: string }` as input and return `{ text: string }` by default.
+
+```json
+{
+  "type": "agent",
+  "id": "summarize",
+  "agentId": "support-agent"
+}
+```
+
+그만큼`id` identifies this call site within the workflow. Later steps address the result as `stepResults.summarize`, regardless of the agent's own ID.
+
+추가`outputSchema` to request structured output from the agent:
+
+```json
+{
+  "type": "agent",
+  "id": "extract-subtopics",
+  "agentId": "support-agent",
+  "outputSchema": {
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": { "title": { "type": "string" } },
+      "required": ["title"]
+    }
+  }
+}
+```
+
+사용`mapping` entry before an agent to build its `{ prompt }` input from workflow data.
+
+Agent 항목은 선택 사항을 허용합니다.`description` and an `options` object:
+
+```json
+{
+  "type": "agent",
+  "id": "summarize",
+  "agentId": "support-agent",
+  "description": "Summarize the incoming request",
+  "options": { "retries": 2, "metadata": { "team": "support" } }
+}
+```
+
+오직`retries` and `metadata` persist. Function-valued options such as `onFinish` and function-valued `toolChoice` are rejected when a code-defined workflow is stored. Other agent call options don't persist.
+
+### Tool 단계 {/* #tool-steps */}
+
+에이`tool` entry invokes a tool by its registration key from the `Mastra` `tools` object. Mastra resolves the tool's input and output schemas from the registry when it registers the workflow.
+
+```json
+{
+  "type": "tool",
+  "id": "lookup",
+  "toolId": "lookup-customer"
+}
+```
+
+Tool 항목은 동일한 선택 사항을 허용합니다.`description` and `options` fields as agent entries. Only `retries` and `metadata` persist.
+
+### 매핑 단계 {/* #mapping-steps */}
+
+에이`mapping` entry reshapes data. Its `mapConfig` is a JSON string that encodes an object. Each key becomes a key in the step output, and each descriptor defines one source.
+
+| 설명자 | 설명 |
+| - | - |
+|`{ "value": ... }` | A constant JSON value |
+| `{ "template": "..." }` | A string built from `${...}` placeholders |
+| `{ "initData": true, "path": "a.b" }` | A value from the workflow input |
+| `{ "step": "step-id", "path": "a.b" }` | A value from a preceding step's output |
+| `{ "requestContextPath": "a.b" }` | A value from the request context |
+
+그만큼`step` source also accepts an array of step IDs:
+
+```json
+{ "step": ["escalate", "auto-reply"], "path": "text" }
+```
+
+비어 있지 않은 결과가 있는 첫 번째 나열된 단계가 값을 제공합니다. 이것은 다음 이후에 실행된 분기를 선택할 수 있습니다.`conditional` entry.
+
+템플릿은 다음에 대한 자리 표시자를 확인합니다.`initData`, `inputData`, `state`, `requestContext`, and `stepResults.<step-id>`:
+
+```json
+{
+  "type": "mapping",
+  "id": "build-prompt",
+  "mapConfig": "{\"prompt\":{\"template\":\"Summarize this request: ${initData.request}\"}}"
+}
+```
+
+템플릿으로 확인된 개체와 배열은 JSON으로 문자열화됩니다. 에이`null` value inside a present result renders as an empty string. A template that references a step without a successful output fails the run.
+
+매핑 항목은 최상위 그래프 항목이어야 합니다. 내부에 배치할 수 없습니다.`parallel`, `conditional`, `foreach`, or `loop` containers.
+
+### 중첩된 Workflow 단계 {/* #nested-workflow-steps */}
+
+에이`workflow` entry invokes another registered workflow. The target can be code-defined or stored.
+
+```json
+{
+  "type": "workflow",
+  "id": "lookup-first",
+  "workflowId": "lookup-customer-workflow"
+}
+```
+
+그만큼`id` identifies the call site. The same nested workflow can appear several times under different call-site IDs, and later steps address each result as `stepResults.<id>`. A `workflow` entry also accepts an optional `description`.
+
+### 병렬 항목 {/* #parallel-entries */}
+
+에이`parallel` entry runs several single steps concurrently and merges their outputs into an object keyed by step ID.
+
+```json
+{
+  "type": "parallel",
+  "steps": [
+    { "type": "tool", "id": "first", "toolId": "lookup-customer" },
+    { "type": "tool", "id": "second", "toolId": "lookup-customer" }
+  ]
+}
+```
+
+각 어린이는 다음과 같아야 합니다.`agent`, `tool`, or `workflow` entry. All children receive the parallel entry's input directly.
+
+### 조건부 항목 {/* #conditional-entries */}
+
+에이`conditional` entry pairs each step with a declarative predicate and runs every branch whose predicate is true.
+
+```json
+{
+  "type": "conditional",
+  "steps": [
+    { "type": "agent", "id": "escalate", "agentId": "support-agent" },
+    { "type": "agent", "id": "auto-reply", "agentId": "support-agent" }
+  ],
+  "predicates": [
+    { "op": "eq", "left": { "path": "inputData.priority" }, "right": { "literal": "urgent" } },
+    { "op": "ne", "left": { "path": "inputData.priority" }, "right": { "literal": "urgent" } }
+  ]
+}
+```
+
+각 어린이는 다음과 같아야 합니다.`agent`, `tool`, or `workflow` entry, and each child needs a predicate. All children receive the conditional entry's input directly.
+
+### 술어 {/* #predicates */}
+
+조건부 항목과 루프는 JSON 조건자 DSL을 사용합니다. 피연산자는`{ "path": "..." }` references or `{ "literal": ... }` values. Paths resolve against `initData`, `inputData`, `stepResults`, and `state`.
+
+| 운영자 | 모양 |
+| - | - |
+|`eq`, `ne`, `lt`, `lte`, `gt`, `gte` | `{ "op": "eq", "left": ..., "right": ... }` |
+| `in`, `notIn` | `{ "op": "in", "value": ..., "set": [...] }` |
+| `exists`, `notExists` | `{ "op": "exists", "path": "..." }` |
+| `truthy`, `falsy` | `{ "op": "truthy", "value": ... }` |
+| `and`, `or` | `{ "op": "and", "args": [...] }` |
+| `not` | `{ "op": "not", "arg": ... }` |
+
+누락된 경로는 발생하지 않습니다. 경로 기반 연산자 반환`false` when the path can't be resolved. Use `exists` or `notExists` to distinguish a missing value from a falsy value.
+
+### Foreach 항목 {/* #foreach-entries */}
+
+에이`foreach` entry runs its body once for each item in an array input. The preceding entry must produce a raw array. Results preserve input order, and concurrency defaults to `1`.
+
+```json
+{
+  "type": "foreach",
+  "step": { "type": "workflow", "id": "write-blurb", "workflowId": "blurb-workflow" },
+  "opts": { "concurrency": 3 }
+}
+```
+
+신체는 다음과 같을 수 있습니다.`agent`, `tool`, or `workflow` entry, but not a `mapping` entry.
+
+### 루프 항목 {/* #loop-entries */}
+
+에이`loop` repeats one step while (`dowhile`) or until (`dountil`) a predicate holds.
+
+```json
+{
+  "type": "loop",
+  "loopType": "dountil",
+  "step": { "type": "tool", "id": "poll", "toolId": "check-status" },
+  "predicate": {
+    "op": "eq",
+    "left": { "path": "inputData.status" },
+    "right": { "literal": "done" }
+  }
+}
+```
+
+루프 본문은 단일 단계여야 하며 저장된 루프에는 선언적 조건자가 필요합니다.
+
+### 수면 항목 {/* #sleep-entries */}
+
+에이`sleep` entry pauses for a fixed number of milliseconds. A `sleepUntil` entry pauses until a fixed date represented by an ISO date string. Stored definitions require literal values.
+
+```json
+{ "type": "sleep", "id": "wait", "duration": 5000 }
+```
+
+```json
+{ "type": "sleepUntil", "id": "wait-for-launch", "date": "2027-01-01T00:00:00.000Z" }
+```
+
+런타임 시 기간이나 날짜를 계산해야 하는 경우 코드 정의 Workflow를 사용합니다.
+
+## 확인 {/* #validation */}
+
+Mastra는 정의를 유지하거나 등록하기 전에 정의를 검증합니다.
+
+* 구조: 최상위 전용 매핑과 같은 배치 규칙을 포함한 항목 모양 및 필수 필드입니다.
+* 참고문헌: 각`agentId` and `workflowId` must resolve against the live registries or the same bundle. A `toolId` must match a tool registration key.
+* 스키마 흐름: 각 항목의 입력은 유추된 매핑 출력을 포함하여 이전 출력과 호환되어야 합니다.
+
+유효성 검사 오류에는 다음과 같은 점선 경로가 포함됩니다.`graph.2.steps.0`, that identifies the invalid entry.
+
+## 관련된 {/* #related */}
+
+* [동적 Workflow 사용](/docs/workflows/dynamic-workflows)
+* [`Mastra.addDynamicWorkflow()`](/reference/core/addDynamicWorkflow)
+* [`Mastra.addDynamicWorkflows()`](/reference/core/addDynamicWorkflows)
+* [클라이언트 SDK Workflow API](/reference/client-js/workflows)

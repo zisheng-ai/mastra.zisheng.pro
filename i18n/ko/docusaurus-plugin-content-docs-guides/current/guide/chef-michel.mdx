@@ -1,0 +1,239 @@
+---
+title: "가이드: AI 셰프 어시스턴트 구축"
+description: "사용자가 사용 가능한 재료로 식사를 요리할 수 있도록 Mastra에서 Chef Assistant Agent를 만드는 방법에 대한 안내입니다."
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# AI 셰프 어시스턴트 구축
+
+이 가이드에서는 사용자가 사용 가능한 재료로 식사를 요리하는 데 도움이 되는 "Chef Assistant" Agent를 만듭니다.
+
+Agent를 생성하고 이를 Mastra에 등록하는 방법을 알아봅니다. 다음으로, 터미널을 통해 Agent와 상호 작용하고 다양한 응답 형식을 알아봅니다. 그런 다음 Mastra의 로컬 API 엔드포인트를 통해 Agent에 액세스합니다.
+
+## 전제조건 {/* #prerequisites */}
+
+* Node.js`v22.13.0` or later installed
+* 지원되는 API 키[Model Provider](/models)
+* 기존 Mastra 프로젝트(다음을 따르세요.[installation guide](/guides/getting-started/quickstart) to set up a new project)
+
+## Agent 만들기 {/* #create-the-agent */}
+
+Mastra에서 Agent를 생성하려면`Agent` class to define it and then register it with Mastra.
+
+<Steps>
+  <StepItem>
+    새 파일 만들기`src/mastra/agents/chefAgent.ts` and define your agent:
+
+    ```ts title="src/mastra/agents/chefAgent.ts"
+    import { Agent } from '@mastra/core/agent'
+
+    export const chefAgent = new Agent({
+      id: 'chef-agent',
+      name: 'chef-agent',
+      instructions:
+        'You are Michel, a practical and experienced home chef' +
+        'You help people cook with whatever ingredients they have available.',
+      model: '__GATEWAY_OPENAI_MODEL__',
+    })
+    ```
+  </StepItem>
+
+  <StepItem>
+    당신의`src/mastra/index.ts` file, register the agent:
+
+    ```ts title="src/mastra/index.ts" {2, 5}
+    import { Mastra } from '@mastra/core'
+    import { chefAgent } from './agents/chefAgent'
+
+    export const mastra = new Mastra({
+      agents: { chefAgent },
+    })
+    ```
+  </StepItem>
+</Steps>
+
+## Agent과 상호작용 {/* #interact-with-the-agent */}
+
+요구 사항에 따라 다양한 형식으로 Agent과 상호 작용하고 응답을 받을 수 있습니다. 다음 단계에서는 구조화된 출력을 생성, 스트리밍 및 가져오는 방법을 알아봅니다.
+
+<Steps>
+  <StepItem>
+    새 파일 만들기`src/index.ts` and add a `main()` function to it. Inside, craft a query to ask the agent and log its response.
+
+    ```ts title="src/index.ts"
+    import { chefAgent } from './mastra/agents/chefAgent'
+
+    async function main() {
+      const query =
+        'In my kitchen I have: pasta, canned tomatoes, garlic, olive oil, and some dried herbs (basil and oregano). What can I make?'
+      console.log(`Query: ${query}`)
+
+      const response = await chefAgent.generate([{ role: 'user', content: query }])
+      console.log('\n👨‍🍳 Chef Michel:', response.text)
+    }
+
+    main()
+    ```
+
+    그런 다음 스크립트를 실행합니다.
+
+    ```bash
+    npx bun src/index.ts
+    ```
+
+    다음과 유사한 출력이 표시됩니다.
+
+    ```
+    Query: In my kitchen I have: pasta, canned tomatoes, garlic, olive oil, and some dried herbs (basil and oregano). What can I make?
+
+    👨‍🍳 Chef Michel: You can make a delicious pasta al pomodoro! Here's how...
+    ```
+  </StepItem>
+
+  <StepItem>
+    이전 예에서는 진행 상황 없이 응답을 조금 기다렸을 수 있습니다. Agent가 생성되는 출력을 표시하려면 대신 해당 응답을 터미널로 스트리밍해야 합니다.
+
+    ```ts title="src/index.ts"
+    import { chefAgent } from './mastra/agents/chefAgent'
+
+    async function main() {
+      const query =
+        "Now I'm over at my friend's house, and they have: chicken thighs, coconut milk, sweet potatoes, and some curry powder."
+      console.log(`Query: ${query}`)
+
+      const stream = await chefAgent.stream([{ role: 'user', content: query }])
+
+      console.log('\n Chef Michel: ')
+
+      for await (const chunk of stream.textStream) {
+        process.stdout.write(chunk)
+      }
+
+      console.log('\n\n✅ Recipe complete!')
+    }
+
+    main()
+    ```
+
+    그런 다음 스크립트를 다시 실행하십시오.
+
+    ```bash
+    npx bun src/index.ts
+    ```
+
+    아래와 비슷한 출력이 표시됩니다. 이번에는 하나의 큰 블록 대신 한 줄씩 읽을 수 있습니다.
+
+    ```
+    Query: Now I'm over at my friend's house, and they have: chicken thighs, coconut milk, sweet potatoes, and some curry powder.
+
+    👨‍🍳 Chef Michel:
+    Great! You can make a comforting chicken curry...
+
+    ✅ Recipe complete!
+    ```
+  </StepItem>
+
+  <StepItem>
+    사람에게 Agent의 응답을 표시하는 대신 코드의 다른 부분에 전달하고 싶을 수도 있습니다. 이러한 경우 Agent는 다음을 반환해야 합니다.[structured output](/docs/agents/structured-output).
+
+    당신의 변경`src/index.ts` to the following:
+
+    ```ts title="src/index.ts"
+    import { chefAgent } from './mastra/agents/chefAgent'
+    import { z } from 'zod'
+
+    async function main() {
+      const query = 'I want to make lasagna, can you generate a lasagna recipe for me?'
+      console.log(`Query: ${query}`)
+
+      // Define the Zod schema
+      const schema = z.object({
+        ingredients: z.array(
+          z.object({
+            name: z.string(),
+            amount: z.string(),
+          }),
+        ),
+        steps: z.array(z.string()),
+      })
+
+      const response = await chefAgent.generate([{ role: 'user', content: query }], {
+        structuredOutput: {
+          schema,
+        },
+      })
+      console.log('\n👨‍🍳 Chef Michel:', response.object)
+    }
+
+    main()
+    ```
+
+    스크립트를 다시 실행하면 다음과 유사한 출력이 표시됩니다.
+
+    ```
+    Query: I want to make lasagna, can you generate a lasagna recipe for me?
+
+    👨‍🍳 Chef Michel: {
+      ingredients: [
+        { name: "Lasagna noodles", amount: "12 sheets" },
+        { name: "Ground beef", amount: "1 pound" },
+      ],
+      steps: [
+        "Preheat oven to 375°F (190°C).",
+        "Cook the lasagna noodles according to package instructions.",
+      ]
+    }
+    ```
+  </StepItem>
+</Steps>
+
+## Agent 서버 실행 {/* #run-the-agent-server */}
+
+Mastra의 API를 통해 Agent와 상호 작용하는 방법을 알아보세요.
+
+<Steps>
+  <StepItem>
+    다음을 사용하여 Agent를 서비스로 실행할 수 있습니다.`mastra dev` command:
+
+    ```bash
+    mastra dev
+    ```
+
+    등록된 Agent와 상호 작용하기 위해 엔드포인트를 노출하는 서버가 시작됩니다. 이내에[Studio](/docs/studio/overview) you can test your agent through a UI.
+  </StepItem>
+
+  <StepItem>
+    기본적으로`mastra dev` runs on `http://localhost:4111`. Your Chef Assistant agent will be available at:
+
+    ```
+    POST http://localhost:4111/api/agents/chefAgent/generate
+    ```
+  </StepItem>
+
+  <StepItem>
+    다음을 사용하여 Agent와 상호작용할 수 있습니다.`curl` from the command line:
+
+    ```bash
+    curl -X POST http://localhost:4111/api/agents/chefAgent/generate \
+      -H "Content-Type: application/json" \
+      -d '{
+        "messages": [
+          {
+            "role": "user",
+            "content": "I have eggs, flour, and milk. What can I make?"
+          }
+        ]
+      }'
+    ```
+
+    **샘플 응답:**
+
+    ```json
+    {
+      "text": "You can make delicious pancakes! Here's a simple recipe..."
+    }
+    ```
+  </StepItem>
+</Steps>

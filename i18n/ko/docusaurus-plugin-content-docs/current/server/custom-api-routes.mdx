@@ -1,0 +1,348 @@
+---
+title: "사용자 정의 API 경로 | 섬기는 사람"
+description: "Mastra 서버에서 추가 HTTP 엔드포인트를 노출합니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/ai-sdk"
+---
+
+# 커스텀 API 경로
+
+기본적으로 Mastra는 서버를 통해 등록된 Agent와 Workflow를 자동으로 노출합니다. 추가 동작을 위해 자체 HTTP 경로를 정의할 수 있습니다.
+
+경로는 도우미와 함께 제공됩니다`registerApiRoute()` from `@mastra/core/server`. 경로는 경로와 동일한 파일에 있을 수 있습니다.`Mastra`인스턴스를 분리하면 구성을 간결하게 유지하는 데 도움이 됩니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/my-custom-route', {
+        method: 'GET',
+        handler: async c => {
+          const mastra = c.get('mastra')
+          const agent = await mastra.getAgent('my-agent')
+
+          return c.json({ message: 'Custom route' })
+        },
+      }),
+    ],
+  },
+})
+```
+
+등록되면 서버 루트에서 사용자 지정 경로에 액세스할 수 있습니다. 예를 들어:
+
+```bash
+curl http://localhost:4111/my-custom-route
+```
+
+각 경로의 핸들러는 Hono를 받습니다.`Context`. Within the handler you can access the `Mastra` instance to fetch or call agents and workflows.
+
+## 미들웨어 {/* #middleware */}
+
+경로별 미들웨어를 추가하려면`middleware` array when calling `registerApiRoute()`.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/my-custom-route', {
+        method: 'GET',
+        middleware: [
+          async (c, next) => {
+            console.log(`${c.req.method} ${c.req.url}`)
+            await next()
+          },
+        ],
+        handler: async c => {
+          return c.json({ message: 'Custom route with middleware' })
+        },
+      }),
+    ],
+  },
+})
+```
+
+## OpenAPI 문서 {/* #openapi-documentation */}
+
+사용자 정의 경로에는 Mastra 서버 경로와 함께 Swagger UI에 표시되는 OpenAPI 메타데이터가 포함될 수 있습니다. 다음에서 OpenAPI 사양에 액세스할 수 있습니다.`/api/openapi.json`, where both custom routes and built-in routes are listed. Pass an `openapi` option with standard OpenAPI operation fields.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+import { z } from 'zod'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/items/:itemId', {
+        method: 'GET',
+        openapi: {
+          summary: 'Get item by ID',
+          description: 'Retrieves a single item by its unique identifier',
+          tags: ['Items'],
+          parameters: [
+            {
+              name: 'itemId',
+              in: 'path',
+              required: true,
+              description: 'The item ID',
+              schema: { type: 'string' },
+            },
+          ],
+          responses: {
+            200: {
+              description: 'Item found',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      name: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+            404: {
+              description: 'Item not found',
+            },
+          },
+        },
+        handler: async c => {
+          const itemId = c.req.param('itemId')
+          return c.json({ id: itemId, name: 'Example Item' })
+        },
+      }),
+    ],
+  },
+})
+```
+
+### Zod 스키마 사용 {/* #using-zod-schemas */}
+
+Zod 스키마`openapi` configuration are converted to JSON Schema when the OpenAPI document is generated:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+import { z } from 'zod'
+
+const ItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  price: z.number(),
+})
+
+const CreateItemSchema = z.object({
+  name: z.string().min(1),
+  price: z.number().positive(),
+})
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/items', {
+        method: 'POST',
+        openapi: {
+          summary: 'Create a new item',
+          tags: ['Items'],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: CreateItemSchema,
+              },
+            },
+          },
+          responses: {
+            201: {
+              description: 'Item created',
+              content: {
+                'application/json': {
+                  schema: ItemSchema,
+                },
+              },
+            },
+          },
+        },
+        handler: async c => {
+          const body = await c.req.json()
+          return c.json({ id: 'new-id', ...body }, 201)
+        },
+      }),
+    ],
+  },
+})
+```
+
+### Swagger UI에서 보기 {/* #viewing-in-swagger-ui */}
+
+개발 모드(`mastra dev`) or with `swaggerUI: true` in build options, your custom routes appear in the Swagger UI at `/swagger-ui`.
+
+```typescript
+export const mastra = new Mastra({
+  server: {
+    build: {
+      swaggerUI: true, // Enable in production builds
+    },
+    apiRoutes: [
+      // Your routes...
+    ],
+  },
+})
+```
+
+## 입증 {/* #authentication */}
+
+Mastra 서버에 인증이 구성되면 사용자 정의 API 경로에는 기본적으로 인증이 필요합니다. 경로를 공개적으로 접근 가능하게 하려면 다음을 설정하십시오.`requiresAuth: false`:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+import { MastraJwtAuth } from '@mastra/auth'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraJwtAuth({
+      secret: process.env.MASTRA_JWT_SECRET,
+    }),
+    apiRoutes: [
+      // Protected route (default behavior)
+      registerApiRoute('/protected-data', {
+        method: 'GET',
+        handler: async c => {
+          // Access authenticated user from request context
+          const user = c.get('requestContext').get('user')
+          return c.json({ message: 'Authenticated user', user })
+        },
+      }),
+
+      // Public route (no authentication required)
+      registerApiRoute('/webhooks/github', {
+        method: 'POST',
+        requiresAuth: false, // Explicitly opt out of authentication
+        handler: async c => {
+          const payload = await c.req.json()
+          // Process webhook without authentication
+          return c.json({ received: true })
+        },
+      }),
+    ],
+  },
+})
+```
+
+### 인증 동작 {/* #authentication-behavior */}
+
+* **구성된 인증 없음**: 모든 경로(기본 제공 및 사용자 지정)가 공개됩니다.
+* **인증이 구성됨**:
+  * Mastra 제공 노선(`/api/agents/*`, `/api/workflows/*`, etc.) require authentication
+  * 커스텀 경로에는 기본적으로 인증이 필요합니다.
+  * 커스텀 경로는 다음을 통해 선택 해제할 수 있습니다.`requiresAuth: false`
+
+### 사용자 정보에 접근하기 {/* #accessing-user-information */}
+
+요청이 인증되면 요청 컨텍스트에서 사용자 개체를 사용할 수 있습니다.
+
+```typescript
+registerApiRoute('/user-profile', {
+  method: 'GET',
+  handler: async c => {
+    const requestContext = c.get('requestContext')
+    const user = requestContext.get('user')
+
+    return c.json({ user })
+  },
+})
+```
+
+인증 공급자에 대한 자세한 내용은 다음을 참조하세요.[Auth documentation](/docs/server/auth).
+
+## 클라이언트 연결 해제 후 계속 생성 {/* #continue-generation-after-client-disconnect */}
+
+다음과 같은 내장 스트리밍 도우미[`chatRoute()`](/reference/ai-sdk/chat-route) forward the incoming request's `AbortSignal` to `agent.stream()`. That's the right default when a browser disconnect should cancel the model call.
+
+클라이언트 연결이 끊어질 때 중지되어야 하는 커스텀 스트리밍 경로의 경우 다음을 전달합니다.`c.req.raw.signal` to long-running work such as `agent.stream()`. Mastra's Node-based adapters also stop reading streamed `Response` bodies from custom routes when the client connection closes. Streamed response body errors that aren't caused by client disconnects still propagate through the adapter's normal error handling. In Hono, disconnect behavior depends on the host runtime forwarding connection closes to `request.signal`.
+
+```typescript title="src/mastra/index.ts"
+registerApiRoute('/stream', {
+  method: 'GET',
+  handler: async c => {
+    const stream = await agent.stream(prompt, {
+      abortSignal: c.req.raw.signal,
+    })
+
+    return stream.toTextStreamResponse()
+  },
+})
+```
+
+클라이언트 연결이 끊어진 후에도 서버가 계속해서 최종 응답을 생성하고 유지하도록 하려면 기본 응답 주위에 사용자 지정 경로를 구축하세요.`MastraModelOutput`. Start the agent stream without forwarding `c.req.raw.signal`, then call `consumeStream()` in the background so generation continues server-side.
+
+```typescript title="src/mastra/index.ts"
+import {
+  createUIMessageStream,
+  createUIMessageStreamResponse,
+  InferUIMessageChunk,
+  UIMessage,
+} from 'ai'
+import { toAISdkStream } from '@mastra/ai-sdk'
+import { Mastra } from '@mastra/core'
+import { registerApiRoute } from '@mastra/core/server'
+
+export const mastra = new Mastra({
+  server: {
+    apiRoutes: [
+      registerApiRoute('/chat/persist/:agentId', {
+        method: 'POST',
+        handler: async c => {
+          const { messages, memory } = await c.req.json()
+          const mastra = c.get('mastra')
+          const agent = mastra.getAgent(c.req.param('agentId'))
+
+          const stream = await agent.stream(messages, {
+            memory,
+            // Do not pass c.req.raw.signal if this route should keep running
+            // after the client disconnects.
+          })
+
+          void stream.consumeStream().catch(error => {
+            mastra.getLogger()?.error('Background stream consumption failed', { error })
+          })
+
+          const uiStream = createUIMessageStream({
+            originalMessages: messages,
+            execute: async ({ writer }) => {
+              for await (const part of toAISdkStream(stream, { from: 'agent' })) {
+                writer.write(part as InferUIMessageChunk<UIMessage>)
+              }
+            },
+          })
+
+          return createUIMessageStreamResponse({ stream: uiStream })
+        },
+      }),
+    ],
+  },
+})
+```
+
+:::메모
+
+HTTP 클라이언트가 사라진 후에도 의도적으로 작업을 계속하려는 경우에만 이 패턴을 사용하십시오. 연결을 끊고 생성을 취소하려면 계속 사용하세요.`chatRoute()` or forward the request `AbortSignal` yourself.
+
+:::
+
+## 관련된 {/* #related */}
+
+* [RegisterApiRoute() 참조](/reference/server/register-api-route): 전체 API 참조
+* [서버 미들웨어](/docs/server/middleware): 글로벌 미들웨어 구성
+* [마스트라 서버](/docs/server/mastra-server): 서버 구성 옵션

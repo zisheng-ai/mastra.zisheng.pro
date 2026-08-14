@@ -1,0 +1,150 @@
+---
+title: "모노레포에 배포 | 전개"
+description: "모노레포 설정의 일부인 Mastra 애플리케이션을 배포하는 방법 알아보기"
+packages:
+  - "@mastra/deployer"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# 모노레포에 배포
+
+모노레포에 Mastra를 배포하는 것은 독립 실행형 애플리케이션과 동일한 프로세스를 따릅니다. 이 가이드에서는 모노레포 관련 고려 사항을 다룹니다. 핵심 빌드 및 배포 단계는 다음을 참조하세요.[Deploy a Mastra Server](/docs/deployment/mastra-server).
+
+## 지원되는 단일 저장소 {/* #supported-monorepos */}
+
+Mastra는 다음과 함께 작동합니다.
+
+* npm 작업공간
+* pnpm 작업공간
+* 원사 작업 공간
+* 터보레포
+
+알려진 제한사항:
+
+* Bun 작업 공간 - 부분 지원; 알려진 문제
+* Nx - Nx를 사용할 수 있습니다.[supported dependency strategies](https://nx.dev/concepts/decisions/dependency-management) but you need to have `package.json` files inside your workspace packages
+
+## 예시 구조 {/* #example-structure */}
+
+이 예에서 Mastra 애플리케이션은 다음 위치에 있습니다.`apps/api`:
+
+```
+apps/
+├── api/
+│   ├── src/
+│   │   └── mastra/
+│   │       ├── agents/
+│   │       ├── tools/
+│   │       ├── workflows/
+│   │       └── index.ts
+│   ├── package.json
+│   └── tsconfig.json
+└── web/
+packages/
+├── ui/
+└── utils/
+package.json
+```
+
+## 모노레포에서 빌드하기 {/* #building-from-a-monorepo */}
+
+monorepo Tool를 사용하여 올바른 패키지에서 빌드 명령을 실행하세요. 특별한 플래그가 필요하지 않습니다.
+
+예:
+
+<Tabs>
+  <TabItem value="npm" label="npm">
+    ```bash
+    npm run build --workspace=apps/api
+    ```
+  </TabItem>
+
+  <TabItem value="pnpm" label="pnpm">
+    ```bash
+    pnpm --filter api run build
+    ```
+  </TabItem>
+
+  <TabItem value="yarn" label="yarn">
+    ```bash
+    yarn workspace api build
+    ```
+  </TabItem>
+
+  <TabItem value="turborepo" label="Turborepo">
+    ```bash
+    turbo run build --filter=api
+    ```
+  </TabItem>
+</Tabs>
+
+귀하의 패키지`build` script should run `mastra build`:
+
+```json title="apps/api/package.json"
+{
+  "scripts": {
+    "build": "mastra build"
+  }
+}
+```
+
+## 작업 공간 패키지 {/* #workspace-packages */}
+
+Mastra 애플리케이션이 다른 작업 공간 패키지에서 가져올 때 Mastra는 이를 자동으로 처리합니다.
+
+* 패키지가 사전 컴파일된 경우(예:`tsc` or `tsdown`), Mastra imports the compiled JavaScript
+* 패키지에 컴파일되지 않은 TypeScript가 포함되어 있으면 Mastra는 빌드 중에 이를 트랜스파일합니다.
+
+대부분의 설정에서는 구성 없이도 작동합니다. 작업공간 패키지 가져오기에 문제가 발생하는 경우 해당 패키지를 다음에 추가하세요.[`transpilePackages`](/reference/configuration#bundlertranspilepackages):
+
+```typescript title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  bundler: {
+    transpilePackages: ['@my-org/utils'],
+  },
+})
+```
+
+유지하다`bundler` as a direct property in the object passed to `new Mastra()`. See [build-time configuration](/docs/deployment/mastra-server#build-time-configuration) for the supported entry-file shape.
+
+## 환경변수 {/* #environment-variables */}
+
+가게`.env` files in the Mastra application directory (e.g., `apps/api/.env`), not the monorepo root.
+
+## 배포 구성 {/* #deployment-configuration */}
+
+클라우드 공급자에 배포할 때 배포 대상으로 올바른 패키지가 선택되었는지 확인하세요. 애플리케이션 디렉터리 대신 모노레포 루트 선택(예:`apps/api`) is a common mistake.
+
+대부분의 공급자는 대시보드 또는 구성 파일에서 루트 디렉터리를 지정할 수 있습니다.
+
+## 종속성 관리 {/* #dependency-management */}
+
+버전 충돌 및 빌드 오류를 방지하려면 종속성을 일관되게 유지하세요.
+
+* 사용**single lockfile** at the monorepo root so all packages resolve the same versions
+* 버전 정렬**shared libraries** (like Mastra or frameworks) to prevent duplicates
+
+## 문제 해결 {/* #troubleshooting */}
+
+### Workspace 패키지를 찾을 수 없습니다. {/* #workspace-package-not-found */}
+
+Mastra가 작업 공간 패키지를 확인할 수 없는 경우 다음을 확인하세요.
+
+* 패키지가 귀하의 목록에 나열되어 있습니다.`package.json` dependencies
+* 잠금 파일이 최신 상태입니다(`pnpm install`, `npm install`, etc.)
+* 패키지에는 유효한`main` or `exports` field in its `package.json`
+
+### 작업 공간 패키지의 TypeScript 오류 {/* #typescript-errors-from-workspace-packages */}
+
+컴파일되지 않은 작업 영역 패키지에서 유형 오류가 표시되면 다음 중 하나를 수행하세요.
+
+* 패키지를 먼저 빌드하십시오(더 빠른 Mastra 빌드에 권장됨)
+* 패키지를 다음에 추가하세요.[`transpilePackages`](/reference/configuration#bundlertranspilepackages) in your Mastra config
+
+## 관련된 {/* #related */}
+
+* [Mastra 서버 배포](/docs/deployment/mastra-server): 코어 빌드 및 배포 가이드
+* [구성 참조](/reference/configuration): `bundler.transpilePackages` and other options
+* [CLI 참조](/reference/cli/mastra): 명령 플래그 빌드

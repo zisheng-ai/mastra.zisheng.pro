@@ -3,7 +3,9 @@ import { expect, test } from '@playwright/test'
 const locales = [
   { locale: 'zh-CN', baseUrl: '/' },
   { locale: 'en', baseUrl: '/en/' },
+  { locale: 'fr', baseUrl: '/fr/' },
   { locale: 'ja', baseUrl: '/ja/' },
+  { locale: 'ko', baseUrl: '/ko/' },
   { locale: 'zh-TW', baseUrl: '/zh-TW/' },
   { locale: 'zh-HK', baseUrl: '/zh-HK/' },
 ] as const

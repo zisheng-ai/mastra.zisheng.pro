@@ -1,0 +1,167 @@
+---
+title: "참조: smoothStream() | 스트리밍"
+description: "텍스트 및 추론 델타를 버퍼링하고 일관된 청크로 내보내는 smoothStream()에 대한 API 참조입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/ai-sdk"
+---
+
+# `smoothStream()`
+
+`smoothStream()`일관된 청크로 방출하기 전에 텍스트를 버퍼링하고 델타를 추론하는 실험적인 변환 스트림을 생성합니다. Model이 고르지 않은 델타를 방출할 때 스트리밍 응답이 보다 안정적인 속도로 나타나도록 하려면 이를 사용하십시오.
+
+텍스트가 아닌 청크는 변경되지 않은 채 통과됩니다. 버퍼링된 콘텐츠는 Tool, 컨트롤 또는 완료 청크 이전에 내보내집니다.
+
+## 사용예 {/* #usage-example */}
+
+Agent의 파이프`fullStream` through the transform:
+
+```typescript title="src/stream-agent.ts"
+import { smoothStream } from '@mastra/core/stream'
+
+const result = await agent.stream('Explain how rainbows form')
+
+const stream = result.fullStream.pipeThrough(
+  smoothStream({
+    delayInMs: 20,
+    chunking: 'word',
+  }),
+)
+
+for await (const chunk of stream) {
+  if (chunk.type === 'text-delta') {
+    process.stdout.write(chunk.payload.text)
+  }
+}
+```
+
+변환은 파이프된 스트림만 변경합니다. 원본에 대한 Promise 속성 및 콜백`MastraModelOutput`, such as `result.text` and `onChunk`, Model의 원래 청크 타이밍을 유지합니다.
+
+## AI SDK 경로 {/* #ai-sdk-routes */}
+
+수입`smoothStream()` from `@mastra/ai-sdk` to smooth an agent before `handleChatStream()` converts its output to AI SDK UI chunks:
+
+```typescript title="app/api/chat/route.ts"
+import { handleChatStream, smoothStream } from '@mastra/ai-sdk'
+import { createUIMessageStreamResponse } from 'ai'
+import { mastra } from '@/src/mastra'
+
+export async function POST(req: Request) {
+  const params = await req.json()
+  const stream = await handleChatStream({
+    mastra,
+    agentId: 'weatherAgent',
+    params,
+    experimentalTransform: smoothStream({
+      delayInMs: 20,
+      chunking: 'word',
+    }),
+  })
+
+  return createUIMessageStreamResponse({ stream })
+}
+```
+
+그만큼`@mastra/ai-sdk` export returns a reusable transform factory so route configuration creates a fresh `TransformStream` for every request. The `@mastra/core/stream` export returns a `TransformStream` for direct use with `pipeThrough()`.
+
+재사용 가능한 공장은 다음으로 전달될 수도 있습니다.`Agent.stream()`:
+
+```typescript
+import { smoothStream } from '@mastra/ai-sdk'
+
+const result = await agent.stream('Explain how rainbows form', {
+  experimentalTransform: smoothStream({ delayInMs: 20 }),
+})
+
+for await (const chunk of result.fullStream) {
+  // Consume the transformed Mastra chunks.
+}
+```
+
+## 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'options',
+  type: 'SmoothStreamOptions',
+  description: 'Controls the delay and chunk boundaries for the transformed stream.',
+  isOptional: true,
+  properties: [
+    {
+      type: 'SmoothStreamOptions',
+      parameters: [
+        {
+          name: 'delayInMs',
+          type: 'number | null',
+          description: 'Delay in milliseconds after each emitted chunk. Set this value to null to disable the delay.',
+          isOptional: true,
+          defaultValue: '10',
+        },
+        {
+          name: 'chunking',
+          type: "'word' | 'line' | RegExp | SmoothStreamChunkDetector | Intl.Segmenter",
+          description: 'Controls how buffered text and reasoning are divided into chunks.',
+          isOptional: true,
+          defaultValue: "'word'",
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+그만큼`chunking` option accepts:
+
+* `'word'`: 후행 공백을 포함하여 완전한 단어를 내보냅니다.
+* `'line'`: 각 줄바꿈을 통해 콘텐츠를 내보냅니다.
+* `RegExp`: 첫 번째 일치를 통해 콘텐츠를 내보냅니다.
+* `Intl.Segmenter`: 단어 사이에 공백이 없는 언어에 유용한 로케일 인식 분할을 사용합니다.
+* `SmoothStreamChunkDetector`: 현재 버퍼로 함수를 호출합니다. 이 함수는 방출할 비어 있지 않은 접두사를 반환합니다.`null` or `undefined` to wait for more content.
+
+## 커스텀 청킹 {/* #custom-chunking */}
+
+정규식을 사용하여 청크 경계를 정의합니다.
+
+```typescript
+const stream = result.fullStream.pipeThrough(
+  smoothStream({
+    chunking: /[^,]*,\s*/,
+  }),
+)
+```
+
+사용`Intl.Segmenter` for locale-aware segmentation:
+
+```typescript
+const stream = result.fullStream.pipeThrough(
+  smoothStream({
+    chunking: new Intl.Segmenter('ja', { granularity: 'word' }),
+  }),
+)
+```
+
+청크 경계가 사용자 정의 논리에 따라 달라지는 경우 감지기 기능을 사용하십시오. 반환된 값은 버퍼의 접두사여야 합니다.
+
+```typescript
+const stream = result.fullStream.pipeThrough(
+  smoothStream({
+    chunking: buffer => {
+      const boundary = buffer.indexOf('. ')
+      return boundary === -1 ? null : buffer.slice(0, boundary + 2)
+    },
+  }),
+)
+```
+
+## 보고 {/* #returns */}
+
+`TransformStream<ChunkType<OUTPUT>, ChunkType<OUTPUT>>`
+
+변환은 스무스하게 방출됩니다.`text-delta` and `reasoning-delta` chunks. It preserves chunk identifiers, run identifiers, sources, and metadata.
+
+## 관련된 {/* #related */}
+
+* [`MastraModelOutput`](/reference/streaming/agents/MastraModelOutput)
+* [`ChunkType`](/reference/streaming/ChunkType)

@@ -1,0 +1,1770 @@
+---
+title: "참조: 프로세서 인터페이스 | 프로세서"
+description: "Agent 파이프라인에서 메시지를 변환, 검증 및 제어하기 위한 계약을 정의하는 Mastra의 프로세서 인터페이스에 대한 API 참조입니다."
+packages:
+  - '@mastra/core'
+---
+
+# 프로세서 인터페이스
+
+그만큼`Processor`인터페이스는 Mastra의 모든 프로세서에 대한 계약을 정의합니다. 프로세서는 Agent 실행 파이프라인의 다양한 단계를 처리하기 위해 하나 이상의 메서드를 구현할 수 있습니다.
+
+## 프로세서 메서드가 실행될 때 {/* #when-processor-methods-run */}
+
+프로세서 메서드는 Agent 실행 수명 주기의 다양한 지점에서 실행됩니다.
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                        Agent Execution Flow                        │
+├────────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  User Input                                                        │
+│      │                                                             │
+│      ▼                                                             │
+│  ┌────────────────────────┐                                        │
+│  │  processInput          │  ← Runs ONCE at start                  │
+│  └───────────┬────────────┘                                        │
+│              │                                                     │
+│              ▼                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │                        Agentic Loop                          │  │
+│  │                                                              │  │
+│  │  ┌────────────────────────┐                                  │  │
+│  │  │  processInputStep      │  ← Runs at EACH step             │  │
+│  │  └───────────┬────────────┘                                  │  │
+│  │              │                                               │  │
+│  │              ▼                                               │  │
+│  │  ┌────────────────────────┐                                  │  │
+│  │  │  processLLMRequest     │  ← Before provider call          │  │
+│  │  └───────────┬────────────┘                                  │  │
+│  │              │                                               │  │
+│  │              ▼                                               │  │
+│  │        LLM Execution ──── API Error? ───┐                    │  │
+│  │              │                          │                    │  │
+│  │              │              ┌───────────┴──────────┐         │  │
+│  │              │              │  processAPIError     │         │  │
+│  │              │              └──────────────────────┘         │  │
+│  │              │                (retry loops back to LLM)      │  │
+│  │              ▼                                               │  │
+│  │  ┌────────────────────────┐                                  │  │
+│  │  │  processOutputStream   │  ← Runs on EACH stream chunk     │  │
+│  │  └───────────┬────────────┘                                  │  │
+│  │              │                                               │  │
+│  │              ▼                                               │  │
+│  │  ┌────────────────────────┐                                  │  │
+│  │  │  processLLMResponse    │  ← After stream completes        │  │
+│  │  └───────────┬────────────┘                                  │  │
+│  │              │                                               │  │
+│  │              ▼                                               │  │
+│  │  ┌────────────────────────┐                                  │  │
+│  │  │  processOutputStep     │  ← Runs after EACH LLM step      │  │
+│  │  └───────────┬────────────┘                                  │  │
+│  │              │                                               │  │
+│  │              ▼                                               │  │
+│  │        Tool Execution (if needed)                            │  │
+│  │              │                                               │  │
+│  │              ▼                                               │  │
+│  │  ┌────────────────────────┐                                  │  │
+│  │  │  processToolResult     │  ← Runs per tool, after each     │  │
+│  │  └───────────┬────────────┘    tool.execute() returns        │  │
+│  │              │                                               │  │
+│  │              └──────── Loop back if tools called ────────────│  │
+│  │                                                              │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│              │                                                     │
+│              ▼                                                     │
+│  ┌────────────────────────┐                                        │
+│  │  processOutputResult   │  ← Runs ONCE after completion          │
+│  └────────────────────────┘                                        │
+│              │                                                     │
+│              ▼                                                     │
+│        Final Response                                              │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+| 방법 | 실행될 때 | 사용 사례 |
+| - | - | - |
+|`processInput` | Once at the start, before the agentic loop | Validate/transform initial user input, add context |
+| `processInputStep` | At each step of the agentic loop, before each LLM call | Transform messages between steps, handle tool results |
+| `processLLMRequest`| LLM 요청 변환 후 공급자 호출 전 | 아웃바운드 다시 작성`LanguageModelV2Prompt`변경 사항을 유지하지 않고 현재 호출에 대해 |
+|`processAPIError`| LLM API 호출이 실패하는 경우 | API 거부를 검사하고 선택적으로 상태/메시지를 변경하고 재시도를 요청 |
+|`processOutputStream`| LLM 응답 중 각 스트리밍 청크에서 | 스트리밍 콘텐츠 필터링/수정, 실시간 패턴 감지 |
+|`processLLMResponse`| LLM 단계가 완료되고 스트림 청크가 수집된 후 | 전체 응답을 캡처하거나 캐시하고, 통화 후 부작용을 실행합니다.`processLLMRequest` |
+| `processOutputStep`| 각 LLM 응답 후, Tool 실행 전 | 출력 품질 검증, 재시도를 통한 가드레일 구현 |
+|`processToolResult`| Tool별, 이후`tool.execute()`결과가 메시지 목록에 추가되기 전에 | 신속한 삽입을 위한 스캔 Tool 출력, 민감한 필드 수정, 정책 위반 중단 |
+|`processOutputResult`| 생성이 완료된 후 한 번 | 사후 처리 최종 응답, 로그 결과 |
+
+## 인터페이스 정의 {/* #interface-definition */}
+
+```typescript
+interface Processor<TId extends string = string, TTripwireMetadata = unknown> {
+  readonly id: TId
+  readonly name?: string
+  readonly description?: string
+  /** Index of this processor in the workflow (set at runtime when combining processors). */
+  processorIndex?: number
+  /** When true, processOutputStream also receives `data-*` chunks. Default: false. */
+  processDataParts?: boolean
+
+  /** Callback invoked when this processor detects a violation, regardless of strategy. */
+  onViolation?: (violation: ProcessorViolation) => void | Promise<void>
+
+  processInput?(
+    args: ProcessInputArgs<TTripwireMetadata>,
+  ): Promise<ProcessInputResult> | ProcessInputResult
+
+  processInputStep?(
+    args: ProcessInputStepArgs<TTripwireMetadata>,
+  ):
+    | Promise<ProcessInputStepResult | MessageList | MastraDBMessage[] | undefined | void>
+    | ProcessInputStepResult
+    | MessageList
+    | MastraDBMessage[]
+    | void
+    | undefined
+
+  processLLMRequest?(
+    args: ProcessLLMRequestArgs<TTripwireMetadata>,
+  ): Promise<ProcessLLMRequestResult> | ProcessLLMRequestResult
+
+  processLLMResponse?(
+    args: ProcessLLMResponseArgs<TTripwireMetadata>,
+  ): Promise<ProcessLLMResponseResult> | ProcessLLMResponseResult
+
+  processAPIError?(
+    args: ProcessAPIErrorArgs<TTripwireMetadata>,
+  ): Promise<ProcessAPIErrorResult | void> | ProcessAPIErrorResult | void
+
+  processOutputStream?(
+    args: ProcessOutputStreamArgs<TTripwireMetadata>,
+  ): Promise<ChunkType | null | undefined>
+
+  processOutputStep?(args: ProcessOutputStepArgs<TTripwireMetadata>): ProcessorMessageResult
+
+  processToolResult?(args: ProcessToolResultArgs<TTripwireMetadata>): ProcessorMessageResult
+
+  processOutputResult?(args: ProcessOutputResultArgs<TTripwireMetadata>): ProcessorMessageResult
+}
+```
+
+## 속성 {/* #properties */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for the processor. Used for tracing and debugging.',
+  isOptional: false,
+},
+{
+  name: 'name',
+  type: 'string',
+  description: 'Optional display name for the processor. Falls back to id if not provided.',
+  isOptional: true,
+},
+{
+  name: 'description',
+  type: 'string',
+  description: 'Optional human-readable description shown in tracing and Studio.',
+  isOptional: true,
+},
+{
+  name: 'processorIndex',
+  type: 'number',
+  description:
+    'Position of the processor in the combined processor list. Set at runtime by Mastra when processors are merged with memory, workspace, and per-call overrides. You do not set this yourself.',
+  isOptional: true,
+},
+{
+  name: 'processDataParts',
+  type: 'boolean',
+  description:
+    'When true, the processOutputStream method also receives `data-*` chunks emitted by tools via writer.custom(). Defaults to false.',
+  isOptional: true,
+},
+{
+  name: 'onViolation',
+  type: '(violation: ProcessorViolation) => void | Promise<void>',
+  description:
+    'Optional callback invoked when the processor detects a policy violation, regardless of strategy (block or warn). Use for side effects like alerting, logging to external systems, or emailing users. Errors thrown by this callback are silently caught to prevent interfering with processor logic. The violation object contains processorId, message, and a processor-specific detail field.',
+  isOptional: true,
+},
+]}
+/>
+
+## 메시지 인수 {/* #message-arguments */}
+
+대부분의 프로세서 방법은 두 가지를 모두 받습니다.`messages` and `messageList`. They point to the same underlying conversation but expose it differently.
+
+### `messages`대`messageList` {/* #messages-vs-messagelist */}
+
+* `messages`: 일반 배열`MastraDBMessage` objects, scoped to the current stage. For `processInput` and `processInputStep` this excludes system messages. For `processOutputResult` and `processOutputStep` this includes the latest LLM response. The array is backed by `messageList`, so editing a message's `content.parts` in place is visible to downstream processors and to persistence.
+* `messageList`: 라이브`MessageList` instance backing the run. It exposes filtered views (input, response, remembered, all), multiple output formats (db, ui, core), and methods for mutating the conversation.
+
+사용`messages` when you only need to read, map over, or lightly edit fields on the current stage's messages. Use `messageList` when you need to:
+
+* 출력을 처리하는 동안 입력 메시지 등 다른 단계의 메시지를 읽습니다.
+* 전체 메시지를 추가, 제거 또는 교체합니다.
+* 타사 API용 UI 또는 핵심 메시지와 같은 다른 형식으로 변환합니다.
+
+`messages`항상 파생됩니다`messageList`, so mutating `messageList` is the canonical way to add, remove, or reorder messages. For in-place edits to a message's content (for example, rewriting `content.parts`), mutating `messages` directly is equivalent. If you return a new array from `messages`, Mastra reconciles it against `messageList` for the current stage.
+
+### 고집 {/* #persistence */}
+
+Memory가 활성화되면 최종 결과만`messageList` after all processors finish is persisted to storage. Both return styles are equivalent for persistence:
+
+* 돌연변이를 일으킬 때`messageList` directly (or return the same `MessageList` instance), recorded mutations are applied in place, so the saved conversation reflects your changes.
+* 당신이 반환할 때`MastraDBMessage[]` or `{ messages, systemMessages }`, Mastra reconciles the returned array against `messageList` for the current stage, removing missing messages and replacing system messages.
+
+다른 것을 반환`MessageList` instance is an error. Always mutate the one passed to your processor.
+
+### 메시지에서 텍스트 읽기 {/* #reading-text-from-a-message */}
+
+`MastraDBMessage.content`구조화된 객체를 사용합니다. 문자열은 지원되지 않습니다. 사용자 또는 보조자 텍스트를 읽는 정식 방법은 다음과 같습니다.`content.parts`:
+
+```typescript
+import type { MastraDBMessage } from '@mastra/core/memory'
+
+function getText(message: MastraDBMessage): string {
+  let text = ''
+
+  if (message.content.parts) {
+    for (const part of message.content.parts) {
+      if (part.type === 'text' && typeof part.text === 'string') {
+        text += part.text
+      }
+    }
+  }
+
+  // Fallback for legacy messages that only have the flattened `content` string
+  if (!text && typeof message.content.content === 'string') {
+    text = message.content.content
+  }
+
+  return text
+}
+```
+
+핵심 사항:
+
+* `message.content.parts`1차 소스입니다. 단일 메시지에는 Tool 호출, Tool 결과, 파일 부분 등 텍스트가 아닌 부분을 포함하여 여러 부분이 포함될 수 있습니다. 필터링 기준`part.type === 'text'` before reading `part.text`.
+* `message.content.content`이전 버전과의 호환성을 위해 유지되는 병합된 문자열입니다. 다음과 같은 경우에만 대체 수단으로 사용하세요.`parts` is empty or missing.
+* `message.content`그 자체는 결코 평범한 문자열이 아닙니다.`MastraDBMessage`. Legacy `CoreMessage` shapes may be strings, but processors always receive `MastraDBMessage`.
+
+## 행동 양식 {/* #methods */}
+
+### `processInput` {/* #processinput */}
+
+LLM으로 전송되기 전에 입력 메시지를 처리합니다. Agent 실행 시작 시 한 번 실행됩니다.
+
+```typescript prettier:false
+processInput?(args: ProcessInputArgs): Promise<ProcessInputResult> | ProcessInputResult;
+```
+
+#### `ProcessInputArgs` {/* #processinputargs */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'messages',
+  type: 'MastraDBMessage[]',
+  description: 'User and assistant messages to process (excludes system messages).',
+  isOptional: false,
+},
+{
+  name: 'systemMessages',
+  type: 'CoreMessage[]',
+  description:
+    'All system messages (agent instructions, memory context, user-provided). Can be modified and returned.',
+  isOptional: false,
+},
+{
+  name: 'messageList',
+  type: 'MessageList',
+  description: 'Full MessageList instance for advanced message management.',
+  isOptional: false,
+},
+{
+  name: 'abort',
+  type: '(reason?: string, options?: { retry?: boolean; metadata?: unknown }) => never',
+  description:
+    'Function to abort processing. Throws a TripWire error that stops execution. Pass `retry: true` to request the LLM retry the step with feedback.',
+  isOptional: false,
+},
+{
+  name: 'retryCount',
+  type: 'number',
+  description:
+    'Number of times processors have triggered retry for this generation. Use this to limit retry attempts. Always passed by Mastra; starts at 0.',
+  isOptional: false,
+},
+{
+  name: 'tracingContext',
+  type: 'TracingContext',
+  description: 'Tracing context for observability.',
+  isOptional: true,
+},
+{
+  name: 'requestContext',
+  type: 'RequestContext',
+  description: 'Request-scoped context with execution metadata like threadId and resourceId.',
+  isOptional: true,
+},
+]}
+/>
+
+#### `ProcessInputResult` {/* #processinputresult */}
+
+이 메서드는 세 가지 유형 중 하나를 반환할 수 있습니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'MastraDBMessage[]',
+  type: 'array',
+  description: 'Transformed messages array. System messages remain unchanged.',
+},
+{
+  name: 'MessageList',
+  type: 'MessageList',
+  description: "The same messageList instance passed in. Indicates you've mutated it directly.",
+},
+{
+  name: '{ messages, systemMessages }',
+  type: 'object',
+  description: 'Object with both transformed messages and modified system messages.',
+},
+]}
+/>
+
+***
+
+### `processInputStep` {/* #processinputstep */}
+
+LLM으로 전송되기 전에 Agent 루프의 각 단계에서 입력 메시지를 처리합니다. 같지 않은`processInput` which runs once at the start, this runs at every step including tool call continuations.
+
+```typescript prettier:false
+processInputStep?<TTripwireMetadata = unknown>(
+  args: ProcessInputStepArgs<TTripwireMetadata>,
+):
+  | Promise<ProcessInputStepResult | MessageList | MastraDBMessage[] | void | undefined>
+  | ProcessInputStepResult
+  | MessageList
+  | MastraDBMessage[]
+  | void
+  | undefined;
+```
+
+#### Agent 루프의 실행 순서 {/* #execution-order-in-the-agentic-loop */}
+
+1. `processInput`(시작할 때 한 번)
+2. `processInputStep`inputProcessors에서(각 단계에서, LLM 호출 전)
+3. `prepareStep`콜백(inputProcessors 다음에 processInputStep 파이프라인의 일부로 실행됨)
+4. `processLLMRequest`inputProcessors에서(Prompt 변환 후, 공급자 호출 전)
+5. LLM 실행
+6. `processOutputStream`OutputProcessors에서(각 스트리밍 청크에서)
+7. `processLLMResponse`inputProcessors에서(스트림이 완료된 후 다음과 쌍을 이룹니다.)`processLLMRequest`)
+8. `processOutputStep`OutputProcessors에서(LLM 응답 후, Tool 실행 전)
+9. Tool 실행(필요한 경우)
+10. Tool가 호출된 경우 2단계부터 반복하세요.
+
+#### `ProcessInputStepArgs` {/* #processinputstepargs */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'messages',
+  type: 'MastraDBMessage[]',
+  description: 'All messages including tool calls and results from previous steps (read-only snapshot).',
+  isOptional: false,
+},
+{
+  name: 'messageList',
+  type: 'MessageList',
+  description: 'MessageList instance for managing messages. Can mutate directly or return in result.',
+  isOptional: false,
+},
+{
+  name: 'stepNumber',
+  type: 'number',
+  description: 'Current step number (0-indexed). Step 0 is the initial LLM call.',
+  isOptional: false,
+},
+{
+  name: 'steps',
+  type: 'StepResult[]',
+  description: 'Results from previous steps, including text, toolCalls, and toolResults.',
+  isOptional: false,
+},
+{
+  name: 'systemMessages',
+  type: 'CoreMessage[]',
+  description: 'All system messages (read-only snapshot). Return in result to replace.',
+  isOptional: false,
+},
+{
+  name: 'model',
+  type: 'MastraLanguageModelV2',
+  description: 'Current model being used. Return a different model in result to switch.',
+  isOptional: false,
+},
+{
+  name: 'toolChoice',
+  type: 'ToolChoice',
+  description: "Current tool choice setting ('auto', 'none', 'required', or specific tool).",
+  isOptional: true,
+},
+{
+  name: 'activeTools',
+  type: 'string[]',
+  description: 'Currently active tool names. Return filtered array to limit tools.',
+  isOptional: true,
+},
+{
+  name: 'tools',
+  type: 'ToolSet',
+  description: 'Current tools available for this step. Return in result to add/replace tools.',
+  isOptional: true,
+},
+{
+  name: 'providerOptions',
+  type: 'SharedV2ProviderOptions',
+  description: 'Provider-specific options (e.g., Anthropic cacheControl, OpenAI reasoningEffort).',
+  isOptional: true,
+},
+{
+  name: 'modelSettings',
+  type: 'CallSettings',
+  description: 'Model settings like temperature, maxTokens, topP.',
+  isOptional: true,
+},
+{
+  name: 'structuredOutput',
+  type: 'StructuredOutputOptions',
+  description: 'Structured output configuration (schema, output mode). Return in result to modify.',
+  isOptional: true,
+},
+{
+  name: 'abort',
+  type: '(reason?: string, options?: { retry?: boolean; metadata?: unknown }) => never',
+  description:
+    'Function to abort processing. Throws a TripWire error that stops execution. Pass `retry: true` to request the LLM retry the step with feedback.',
+  isOptional: false,
+},
+{
+  name: 'retryCount',
+  type: 'number',
+  description:
+    'Current retry attempt count from `ProcessorContext`. Starts at `0`; use to cap processor-triggered retries.',
+  isOptional: false,
+},
+{
+  name: 'tracingContext',
+  type: 'TracingContext',
+  description: 'Tracing context for observability.',
+  isOptional: true,
+},
+{
+  name: 'requestContext',
+  type: 'RequestContext',
+  description: 'Request-scoped context with execution metadata.',
+  isOptional: true,
+},
+]}
+/>
+
+#### `ProcessInputStepResult` {/* #processinputstepresult */}
+
+`processInputStep`여러 모양을 반환할 수 있습니다.
+
+* **`ProcessInputStepResult`물체**: 이 단계에서는 아래 속성 조합을 재정의합니다(다음에 설명).
+* **`MessageList`**: 동일하게 반환`messageList` instance to signal you mutated messages in place.
+* **`MastraDBMessage[]`**: 변환된 메시지 배열을 반환합니다. 단계의 메시지를 대체합니다.
+* **`void`또는`undefined`**: 단계를 변경하지 않고 그대로 두려면 아무것도 반환하지 않습니다.
+
+개체 양식은 다음 속성의 모든 조합을 반환할 수 있습니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'model',
+  type: 'LanguageModelV2 | string',
+  description: "Change the model for this step. Can be a model instance or router ID like 'openai/gpt-5.5'.",
+  isOptional: true,
+},
+{
+  name: 'toolChoice',
+  type: 'ToolChoice',
+  description: 'Change tool selection behavior for this step.',
+  isOptional: true,
+},
+{
+  name: 'activeTools',
+  type: 'string[]',
+  description: 'Filter which tools are available for this step.',
+  isOptional: true,
+},
+{
+  name: 'tools',
+  type: 'ToolSet',
+  description: 'Replace or modify tools for this step. Use spread to merge: { tools: { ...tools, newTool } }.',
+  isOptional: true,
+},
+{
+  name: 'messages',
+  type: 'MastraDBMessage[]',
+  description: 'Replace all messages. Cannot be used with messageList.',
+  isOptional: true,
+},
+{
+  name: 'messageList',
+  type: 'MessageList',
+  description: 'Return the same messageList instance (indicates you mutated it). Cannot be used with messages.',
+  isOptional: true,
+},
+{
+  name: 'systemMessages',
+  type: 'CoreMessage[]',
+  description: 'Replace all system messages for this step only.',
+  isOptional: true,
+},
+{
+  name: 'providerOptions',
+  type: 'SharedV2ProviderOptions',
+  description: 'Change provider-specific options for this step.',
+  isOptional: true,
+},
+{
+  name: 'modelSettings',
+  type: 'CallSettings',
+  description: 'Change model settings for this step.',
+  isOptional: true,
+},
+{
+  name: 'structuredOutput',
+  type: 'StructuredOutputOptions',
+  description: 'Change structured output configuration for this step.',
+  isOptional: true,
+},
+]}
+/>
+
+#### 프로세서 체인 {/* #processor-chaining */}
+
+다중 프로세서가 구현되는 경우`processInputStep`, they run in order and changes chain through:
+
+```
+Processor 1: receives { model: 'gpt-5.4' } → returns { model: 'gpt-5.4-mini' }
+Processor 2: receives { model: 'gpt-5.4-mini' } → returns { toolChoice: 'none' }
+Final: model = 'gpt-5.4-mini', toolChoice = 'none'
+```
+
+#### 시스템 메시지 격리 {/* #system-message-isolation */}
+
+시스템 메시지는**reset to their original values** at the start of each step. Modifications made in `processInputStep` only affect the current step, not subsequent steps.
+
+#### 사용 사례 {/* #use-cases */}
+
+* 단계 번호 또는 상황에 따른 동적 Model 전환
+* 특정 단계를 거친 후 Tool 비활성화
+* 대화 맥락에 따라 Tool를 동적으로 추가하거나 교체합니다.
+* 공급자 간 메시지 부분 유형 변환(예:`reasoning` → `thinking` for Anthropic)
+* 단계 번호 또는 누적된 컨텍스트를 기반으로 메시지 수정
+* 단계별 시스템 지침 추가
+* 단계별 공급자 옵션 조정(예: 캐시 제어)
+* 단계 컨텍스트를 기반으로 구조화된 출력 스키마 수정
+
+***
+
+### `processLLMRequest` {/* #processllmrequest */}
+
+Mastra가 변환한 후 최종 LLM 요청을 처리합니다.`MessageList` into `LanguageModelV2Prompt` and before the provider call. Use this method for transient, model-aware rewrites that should affect only the current outbound request.
+
+반환된 Prompt 변경 사항은 현재 통화에 대해서만 Model로 전달됩니다. 그들은 다시 지속되지 않습니다`MessageList`, memory, UI history, or later provider calls.
+
+```typescript prettier:false
+processLLMRequest?(
+  args: ProcessLLMRequestArgs,
+): Promise<ProcessLLMRequestResult> | ProcessLLMRequestResult;
+```
+
+#### `ProcessLLMRequestArgs` {/* #processllmrequestargs */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'prompt',
+  type: 'LanguageModelV2Prompt',
+  description: 'The LLM request prompt that will be sent to the provider for this call.',
+  isOptional: false,
+},
+{
+  name: 'model',
+  type: 'MastraLanguageModel',
+  description: 'The resolved model that will receive the prompt. Use this to scope provider-specific rewrites.',
+  isOptional: false,
+},
+{
+  name: 'stepNumber',
+  type: 'number',
+  description: 'Current step number (0-indexed). Step 0 is the initial LLM call.',
+  isOptional: false,
+},
+{
+  name: 'steps',
+  type: 'StepResult[]',
+  description: 'Results from previous steps, including text, toolCalls, and toolResults.',
+  isOptional: false,
+},
+{
+  name: 'state',
+  type: 'Record<string, unknown>',
+  description: 'Per-processor state that persists across all method calls within this request.',
+  isOptional: false,
+},
+{
+  name: 'abort',
+  type: '(reason?: string, options?: { retry?: boolean; metadata?: unknown }) => never',
+  description:
+    'Function to abort processing. Throws a TripWire error that stops execution and emits a `tripwire` chunk.',
+  isOptional: false,
+},
+{
+  name: 'retryCount',
+  type: 'number',
+  description:
+    'Current retry attempt count from `ProcessorContext`. Starts at `0`; use to cap processor-triggered retries.',
+  isOptional: false,
+},
+{
+  name: 'requestContext',
+  type: 'RequestContext',
+  description: 'Request-scoped context with execution metadata.',
+  isOptional: true,
+},
+{
+  name: 'tracingContext',
+  type: 'TracingContext',
+  description: 'Tracing context for observability.',
+  isOptional: true,
+},
+{
+  name: 'writer',
+  type: 'ProcessorStreamWriter',
+  description:
+    'Stream writer for emitting custom data chunks during streaming. Call `writer.custom()` to emit a `data-*` chunk.',
+  isOptional: true,
+},
+{
+  name: 'abortSignal',
+  type: 'AbortSignal',
+  description: 'Signal for cancelling the operation.',
+  isOptional: true,
+},
+]}
+/>
+
+#### 반환 값 {/* #return-value */}
+
+`processLLMRequest`보고`ProcessLLMRequestResult`, which is `{ prompt?: LanguageModelV2Prompt } | undefined | void`.
+
+* 반품`{ prompt }` to replace the outbound prompt for the current provider call.
+* 반품`undefined` or `void` to forward the original prompt unchanged.
+
+#### 사용 사례 {/* #use-cases-1 */}
+
+* Model 호출 전에 제공자별 Prompt 부분 제거 또는 재구성
+* 공급자의 입력 요구 사항에 맞게 역할 또는 콘텐츠 정규화
+* 루프 중간에 공급자를 전환할 때 Tool 결과 형식 적용
+
+***
+
+### `processLLMResponse` {/* #processllmresponse */}
+
+단계가 완료된 후(또는 캐시된 응답이 재생된 후) 및 출력 프로세서가 응답 청크를 수집한 후 LLM 응답을 처리합니다. 이 후크는 다음과 쌍을 이룹니다.`processLLMRequest`: use `processLLMRequest` to stash state (such as a cache key) before the provider call, and `processLLMResponse` to act on the completed response (such as writing it to a cache).
+
+그만큼`state` object is the same instance passed to `processLLMRequest` for the same step, so processors can correlate pre- and post-call work.
+
+```typescript prettier:false
+processLLMResponse?(
+  args: ProcessLLMResponseArgs,
+): Promise<ProcessLLMResponseResult> | ProcessLLMResponseResult;
+```
+
+#### `ProcessLLMResponseArgs` {/* #processllmresponseargs */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'chunks',
+  type: 'CachedLLMStepChunk[]',
+  description:
+    'Chunks produced by the LLM call (or replayed from cache) for this step, in stripped form (`{ type, payload }`).',
+  isOptional: false,
+},
+{
+  name: 'model',
+  type: 'MastraLanguageModel',
+  description: 'The model that produced (or would have produced) the response.',
+  isOptional: false,
+},
+{
+  name: 'stepNumber',
+  type: 'number',
+  description: 'Current step number (0-indexed).',
+  isOptional: false,
+},
+{
+  name: 'steps',
+  type: 'StepResult[]',
+  description: 'All completed steps so far, including this step.',
+  isOptional: false,
+},
+{
+  name: 'state',
+  type: 'Record<string, unknown>',
+  description:
+    'Per-processor state shared with `processLLMRequest` for the same step. Use this to pass data between the two hooks (e.g. a cache key).',
+  isOptional: false,
+},
+{
+  name: 'fromCache',
+  type: 'boolean',
+  description:
+    'When `true`, the response was replayed from a cache via `processLLMRequest` returning `{ response }`. Processors that write to a cache should skip writes when this is `true`.',
+  isOptional: false,
+},
+{
+  name: 'warnings',
+  type: 'LanguageModelV2CallWarning[]',
+  description: 'Warnings reported by the language model call (e.g. unsupported settings).',
+  isOptional: true,
+},
+{
+  name: 'request',
+  type: 'unknown',
+  description: 'Provider request body, when available. Useful for tracing.',
+  isOptional: true,
+},
+{
+  name: 'rawResponse',
+  type: 'unknown',
+  description: 'Raw provider response, when available. Useful for tracing.',
+  isOptional: true,
+},
+{
+  name: 'abort',
+  type: '(reason?: string, options?: { retry?: boolean; metadata?: unknown }) => never',
+  description: 'Function to abort processing. Throws a TripWire error that stops execution.',
+  isOptional: false,
+},
+{
+  name: 'retryCount',
+  type: 'number',
+  description: 'Current retry attempt count. Starts at `0`; use to cap processor-triggered retries.',
+  isOptional: false,
+},
+{
+  name: 'requestContext',
+  type: 'RequestContext',
+  description: 'Request-scoped context with execution metadata.',
+  isOptional: true,
+},
+{
+  name: 'tracingContext',
+  type: 'TracingContext',
+  description: 'Tracing context for observability.',
+  isOptional: true,
+},
+{
+  name: 'writer',
+  type: 'ProcessorStreamWriter',
+  description: 'Stream writer for emitting custom data chunks.',
+  isOptional: true,
+},
+{
+  name: 'abortSignal',
+  type: 'AbortSignal',
+  description: 'Signal for cancelling the operation.',
+  isOptional: true,
+},
+]}
+/>
+
+#### 반환 값 {/* #return-value-1 */}
+
+`processLLMResponse`보고`ProcessLLMResponseResult`, which is `undefined | void`. The return value is reserved for future extensibility.
+
+#### 사용 사례 {/* #use-cases-2 */}
+
+* 실시간 호출 후 캐시에 LLM 응답 쓰기(캐시 키 파생과 쌍을 이룸)`processLLMRequest`)
+* 분석을 위한 전체 응답 로깅 또는 기록
+* 완료된 응답을 기반으로 부작용 유발
+
+***
+
+### `processAPIError` {/* #processapierror */}
+
+LLM API 거부 오류가 최종 오류로 나타나기 전에 처리합니다. 이는 재시도할 수 없는 오류(예: 400 또는 422 상태 코드)로 인해 API 호출이 실패할 때 실행됩니다. 같지 않은`processOutputStep` which runs after successful responses, this runs when the API rejects the request.
+
+구현하는 프로세서 추가`processAPIError` to an agent's `errorProcessors` array.
+
+프로세서는 오류를 검사하고 요청을 수정할 수 있습니다. 예를 들어 메시지를`messageList`. Return `{ retry: true }` to retry with the modified state.
+
+```typescript prettier:false
+processAPIError?(args: ProcessAPIErrorArgs): Promise<ProcessAPIErrorResult | void> | ProcessAPIErrorResult | void;
+```
+
+#### `ProcessAPIErrorArgs` {/* #processapierrorargs */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'error',
+  type: 'unknown',
+  description: 'The error that occurred during the LLM API call.',
+  isOptional: false,
+},
+{
+  name: 'messages',
+  type: 'MastraDBMessage[]',
+  description: 'All messages at the time of the error.',
+  isOptional: false,
+},
+{
+  name: 'messageList',
+  type: 'MessageList',
+  description: 'MessageList instance for managing messages. Modify this to change the request before retry.',
+  isOptional: false,
+},
+{
+  name: 'stepNumber',
+  type: 'number',
+  description: 'Current step number (0-indexed).',
+  isOptional: false,
+},
+{
+  name: 'steps',
+  type: 'StepResult[]',
+  description: 'All completed steps so far.',
+  isOptional: false,
+},
+{
+  name: 'state',
+  type: 'Record<string, unknown>',
+  description: 'Per-processor state that persists across all method calls within this request.',
+  isOptional: false,
+},
+{
+  name: 'retryCount',
+  type: 'number',
+  description: 'The current retry count for error handlers. Use this to limit retry attempts.',
+  isOptional: false,
+},
+{
+  name: 'abort',
+  type: '(reason?: string, options?: { retry?: boolean; metadata?: unknown }) => never',
+  description: 'Function to abort processing.',
+  isOptional: false,
+},
+{
+  name: 'writer',
+  type: 'ProcessorStreamWriter',
+  description:
+    'Stream writer for emitting custom data chunks during streaming. Call `writer.custom()` to emit a `data-*` chunk.',
+  isOptional: true,
+},
+{
+  name: 'requestContext',
+  type: 'RequestContext',
+  description: 'Request context passed through from the agent call.',
+  isOptional: true,
+},
+{
+  name: 'abortSignal',
+  type: 'AbortSignal',
+  description: 'Signal for cancelling the operation.',
+  isOptional: true,
+},
+]}
+/>
+
+#### `ProcessAPIErrorResult` {/* #processapierrorresult */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'retry',
+  type: 'boolean',
+  description: 'Whether to retry the LLM call after applying modifications.',
+  isOptional: false,
+},
+]}
+/>
+
+#### 사용 사례 {/* #use-cases-3 */}
+
+* 요청을 수정하고 재시도하여 API 관련 거부 처리
+* 요청 수정을 통해 재시도할 수 없는 오류를 재시도 가능한 오류로 변환
+* Model별 오류 복구 전략 구현
+
+#### 예: 사용자 정의 오류 복구 {/* #example-custom-error-recovery */}
+
+```typescript title="src/mastra/processors/error-recovery.ts"
+import { APICallError } from '@ai-sdk/provider'
+import type { Processor, ProcessAPIErrorArgs, ProcessAPIErrorResult } from '@mastra/core/processors'
+
+export class ErrorRecoveryProcessor implements Processor {
+  id = 'error-recovery'
+
+  processAPIError({
+    error,
+    messageList,
+    retryCount,
+  }: ProcessAPIErrorArgs): ProcessAPIErrorResult | void {
+    // Only retry once
+    if (retryCount > 0) return
+
+    // Check for a specific API error
+    if (APICallError.isInstance(error) && error.message.includes('context length exceeded')) {
+      // Trim older messages to fit within context
+      const messages = messageList.get.all.db()
+      if (messages.length > 4) {
+        messageList.removeByIds([messages[1]!.id, messages[2]!.id])
+        return { retry: true }
+      }
+    }
+  }
+}
+```
+
+***
+
+### `processOutputStream` {/* #processoutputstream */}
+
+내장된 상태 관리를 통해 스트리밍 출력 청크를 처리합니다. 프로세서가 청크를 축적하고 더 큰 컨텍스트를 기반으로 결정을 내릴 수 있습니다.
+
+```typescript prettier:false
+processOutputStream?(args: ProcessOutputStreamArgs): Promise<ChunkType | null | undefined>;
+```
+
+#### `ProcessOutputStreamArgs` {/* #processoutputstreamargs */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'part',
+  type: 'ChunkType',
+  description: 'The current stream chunk being processed.',
+  isOptional: false,
+},
+{
+  name: 'streamParts',
+  type: 'ChunkType[]',
+  description: 'All chunks seen so far in the stream.',
+  isOptional: false,
+},
+{
+  name: 'state',
+  type: 'Record<string, unknown>',
+  description:
+    'Mutable per-processor state that persists across every chunk and every method call within a single request. A fresh state object is created for each new generate or stream call.',
+  isOptional: false,
+},
+{
+  name: 'abort',
+  type: '(reason?: string, options?: { retry?: boolean; metadata?: unknown }) => never',
+  description:
+    'Function to abort the stream. Throws a TripWire error that ends the stream and emits a `tripwire` chunk. Pass `retry: true` to request another LLM attempt instead of ending.',
+  isOptional: false,
+},
+{
+  name: 'retryCount',
+  type: 'number',
+  description:
+    'Current retry attempt count from `ProcessorContext`. Starts at `0`; use to cap processor-triggered retries.',
+  isOptional: false,
+},
+{
+  name: 'messageList',
+  type: 'MessageList',
+  description: 'MessageList instance for accessing conversation history.',
+  isOptional: true,
+},
+{
+  name: 'tracingContext',
+  type: 'TracingContext',
+  description: 'Tracing context for observability.',
+  isOptional: true,
+},
+{
+  name: 'requestContext',
+  type: 'RequestContext',
+  description: 'Request-scoped context with execution metadata.',
+  isOptional: true,
+},
+{
+  name: 'writer',
+  type: 'ProcessorStreamWriter',
+  description:
+    'Stream writer for emitting custom data chunks back to the client. Call writer.custom() to emit data-* typed chunks. Available during streaming.',
+  isOptional: true,
+},
+]}
+/>
+
+#### 반환 값 {/* #return-value-2 */}
+
+`processOutputStream`보고`Promise<ChunkType | null | undefined>`.
+
+* 반환`ChunkType` to emit the chunk. Return the original `part` to emit it unchanged, or a new `ChunkType` to emit a modified chunk.
+* 반품`null` to drop the chunk. Nothing is sent to the next processor or the client.
+* 반품`undefined` (including implicit `undefined` from a `return;` statement or a method that falls off the end) to drop the chunk. `null` and `undefined` behave the same way.
+
+청크를 삭제하면 해당 단일 청크에만 영향을 미칩니다. 스트림이 계속되고 다음 청크가 계속 처리됩니다. 스트림을 완전히 중지하려면 다음을 호출하세요.`abort()`.
+
+***
+
+### `processOutputResult` {/* #processoutputresult */}
+
+스트리밍이나 생성이 완료된 후 전체 출력 결과를 처리합니다.
+
+```typescript prettier:false
+processOutputResult?(args: ProcessOutputResultArgs): ProcessorMessageResult;
+```
+
+#### `ProcessOutputResultArgs` {/* #processoutputresultargs */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'messages',
+  type: 'MastraDBMessage[]',
+  description: 'The generated response messages.',
+  isOptional: false,
+},
+{
+  name: 'messageList',
+  type: 'MessageList',
+  description: 'MessageList instance for managing messages.',
+  isOptional: false,
+},
+{
+  name: 'state',
+  type: 'Record<string, unknown>',
+  description:
+    'Per-processor state that persists across all method calls within this request. Shared with processOutputStream and other methods.',
+  isOptional: false,
+},
+{
+  name: 'result',
+  type: 'OutputResult',
+  description:
+    'Resolved generation result containing `text` (accumulated text), `usage` (token usage with inputTokens, outputTokens, totalTokens), `finishReason` (why generation ended), and `steps` (all LLM step results, each with toolCalls, toolResults, reasoning, sources, files, etc.).',
+  isOptional: false,
+},
+{
+  name: 'abort',
+  type: '(reason?: string, options?: { retry?: boolean; metadata?: unknown }) => never',
+  description:
+    'Function to abort processing. Throws a TripWire error that stops execution and emits a `tripwire` chunk.',
+  isOptional: false,
+},
+{
+  name: 'retryCount',
+  type: 'number',
+  description:
+    'Current retry attempt count from `ProcessorContext`. Starts at `0`; use to cap processor-triggered retries.',
+  isOptional: false,
+},
+{
+  name: 'tracingContext',
+  type: 'TracingContext',
+  description: 'Tracing context for observability.',
+  isOptional: true,
+},
+{
+  name: 'requestContext',
+  type: 'RequestContext',
+  description: 'Request-scoped context with execution metadata.',
+  isOptional: true,
+},
+{
+  name: 'writer',
+  type: 'ProcessorStreamWriter',
+  description:
+    'Stream writer for emitting custom data chunks back to the client. Call writer.custom() to emit data-* typed chunks. Available during streaming.',
+  isOptional: true,
+},
+]}
+/>
+
+***
+
+### `processOutputStep` {/* #processoutputstep */}
+
+Tool 실행 전에 Agent 루프의 각 LLM 응답 후 출력을 처리합니다. 같지 않은`processOutputResult` which runs once at the end, this runs at every step. This is the ideal method for implementing guardrails that can trigger retries.
+
+```typescript prettier:false
+processOutputStep?(args: ProcessOutputStepArgs): ProcessorMessageResult;
+```
+
+#### `ProcessOutputStepArgs` {/* #processoutputstepargs */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'messages',
+  type: 'MastraDBMessage[]',
+  description: 'All messages including the latest LLM response.',
+  isOptional: false,
+},
+{
+  name: 'messageList',
+  type: 'MessageList',
+  description: 'MessageList instance for managing messages.',
+  isOptional: false,
+},
+{
+  name: 'stepNumber',
+  type: 'number',
+  description: 'Current step number (0-indexed).',
+  isOptional: false,
+},
+{
+  name: 'finishReason',
+  type: 'string',
+  description: 'The finish reason from the LLM (stop, tool-use, length, etc.).',
+  isOptional: true,
+},
+{
+  name: 'providerMetadata',
+  type: 'ProviderMetadata',
+  description:
+    'Provider-specific metadata for the finishing step (e.g. AWS Bedrock guardrail trace). Present when the model step produced provider metadata, including on content-filter blocks where `steps` is empty.',
+  isOptional: true,
+},
+{
+  name: 'toolCalls',
+  type: 'ToolCallInfo[]',
+  description: 'Tool calls made in this step (if any).',
+  isOptional: true,
+},
+{
+  name: 'text',
+  type: 'string',
+  description: 'Generated text from this step.',
+  isOptional: true,
+},
+{
+  name: 'usage',
+  type: 'LanguageModelUsage',
+  description: 'Token usage for the current step (`inputTokens`, `outputTokens`, `totalTokens`).',
+  isOptional: false,
+},
+{
+  name: 'systemMessages',
+  type: 'CoreMessage[]',
+  description: 'All system messages for read/modify access.',
+  isOptional: false,
+},
+{
+  name: 'steps',
+  type: 'StepResult[]',
+  description: 'All completed steps so far, including the current step.',
+  isOptional: false,
+},
+{
+  name: 'state',
+  type: 'Record<string, unknown>',
+  description:
+    'Per-processor state that persists across all method calls within this request. Shared with processOutputStream and processOutputResult.',
+  isOptional: false,
+},
+{
+  name: 'abort',
+  type: '(reason?: string, options?: { retry?: boolean; metadata?: unknown }) => never',
+  description: 'Function to abort processing. Pass `retry: true` to request the LLM retry the step.',
+  isOptional: false,
+},
+{
+  name: 'retryCount',
+  type: 'number',
+  description:
+    'Number of times processors have triggered retry. Use this to limit retry attempts. Always passed by Mastra; starts at 0.',
+  isOptional: false,
+},
+{
+  name: 'tracingContext',
+  type: 'TracingContext',
+  description: 'Tracing context for observability.',
+  isOptional: true,
+},
+{
+  name: 'requestContext',
+  type: 'RequestContext',
+  description: 'Request-scoped context with execution metadata.',
+  isOptional: true,
+},
+]}
+/>
+
+#### 사용 사례 {/* #use-cases-4 */}
+
+* 재시도를 요청할 수 있는 품질 가드레일 구현
+* Tool 실행 전 LLM 출력 검증
+* 단계별 로깅 또는 측정항목 추가
+* 재시도 기능으로 출력 조정 구현
+
+#### 예: 재시도가 포함된 품질 가드레일 {/* #example-quality-guardrail-with-retry */}
+
+```typescript title="src/mastra/processors/quality-guardrail.ts"
+import type { Processor } from '@mastra/core/processors'
+
+export class QualityGuardrail implements Processor {
+  id = 'quality-guardrail'
+
+  async processOutputStep({ text, abort, retryCount }) {
+    const score = await evaluateResponseQuality(text)
+
+    if (score < 0.7) {
+      if (retryCount < 3) {
+        // Request retry with feedback for the LLM
+        abort('Response quality too low. Please provide more detail.', {
+          retry: true,
+          metadata: { qualityScore: score },
+        })
+      } else {
+        // Max retries reached, block the response
+        abort('Response quality too low after multiple attempts.')
+      }
+    }
+
+    return []
+  }
+}
+```
+
+### `processToolResult` {/* #processtoolresult */}
+
+이후 Tool의 결과를 처리합니다.`tool.execute()` returns and before the result is added to the message list or fed to the next LLM call. Symmetric with `processOutputStep`, which fires before tool execution. Use this method to scan tool output for prompt injection, redact sensitive fields, or abort the run with `abort('reason', { retry: true })`.
+
+Tool의 결과를 바꾸려면 mutate`messageList` in place via `messageList.updateToolInvocation`. The runtime re-reads the post-processor result from the message list and overwrites the downstream tool-result stream chunk before it is enqueued, so streaming clients see the processed value.
+
+이 메소드는 다음과 같은 경우에는 실행되지 않습니다.`tool.execute()` throws; it is called only for successful tool executions where a result is available.
+
+```typescript prettier:false
+processToolResult?(args: ProcessToolResultArgs): ProcessorMessageResult;
+```
+
+#### `ProcessToolResultArgs` {/* #processtoolresultargs */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'messages',
+  type: 'MastraDBMessage[]',
+  description: 'All messages including the current assistant message with the tool call.',
+  isOptional: false,
+},
+{
+  name: 'messageList',
+  type: 'MessageList',
+  description:
+    'MessageList instance for managing messages. Call `updateToolInvocation` to replace the tool result with a redacted or transformed value.',
+  isOptional: false,
+},
+{
+  name: 'stepNumber',
+  type: 'number',
+  description: 'Current step number (0-indexed).',
+  isOptional: false,
+},
+{
+  name: 'toolName',
+  type: 'string',
+  description: 'Name of the tool that was executed.',
+  isOptional: false,
+},
+{
+  name: 'toolCallId',
+  type: 'string',
+  description: 'Unique identifier for this specific tool call.',
+  isOptional: false,
+},
+{
+  name: 'args',
+  type: 'unknown',
+  description: 'Arguments the LLM passed to the tool.',
+  isOptional: false,
+},
+{
+  name: 'result',
+  type: 'unknown',
+  description:
+    'Value returned by the tool. For client-executed tools this is the output of `tool.execute()` after it has passed through `ensureSerializable`. For provider-executed tools (e.g. Anthropic `web_search`) it is the raw result from the provider stream, which is not run through `ensureSerializable`.',
+  isOptional: false,
+},
+{
+  name: 'providerExecuted',
+  type: 'boolean',
+  description:
+    'Whether this result came from a provider-executed tool such as Anthropic web_search. Defaults to undefined for client-executed tools.',
+  isOptional: true,
+},
+{
+  name: 'systemMessages',
+  type: 'CoreMessage[]',
+  description: 'All system messages for read access.',
+  isOptional: false,
+},
+{
+  name: 'steps',
+  type: 'StepResult[]',
+  description: 'All completed steps so far.',
+  isOptional: false,
+},
+{
+  name: 'state',
+  type: 'Record<string, unknown>',
+  description:
+    'Per-processor state that persists across all method calls within this request. Shared with other processor methods on the same processor.',
+  isOptional: false,
+},
+{
+  name: 'abort',
+  type: '(reason?: string, options?: { retry?: boolean; metadata?: unknown }) => never',
+  description:
+    'Function to abort the run. Pass `retry: true` to request the LLM retry the step with the abort reason as feedback.',
+  isOptional: false,
+},
+{
+  name: 'retryCount',
+  type: 'number',
+  description: 'Number of times processors have triggered retry. Starts at 0.',
+  isOptional: false,
+},
+{
+  name: 'tracingContext',
+  type: 'TracingContext',
+  description: 'Tracing context for observability.',
+  isOptional: true,
+},
+{
+  name: 'requestContext',
+  type: 'RequestContext',
+  description: 'Request-scoped context with execution metadata.',
+  isOptional: true,
+},
+]}
+/>
+
+#### 사용 사례 {/* #use-cases-5 */}
+
+* LLM이 보기 전에 신속한 주입을 위한 스캐닝 Tool 출력입니다.
+* Tool 반환에서 민감한 필드(PII, 비밀, 자격 증명)를 수정합니다.
+* Tool가 정책을 위반하는 콘텐츠를 반환하면 실행을 중단합니다.
+* 규정 준수 또는 감사를 위한 로깅 또는 계측 Tool 반환.
+
+#### 예: 민감한 필드 수정 {/* #example-redact-sensitive-fields */}
+
+```typescript title="src/mastra/processors/redact-tool-result.ts"
+import type { Processor } from '@mastra/core/processors'
+
+export class RedactToolResult implements Processor {
+  id = 'redact-tool-result'
+
+  async processToolResult({ toolName, toolCallId, args, result, messageList }) {
+    if (toolName !== 'lookup-customer') return
+
+    const redacted = {
+      ...(result as Record<string, unknown>),
+      ssn: '[REDACTED]',
+      email: '[REDACTED]',
+    }
+
+    messageList.updateToolInvocation({
+      type: 'tool-invocation',
+      toolInvocation: {
+        state: 'result',
+        toolCallId,
+        toolName,
+        args,
+        result: redacted,
+      },
+    })
+  }
+}
+```
+
+#### 예: Tool 출력에서 ​​Prompt 삽입 차단 {/* #example-block-prompt-injection-in-tool-output */}
+
+```typescript title="src/mastra/processors/scan-tool-result.ts"
+import type { Processor } from '@mastra/core/processors'
+
+export class ScanToolResult implements Processor {
+  id = 'scan-tool-result'
+
+  async processToolResult({ result, abort }) {
+    const text = typeof result === 'string' ? result : JSON.stringify(result)
+    if (containsPromptInjection(text)) {
+      abort('blocked by scan-tool-result: suspected prompt injection')
+    }
+  }
+}
+
+function containsPromptInjection(text: string): boolean {
+  return /ignore (all )?(previous|prior) instructions/i.test(text)
+}
+```
+
+## 프로세서 유형 {/* #processor-types */}
+
+Mastra는 프로세서가 필요한 메소드를 구현하도록 유형 별칭을 제공합니다.
+
+```typescript
+// Must implement processInput, processInputStep, processLLMRequest, or processLLMResponse (or any combination)
+type InputProcessor = Processor &
+  (
+    | { processInput: required }
+    | { processInputStep: required }
+    | { processLLMRequest: required }
+    | { processLLMResponse: required }
+  )
+
+// Must implement processOutputStream, processOutputStep, OR processOutputResult (or any combination)
+type OutputProcessor = Processor &
+  (
+    | { processOutputStream: required }
+    | { processOutputStep: required }
+    | { processOutputResult: required }
+  )
+
+// Must implement processAPIError
+type ErrorProcessor = Processor & { processAPIError: required }
+```
+
+구현하는 프로세서 구성`processAPIError` in `errorProcessors`:
+
+```typescript
+const agent = new Agent({
+  id: 'agent',
+  errorProcessors: [new PrefillErrorHandler()],
+})
+```
+
+## 사용 예 {/* #usage-examples */}
+
+### 기본 입력 프로세서 {/* #basic-input-processor */}
+
+```typescript title="src/mastra/processors/lowercase.ts"
+import type { Processor } from '@mastra/core/processors'
+import type { MastraDBMessage } from '@mastra/core/memory'
+
+export class LowercaseProcessor implements Processor {
+  id = 'lowercase'
+
+  async processInput({ messages }): Promise<MastraDBMessage[]> {
+    return messages.map(msg => ({
+      ...msg,
+      content: {
+        ...msg.content,
+        parts: msg.content.parts?.map(part =>
+          part.type === 'text' ? { ...part, text: part.text.toLowerCase() } : part,
+        ),
+      },
+    }))
+  }
+}
+```
+
+### 단계별 프로세서`processInputStep` {/* #per-step-processor-with-processinputstep */}
+
+```typescript title="src/mastra/processors/dynamic-model.ts"
+import type {
+  Processor,
+  ProcessInputStepArgs,
+  ProcessInputStepResult,
+} from '@mastra/core/processors'
+
+export class DynamicModelProcessor implements Processor {
+  id = 'dynamic-model'
+
+  async processInputStep({
+    stepNumber,
+    steps,
+    toolChoice,
+  }: ProcessInputStepArgs): Promise<ProcessInputStepResult> {
+    // Use a fast model for initial response
+    if (stepNumber === 0) {
+      return { model: '__GATEWAY_OPENAI_MODEL_MINI__' }
+    }
+
+    // Switch to powerful model after tool calls
+    if (steps.length > 0 && steps[steps.length - 1].toolCalls?.length) {
+      return { model: '__GATEWAY_OPENAI_MODEL__' }
+    }
+
+    // Disable tools after 5 steps to force completion
+    if (stepNumber > 5) {
+      return { toolChoice: 'none' }
+    }
+
+    return {}
+  }
+}
+```
+
+### 메시지 변환기`processInputStep` {/* #message-transformer-with-processinputstep */}
+
+```typescript title="src/mastra/processors/reasoning-transformer.ts"
+import type { Processor } from '@mastra/core/processors'
+import type { MastraDBMessage } from '@mastra/core/memory'
+
+export class ReasoningTransformer implements Processor {
+  id = 'reasoning-transformer'
+
+  async processInputStep({ messages, messageList }) {
+    // Transform reasoning parts to thinking parts at each step
+    // This is useful when switching between model providers
+    for (const msg of messages) {
+      if (msg.role === 'assistant' && msg.content.parts) {
+        for (const part of msg.content.parts) {
+          if (part.type === 'reasoning') {
+            ;(part as any).type = 'thinking'
+          }
+        }
+      }
+    }
+    return messageList
+  }
+}
+```
+
+### 하이브리드 프로세서(입력 및 출력) {/* #hybrid-processor-input-and-output */}
+
+```typescript title="src/mastra/processors/content-filter.ts"
+import type { Processor } from '@mastra/core/processors'
+import type { MastraDBMessage } from '@mastra/core/memory'
+import type { ChunkType } from '@mastra/core/stream'
+
+export class ContentFilter implements Processor {
+  id = 'content-filter'
+  private blockedWords: string[]
+
+  constructor(blockedWords: string[]) {
+    this.blockedWords = blockedWords
+  }
+
+  async processInput({ messages, abort }): Promise<MastraDBMessage[]> {
+    for (const msg of messages) {
+      const text = msg.content.parts
+        ?.filter(p => p.type === 'text')
+        .map(p => p.text)
+        .join(' ')
+
+      if (this.blockedWords.some(word => text?.includes(word))) {
+        abort('Blocked content detected in input')
+      }
+    }
+    return messages
+  }
+
+  async processOutputStream({ part, abort }): Promise<ChunkType | null> {
+    if (part.type === 'text-delta') {
+      if (this.blockedWords.some(word => part.payload.text.includes(word))) {
+        abort('Blocked content detected in output')
+      }
+    }
+    return part
+  }
+}
+```
+
+### 상태가 있는 스트림 누산기 {/* #stream-accumulator-with-state */}
+
+```typescript title="src/mastra/processors/word-counter.ts"
+import type { Processor } from '@mastra/core/processors'
+import type { ChunkType } from '@mastra/core/stream'
+
+export class WordCounter implements Processor {
+  id = 'word-counter'
+
+  async processOutputStream({ part, state }): Promise<ChunkType> {
+    // Initialize state on first chunk
+    if (!state.wordCount) {
+      state.wordCount = 0
+    }
+
+    // Count words in text chunks
+    if (part.type === 'text-delta') {
+      const words = part.payload.text.split(/\s+/).filter(Boolean)
+      state.wordCount += words.length
+    }
+
+    // Log word count on finish
+    if (part.type === 'finish') {
+      console.log(`Total words: ${state.wordCount}`)
+    }
+
+    return part
+  }
+}
+```
+
+## 상태 수명주기 {/* #state-lifecycle */}
+
+모든 프로세서는`state` object in `processLLMRequest`, `processLLMResponse`, `processOutputStream`, `processOutputStep`, `processOutputResult`, and `processAPIError`. State has three important properties:
+
+* **프로세서별**: 각 프로세서는 자체적으로`state` object, keyed by the processor's `id`. Processors with different ids can't read or overwrite each other's state.
+* **요청별**: 매 시작마다 새로운 상태 객체가 생성됩니다.`agent.generate()` or `agent.stream()` call. State doesn't leak between requests or between users.
+* **다양한 방법으로 공유됨**: 하나의 요청 내에서 동일한`state` object is passed to `processLLMRequest` (before the provider call), `processLLMResponse` (after the step completes), `processOutputStream` (for every chunk), `processOutputStep` (after every LLM step), `processOutputResult` (once at the end), and `processAPIError` (when an LLM call fails). For example, `processLLMRequest` can stash a cache key and `processLLMResponse` can read it back to write the response.
+
+첫 번째 액세스 시 방어적으로 필드를 초기화하세요.`state` starts as an empty object:
+
+```typescript
+import type { Processor } from '@mastra/core/processors'
+
+export class WordCounter implements Processor {
+  id = 'word-counter'
+
+  async processOutputStream({ part, state }) {
+    state.wordCount ??= 0
+    if (part.type === 'text-delta') {
+      state.wordCount += part.payload.text.split(/\s+/).filter(Boolean).length
+    }
+    return part
+  }
+}
+```
+
+## 중단 및 트립와이어 청크 {/* #aborting-and-tripwire-chunks */}
+
+그만큼`abort` function on each method throws a `TripWire` error that stops processing and emits a `tripwire` chunk on the output stream. Clients can detect the chunk to distinguish a blocked response from a normal finish.
+
+```typescript
+abort('Blocked content detected', { retry: false, metadata: { category: 'pii' } })
+```
+
+* `reason`: 사람이 읽을 수 있는 설명입니다. 다음과 같이 나타납니다.`tripwire.payload.reason`.
+* `retry`: 언제`true`, the agent retries the same step with `reason` fed back as feedback. Retries only run when `maxProcessorRetries` is set on the agent or call; otherwise the request aborts. When `errorProcessors` are configured, `maxProcessorRetries` defaults to `10` for that call.
+* `metadata`: 선택적으로 구조화된 데이터가 첨부됩니다.`tripwire` chunk for downstream consumers.
+
+방출된`tripwire` chunk has the shape:
+
+```typescript
+type TripwireChunk = {
+  type: 'tripwire'
+  runId: string
+  from: 'AGENT'
+  payload: {
+    reason: string
+    retry?: boolean
+    metadata?: unknown
+    processorId: string
+  }
+}
+```
+
+비스트리밍 통화(`agent.generate()`), the result exposes the same information as `result.tripwire` and `result.finishReason === 'other'`.
+
+## 커스텀 데이터 청크 내보내기 {/* #emitting-custom-data-chunks */}
+
+다음에 대한 액세스 권한이 있는 프로세서`writer` can stream custom `data-*` chunks to the client by calling `writer.custom(chunk)`. Tools can do the same through their own writer. This is the only way for a processor to emit content outside of normal text and tool chunks.
+
+```typescript
+await writer.custom({
+  type: 'data-moderation',
+  runId,
+  from: 'AGENT',
+  data: { level: 'warn', reason: 'Possibly unsafe' },
+})
+```
+
+Memory가 구성되면 사용자 정의`data-*` chunks emitted from `processOutputStream` or `processOutputResult` are saved as parts of the assistant message. Set `transient: true` on the chunk object to stream it without saving it to memory:
+
+```typescript {4}
+await writer.custom({
+  type: 'data-progress',
+  data: { status: 'Processing' },
+  transient: true,
+})
+```
+
+통과하다`transient` as a property of the chunk, not as the second argument to `writer.custom()`. The second argument contains writer options such as `messageId`.
+
+기본적으로 프로세서**don't** see `data-*` chunks in `processOutputStream` so they don't accidentally process tool telemetry or their own output. Opt in by setting `processDataParts: true` on the processor:
+
+```typescript
+class ModerationCollector implements Processor {
+  id = 'moderation-collector'
+  processDataParts = true
+
+  async processOutputStream({ part, state }) {
+    if (part.type === 'data-moderation') {
+      state.warnings ??= []
+      state.warnings.push(part.data)
+    }
+    return part
+  }
+}
+```
+
+덩어리`type` must start with `data-` to be treated as a custom data chunk. Returning `null` or `undefined` from `processOutputStream` still drops the chunk, so a processor can inspect, modify, or filter custom data the same way it filters text chunks.
+
+## Agent에서 프로세서 구성 {/* #configuring-processors-on-an-agent */}
+
+프로세서는 세 가지 어레이를 통해 Agent에 연결됩니다.
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { PrefillErrorHandler } from '@mastra/core/processors'
+
+const agent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  instructions: '...',
+  inputProcessors: [new ContentFilter(['secret'])],
+  outputProcessors: [new WordCounter()],
+  errorProcessors: [new PrefillErrorHandler()],
+  maxProcessorRetries: 3,
+})
+```
+
+* `inputProcessors`: LLM 이전에 실행합니다. 입력 메시지를 받습니다.
+* `outputProcessors`: LLM 응답 중 또는 응답 후에 실행됩니다. 출력 청크 또는 메시지를 수신합니다.
+* `errorProcessors`: LLM API 호출이 발생하면 실행됩니다. 원시 오류를 수신합니다.
+
+각 어레이는 또한 요청에 따라 프로세서를 구축할 수 있도록 기능을 허용합니다.`RequestContext`:
+
+```typescript
+new Agent({
+  id: 'processor-interface-agent',
+  inputProcessors: ({ requestContext }) => {
+    const blockedWords = requestContext.get('blockedWords') ?? []
+    return [new ContentFilter(blockedWords)]
+  },
+})
+```
+
+### 통화별 재정의 {/* #per-call-overrides */}
+
+`agent.generate()`그리고`agent.stream()` accept `inputProcessors`, `outputProcessors`, `errorProcessors`, and `maxProcessorRetries`. When any processor array is set on the call, it **replaces** the matching array configured on the agent for that request. Memory, workspace, skill, channel, and browser processors that Mastra adds automatically are always preserved and run around your array.
+
+```typescript
+await agent.stream('Summarize this', {
+  outputProcessors: [new StreamFilter()],
+  maxProcessorRetries: 5,
+})
+```
+
+`maxProcessorRetries`전달된 통화는 Agent 기본값을 재정의합니다. 둘 다 설정되지 않은 경우 프로세서가 요청한 재시도는 중단으로 처리됩니다.
+
+## 관련된 {/* #related */}
+
+* [프로세서 개요](/docs/agents/processors): 프로세서에 대한 개념 가이드
+* [난간](/docs/agents/guardrails): 보안 및 검증 프로세서
+* [Memory 프로세서](/docs/memory/memory-processors): Memory 전용 프로세서

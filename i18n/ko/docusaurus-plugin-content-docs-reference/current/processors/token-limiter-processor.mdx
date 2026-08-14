@@ -1,0 +1,243 @@
+---
+title: "참조: TokenLimiterProcessor | 프로세서"
+description: "메시지의 토큰 수를 제한하는 Mastra의 TokenLimiterProcessor에 대한 문서입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+---
+
+# TokenLimiter프로세서
+
+그만큼`TokenLimiterProcessor`메시지의 토큰 수를 제한합니다. 입력, 단계별 입력 및 출력 프로세서로 사용할 수 있습니다.
+
+* **입력 프로세서** (`processInput`): Filters historical messages to fit within the context window before the agentic loop starts, prioritizing recent messages
+* **단계별 입력 프로세서** (`processInputStep`): Prunes messages at each step of a multi-step agent workflow, preventing unbounded token growth when tools trigger additional LLM calls
+* **출력 프로세서**: 초과된 제한을 처리하기 위해 구성 가능한 전략을 사용하여 스트리밍 또는 비스트리밍을 통해 생성된 응답 토큰을 제한합니다.
+
+## 사용예 {/* #usage-example */}
+
+```typescript
+import { TokenLimiterProcessor } from '@mastra/core/processors'
+
+const processor = new TokenLimiterProcessor({
+  limit: 1000,
+  strategy: 'truncate',
+  countMode: 'cumulative',
+})
+```
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'options',
+  type: 'number | Options',
+  description: 'Either a simple number for token limit, or configuration options object',
+  isOptional: false,
+  properties: [
+    {
+      type: 'number | Options',
+      parameters: [
+        {
+          name: 'limit',
+          type: 'number',
+          description: 'Maximum number of tokens to allow in the response',
+          isOptional: false,
+        },
+        {
+          name: 'encoding',
+          type: 'TiktokenBPE',
+          description: 'Optional encoding to use. Defaults to o200k_base which is used by gpt-5.1',
+          isOptional: true,
+          default: 'o200k_base',
+        },
+        {
+          name: 'strategy',
+          type: "'truncate' | 'abort'",
+          description:
+            "Strategy when token limit is reached: 'truncate' stops emitting chunks, 'abort' calls abort() to stop the stream",
+          isOptional: true,
+          default: "'truncate'",
+        },
+        {
+          name: 'countMode',
+          type: "'cumulative' | 'part'",
+          description:
+            "Whether to count tokens from the beginning of the stream or just the current part: 'cumulative' counts all tokens from start, 'part' only counts tokens in current part",
+          isOptional: true,
+          default: "'cumulative'",
+        },
+        {
+          name: 'trimMode',
+          type: "'best-fit' | 'contiguous'",
+          description:
+            "Controls how messages are trimmed when exceeding the token limit: 'best-fit' keeps as many messages as possible (may create gaps), 'contiguous' stops at the first message that does not fit, ensuring a continuous suffix of conversation history",
+          isOptional: true,
+          default: "'best-fit'",
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+## 보고 {/* #returns */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: "Processor identifier set to 'token-limiter'",
+  isOptional: false,
+},
+{
+  name: 'name',
+  type: 'string',
+  description: 'Optional processor display name',
+  isOptional: true,
+},
+{
+  name: 'processInput',
+  type: '(args: { messages: MastraDBMessage[]; abort: (reason?: string) => never }) => Promise<MastraDBMessage[]>',
+  description:
+    'Filters input messages to fit within token limit before the agentic loop starts, prioritizing recent messages while preserving system messages',
+  isOptional: false,
+},
+{
+  name: 'processInputStep',
+  type: '(args: ProcessInputStepArgs) => Promise<void>',
+  description:
+    'Prunes messages at each step of the agentic loop (including tool call continuations) to keep the conversation within the token limit. Mutates the messageList directly by removing oldest messages first while preserving system messages.',
+  isOptional: false,
+},
+{
+  name: 'processOutputStream',
+  type: '(args: ProcessOutputStreamArgs) => Promise<ChunkType | null>',
+  description:
+    'Processes streaming output parts to limit token count during streaming. Only text and object parts count against the limit and can be withheld; lifecycle, reasoning and tool parts always pass through.',
+  isOptional: false,
+},
+{
+  name: 'processOutputResult',
+  type: '(args: { messages: MastraDBMessage[]; abort: (reason?: string) => never }) => Promise<MastraDBMessage[]>',
+  description: 'Processes final output results to limit token count in non-streaming scenarios',
+  isOptional: false,
+},
+{
+  name: 'getMaxTokens',
+  type: '() => number',
+  description: 'Get the maximum token limit',
+  isOptional: false,
+},
+]}
+/>
+
+## 출력 스트림 동작 {/* #output-stream-behavior */}
+
+출력 프로세서로서 생성된 출력 수를 전달하는 부품만 제한에 대해 다음을 수행합니다.`text-delta` and `object`. Lifecycle parts (such as `step-start`), reasoning deltas, response metadata, and tool parts (`tool-call`, `tool-result`) are neither counted nor withheld, so tool calls always reach the agentic loop and get executed.
+
+기본값으로`truncate` strategy, the first time output is withheld the processor emits a transient `data-token-limit-reached` part on the stream:
+
+```typescript
+for await (const part of stream.fullStream) {
+  if (part.type === 'data-token-limit-reached') {
+    console.log('output truncated at', part.data.limit, 'tokens')
+  }
+}
+```
+
+## 오류 동작 {/* #error-behavior */}
+
+입력 프로세서로 사용되는 경우(둘 다`processInput` and `processInputStep`), `TokenLimiterProcessor` throws a `TripWire` error in the following cases:
+
+* **빈 메시지**: 처리할 메시지가 없으면 메시지 없이 LLM 요청을 보낼 수 없기 때문에 TripWire가 발생합니다.
+* **시스템 메시지가 한도를 초과했습니다.**: 시스템 메시지만 토큰 제한을 초과하는 경우 시스템 메시지만 있고 사용자/보조 메시지 없이 LLM 요청을 보낼 수 없기 때문에 TripWire가 발생합니다.
+
+```typescript
+import { TripWire } from '@mastra/core/agent'
+
+try {
+  await agent.generate('Hello')
+} catch (error) {
+  if (error instanceof TripWire) {
+    console.log('Token limit error:', error.message)
+  }
+}
+```
+
+## 확장된 사용 예 {/* #extended-usage-example */}
+
+### 입력 프로세서로(컨텍스트 창 제한) {/* #as-an-input-processor-limit-context-window */}
+
+사용`inputProcessors` to limit historical messages sent to the model, which helps stay within context window limits:
+
+```typescript title="src/mastra/agents/context-limited-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { TokenLimiterProcessor } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'context-limited-agent',
+  name: 'context-limited-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({/* ... */}),
+  inputProcessors: [
+    new TokenLimiterProcessor({ limit: 4000 }), // Limits historical messages to ~4000 tokens
+  ],
+})
+```
+
+### 단계별 입력 프로세서로서(다단계 토큰 증가 제한) {/* #as-a-per-step-input-processor-limit-multi-step-token-growth */}
+
+상담사가 여러 단계에 걸쳐 Tool를 사용하는 경우(예:`maxSteps > 1`), each step accumulates conversation history from all previous steps. Use `inputProcessors` to also limit tokens at each step of the agentic loop. The `TokenLimiterProcessor` automatically applies to both the initial input and every subsequent step:
+
+```typescript title="src/mastra/agents/multi-step-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { TokenLimiterProcessor } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'multi-step-agent',
+  name: 'multi-step-agent',
+  instructions: 'You are a helpful research assistant with access to tools',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [
+    new TokenLimiterProcessor({ limit: 8000 }), // Applied at every step
+  ],
+})
+
+// Each tool call step will be limited to ~8000 input tokens
+const result = await agent.generate('Research this topic using your tools', {
+  maxSteps: 10,
+})
+```
+
+### 출력 프로세서로 사용(응답 길이 제한) {/* #as-an-output-processor-limit-response-length */}
+
+사용`outputProcessors` to limit the length of generated responses:
+
+```typescript title="src/mastra/agents/response-limited-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { TokenLimiterProcessor } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'response-limited-agent',
+  name: 'response-limited-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  outputProcessors: [
+    new TokenLimiterProcessor({
+      limit: 1000,
+      strategy: 'truncate',
+      countMode: 'cumulative',
+    }),
+  ],
+})
+```
+
+## 관련된 {/* #related */}
+
+* [난간](/docs/agents/guardrails)

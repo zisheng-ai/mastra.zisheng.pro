@@ -1,0 +1,322 @@
+---
+title: "참조: PubSub | PubSub"
+description: "Mastra에서 pub/sub 계약을 정의하는 PubSub 추상 기본 클래스에 대한 API 참조입니다."
+packages:
+  - "@mastra/core"
+---
+
+# PubSub
+
+`PubSub`Mastra 이벤트 시스템의 추상 기본 클래스입니다. 이는 모든 게시/구독 백엔드가 구현하는 계약을 정의하므로 나머지 Mastra는 어떤 전송이 사용 중인지 알지 못한 채 이벤트를 게시하고 구독할 수 있습니다.
+
+Mastra는 Workflow 이벤트 처리, 스트리밍 및 구성 요소 간 통신을 위해 내부적으로 pub/sub를 사용합니다. 대부분의 응용프로그램은 기본값을 사용합니다.[`EventEmitterPubSub`](/reference/pubsub/event-emitter) and never construct a `PubSub`곧장. 사용자 정의 전송이 필요한 경우에만 이 클래스를 구현하십시오.
+
+내장 구현에 대해서는 다음을 참조하세요.[`EventEmitterPubSub`](/reference/pubsub/event-emitter), [`UnixSocketPubSub`](/reference/pubsub/unix-socket-pubsub), [`CachingPubSub`](/reference/pubsub/caching-pubsub), [`RedisStreamsPubSub`](/reference/pubsub/redis-streams), 그리고[`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub).
+
+## 사용예 {/* #usage-example */}
+
+연장하다`PubSub` and implement the four abstract methods to add a custom backend.
+
+```typescript title="src/mastra/pubsub.ts"
+import { PubSub } from '@mastra/core/events'
+import type { Event, EventCallback, SubscribeOptions } from '@mastra/core/events'
+
+export class CustomPubSub extends PubSub {
+  async publish(topic: string, event: Omit<Event, 'id' | 'createdAt'>): Promise<void> {
+    // Deliver the event to subscribers of `topic`.
+  }
+
+  async subscribe(topic: string, cb: EventCallback, options?: SubscribeOptions): Promise<void> {
+    // Register `cb` to receive events published to `topic`.
+  }
+
+  async unsubscribe(topic: string, cb: EventCallback): Promise<void> {
+    // Remove a previously registered callback.
+  }
+
+  async flush(): Promise<void> {
+    // Wait for any in-flight deliveries to settle.
+  }
+}
+```
+
+인스턴스를[Mastra](/reference/core/mastra-class) constructor:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { CustomPubSub } from './pubsub'
+
+export const mastra = new Mastra({
+  pubsub: new CustomPubSub(),
+})
+```
+
+## 배송 모드 {/* #delivery-modes */}
+
+에이`PubSub` declares which delivery modes it supports through the `supportedModes` property. Mastra reads this to decide whether to run a long-lived worker that pulls events.
+
+| 모드 | 설명 |
+| - | - |
+|`pull` | Consumers actively read from the broker, for example Redis Streams `XREADGROUP`. Mastra runs an orchestration worker to read. |
+| `push` | Events arrive without the consumer asking, either in-process or through an HTTP endpoint. No read loop is required. |
+
+기본값은`['pull']` so that custom implementations keep today's behavior unless they opt in to push delivery.
+
+## 행동 양식 {/* #methods */}
+
+### 핵심 방법 {/* #core-methods */}
+
+#### `publish(topic, event)` {/* #publishtopic-event */}
+
+주제에 이벤트를 게시합니다. 그만큼`id` and `createdAt` fields are assigned by the implementation.
+
+```typescript
+await pubsub.publish('my-topic', {
+  type: 'example',
+  data: { value: 1 },
+  runId: 'run-123',
+})
+```
+
+#### `subscribe(topic, cb, options?)` {/* #subscribetopic-cb-options */}
+
+주제에 게시된 이벤트를 수신하기 위한 콜백을 등록합니다. 언제`options.group` is set, subscribers in the same group compete for messages and each event is delivered to one member. Without a group, every subscriber receives every event.
+
+통과하다`options.batch` to opt in to batched delivery. The callback signature is unchanged: a batch of N events is delivered as N consecutive `cb(event, ack, nack)` calls in publish order. Batching is honored only when the backend's [`supportsNativeBatching`](#properties) is `true`. Other backends ignore the option and deliver events one at a time.
+
+```typescript
+await pubsub.subscribe('my-topic', (event, ack, nack) => {
+  console.log(event)
+})
+```
+
+#### `unsubscribe(topic, cb)` {/* #unsubscribetopic-cb */}
+
+주제에서 이전에 등록된 콜백을 제거합니다.
+
+```typescript
+await pubsub.unsubscribe('my-topic', callback)
+```
+
+#### `flush()` {/* #flush */}
+
+기내 배송이 완료될 때까지 기다립니다. 이벤트 삭제를 방지하려면 종료하기 전에 이 호출을 호출하세요.
+
+```typescript
+await pubsub.flush()
+```
+
+#### `clearTopic(topic)` {/* #cleartopictopic */}
+
+더 이상 이벤트가 게시되지 않으면 주제에 대해 유지된 모든 상태(캐시된 기록, 영구 스트림 항목 및 소비자 그룹)를 삭제합니다. Mastra의 실행 라이프사이클(지속성 Agent 및 이벤트 Workflow우 엔진)은 실행이 최종 상태에 도달할 때 이를 자동으로 호출하므로 실행별 항목이 메시지를 보관하는 전송에 누적되지 않습니다.
+
+기본 구현은 no-op입니다. 즉, 주제별로 아무것도 보관하지 않는 전송입니다(예:`EventEmitterPubSub`) have nothing to clear. Backends that persist messages, like [`RedisStreamsPubSub`](/reference/pubsub/redis-streams), override it. The contract is best-effort: implementations log failures rather than throwing, because callers invoke it fire-and-forget at cleanup boundaries.
+
+```typescript
+await pubsub.clearTopic('workflow.events.v2.run-123')
+```
+
+### 재생 방법 {/* #replay-methods */}
+
+이러한 메서드는 연결 해제 후 스트림 재개를 지원합니다. 기본 구현은 일반 구현으로 대체됩니다.`subscribe`, so backends without history support behave as live-only. [`CachingPubSub`](/reference/pubsub/caching-pubsub) overrides them to replay cached events.
+
+#### `getHistory(topic, offset?)` {/* #gethistorytopic-offset */}
+
+다음에서 시작하여 주제에 대해 캐시된 이벤트를 반환합니다.`offset`. Returns an empty array when the backend has no history.
+
+```typescript
+const events = await pubsub.getHistory('my-topic', 0)
+```
+
+보고:`Promise<Event[]>`
+
+#### `subscribeWithReplay(topic, cb)` {/* #subscribewithreplaytopic-cb */}
+
+캐시된 이벤트를 재생한 다음 라이브 이벤트를 구독합니다.
+
+```typescript
+await pubsub.subscribeWithReplay('my-topic', event => {
+  console.log(event)
+})
+```
+
+#### `subscribeFromOffset(topic, offset, cb)` {/* #subscribefromoffsettopic-offset-cb */}
+
+알려진 위치에서 시작하여 캐시된 이벤트를 재생한 다음 라이브 이벤트를 구독합니다. 이는 클라이언트가 마지막 위치를 알고 있는 경우 전체 재생보다 더 효율적입니다.
+
+```typescript
+await pubsub.subscribeFromOffset('my-topic', 42, event => {
+  console.log(event)
+})
+```
+
+## 속성 {/* #properties */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'supportedModes',
+  type: 'ReadonlyArray<"pull" | "push">',
+  description: 'Delivery modes the implementation supports. Defaults to `["pull"]`.',
+},
+{
+  name: 'supportsNativeBatching',
+  type: 'boolean',
+  description:
+    'Whether the implementation honors `options.batch` on `subscribe()`. Defaults to `false`. Backends that integrate batching internally override this and return `true`.',
+},
+]}
+/>
+
+## 유형 {/* #types */}
+
+### `Event` {/* #event */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'type',
+  type: 'string',
+  description: 'Event type identifier.',
+},
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique event ID, assigned by the implementation on publish.',
+},
+{
+  name: 'data',
+  type: 'any',
+  description: 'Event payload.',
+},
+{
+  name: 'runId',
+  type: 'string',
+  description: 'Run the event belongs to.',
+},
+{
+  name: 'createdAt',
+  type: 'Date',
+  description: 'Timestamp assigned by the implementation on publish.',
+},
+{
+  name: 'index',
+  type: 'number',
+  description: 'Sequential position used to resume from a specific offset.',
+  isOptional: true,
+},
+{
+  name: 'deliveryAttempt',
+  type: 'number',
+  description:
+    'Number of times the event has been delivered. Starts at 1. Defaults to 1 when the backend does not track redelivery.',
+  isOptional: true,
+},
+]}
+/>
+
+### `SubscribeOptions` {/* #subscribeoptions */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'group',
+  type: 'string',
+  description:
+    'When set, subscribers with the same group compete for messages and each event is delivered to one member. When omitted, every subscriber receives every event.',
+  isOptional: true,
+},
+{
+  name: 'batch',
+  type: 'SubscribeBatchOptions',
+  description:
+    'Opt in to batched delivery for this subscription. When omitted, events are delivered one at a time. Honored only by backends where `supportsNativeBatching` is `true`.',
+  isOptional: true,
+},
+]}
+/>
+
+### `SubscribeBatchOptions` {/* #subscribebatchoptions */}
+
+구독별 일괄 처리 정책. 콜백 서명은 변경되지 않습니다. N개 이벤트 배치는 게시 순서에 따라 N개의 연속 콜백 호출이 됩니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'maxSize',
+  type: 'number',
+  description: 'Maximum events held before forcing a flush.',
+  isOptional: true,
+},
+{
+  name: 'maxWaitMs',
+  type: 'number',
+  description:
+    'Maximum time in milliseconds the oldest event may sit in the buffer. The timer starts when the buffer transitions from empty to non-empty.',
+  isOptional: true,
+},
+{
+  name: 'minIntervalMs',
+  type: 'number',
+  description:
+    'Minimum time in milliseconds between consecutive batch deliveries. Even when `maxSize` or `maxWaitMs` would fire, the buffer holds until this interval has elapsed since the last delivery.',
+  isOptional: true,
+},
+{
+  name: 'isImmediate',
+  type: '(event: Event) => boolean',
+  description:
+    'When it returns `true` for an event, the buffer flushes immediately on publish, subject to `minIntervalMs`. A per-event escape hatch.',
+  isOptional: true,
+},
+{
+  name: 'coalesce',
+  type: '(events: Event[]) => Event[]',
+  description:
+    'Applied to the queued batch before delivery to drop superseded events. Must return a subset of its input by reference identity; returning freshly constructed `Event` objects is a contract violation and discards the whole batch. Ordering of kept events is preserved.',
+  isOptional: true,
+},
+{
+  name: 'maxBufferSize',
+  type: 'number',
+  description:
+    'Maximum events the buffer may hold before overflow handling kicks in. Events flagged immediate are never dropped on overflow.',
+  isOptional: true,
+  defaultValue: '256',
+},
+{
+  name: 'overflow',
+  type: '"drop-oldest" | "drop-newest" | "coalesce-or-drop-oldest"',
+  description:
+    'Overflow strategy when the buffer exceeds `maxBufferSize`. `coalesce-or-drop-oldest` runs `coalesce` first, then drops oldest if still over budget.',
+  isOptional: true,
+  defaultValue: 'coalesce-or-drop-oldest',
+},
+]}
+/>
+
+### `EventCallback` {/* #eventcallback */}
+
+구독자를 위한 콜백 서명:`(event: Event, ack?: () => Promise<void>, nack?: () => Promise<void>) => void`.
+
+<PropertiesTable
+  content={[
+{
+  name: 'event',
+  type: 'Event',
+  description: 'The delivered event.',
+},
+{
+  name: 'ack',
+  type: '() => Promise<void>',
+  description: 'Acknowledge successful processing. The event is removed from the queue.',
+  isOptional: true,
+},
+{
+  name: 'nack',
+  type: '() => Promise<void>',
+  description: 'Negative acknowledge. The event is requeued for redelivery after a delay.',
+  isOptional: true,
+},
+]}
+/>

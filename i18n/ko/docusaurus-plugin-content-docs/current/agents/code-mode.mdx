@@ -1,0 +1,181 @@
+---
+title: "코드 모드 | Agent"
+description: "Agent가 샌드박스에서 다중 Tool 계산을 실행하고 보다 정확한 단일 응답을 반환하도록 합니다."
+packages:
+  - "@mastra/core"
+---
+
+# 코드 모드
+
+**추가된 항목:** `@mastra/core@1.38.0`
+
+:::실험적
+
+이 기능은 베타 버전입니다. API가 안정될 때까지 주요 버전 변경 없이 주요 변경 사항이 발생할 수 있습니다.
+
+:::
+
+코드 모드를 사용하면 Agent가 격리된 샌드박스에서 다중 Tool 계산을 실행하고 결과를 보다 정확한 단일 응답으로 반환할 수 있습니다.
+
+한 번에 한 번씩 Tool를 호출하는 대신 Model은 사용자 쿼리에 맞는 맞춤형 함수를 작성합니다. 이 기능은 기존 Tool를 다음과 같이 조정합니다.`external_*` functions and reduces or aggregates their results into one structured answer.
+
+[`createCodeMode()`](/reference/tools/create-code-mode)이 Tool를 기본값으로 반환합니다.`id` of `execute_typescript`. The `id` is configurable, so an agent can have several code mode tools at once, each scoped to a different set of tools (see [Scoping tools across multiple code tools](#scoping-tools-across-multiple-code-tools)).
+
+## 코드 모드를 사용하는 경우 {/* #when-to-use-code-mode */}
+
+Agent가 사용자 쿼리에 응답하거나 복잡한 계산을 수행하기 위해 여러 Tool를 사용하는 경우 코드 모드를 사용합니다.
+
+* 왕복 횟수 감소: 모든 Tool 결정에 대해 Agent 루프를 반복하는 대신 다중 Tool 쿼리가 하나의 Tool 호출로 실행됩니다.
+* 더 작은 컨텍스트: 이 기능은 대규모 Tool 응답을 Agent에 반환하기 전에 축소하거나 집계할 수 있습니다.
+* 올바른 수학: 합계, 평균 및 기타 산술은 토큰 예측이 아닌 JavaScript로 실행됩니다.
+* 사전 계획: 필터링, 집계 및 분기는 별도의 차례가 아닌 함수 내에서 발생합니다.
+
+## 작동 원리 {/* #how-it-works */}
+
+코드 모드가 없으면 다중 Tool 쿼리가 Agent 루프를 여러 번 실행할 수 있습니다. Model은 Tool를 선택하고 결과를 읽습니다. 필요에 따라 프로세스를 반복합니다.
+
+매 턴마다 Agent의 컨텍스트 창에 전체 Tool 응답이 추가되어 추론이 저하되고 토큰 사용량이 증가할 수 있습니다.
+
+코드 모드를 사용하면 Tool가 전체 유효성 검사, 요청 컨텍스트 및 추적을 통해 호스트에서 계속 실행됩니다. Model의 오케스트레이션 코드만 샌드박스에서 실행됩니다. 각`external_*` call is bridged back to the real tool on the host, and the function can reduce or aggregate results before returning one response to the agent.
+
+이 기능은[Workspace sandbox](/docs/workspace/overview). A sandbox is required, because code mode runs model-authored code and the execution boundary must be chosen deliberately. Pass one via `sandbox`, or run the agent in a workspace that provides one. To execute on the host machine, pass `new LocalSandbox()` explicitly. This runs the function as a host `node` process with host privileges, so only use it for trusted or local development.
+
+자체 실행 경계를 가져오는 전송은 예외입니다.[`IsolatedVmCodeModeTransport`](/reference/tools/isolated-vm-transport) the program runs in an in-process V8 isolate and no sandbox is needed (see [In-process isolation](#in-process-isolation)).
+
+## 빠른 시작 {/* #quickstart */}
+
+`createCodeMode()`Tool와 생성된 지침을 반환합니다. 없음`id`, the tool uses the name `execute_typescript`. Add both to your agent:
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { createCodeMode, createTool } from '@mastra/core/tools'
+import { LocalSandbox } from '@mastra/core/workspace'
+import { z } from 'zod'
+
+const getTopProducts = createTool({
+  id: 'getTopProducts',
+  description: 'Get top selling products',
+  inputSchema: z.object({ limit: z.number() }),
+  outputSchema: z.object({
+    products: z.array(z.object({ id: z.string(), name: z.string(), totalSales: z.number() })),
+  }),
+  execute: async ({ limit }) => fetchTopProducts(limit),
+})
+
+const getProductRatings = createTool({
+  id: 'getProductRatings',
+  description: 'Get ratings for a product',
+  inputSchema: z.object({ productId: z.string() }),
+  outputSchema: z.object({ ratings: z.array(z.object({ score: z.number() })) }),
+  execute: async ({ productId }) => fetchRatings(productId),
+})
+
+const { tool, instructions } = createCodeMode({
+  tools: { getTopProducts, getProductRatings },
+  sandbox: new LocalSandbox(), // required; runs on the host — see "How it works"
+})
+
+const agent = new Agent({
+  id: 'shop-assistant',
+  name: 'shop-assistant',
+  instructions: ['You are a helpful shopping assistant.', instructions],
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { execute_typescript: tool },
+})
+```
+
+"상위 5개 제품과 각 제품의 평균 평점은 무엇입니까?"라고 질문하면 Model이 하나를 내보냅니다.`execute_typescript` call instead of many separate tool calls:
+
+```typescript
+const top = await external_getTopProducts({ limit: 5 })
+const ratings = await Promise.all(
+  top.products.map(p => external_getProductRatings({ productId: p.id })),
+)
+return top.products.map((product, i) => {
+  const scores = ratings[i].ratings.map(r => r.score)
+  const avg = scores.reduce((sum, s) => sum + s, 0) / scores.length
+  return {
+    name: product.name,
+    sales: product.totalSales,
+    averageRating: Math.round(avg * 100) / 100,
+  }
+})
+```
+
+5개의 평가 조회는 모두 병렬로 실행되고 평균은 JavaScript로 계산되며 Agent는 하나의 구조화된 결과를 받습니다.
+
+을 위한`createCodeMode()` to work well, keep these tips in mind:
+
+* Tool에 집중하여 각 Tool가 한 가지 작업을 잘 수행하고 Model이 Tool를 코드로 구성하도록 합니다.
+* 코드 모드는 호출을 병렬화할 수 있는 경우 가장 도움이 됩니다.`Promise.all`.
+
+방문[`createCodeMode()` reference](/reference/tools/create-code-mode) for configuration options, return values, result shape, and instructions inspection.
+
+## 여러 코드 Tool에 대한 범위 지정 Tool {/* #scoping-tools-across-multiple-code-tools */}
+
+`createCodeMode()`자체 허용 목록을 캡처합니다. Agent에게 각각 다른 Tool 하위 집합으로 범위가 지정된 여러 코드 Tool를 제공하려면 이 메서드를 두 번 이상 호출하세요. 그것은 단지 전화할 수 있습니다`external_*` functions for the tools passed to its own `createCodeMode()` call, so the subsets stay isolated.
+
+각 Tool에 고유한 기능을 부여하세요.`id` so their ids don't collide, and add each tool's instructions to the agent:
+
+```typescript
+const sales = createCodeMode({
+  id: 'sales_code',
+  tools: { listRecentOrders, getCustomer },
+  sandbox,
+})
+
+const inventory = createCodeMode({
+  id: 'inventory_code',
+  tools: { listProducts, getSupplier },
+  sandbox,
+})
+
+const agent = new Agent({
+  id: 'ops-assistant',
+  name: 'ops-assistant',
+  instructions: ['You are an ops assistant.', sales.instructions, inventory.instructions],
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { sales_code: sales.tool, inventory_code: inventory.tool },
+})
+```
+
+생성된 코드`sales_code` can't call an inventory tool, and the reverse holds too. Use this for least-privilege scoping and to keep each tool's prompt surface small.
+
+## 원격 샌드박스 {/* #remote-sandboxes */}
+
+기본적으로 코드 모드는 프로그램을 호스트 파일 시스템에 쓰고 실행하는 전송을 사용합니다.`node` against it. That works for `LocalSandbox`, which shares the host, but not for remote sandboxes that run in their own micro-VM (such as [E2B](/reference/workspace/e2b-sandbox)), where the host paths don't exist.
+
+원격 샌드박스에는 프로그램을 샌드박스 파일 시스템에 작성하는 전송이 필요합니다. E2B의 경우 포함된 항목을 전달합니다.`E2BCodeModeTransport` as the second argument to `createCodeMode`:
+
+```typescript
+import { createCodeMode } from '@mastra/core/tools'
+import { E2BSandbox, E2BCodeModeTransport } from '@mastra/e2b'
+
+const { tool, instructions } = createCodeMode(
+  { tools, sandbox: new E2BSandbox() },
+  new E2BCodeModeTransport(),
+)
+```
+
+## 공정 중 격리 {/* #in-process-isolation */}
+
+프로세스를 생성하거나 원격 샌드박스를 실행하지 않고 보안 경계를 얻으려면 다음을 사용하십시오.[`IsolatedVmCodeModeTransport`](/reference/tools/isolated-vm-transport) from `@mastra/isolated-vm`. It runs the program in an in-process V8 isolate, so no sandbox is required: the isolate has no filesystem, network, or process access, and its only capabilities are the `external_*` functions bridged back to your tools on the host.
+
+```typescript
+import { createCodeMode } from '@mastra/core/tools'
+import { IsolatedVmCodeModeTransport } from '@mastra/isolated-vm'
+
+const { tool, instructions } = createCodeMode(
+  { tools }, // no sandbox needed
+  new IsolatedVmCodeModeTransport({ memoryLimitMb: 128 }),
+)
+```
+
+`isolated-vm`기본 애드온이며 Node.js 20 이상에서는 호스트 프로세스를 다음으로 시작해야 합니다.`--no-node-snapshot` flag. See the [IsolatedVmCodeModeTransport reference](/reference/tools/isolated-vm-transport) for setup details.
+
+## 관련된 {/* #related */}
+
+* [createCodeMode() 참조](/reference/tools/create-code-mode)
+* [격리된VmCodeMode전송 참조](/reference/tools/isolated-vm-transport)
+* [Tool](/docs/agents/using-tools)
+* [작업공간 개요](/docs/workspace/overview)

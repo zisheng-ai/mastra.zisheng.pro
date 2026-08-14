@@ -1,0 +1,529 @@
+---
+title: "참조: SignalProvider | 신호"
+description: "외부 소스를 모니터링하고 이벤트를 Agent 스레드에 푸시하는 신호 제공자를 구축하기 위한 추상 기본 클래스인 SignalProvider에 대한 API 참조입니다."
+packages:
+  - "@mastra/core"
+---
+
+# 신호 제공자
+
+**추가된 항목:** `@mastra/core@1.39.0`
+
+신호 제공자를 구축하기 위한 추상 기본 클래스입니다. 신호 제공자는 외부 소스(API, 웹후크, 이벤트 스트림)를 모니터링하고 내장된 구독 레지스트리를 통해 알림 신호를 Agent 스레드에 푸시합니다.
+
+신호 제공자는 기본적으로 프로세서가 아닙니다. Agent 실행을 가로채야 하는 공급자는 프로세서를 반환합니다.`getInputProcessors()` or `getOutputProcessors()`. Providers that expose agent-callable tools return them from `getTools()`.
+
+즉시 사용 가능한 웹훅 기반 공급자에 대해서는 다음을 참조하세요.[`WebhookSignalProvider`](/reference/signals/webhook-signal-provider).
+
+## 사용예 {/* #usage-example */}
+
+30초마다 API를 확인하는 폴링 제공자:
+
+```typescript title="src/signals/slack-signals.ts"
+import { SignalProvider } from '@mastra/core/signals'
+import type { SignalSubscription } from '@mastra/core/signals'
+
+class SlackSignals extends SignalProvider<'slack-signals'> {
+  readonly id = 'slack-signals'
+  readonly pollInterval = 30_000
+
+  async poll(subscriptions: SignalSubscription[]) {
+    for (const sub of subscriptions) {
+      const messages = await fetchSlackMessages(sub.externalResourceId)
+      if (messages.length > 0) {
+        await this.notify(
+          {
+            source: 'slack',
+            kind: 'new-messages',
+            summary: `${messages.length} new messages in ${sub.externalResourceId}`,
+          },
+          { threadId: sub.threadId, resourceId: sub.resourceId },
+        )
+      }
+    }
+  }
+}
+```
+
+Agent에 등록하세요:
+
+```typescript title="src/mastra/index.ts"
+import { Agent } from '@mastra/core/agent'
+
+const agent = new Agent({
+  id: 'agent',
+  signals: [new SlackSignals()],
+})
+```
+
+Agent이 전화함`connect(this)` and registers any processors or tools the provider returns. It then starts polling.
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+`SignalProvider`추상적이다. 서브클래스 호출`super()` with no arguments.
+
+## 속성 {/* #properties */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'TId extends string',
+  description: 'Unique identifier for this provider. Subclasses must implement this as a readonly property.',
+},
+{
+  name: 'name',
+  type: 'string',
+  description: 'Human-readable display name for the provider.',
+  isOptional: true,
+},
+{
+  name: 'pollInterval',
+  type: 'number',
+  description:
+    'Poll interval in milliseconds. When set, the framework calls `poll()` on this interval. Leave `undefined` or `0` for webhook-only providers.',
+  isOptional: true,
+},
+{
+  name: 'isConnected',
+  type: 'boolean',
+  description:
+    'Whether this provider is connected to an agent. Returns `true` after `connect()` is called. Used internally to skip re-wiring during `Agent.__fork()`.',
+},
+]}
+/>
+
+## 행동 양식 {/* #methods */}
+
+### 연결 {/* #connection */}
+
+#### `connect(agent)` {/* #connectagent */}
+
+Agent 생성자에 의해 호출됩니다. 공급자가 Agent에 신호를 다시 보낼 수 있도록 양방향 링크를 설정합니다. 링크가 설정된 후 추가 설정을 실행하려면 재정의하세요. 항상 전화해`super.connect(agent)`.
+
+```typescript prettier:false
+class MySignals extends SignalProvider<'my-signals'> {
+  readonly id = 'my-signals'
+
+  override connect(agent) {
+    super.connect(agent)
+    // additional setup after agent link is established
+  }
+}
+```
+
+#### `__registerMastra(mastra)` {/* #__registermastramastra */}
+
+공급자의 Agent가 Mastra 인스턴스에 등록될 때 호출됩니다. 스토리지 또는 기타 Mastra 서비스에 액세스하려면 재정의하세요. 항상 전화해`super.__registerMastra(mastra)`.
+
+```typescript prettier:false
+override __registerMastra(mastra) {
+  super.__registerMastra(mastra)
+  // this.mastra is now available
+}
+```
+
+### 프로세서 및 Tool 통합 {/* #processor-and-tool-integration */}
+
+#### `getInputProcessors()` {/* #getinputprocessors */}
+
+이 공급자를 Agent에 등록해야 하는 반환 입력 프로세서입니다. 공급자가 Agent 입력 단계(예: 컨텍스트 힌트 삽입 또는 Tool 호출 감지)를 가로채는 경우 재정의합니다.
+
+```typescript prettier:false
+getInputProcessors() {
+  return [this]
+}
+```
+
+보고:`InputProcessorOrWorkflow[]`
+
+#### `getOutputProcessors()` {/* #getoutputprocessors */}
+
+이 공급자를 Agent에 등록해야 하는 반환 출력 프로세서입니다. 공급자가 Agent 출력 단계를 가로채는 경우 재정의합니다.
+
+```typescript prettier:false
+getOutputProcessors() {
+  return [this]
+}
+```
+
+보고:`OutputProcessorOrWorkflow[]`
+
+#### `getTools()` {/* #gettools */}
+
+이 공급자가 Agent에 노출하는 반환 Tool입니다. 공급자가 구독 또는 구독 취소 명령과 같은 Agent 호출 가능 Tool를 추가하면 재정의됩니다.
+
+```typescript prettier:false
+getTools() {
+  return {
+    subscribe_pr: createTool({ /* ... */ }),
+    unsubscribe_pr: createTool({ /* ... */ }),
+  }
+}
+```
+
+보고:`Record<string, unknown>`
+
+### 구독 추적 {/* #subscription-tracking */}
+
+#### `subscribe(target, externalResourceId, metadata?)` {/* #subscribetarget-externalresourceid-metadata */}
+
+외부 리소스에 대한 스레드를 구독합니다. 이는 보호된 메서드입니다. 공급자 구현 내에서 호출하세요.
+
+```typescript prettier:false
+const sub = this.subscribe(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'github:mastra-ai/mastra#123',
+  { pr: 123 },
+)
+```
+
+보고:`SignalSubscription`: the created subscription, or the existing one with merged metadata.
+
+<PropertiesTable
+  content={[
+{
+  name: 'target',
+  type: 'SignalProviderTarget',
+  description: 'The thread to subscribe. Must include `threadId` and `resourceId`.',
+},
+{
+  name: 'externalResourceId',
+  type: 'string',
+  description: 'Provider-specific identifier for the external resource (for example, `"github:owner/repo#123"`).',
+},
+{
+  name: 'metadata',
+  type: 'Record<string, unknown>',
+  description:
+    'Additional data to store with the subscription. Merged into existing metadata on duplicate subscribes.',
+  isOptional: true,
+},
+]}
+/>
+
+#### `unsubscribe(target, externalResourceId)` {/* #unsubscribetarget-externalresourceid */}
+
+구독을 제거합니다.
+
+```typescript prettier:false
+const removed = this.unsubscribe(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'github:mastra-ai/mastra#123',
+)
+```
+
+보고:`boolean`: `true` if removed, `false` if no matching subscription existed.
+
+#### `getSubscriptions()` {/* #getsubscriptions */}
+
+이 공급자에 대한 모든 활성 구독을 반환합니다.
+
+```typescript prettier:false
+const allSubs = this.getSubscriptions()
+```
+
+보고:`SignalSubscription[]`
+
+#### `getSubscriptionsForResource(externalResourceId)` {/* #getsubscriptionsforresourceexternalresourceid */}
+
+특정 외부 리소스에 대한 모든 구독을 반환합니다.
+
+```typescript prettier:false
+const subs = this.getSubscriptionsForResource('github:mastra-ai/mastra#123')
+for (const sub of subs) {
+  await this.notify(
+    { source: 'my-provider', kind: 'update', summary: 'Resource updated' },
+    { threadId: sub.threadId, resourceId: sub.resourceId },
+  )
+}
+```
+
+보고:`SignalSubscription[]`
+
+#### `getSubscriptionsForThread(target)` {/* #getsubscriptionsforthreadtarget */}
+
+특정 스레드에 대한 모든 구독을 반환합니다.
+
+```typescript prettier:false
+const subs = this.getSubscriptionsForThread({
+  threadId: 'thread-1',
+  resourceId: 'user-1',
+})
+```
+
+보고:`SignalSubscription[]`
+
+#### `hasSubscription(target, externalResourceId)` {/* #hassubscriptiontarget-externalresourceid */}
+
+구독이 존재하는지 확인하세요.
+
+```typescript prettier:false
+if (this.hasSubscription(target, 'github:mastra-ai/mastra#123')) {
+  // already subscribed
+}
+```
+
+보고:`boolean`
+
+#### `unsubscribeAll(target)` {/* #unsubscribealltarget */}
+
+스레드에 대한 모든 구독을 제거합니다.
+
+```typescript prettier:false
+const removed = this.unsubscribeAll({
+  threadId: 'thread-1',
+  resourceId: 'user-1',
+})
+```
+
+보고:`number`: count of removed subscriptions.
+
+#### `subscriptionCount` {/* #subscriptioncount */}
+
+이 공급자에 대한 총 활성 구독 수입니다.
+
+```typescript prettier:false
+if (this.subscriptionCount === 0) {
+  // nothing to poll
+}
+```
+
+보고:`number`
+
+### 투표 {/* #polling */}
+
+#### `poll(subscriptions)` {/* #pollsubscriptions */}
+
+모든 활성 구독이 있는 각 폴 주기마다 호출됩니다. 외부 소스를 확인하고 알림을 내보내려면 재정의하세요. 프레임워크는 폴링 주기가 겹치는 것을 방지합니다.`poll()` call takes longer than `pollInterval`, the next cycle is skipped.
+
+```typescript prettier:false
+async poll(subscriptions: SignalSubscription[]) {
+  for (const sub of subscriptions) {
+    const events = await checkExternalSource(sub.externalResourceId)
+    for (const event of events) {
+      await this.notify(
+        { source: 'my-provider', kind: event.type, summary: event.message },
+        { threadId: sub.threadId, resourceId: sub.resourceId },
+      )
+    }
+  }
+}
+```
+
+#### `startPolling()` {/* #startpolling */}
+
+폴링 타이머를 시작합니다. 이후 Agent이 호출함`connect()`. Idempotent: calling multiple times has no effect.
+
+```typescript prettier:false
+provider.startPolling()
+```
+
+#### `stopPolling()` {/* #stoppolling */}
+
+폴링 타이머를 중지합니다.
+
+```typescript prettier:false
+provider.stopPolling()
+```
+
+### 웹훅 {/* #webhooks */}
+
+#### `handleWebhook(request)` {/* #handlewebhookrequest */}
+
+들어오는 웹훅 요청을 처리합니다. 페이로드를 구문 분석하고 구독과 일치시키려면 재정의하세요. 그런 다음 알림 신호를 보냅니다. 보다[`WebhookSignalProvider`](/reference/signals/webhook-signal-provider) for a ready-to-use implementation.
+
+웹훅 요청을 확인한 후 애플리케이션 정의 HTTP 엔드포인트에서 이 메서드를 호출하세요.
+
+```typescript prettier:false
+async handleWebhook(request) {
+  const payload = request.body as { repo: string, event: string }
+  const subs = this.getSubscriptionsForResource(payload.repo)
+
+  for (const sub of subs) {
+    await this.notify(
+      { source: 'github', kind: payload.event, summary: `Event on ${payload.repo}` },
+      { threadId: sub.threadId, resourceId: sub.resourceId },
+    )
+  }
+
+  return { status: 200, body: { matched: subs.length } }
+}
+```
+
+보고:`Promise<{ status?: number; body?: unknown }>`
+
+### 수명주기 {/* #lifecycle */}
+
+#### `start()` {/* #start */}
+
+다음 이후에 호출됨`connect()` to run async initialization. Override when setup requires the agent or Mastra instance to be available.
+
+```typescript prettier:false
+async start() {
+  await this.loadInitialState()
+}
+```
+
+#### `stop()` {/* #stop */}
+
+종료 시 호출됩니다. 기본 구현은 폴링을 중지하고 모든 구독을 지웁니다.
+
+```typescript prettier:false
+provider.stop()
+```
+
+### 알림 {/* #notifications */}
+
+#### `notify(notification, target)` {/* #notifynotification-target */}
+
+연결된 Agent에게 알림 신호를 보냅니다. 이것은 보호된 편의 포장지입니다.`agent.sendNotificationSignal()`.
+
+```typescript prettier:false
+await this.notify(
+  {
+    source: 'my-provider',
+    kind: 'pr-updated',
+    summary: 'PR #123 was updated',
+    priority: 'high',
+    payload: { prNumber: 123 },
+  },
+  { threadId: 'thread-1', resourceId: 'user-1' },
+)
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'notification',
+  type: 'object',
+  description: 'The notification payload.',
+  properties: [
+    {
+      type: 'object',
+      parameters: [
+        {
+          name: 'source',
+          type: 'string',
+          description: 'Identifier for the notification source.',
+        },
+        {
+          name: 'kind',
+          type: 'string',
+          description: 'Type of event (for example, `"pr-updated"`, `"new-message"`).',
+        },
+        {
+          name: 'summary',
+          type: 'string',
+          description: 'Human-readable summary of the event.',
+        },
+        {
+          name: 'priority',
+          type: '"high" | "medium" | "low"',
+          description: 'Notification priority.',
+          isOptional: true,
+        },
+        {
+          name: 'payload',
+          type: 'unknown',
+          description: 'Arbitrary data attached to the notification.',
+          isOptional: true,
+        },
+      ],
+    },
+  ],
+},
+{
+  name: 'target',
+  type: 'SignalProviderTarget',
+  description: 'The thread to notify. Must include `threadId` and `resourceId`.',
+},
+]}
+/>
+
+## 유형 {/* #types */}
+
+### `SignalSubscription` {/* #signalsubscription */}
+
+에서 반환한 구독 객체`subscribe()`.
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for the subscription.',
+},
+{
+  name: 'providerId',
+  type: 'string',
+  description: 'The provider that owns this subscription.',
+},
+{
+  name: 'threadId',
+  type: 'string',
+  description: 'The thread receiving signals.',
+},
+{
+  name: 'resourceId',
+  type: 'string',
+  description: 'The resource owning the thread.',
+},
+{
+  name: 'externalResourceId',
+  type: 'string',
+  description: 'Provider-specific identifier for the external resource (for example, `"github:owner/repo#123"`).',
+},
+{
+  name: 'subscribedAt',
+  type: 'Date',
+  description: 'When the subscription was created.',
+},
+{
+  name: 'metadata',
+  type: 'Record<string, unknown>',
+  description: 'Provider-specific metadata stored with the subscription.',
+},
+]}
+/>
+
+### `SignalProviderTarget` {/* #signalprovidertarget */}
+
+특정 Agent 스레드를 식별합니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'threadId',
+  type: 'string',
+  description: 'The thread to target.',
+},
+{
+  name: 'resourceId',
+  type: 'string',
+  description: 'The resource owning the thread.',
+},
+{
+  name: 'agentId',
+  type: 'string',
+  description: 'Agent identifier.',
+  isOptional: true,
+},
+]}
+/>
+
+## 타입 가드 {/* #type-guard */}
+
+### `isSignalProvider(obj)` {/* #issignalproviderobj */}
+
+런타임 확인`SignalProvider` instances.
+
+```typescript prettier:false
+import { isSignalProvider } from '@mastra/core/signals'
+
+if (isSignalProvider(obj)) {
+  obj.connect(agent)
+}
+```
+
+보고:`boolean`

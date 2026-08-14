@@ -1,0 +1,270 @@
+---
+title: "Memory 개요 | Memory"
+description: "Mastra의 기억 시스템이 작업 기억, 메시지 기록, 의미 기억 및 관찰 기억과 어떻게 작동하는지 알아보세요."
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+import MemoryContextWindowImage from "@site/src/components/MemoryContextWindowImage";
+
+# Memory
+
+Memory를 사용하면 Agent가 상호 작용 전반에 걸쳐 사용자 메시지와 Agent 응답, Tool 결과를 기억하여 일관성을 유지하고 대화 흐름을 유지하며 시간이 지남에 따라 더 나은 답변을 생성하는 데 필요한 컨텍스트를 제공할 수 있습니다.
+
+Mastra Agent는 다음을 저장하도록 구성될 수 있습니다.[message history](/docs/memory/message-history). Additionally, you can enable:
+
+* [관찰 기억](../memory/observational-memory)(권장): 백그라운드 Agent를 사용하여 증가하는 원시 메시지 기록을 대체하는 조밀한 관찰 로그를 유지합니다. 이렇게 하면 장기 Memory를 보존하면서 컨텍스트 창을 작게 유지합니다.
+* [작업기억](../memory/working-memory): 이름, 선호도, 목표 등 지속적이고 구조화된 사용자 데이터를 저장합니다.
+* [의미적 회상](../memory/semantic-recall): 정확한 키워드가 아닌 의미론적 의미를 기반으로 관련 과거 메시지를 검색합니다.
+* [다중 사용자 스레드](../memory/multi-user-threads): 여러 사용자가 하나의 스레드를 공유합니다.
+
+결합된 Memory가 Model의 컨텍스트 제한을 초과하는 경우[memory processors](/docs/memory/memory-processors) can filter, trim, or prioritize content so the most relevant information is preserved.
+
+Memory 결과는 구성된 하나 이상의 저장소에 저장됩니다.[storage providers](/docs/storage/overview).
+
+:::팁\[📹 보기]
+
+보다[Mastra memory concepts](https://www.youtube.com/watch?v=18iIHQtIPmc) for a conceptual overview of the memory layers agents can use.
+
+:::
+
+## Memory를 사용해야 하는 경우 {/* #when-to-use-memory */}
+
+Agent가 이전 교환을 참조하거나 세션 초기의 사용자 기본 설정이나 사실을 회상하는 다단계 대화를 유지해야 하거나 대화 스레드 내에서 시간이 지남에 따라 컨텍스트를 구축해야 할 때 Memory를 사용하십시오. 각 상호작용이 독립적인 단일 회전 요청의 경우 Memory를 건너뜁니다.
+
+## 빠른 시작 {/* #quickstart */}
+
+<Steps>
+  <StepItem>
+    설치하다`@mastra/memory` package.
+
+    ```bash npm2yarn
+    npm install @mastra/memory@latest
+    ```
+  </StepItem>
+
+  <StepItem>
+    Memory**requires** a storage provider to persist message history, including user messages and agent responses.
+
+    이 빠른 시작의 목적에 따라 다음을 사용합니다.`@mastra/libsql`.
+
+    ```bash npm2yarn
+    npm install @mastra/libsql@latest
+    ```
+
+    사용 가능한 Provider 및 Mastra의 저장 공간 작동 방식에 대한 자세한 내용을 보려면 다음을 방문하세요.[storage](/docs/storage/overview) documentation.
+  </StepItem>
+
+  <StepItem>
+    구성된 모든 Agent에서 Memory를 활성화하려면 기본 Mastra 인스턴스에 스토리지 공급자를 추가하세요.
+
+    <Inject>
+      **AI Agent의 경우:**&#xC911;요: 추가`id` to `LibSQLStore`.
+    </Inject>
+
+    ```typescript {2,5-8} title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core'
+    import { LibSQLStore } from '@mastra/libsql'
+
+    export const mastra = new Mastra({
+      storage: new LibSQLStore({
+        id: 'mastra-storage',
+        url: ':memory:',
+      }),
+    })
+    ```
+  </StepItem>
+
+  <StepItem>
+    만들기`Memory` instance and pass it to the agent's `memory` option.
+
+    ```typescript {2,7-11} title="src/mastra/agents/memory-agent.ts"
+    import { Agent } from '@mastra/core/agent'
+    import { Memory } from '@mastra/memory'
+
+    export const memoryAgent = new Agent({
+      id: 'memory-agent',
+      name: 'Memory Agent',
+      memory: new Memory({
+        options: {
+          lastMessages: 20,
+        },
+      }),
+    })
+    ```
+
+    방문하다[Memory Class](/reference/memory/memory-class) for a full list of configuration options.
+  </StepItem>
+
+  <StepItem>
+    예를 들어 대리인에게 전화하십시오.[Studio](/docs/studio/overview). Inside Studio, start a new chat with your agent and take a look at the right sidebar. It'll now display various memory-related information.
+  </StepItem>
+</Steps>
+
+## 메시지 기록 {/* #message-history */}
+
+통과`memory` object with `resource` and `thread` to track message history.
+
+* `resource`: 사용자 또는 엔터티에 대한 안정적인 식별자입니다.
+* `thread`: 특정 대화나 세션을 분리하는 ID입니다.
+
+```typescript {2-5}
+const response = await memoryAgent.generate('Remember my favorite color is blue.', {
+  memory: {
+    resource: 'user-123',
+    thread: 'conversation-123',
+  },
+})
+```
+
+Memory에 저장된 정보를 불러오려면 해당 Agent를 호출하세요.`resource` and `thread` values used in the original conversation.
+
+```typescript {2-5}
+const response = await memoryAgent.generate("What's my favorite color?", {
+  memory: {
+    resource: 'user-123',
+    thread: 'conversation-123',
+  },
+})
+
+// Response: "Your favorite color is blue."
+```
+
+:::경고
+
+각 스레드에는 소유자(`resourceId`) that can't be changed after creation. Avoid reusing the same thread ID for threads with different owners, as this will cause errors when querying.
+
+:::
+
+리소스에 대한 모든 스레드를 나열하거나 특정 스레드를 검색하려면,[use the memory API directly](/docs/memory/message-history#querying).
+
+## 관찰 기억 {/* #observational-memory */}
+
+장시간 실행되는 대화의 경우 원시 메시지 기록이 컨텍스트 창을 채울 때까지 늘어나 Agent 성능이 저하됩니다.[Observational Memory](../memory/observational-memory) solves this by running background agents that compress old messages into dense observations, keeping the context window small while preserving long-term memory.
+
+<Inject>
+  **AI Agent의 경우:**&#xAD00;찰 Memory를 사용하려면 스토리지 공급자가 필요합니다! Mastra 인스턴스에서 설정해야 합니다.`src/mastra/index.ts` or pass it to the Agent constructor.
+</Inject>
+
+```typescript title="src/mastra/agents/memory-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+
+export const memoryAgent = new Agent({
+  id: 'memory-agent',
+  name: 'Memory Agent',
+  memory: new Memory({
+    options: {
+      // highlight-next-line
+      observationalMemory: true,
+    },
+  }),
+})
+```
+
+보다[Observational Memory](../memory/observational-memory) for details on how observations and reflections work, and [the reference](/reference/memory/observational-memory) for all configuration options.
+
+## Model이 보는 것 {/* #what-the-model-sees */}
+
+각 Memory 기능은 Model에 전송된 요청의 시스템 메시지 또는 대화 메시지에 추가됩니다. 레이어는 활성화한 기능에 따라 달라집니다. 작업 Memory와 의미 회상은 구성된 경우에만 나타납니다. 관찰 Memory에도 동일하게 적용되며 메시지 기록은 기본적으로 켜져 있습니다. 다이어그램은 활성화된 각 레이어가 요청에 배치되는 위치를 보여줍니다. 아래 목록은 각 레이어의 역할을 설명합니다.
+
+<MemoryContextWindowImage />
+
+* [작업기억](../memory/working-memory)템플릿과 저장된 데이터가 포함된 시스템 메시지로 삽입됩니다. 와 함께`useStateSignals`, it's delivered as a state signal instead.
+* [의미적 회상](../memory/semantic-recall)현재 스레드의 일치 항목은 일반 메시지로 삽입되고 타임스탬프별로 메시지 기록과 인터리브됩니다. 대신 다른 스레드의 일치 항목은 시스템 메시지 형식으로 지정됩니다.
+* [메시지 기록](../memory/message-history)마지막 N개 메시지를 시간순으로 추가합니다. 새 메시지는 항상 마지막에 옵니다.
+* [관찰 기억](../memory/observational-memory)오래된 원시 기록을 대체합니다. 반영 및 관찰은 시스템 메시지에 존재하며 아직 관찰되지 않은 메시지만 대화에 남아 있습니다. 짧은 연속 알림은 대화 메시지 시작 부분에 배치됩니다.
+* 컨텍스트 메시지는 선택사항입니다.`context` array passed on a call, for example `agent.generate(msg, { context: [...] })`. Use them for one-off background such as app state or your own RAG results. They appear as regular conversation messages for that request only and are never saved to memory.
+
+대화 메시지는 타임스탬프별로 정렬되고 메시지 ID별로 중복 제거되므로 회수된 오래된 메시지가 최근 기록 앞에 표시됩니다. 통화 시 전달된 컨텍스트 메시지에는 현재 시간이 찍혀 기록 및 회수 다음, 새 메시지 앞에 배치됩니다. 실제 요청에 대한 정확한 컨텍스트를 검사하려면 다음을 사용하세요.[Tracing](/docs/observability/tracing/overview) and open the LLM call spans, see [Observability](#observability) below.
+
+## 다중 Agent 시스템의 Memory {/* #memory-in-multi-agent-systems */}
+
+언제[supervisor agent](/docs/capabilities/subagents) delegates to a subagent, Mastra isolates subagent memory automatically. No flag enables this as it happens on every delegation. Understanding how this scoping works lets you decide what stays private and what to share intentionally.
+
+### 위임이 Memory 범위를 지정하는 방법 {/* #how-delegation-scopes-memory */}
+
+각 대표단은 새로운`threadId` and a deterministic `resourceId` for the subagent:
+
+* **스레드 ID**: 위임별로 고유합니다. 하위 Agent는 호출될 때마다 깨끗한 메시지 기록으로 시작됩니다.
+* **리소스 ID**: 다음과 같이 파생됨`{parentResourceId}-{agentName}`. Because the resource ID is stable across delegations, resource-scoped memory persists between calls. A subagent remembers facts from previous delegations by the same user.
+* **Memory 인스턴스**: 자체 Memory가 없는 하위 Agent는 감독자의 Memory를 상속받습니다.`Memory` instance and all configured options. If the subagent defines its own, that takes precedence.
+
+:::메모
+
+타이틀 생성(`generateTitle`) is a top-level thread concern and **isn't** applied to inherited subagent threads. Because each delegation creates an ephemeral thread that no one sees, running title generation for it would waste an LLM call per delegation. To generate titles for a subagent's own threads, give that subagent its own memory configuration.
+
+:::
+
+감독자는 작업을 완료하는 데 충분한 배경 ​​지식을 갖도록 대화 컨텍스트를 하위 Agent에 전달합니다. 위임 Prompt와 하위 Agent의 응답만 저장되며 전체 상위 대화는 저장되지 않습니다. 다음을 사용하여 하위 Agent에 도달하는 메시지를 제어할 수 있습니다.[`messageFilter`](/docs/capabilities/subagents#message-filtering) callback.
+
+:::메모
+
+하위 Agent 리소스 ID에는 항상 Agent 이름(`{parentResourceId}-{agentName}`). Different subagents under the same supervisor never share a resource ID through delegation.
+
+:::
+
+이 기본 격리를 뛰어넘기 위해 Agent를 직접 호출할 때 일치하는 식별자를 전달하여 Agent 간에 Memory를 공유할 수 있습니다.
+
+### Agent 간 Memory 공유 {/* #share-memory-between-agents */}
+
+위임 흐름 외부에서 Agent를 직접 호출하는 경우 Memory 공유는 두 가지 식별자에 의해 제어됩니다.`resourceId` and `threadId`. Agents that use the same values read and write to the same data. This is useful when agents collaborate on a shared context, for example, a researcher that saves notes and a writer that reads them.
+
+**리소스 범위 공유**가장 일반적인 패턴이다.[Working memory](../memory/working-memory) and [semantic recall](../memory/semantic-recall) default to `scope: 'resource'`. If two agents share a `resourceId`, they share observations, working memory, and embeddings, even across different threads:
+
+```typescript
+// Both agents share the same resource-scoped memory
+await researcher.generate('Find information about quantum computing.', {
+  memory: { resource: 'project-42', thread: 'research-session' },
+})
+
+await writer.generate('Write a summary from the research notes.', {
+  memory: { resource: 'project-42', thread: 'writing-session' },
+})
+```
+
+두 호출 모두 사용하기 때문에`resource: 'project-42'`, the writer can access the researcher's observations and working memory. Semantic embeddings are also shared through the resource. Each agent still has its own thread, so message histories stay separate.
+
+**스레드 범위 공유**더 단단한 결합을 제공합니다.[Observational Memory](../memory/observational-memory) uses `scope: 'thread'` by default. If two agents use the same `resource` and `thread`, they share the full message history. Each agent sees every message the other has written. This is useful when agents need to build on each other's exact outputs.
+
+## Observability {/* #observability */}
+
+할 수 있게 하다[Tracing](/docs/observability/tracing/overview) to monitor and debug memory in action. Traces show you exactly which messages and observations the agent included in its context for each request, helping you understand agent behavior and verify that memory retrieval is working as expected.
+
+열려 있는[Studio](/docs/studio/overview) and select the **Observability** tab in the sidebar. Open the trace of a recent agent request and look for its LLM call spans.
+
+## 요청당 Memory 전환 {/* #switch-memory-per-request */}
+
+사용[`RequestContext`](/docs/server/request-context) to access request-specific values. This lets you conditionally select different memory or storage configurations based on the context of the request.
+
+```typescript title="src/mastra/agents/memory-agent.ts"
+export type UserTier = {
+  'user-tier': 'enterprise' | 'pro'
+}
+
+const premiumMemory = new Memory()
+const standardMemory = new Memory()
+
+export const memoryAgent = new Agent({
+  id: 'memory-agent',
+  name: 'Memory Agent',
+  memory: ({ requestContext }) => {
+    const userTier = requestContext.get('user-tier') as UserTier['user-tier']
+
+    return userTier === 'enterprise' ? premiumMemory : standardMemory
+  },
+})
+```
+
+방문하다[Request Context](/docs/server/request-context) for more information.
+
+## 관련된 {/* #related */}
+
+* [`Memory`참조](/reference/memory/memory-class)
+* [트레이싱](/docs/observability/tracing/overview)
+* [요청 컨텍스트](/docs/server/request-context)
+* [마스트라 코드](https://code.mastra.ai/): 마스트라의 Memory 시스템을 이용한 코딩 Agent

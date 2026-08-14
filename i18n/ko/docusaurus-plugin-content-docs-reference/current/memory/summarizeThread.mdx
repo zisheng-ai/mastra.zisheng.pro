@@ -1,0 +1,163 @@
+---
+title: "참조: Memory.summarizeThread() | Memory"
+description: "스레드의 대화를 한 번에 요약하고 여기에서 구조화된 값을 추출하는 Mastra의 'Memory.summarizeThread()' 메서드에 대한 문서입니다."
+packages:
+  - "@mastra/memory"
+---
+
+# Memory.요약쓰레드()
+
+그만큼`.summarizeThread()`메서드는 스레드의 대화를 한 번에 요약합니다. 스토리지에서 스레드의 메시지를 로드하고 이를 구동하는 동일한 Observer 배관을 통해 증류합니다.[관찰 기억](/reference/memory/observational-memory): Agent에 관찰 Memory가 연결되지 않은 독립형 호출입니다.
+
+메시지는 최신 항목부터 시작하여 페이지별로 로드됩니다.`lastMessages` and `maxInputTokens`, so summarizing a long thread doesn't read its entire history from storage.
+
+아무것도 Memory에 다시 기록되지 않습니다. 요약 및 추출된 값은 귀하(및 각 추출기의`onExtracted` hook), so you decide where they go: for example your own database.
+
+세션이 종료되고 전화가 끊어졌을 때 음성 통화와 같이 전체 대화의 요약이나 구조화된 추출을 원할 때 이 기능을 사용하세요. 이미 가지고 있는 메시지의 경우(스레드에서 로드하지 않고) 독립 실행형을 사용하세요.[`summarizeConversation()`](/reference/memory/summarizeConversation) function instead. It takes the same options with `messages` in place of `threadId`.
+
+## 사용예 {/* #usage-example */}
+
+```typescript
+const result = await memory.summarizeThread({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  threadId: 'thread-123',
+  instructions: 'Summarize this voicemail call for the business owner.',
+})
+```
+
+## 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'threadId',
+  type: 'string',
+  description: 'The unique identifier of the thread to summarize.',
+  isOptional: false,
+},
+{
+  name: 'model',
+  type: 'string | LanguageModel | DynamicModel',
+  description: "Model that runs the summarization, such as a router string like '__GATEWAY_OPENAI_MODEL_MINI__'.",
+  isOptional: false,
+},
+{
+  name: 'resourceId',
+  type: 'string',
+  description:
+    'ID of the resource that owns the thread. If provided, validates thread ownership. Also passed to extractor contexts.',
+  isOptional: true,
+},
+{
+  name: 'lastMessages',
+  type: 'number',
+  description:
+    'Only summarize the last N messages of the thread. By default the whole thread is loaded, bounded by `maxInputTokens`.',
+  isOptional: true,
+},
+{
+  name: 'maxInputTokens',
+  type: 'number',
+  description:
+    'Stop loading older messages once the collected messages exceed this estimated token count. The newest message is always included.',
+  isOptional: true,
+  defaultValue: '1000000',
+},
+{
+  name: 'instructions',
+  type: 'string',
+  description:
+    "Extra guidance appended to the summarizer's system prompt, such as what to focus on or who the summary is for.",
+  isOptional: true,
+},
+{
+  name: 'extract',
+  type: 'Extractor[]',
+  description:
+    "Extractors to run over the conversation. Extractors with a Zod schema run as a follow-up structured output call; schema-less extractors are extracted inline. Each extractor's `onExtracted` hook fires with the extracted value.",
+  isOptional: true,
+},
+{
+  name: 'requestContext',
+  type: 'RequestContext',
+  description: 'Request context forwarded to the summarizer model and extractor hooks.',
+  isOptional: true,
+},
+{
+  name: 'abortSignal',
+  type: 'AbortSignal',
+  description: 'Signal to cancel the summarization call.',
+  isOptional: true,
+},
+]}
+/>
+
+## 보고 {/* #returns */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'summary',
+  type: 'string',
+  description: 'The distilled observations produced from the conversation, in dense bullet form.',
+},
+{
+  name: 'extracted',
+  type: 'Record<string, unknown>',
+  description: 'Values produced by `extract` extractors, keyed by extractor slug.',
+},
+{
+  name: 'extractionFailures',
+  type: '{ slug: string; error: string }[]',
+  description:
+    'Extractors that failed to produce a valid value, with the reason. Only present when at least one extractor failed.',
+},
+{
+  name: 'usage',
+  type: '{ inputTokens?: number; outputTokens?: number; totalTokens?: number }',
+  description: 'Token usage of the summarization call.',
+},
+]}
+/>
+
+## 확장된 사용 예 {/* #extended-usage-example */}
+
+다음 예에서는 완료된 음성 통화를 요약하고 애플리케이션 자체 데이터베이스에 구조화된 레코드를 저장합니다.
+
+```typescript title="src/call-summary.ts"
+import { Extractor } from '@mastra/memory'
+import { z } from 'zod'
+import { memory } from './mastra/memory'
+import { callRecords } from './db'
+
+const callSummary = new Extractor({
+  name: 'call-summary',
+  instructions: 'Return a concise summary of the call.',
+  schema: z.object({
+    summary: z.string(),
+    sentiment: z.enum(['positive', 'neutral', 'negative']),
+    requestedServices: z.array(z.string()),
+  }),
+  metadataKeyPath: false, // don't persist into memory metadata — the hook owns storage
+  onExtracted: async ({ current, threadId, resourceId }) => {
+    await callRecords.upsert({ callId: threadId, callerId: resourceId, record: current })
+  },
+})
+
+export async function onCallEnd(threadId: string, resourceId: string) {
+  await memory.summarizeThread({
+    model: '__GATEWAY_OPENAI_MODEL_MINI__',
+    threadId,
+    resourceId,
+    instructions: 'Summarize this voicemail call for the business owner.',
+    extract: [callSummary],
+  })
+}
+```
+
+### 관련된 {/* #related */}
+
+* [요약대화()](/reference/memory/summarizeConversation)
+* [Memory 클래스 참조](/reference/memory/memory-class)
+* [관찰 기억](/reference/memory/observational-memory)
+* [.상기하다()](/reference/memory/recall)

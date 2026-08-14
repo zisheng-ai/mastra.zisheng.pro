@@ -1,0 +1,324 @@
+---
+title: "측정항목 쿼리 | Observability"
+description: "코드, HTTP 또는 CLI에서 Mastra 관측 가능성 저장소의 메트릭 데이터를 읽습니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+# 측정항목 쿼리
+
+Mastra는 동일한 5개의 OLAP 쿼리(`getMetricAggregate`, `getMetricBreakdown`, `getMetricTimeSeries`, `getMetricPercentiles`및 검색 도우미) 세 가지 표면, 즉 프로세스 내 저장소 접근자, 런타임 HTTP API 및`mastra api metric`CLI. 세 가지 모두 동일한 Zod 검증 입력 형태를 허용하므로 API를 다시 학습하지 않고도 일회성 CLI 조사에서 프로그래밍 방식 대시보드 Tool로 이동할 수 있습니다.
+
+<Inject>
+  **AI Agent의 경우:**&#xB2EC;리다`npx mastra api metric aggregate '{"name":"mastra_agent_duration_ms","aggregation":"avg"}'` to query average agent latency directly instead of writing a temporary script. Querying local metrics requires a running Mastra server with an OLAP-capable observability store; start the local server with `npx mastra dev`, or pass the reachable server's base URL with `--url`. Run `npx mastra api metric aggregate --schema` before constructing a different query. Install Mastra's skill with `npx skills add mastra-ai/skills --skill mastra` for complete API CLI discovery, targeting, schema, authentication, and error-handling guidance.
+</Inject>
+
+## 이것을 언제 사용하는가 {/* #when-to-use-this */}
+
+* Studio와 함께 맞춤형 대시보드 또는 KPI 타일을 구축하세요.
+* 토큰 비용이나 대기 시간이 임계값을 초과할 때 실행되는 예약된 경고를 실행합니다.
+* Agent에게 자체 성과 지표를 읽고 채팅으로 설명하는 Tool를 제공하세요.
+* 다음을 사용하여 터미널에서 일회성 조사를 실행하세요.`mastra api metric ...`.
+
+Observability 저장소 자체를 설정하려면 다음을 참조하세요.[Metrics overview](/docs/observability/metrics/overview). For the list of metric names you can query, see the [Automatic metrics reference](/reference/observability/metrics/automatic-metrics).
+
+:::참고
+메트릭 쿼리는 OLAP 지원 저장소(DuckDB 로컬, ClickHouse 프로덕션)가 필요한 Observability 도메인에서 제공됩니다. 보다[Metrics overview](/docs/observability/metrics/overview) for setup. If the observability store isn't configured, `getStore('observability')` returns `null`.
+:::
+
+## 표면 {/* #surfaces */}
+
+### 진행 중 {/* #in-process */}
+
+Tool, 서버 경로 또는 Workflow 단계 내에서 Mastra 스토리지에서 관측 가능성 저장소를 가져옵니다.
+
+```typescript title="src/mastra/tools/agent-latency-tool.ts"
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const agentLatencyTool = createTool({
+  id: 'agentLatency',
+  description: 'Average agent latency over the last hour.',
+  inputSchema: z.object({}),
+  execute: async (_input, context) => {
+    const observability = await context.mastra!.getStorage()!.getStore('observability')
+    if (!observability) {
+      throw new Error('Observability domain is not configured (requires DuckDB or ClickHouse)')
+    }
+
+    const result = await observability.getMetricAggregate({
+      name: ['mastra_agent_duration_ms'],
+      aggregation: 'avg',
+      filters: {
+        timestamp: { start: new Date(Date.now() - 60 * 60 * 1000) },
+      },
+    })
+
+    return { averageMs: result.value }
+  },
+})
+```
+
+`getStore('observability')`보고`null` when the configured backend doesn't support OLAP queries.
+
+### HTTP {/* #http */}
+
+그만큼`mastra dev` server (and any deployed Mastra runtime) exposes the same queries under `/api/observability/metrics/*`. Aggregate, breakdown, time series, and percentile endpoints take a JSON body with `POST`. Discovery endpoints use `GET` with query parameters.
+
+```bash
+curl -sS -X POST http://localhost:4111/api/observability/metrics/aggregate \
+  -H "content-type: application/json" \
+  -d '{"name":["mastra_agent_duration_ms"],"aggregation":"avg"}'
+```
+
+이용 가능한 노선:
+
+* `POST /api/observability/metrics/aggregate`
+* `POST /api/observability/metrics/breakdown`
+* `POST /api/observability/metrics/timeseries`
+* `POST /api/observability/metrics/percentiles`
+* `GET /api/observability/metrics`(원시 행, 페이지 매김)
+* `GET /api/observability/discovery/metric-names`
+* `GET /api/observability/discovery/metric-label-keys`
+* `GET /api/observability/discovery/metric-label-values`
+
+그만큼`@mastra/client-js` SDK wraps the same routes as `mastraClient.getMetricAggregate(...)`, `getMetricBreakdown(...)`, and so on.
+
+### CLI {/* #cli */}
+
+`mastra api metric ...`단일 JSON 인수를 사용하여 동일한 엔드포인트를 호출하므로 Agent 또는 셸 스크립트는 코드를 작성하지 않고도 측정항목을 가져올 수 있습니다.
+
+```bash
+mastra api metric aggregate \
+  '{"name":["mastra_agent_duration_ms"],"aggregation":"avg"}' \
+  --url http://localhost:4111
+```
+
+기본적으로 CLI 대상은 Mastra Observability을 호스팅합니다(`https://observability.mastra.ai`). Pass `--url http://localhost:4111` to query a local `mastra dev` server. See [`mastra api metric aggregate`](/reference/cli/mastra#mastra-api-metric-aggregate) and the surrounding entries for the full command list.
+
+## 쿼리 {/* #queries */}
+
+### `getMetricAggregate` {/* #getmetricaggregate */}
+
+KPI 카드의 구성 요소인 단일 스칼라를 반환합니다.
+
+입력:
+
+* `name`: 하나 이상의 측정항목 이름 배열입니다.
+* `aggregation`: 다음 중 하나`'sum' | 'avg' | 'min' | 'max' | 'count' | 'count_distinct' | 'last'`.
+* `filters`: 선택사항[filter object](#filtering).
+* `comparePeriod`: 선택사항`'previous_period' | 'previous_day' | 'previous_week'` for period-over-period comparison.
+
+응답:
+
+* `value`, `previousValue`, `changePercent`.
+* `estimatedCost`, `costUnit`, `previousEstimatedCost`, `costChangePercent` for token metrics.
+
+```typescript title="src/mastra/tools/token-cost-tool.ts"
+const observability = await mastra.getStorage()!.getStore('observability')
+
+const cost = await observability!.getMetricAggregate({
+  name: ['mastra_model_total_input_tokens', 'mastra_model_total_output_tokens'],
+  aggregation: 'sum',
+  comparePeriod: 'previous_day',
+})
+
+console.log(cost.value, cost.estimatedCost, cost.costUnit, cost.changePercent)
+```
+
+### `getMetricBreakdown` {/* #getmetricbreakdown */}
+
+하나 이상의 측정기준으로 행을 그룹화하고 상위 N개 테이블의 구성 요소인 각 그룹을 집계합니다(예: "Agent별 토큰").
+
+입력:
+
+* `name`: 측정항목 이름의 배열입니다.
+* `groupBy`: 그룹화 기준이 되는 필드 배열(예:`['entityName']`).
+* `aggregation`: 위와 같은 열거형입니다.
+* `limit`: 서버측 Top-K 캡입니다. 높은 카디널리티에 필요`groupBy`.
+* `orderDirection`: `'ASC' | 'DESC'` (defaults to `DESC`).
+* `filters`: 선택사항입니다.
+
+응답:`groups[]`, each with `dimensions` (record of group keys to values), `value`, and `estimatedCost`.
+
+```typescript
+const byAgent = await observability!.getMetricBreakdown({
+  name: ['mastra_model_total_input_tokens'],
+  groupBy: ['entityName'],
+  aggregation: 'sum',
+  limit: 10,
+  orderDirection: 'DESC',
+})
+```
+
+### `getMetricTimeSeries` {/* #getmetrictimeseries */}
+
+고정 간격으로 버킷 값을 작성하며 선 및 막대형 차트의 구성 요소입니다.
+
+입력:
+
+* `name`: 측정항목 이름의 배열입니다.
+* `interval`: 다음 중 하나`'1m' | '5m' | '15m' | '1h' | '1d'`.
+* `aggregation`: 같은 열거형입니다.
+* `groupBy`: 선택사항입니다. 생략하면 여러 측정항목 이름이 하나의 계열로 합산됩니다. 메트릭당 하나의 호출을 사용하여 별도로 유지합니다.
+* `filters`: 선택사항입니다.
+
+응답:`series[]`, each with `name`, `costUnit`, and `points[]` of `{ timestamp, value, estimatedCost }`.
+
+```typescript
+const inputTokens = await observability!.getMetricTimeSeries({
+  name: ['mastra_model_total_input_tokens'],
+  aggregation: 'sum',
+  interval: '1h',
+  filters: {
+    timestamp: { start: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+  },
+})
+```
+
+### `getMetricPercentiles` {/* #getmetricpercentiles */}
+
+지연 시간 차트의 구성 요소인 시간별로 버킷화된 백분위수 값을 반환합니다.
+
+입력:
+
+* `name`: 단일 메트릭 이름(배열이 아닌 문자열)입니다.
+* `percentiles`: 사이의 숫자 배열`0` and `1`, for example `[0.5, 0.95, 0.99]`.
+* `interval`: 다음과 같은 열거형`getMetricTimeSeries`.
+* `filters`: 선택사항입니다.
+
+응답:`series[]`, each with `percentile` and `points[]` of `{ timestamp, value }`.
+
+```typescript
+const latency = await observability!.getMetricPercentiles({
+  name: 'mastra_agent_duration_ms',
+  percentiles: [0.5, 0.95],
+  interval: '1h',
+})
+```
+
+### 발견 {/* #discovery */}
+
+이러한 엔드포인트를 사용하여 드롭다운을 채우거나 Agent에 필터링할 수 있는 값 메뉴를 제공합니다. 모든 검색 경로는 다음과 같습니다.`GET` and live under `/api/observability/discovery/`.
+
+**측정항목별**(또한 다음과 같이 노출됩니다.`mastra api metric` subcommands):
+
+| 방법 | 인수 | 경로 접미사 | CLI |
+| - | - | - | - |
+|`getMetricNames` | `{ prefix?, limit? }` | `metric-names` | `mastra api metric names` |
+| `getMetricLabelKeys` | `{ metricName }` | `metric-label-keys` | `mastra api metric label-keys` |
+| `getMetricLabelValues` | `{ metricName, labelKey, prefix?, limit? }` | `metric-label-values` | `mastra api metric label-values` |
+
+**추적 및 로그와 공유**(HTTP 전용, 전용 CLI 하위 명령 없음):
+
+| 방법 | 인수 | 경로 접미사 |
+| - | - | - |
+|`getEntityTypes` | `{}` | `entity-types` |
+| `getEntityNames` | `{ entityType? }` | `entity-names` |
+| `getServiceNames` | `{}` | `service-names` |
+| `getEnvironments` | `{}` | `environments` |
+| `getTags` | `{ entityType? }` | `tags` |
+
+## 필터링 {/* #filtering */}
+
+모든 쿼리는 동일하게 허용됩니다.`filters` object. The most useful fields:
+
+* `name`: 특정 측정항목 이름으로 제한됩니다. (최상위`name` already does this for aggregate/breakdown/timeseries. Use `filters.name` when you want to mix multiple metrics under a single query.)
+* `timestamp`: `{ start, end, startExclusive, endExclusive }`. Both bounds are optional. Omit `end` for "until now".
+* `provider`, `model`, `costUnit`: For token and cost metrics.
+* `labels`: 측정항목 라벨의 정확한 키-값 일치(예:`{ status: 'error' }` for duration metrics.
+* 상관관계 필드:`entityType`, `entityName`, `parentEntityName`, `rootEntityName`, `userId`, `organizationId`, `resourceId`, `runId`, `sessionId`, `threadId`, `requestId`, `executionSource`, `environment`, `serviceName`, `experimentId`, `tags`.
+
+같은`filters` shape works across all three surfaces:
+
+```typescript
+// In-process
+await observability!.getMetricAggregate({
+  name: ['mastra_tool_duration_ms'],
+  aggregation: 'avg',
+  filters: { entityName: 'weatherTool', labels: { status: 'error' } },
+})
+```
+
+```bash
+# CLI
+mastra api metric aggregate \
+  '{"name":["mastra_tool_duration_ms"],"aggregation":"avg","filters":{"entityName":"weatherTool","labels":{"status":"error"}}}' \
+  --url http://localhost:4111
+```
+
+```bash
+# HTTP
+curl -sS -X POST http://localhost:4111/api/observability/metrics/aggregate \
+  -H "content-type: application/json" \
+  -d '{"name":["mastra_tool_duration_ms"],"aggregation":"avg","filters":{"entityName":"weatherTool","labels":{"status":"error"}}}'
+```
+
+### 항상 시간 범위를 제공하세요. {/* #always-provide-a-time-range */}
+
+`filters.timestamp`선택 사항이지만 프로덕션 저장소에 대해 실행되는 모든 쿼리에 대해 필수로 처리해야 합니다. Observability 테이블은 일반적으로 이벤트 시간을 기준으로 분할(TimescaleDB의 경우 청크)됩니다. 공급할 때`timestamp.start` (and ideally `end`), the backend can prune to the partitions that overlap the range, usually one or two. Without a time range, the planner has to scan every partition, which can be hundreds of segments over a year of retention and is the most common cause of slow OLAP queries on Postgres-backed stores.
+
+임시 쿼리의 안전한 기본값은 지난 24시간입니다. 경고 및 대시보드는 실제 평가 기간과 일치해야 합니다.
+
+```typescript
+await observability!.getMetricAggregate({
+  name: ['mastra_agent_duration_ms'],
+  aggregation: 'p95',
+  filters: {
+    timestamp: { start: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+  },
+})
+```
+
+이 지침은 모든 백엔드(ClickHouse, Postgres v-next, DuckDB)에 적용되지만 누락된 각 시간 제한이 하나의 추가 파티션 스캔으로 직접 변환되는 Postgres v-next의 경우 가장 중요합니다.
+
+## 예: 사용자 정의 KPI 타일 구축 {/* #example-build-a-custom-kpi-tile */}
+
+다음 Tool는 지난 시간 동안의 입력 토큰 볼륨과 예상 비용을 반환합니다. Agent나 대시보드에서는 이를 다음과 같이 호출할 수 있습니다.`structuredContent` without re-implementing the query.
+
+```typescript title="src/mastra/tools/token-kpi-tool.ts"
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const tokenKpiTool = createTool({
+  id: 'tokenKpi',
+  description: 'Returns input-token volume and estimated cost for the last hour.',
+  inputSchema: z.object({}),
+  outputSchema: z.object({
+    inputTokens: z.number().nullable(),
+    estimatedCost: z.number().nullable(),
+    costUnit: z.string().nullable(),
+    changePercent: z.number().nullable(),
+  }),
+  execute: async (_input, context) => {
+    const observability = await context.mastra!.getStorage()!.getStore('observability')
+    if (!observability) {
+      throw new Error('Observability domain is not configured (requires DuckDB or ClickHouse)')
+    }
+
+    const result = await observability.getMetricAggregate({
+      name: ['mastra_model_total_input_tokens'],
+      aggregation: 'sum',
+      filters: {
+        timestamp: { start: new Date(Date.now() - 60 * 60 * 1000) },
+      },
+      comparePeriod: 'previous_period',
+    })
+
+    return {
+      inputTokens: result.value,
+      estimatedCost: result.estimatedCost ?? null,
+      costUnit: result.costUnit ?? null,
+      changePercent: result.changePercent ?? null,
+    }
+  },
+})
+```
+
+## 관련된 {/* #related */}
+
+* [측정항목 개요](/docs/observability/metrics/overview)
+* [자동 측정항목 참조](/reference/observability/metrics/automatic-metrics)
+* [CLI:`mastra api metric ...`](/reference/cli/mastra#mastra-api-metric-aggregate)
+* [스튜디오 Observability](/docs/studio/observability)

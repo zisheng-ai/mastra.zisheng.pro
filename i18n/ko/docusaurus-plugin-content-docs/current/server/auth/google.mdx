@@ -1,0 +1,281 @@
+---
+title: "구글 | 인증"
+description: "호스팅 도메인 확인 및 그룹 기반 RBAC가 포함된 Google Workspace를 사용하여 Mastra 서버와 Studio를 인증하세요."
+packages:
+  - "@mastra/auth-google"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Google
+
+그만큼`@mastra/auth-google`패키지는 Google Workspace를 사용하여 Mastra에 대한 인증 및 역할 기반 액세스 제어를 제공합니다. 암호화된 세션 쿠키를 사용하여 OAuth 2.0/OIDC 로그인 흐름을 지원하고, Google ID 토큰을 확인하고, Google Workspace 그룹을 Mastra 권한에 매핑합니다.
+
+Studio 사용자가 Google로 로그인할 때 이 기능을 사용하세요. 액세스는 하나 이상의 Google Workspace 도메인으로 제한되어야 합니다.
+
+## 전제조건 {/* #prerequisites */}
+
+이 가이드에서는 Google Workspace 인증을 사용합니다. 다음을 확인하세요.
+
+1. Google Cloud 프로젝트 만들기 또는 선택
+2. 웹 애플리케이션용 OAuth 클라이언트 설정
+3. 승인된 리디렉션 URI에 Mastra SSO 콜백 URL을 추가하세요.
+4. RBAC를 사용하려는 경우 Google Workspace 그룹을 구성하세요.
+
+Google 그룹스 RBAC의 경우 도메인 전체 위임으로 Google Workspace 서비스 계정을 구성하고 여기에 Directory API 읽기 전용 그룹 범위를 부여합니다.
+
+```text
+https://www.googleapis.com/auth/admin.directory.group.readonly
+```
+
+환경 변수가 설정되어 있는지 확인하세요.
+
+```env title=".env"
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret
+GOOGLE_REDIRECT_URI=http://localhost:4111/api/auth/sso/callback
+GOOGLE_COOKIE_PASSWORD=a-random-string-at-least-32-characters-long
+GOOGLE_ALLOWED_DOMAINS=example.com
+
+GOOGLE_SERVICE_ACCOUNT_EMAIL=service-account@project.iam.gserviceaccount.com
+GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+GOOGLE_WORKSPACE_ADMIN_EMAIL=admin@example.com
+```
+
+:::메모
+
+`GOOGLE_COOKIE_PASSWORD`세션 쿠키를 암호화합니다. 생략하면 서버를 다시 시작해도 유지되지 않는 자동 생성 값이 사용됩니다. 프로덕션을 위해 명시적으로 설정합니다.
+
+`MastraAuthGoogle`읽는다`GOOGLE_*` auth variables automatically. The service-account variables shown above are read by the configuration code you pass to `MastraRBACGoogle`.
+
+:::
+
+## 설치 {/* #installation */}
+
+사용하기 전에`MastraAuthGoogle` class, install the `@mastra/auth-google` package.
+
+```bash npm2yarn
+npm install @mastra/auth-google
+```
+
+## 사용 예 {/* #usage-examples */}
+
+### 환경 변수를 사용한 기본 사용법 {/* #basic-usage-with-environment-variables */}
+
+위의 환경 변수를 설정하면 모든 생성자 매개변수는 선택사항입니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthGoogle } from '@mastra/auth-google'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthGoogle(),
+  },
+})
+```
+
+:::경고
+
+사용`allowedDomains` or `GOOGLE_ALLOWED_DOMAINS` to enforce Workspace access. Mastra checks Google's verified `hd` claim, not the email address suffix.
+
+:::
+
+### 맞춤 구성 {/* #custom-configuration */}
+
+환경 변수에 의존하지 않으려면 생성자 옵션을 직접 전달하세요.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthGoogle } from '@mastra/auth-google'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthGoogle({
+      clientId: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      redirectUri: process.env.GOOGLE_REDIRECT_URI,
+      allowedDomains: ['example.com'],
+    }),
+  },
+})
+```
+
+### Google 그룹스 RBAC로 인증 {/* #auth-with-google-groups-rbac */}
+
+추가하다`MastraRBACGoogle` to map Google Workspace groups to Mastra permissions:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthGoogle, MastraRBACGoogle } from '@mastra/auth-google'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthGoogle(),
+    rbac: new MastraRBACGoogle({
+      serviceAccount: {
+        clientEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!,
+        privateKey: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!,
+        subject: process.env.GOOGLE_WORKSPACE_ADMIN_EMAIL!,
+      },
+      roleMapping: {
+        'admins@example.com': ['*'],
+        'engineering@example.com': ['agents:*', 'workflows:*', 'tools:*'],
+        'viewers@example.com': ['agents:read', 'workflows:read'],
+        _default: [], // users with unmapped groups get no permissions
+      },
+    }),
+  },
+})
+```
+
+### 공급자 간 사용 {/* #cross-provider-usage */}
+
+로그인 및 RBAC용 Google Workspace 그룹에는 다른 인증 Provider(Auth0, Clerk 등)를 사용하세요. 통과`getUserKey` function to resolve the Google Directory API user key from the other provider's user object:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthAuth0 } from '@mastra/auth-auth0'
+import { MastraRBACGoogle } from '@mastra/auth-google'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthAuth0(),
+    rbac: new MastraRBACGoogle({
+      getUserKey: user => {
+        if (!user || typeof user !== 'object') return undefined
+
+        const { email } = user as { email?: unknown }
+        return typeof email === 'string' ? email : undefined
+      },
+      serviceAccount: {
+        clientEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!,
+        privateKey: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!,
+        subject: process.env.GOOGLE_WORKSPACE_ADMIN_EMAIL!,
+      },
+      roleMapping: {
+        'engineering@example.com': ['agents:*', 'workflows:*'],
+        'admins@example.com': ['*'],
+        _default: [],
+      },
+    }),
+  },
+})
+```
+
+방문하다[MastraAuthGoogle](/reference/auth/google) for all available configuration options.
+
+## 역할 매핑 {/* #role-mapping */}
+
+그만큼`roleMapping` option maps Google Workspace group email addresses to arrays of Mastra permission strings. Permissions follow a `resource:action` pattern and support wildcards:
+
+```typescript
+const rbac = new MastraRBACGoogle({
+  roleMapping: {
+    // full access to everything
+    'admins@example.com': ['*'],
+
+    // full access to agents and workflows
+    'engineering@example.com': ['agents:*', 'workflows:*'],
+
+    // read-only access
+    'viewers@example.com': ['agents:read', 'workflows:read'],
+
+    // users whose groups don't match any key above
+    _default: [],
+  },
+})
+```
+
+그룹 이메일 주소는 기본적으로 역할 ID로 사용됩니다. 사용`mapGroupToRoles` if you want to map by group name or another property. The `_default` key assigns permissions to users whose Google Workspace groups don't match any other key.
+
+## 클라이언트 측 설정 {/* #client-side-setup */}
+
+인증이 활성화되면 Mastra 경로에 대한 요청에는 인증이 필요합니다. SSO가 활성화된 경우`GOOGLE_CLIENT_SECRET`, `MastraAuthGoogle` uses Google sign-in and sets an encrypted session cookie after login.
+
+### 쿠키 세션(권장) {/* #cookie-session-recommended */}
+
+교차 출처 요청의 경우(예: 프런트엔드`:3000` calling Mastra on `:4111`), enable CORS credentials on the Mastra server:
+
+```typescript title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthGoogle(),
+    cors: {
+      origin: 'http://localhost:3000',
+      credentials: true,
+    },
+  },
+})
+```
+
+자격 증명을 포함하도록 클라이언트를 구성합니다.
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  baseUrl: 'http://localhost:4111',
+  credentials: 'include',
+})
+```
+
+### 무기명 토큰 {/* #bearer-token */}
+
+Google ID 토큰을 Bearer 토큰으로 전달할 수도 있습니다. Mastra는 Google의 JWKS(JSON 웹 키 세트) 엔드포인트에 대해 토큰을 확인합니다.
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const createMastraClient = (idToken: string) => {
+  return new MastraClient({
+    baseUrl: 'http://localhost:4111',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+    },
+  })
+}
+```
+
+방문하다[Mastra Client SDK](/docs/server/mastra-client) for more configuration options.
+
+### 인증된 요청 만들기 {/* #making-authenticated-requests */}
+
+<Tabs>
+  <TabItem value="client" label="MastraClient">
+    ```typescript title="src/api/agents.ts"
+    import { mastraClient } from '../lib/mastra-client'
+
+    const agent = mastraClient.getAgent('weatherAgent')
+    const response = await agent.generate('Weather in London')
+    console.log(response)
+    ```
+  </TabItem>
+
+  <TabItem value="curl" label="cURL">
+    ```bash
+    curl -X POST http://localhost:4111/api/agents/weatherAgent/generate \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer <your-google-id-token>" \
+      -d '{
+        "messages": "Weather in London"
+      }'
+    ```
+  </TabItem>
+</Tabs>
+
+## 문제 해결 {/* #troubleshooting */}
+
+* **로그인 후 401**: 확인해 보세요`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI` match the Google Cloud OAuth client.
+* **Workspace 사용자는 거부됩니다.**: 확인하다`GOOGLE_ALLOWED_DOMAINS` matches the Google ID token `hd` claim.
+* **소비자 Gmail 계정은 거부됩니다.**: 이는 다음과 같은 경우에 예상됩니다.`allowedDomains` is configured because Gmail accounts don't have a Workspace `hd` claim.
+* **RBAC는 기본 권한을 반환합니다.**: 사용자에 대해 해결된 역할이 없습니다. 사용자 이메일 또는 맞춤 확인`getUserKey`, Google group membership, and `roleMapping`. If the Directory API lookup fails, the provider throws an error instead of returning `_default`.
+* **쿠키는 교차 출처로 전송되지 않습니다.**: 세트`credentials: "include"` in `MastraClient` and configure `server.cors` with your frontend origin and `credentials: true`.
+* **다시 시작 시 세션이 손실됨**: 세트`GOOGLE_COOKIE_PASSWORD` to a stable value of at least 32 characters. Without it, an auto-generated key is used in development and changes on each restart.
+
+## 관련된 {/* #related */}
+
+* [인증 개요](/docs/server/auth)
+* [복합 인증](/docs/server/auth/composite-auth)
+* [MastraAuthGoogle 참조](/reference/auth/google)

@@ -1,0 +1,385 @@
+---
+title: "Agent컨트롤러 | 마구"
+description: "격리된 세션, 영구 스레드, 모드, 승인, 하위 Agent 및 채널을 사용하여 대화형 Agent 애플리케이션을 구축합니다."
+packages:
+  - "@mastra/core"
+---
+
+# AgentController
+
+:::실험적
+
+그만큼[`AgentController`](/reference/agent-controller/agent-controller-class) feature is in beta stage and subject to breaking changes in minor versions until it graduates from its beta status.
+
+:::
+
+`AgentController`대화형 Agent 애플리케이션을 위한 공유 런타임 호스트입니다. 모드, Model, 스토리지, 작업 공간, Tool 승인, 하위 Agent 및 채널을 조정합니다. 각 사용자 또는 활성 작업은 격리된 작업을 통해 작동합니다.[`Session`](/reference/agent-controller/session).
+
+[마스트라 코드](https://code.mastra.ai)주력 AgentController 구현입니다. 다중 Model 지원, 지속적인 대화, 계획 후 실행 Workflow를 갖춘 터미널 기반 코딩 Agent입니다. 읽다[Building a coding agent](/guides/guide/coding-agent) for a step-by-step guide.
+
+## AgentController를 사용하는 경우 {/* #when-to-use-the-agentcontroller */}
+
+애플리케이션에 다음이 필요할 때 AgentController를 사용하세요.
+
+* 하나의 대화 스레드를 공유하는 다중 Agent 모드(예: 계획 → 구축 → 검토)
+* UI와 Agent 루프 사이의 제어 계층(Model 전환, 상태 지속성, 스레드 관리)
+* Human-In-The-Loop 게이팅을 위한 Tool 승인 흐름 및 권한 정책
+* 제한된 Tool를 사용하여 집중된 하위 작업을 위임하는 하위 Agent 오케스트레이션
+* 각 세션에 대해 격리된 라이브 상태를 포함하여 다시 시작 시 지속 스레드 및 선택된 스레드 설정
+
+이 모든 것을 직접 조립할 수도 있습니다.[Agent class](/docs/agents/overview), which exposes the full agent loop, tools, and memory. The AgentController provides opinionated defaults for an ongoing session where the agent acts as a collaborator rather than a one-shot endpoint. Reach for the Agent class directly when you want full control or a request-response call. Reach for the AgentController when you want the collaborative-session model without building the runtime around it.
+
+## 빠른 시작 {/* #quickstart */}
+
+지지대 만들기[`Agent`](/reference/agents/agent), storage, and [`Workspace`](/reference/workspace/workspace-class). Call [`controller.init()`](/reference/agent-controller/agent-controller-class#init) once, then use [`controller.createSession()`](/reference/agent-controller/agent-controller-class#createsessionoptions) to create a Session. Subscribe with [`session.subscribe()`](/reference/agent-controller/session#subscribelistener) and send work with [`session.sendMessage()`](/reference/agent-controller/session#sendmessage-content-files-requestcontext-):
+
+```typescript title="src/mastra/agent-controller.ts"
+import { Agent } from '@mastra/core/agent'
+import { AgentController } from '@mastra/core/agent-controller'
+import { LocalFilesystem, Workspace } from '@mastra/core/workspace'
+import { LibSQLStore } from '@mastra/libsql'
+
+const agent = new Agent({
+  id: 'assistant',
+  name: 'Assistant',
+  instructions: 'Help the user plan and complete tasks.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const controller = new AgentController({
+  id: 'assistant-controller',
+  agent,
+  storage: new LibSQLStore({
+    id: 'agent-controller-storage',
+    url: 'file:./mastra.db',
+  }),
+  workspace: new Workspace({
+    id: 'assistant-workspace',
+    filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  }),
+  modes: [
+    {
+      id: 'plan',
+      name: 'Plan',
+      metadata: { default: true },
+      instructions: 'Reason about the task before making changes.',
+    },
+    {
+      id: 'build',
+      name: 'Build',
+      instructions: 'Implement the approved plan.',
+    },
+  ],
+})
+
+await controller.init()
+
+const session = await controller.createSession({
+  resourceId: 'user-123',
+})
+
+const unsubscribe = session.subscribe(event => {
+  if (event.type === 'message_update') {
+    console.log(event.message)
+  }
+})
+
+await session.sendMessage({ content: 'Plan a small TypeScript CLI.' })
+unsubscribe()
+```
+
+많은 세션에 동일한 컨트롤러를 사용합니다. 컨트롤러에 현재 세션을 저장하거나 컨트롤러 수준 메시지 방법을 통해 작업을 라우팅하지 마세요.
+
+## 런타임 Model 이해 {/* #understand-the-runtime-model */}
+
+컨트롤러, 세션 및 스레드의 수명은 다릅니다.
+
+* **제어 장치**: 구성 및 런타임 서비스를 위한 공유 호스트입니다. 한 번 초기화하고 다시 사용하세요.
+* **세션**: 하나의 사용자, 작업 또는 동시 작업 범위에 대한 격리된 라이브 런타임입니다. 활성 모드, Model, 상태, 이벤트 버스, 실행 상태, 권한 부여 및 현재 스레드 바인딩을 소유합니다.
+* **실**: 메시지와 스레드 설정이 포함된 저장된 대화입니다. 스레드는 스토리지를 구성할 때 컨트롤러 및 프로세스 재생성을 유지할 수 있습니다.
+
+세션은 라이브 상태입니다. 임의[`session.state`](/reference/agent-controller/session#state), permission grants, pending approvals, and active runs don't automatically survive process recreation. Thread messages and selected thread settings, including mode and per-mode model choices, can persist through storage.
+
+## 세션 및 스레드 {/* #sessions-and-threads */}
+
+`createSession()`다음으로 가져오거나 생성합니다.`resourceId` and optional `scope`:
+
+```typescript
+const webSession = await controller.createSession({
+  resourceId: 'user-123',
+  scope: 'web',
+})
+
+const sameWebSession = await controller.createSession({
+  resourceId: 'user-123',
+  scope: 'web',
+})
+
+const workerSession = await controller.createSession({
+  resourceId: 'user-123',
+  scope: 'background-worker',
+})
+
+console.log(webSession === sameWebSession) // true
+console.log(webSession === workerSession) // false
+```
+
+범위가 서로 다른 세션에는 별도의 이벤트 버스, 실행 루프, 상태, 모드 및 Model 선택, 현재 스레드 바인딩이 있습니다. 저장된 스레드는 여전히 공유 스레드에 속합니다.`resourceId`.
+
+통과하다`threadId` when the host must bind the Session to an exact thread. The controller switches to the existing thread or creates it with that ID when it's missing. This behavior also applies when `createSession()` returns a cached Session:
+
+```typescript
+const session = await controller.createSession({
+  resourceId: 'user-123',
+  scope: 'web',
+  threadId: 'support-ticket-42',
+})
+```
+
+사용[`session.thread.create()`](/reference/agent-controller/session#sessionthreadcreate-title-id-) and [`session.thread.switch()`](/reference/agent-controller/session#sessionthreadswitch-threadid-emitevent-) to move one live Session between conversations.
+
+## 모드 및 Model 전환 {/* #switch-modes-and-models */}
+
+모드는 세션이나 스레드를 교체하지 않고 공유 지원 Agent에서 사용하는 지침과 Tool를 변경합니다. 컨트롤러에서 모드별 Tool 및 가시성을 구성합니다.
+
+```typescript
+const modes = [
+  {
+    id: 'plan',
+    name: 'Plan',
+    metadata: { default: true },
+    instructions: 'Investigate the task and propose a plan.',
+    additionalTools: { searchDocs },
+    availableTools: ['searchDocs', 'submit_plan'],
+    transitionsTo: 'build',
+  },
+  {
+    id: 'build',
+    name: 'Build',
+    instructions: 'Implement the approved plan.',
+  },
+]
+```
+
+`tools`그리고`additionalTools` are mutually exclusive inputs for adding mode-specific tools. When the controller has a shared backing agent, either input layers those tools onto the agent's tools. Use `availableTools` to restrict the final exposed tool names for a mode. Permission denies still take precedence over this allowlist.
+
+다음으로 라이브 세션을 전환하세요.[`session.mode.switch()`](/reference/agent-controller/session#sessionmodeswitch-modeid-). Read the active mode with [`session.mode.get()`](/reference/agent-controller/session#sessionmodeget) or [`session.mode.resolve()`](/reference/agent-controller/session#sessionmoderesolve):
+
+```typescript
+await session.mode.switch({ modeId: 'build' })
+
+console.log(session.mode.get()) // "build"
+console.log(session.mode.resolve().instructions)
+```
+
+다음을 사용하여 독립적으로 Model 전환[`session.model.switch()`](/reference/agent-controller/session#sessionmodelswitch-modelid-scope-modeid-), then read the active selection with [`session.model.get()`](/reference/agent-controller/session#sessionmodelget). Thread-scoped selections are stored per mode and restored when the Session returns to that mode:
+
+```typescript
+await session.model.switch({
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+  scope: 'thread',
+})
+
+console.log(session.model.get())
+```
+
+사용`scope: 'global'` for an in-memory selection that shouldn't be written to thread settings.
+
+## 스레드 및 상태 관리 {/* #manage-threads-and-state */}
+
+다음 사람과의 저장된 대화 목록을 나열합니다.[`session.thread.list()`](/reference/agent-controller/session#sessionthreadlistoptions):
+
+```typescript
+const thread = await session.thread.create({ title: 'Release planning' })
+const threads = await session.thread.list()
+
+await session.thread.switch({ threadId: thread.id })
+console.log(threads.length)
+```
+
+사용`session.state` for structured live state associated with the Session. Read it with [`session.state.get()`](/reference/agent-controller/session#sessionstateget) and write updates with [`session.state.set()`](/reference/agent-controller/session#sessionstatesetupdates). Define `stateSchema` and `initialState` on the controller when you need validation and defaults:
+
+```typescript
+console.log(session.state.get())
+
+await session.state.set({ activeProject: 'docs-site' })
+```
+
+`session.state.get()`스냅샷을 반환합니다.`set()` validates and merges the update into the Session state. Treat this state as live Session data unless your host explicitly persists and restores it.
+
+## Tool 승인 및 정지 재개 {/* #approve-tools-and-resume-suspensions */}
+
+권한 정책은 Tool를 허용할지, 거부할지 또는 승인을 위해 UI로 보낼지 여부를 결정합니다. 다음을 사용하여 사용자 정의 Tool를 카테고리에 매핑합니다.`toolCategoryResolver` on the controller:
+
+```typescript
+const controller = new AgentController({
+  toolCategoryResolver: toolName => {
+    if (toolName === 'delete_project') return 'execute'
+    return null
+  },
+})
+```
+
+다음을 사용하여 카테고리 정책을 구성합니다.[`session.permissions.setForCategory()`](/reference/agent-controller/session#sessionpermissionssetforcategory-category-policy-) and tool policies with [`session.permissions.setForTool()`](/reference/agent-controller/session#sessionpermissionssetfortool-toolname-policy-):
+
+```typescript
+await session.permissions.setForCategory({
+  category: 'execute',
+  policy: 'ask',
+})
+
+await session.permissions.setForTool({
+  toolName: 'delete_project',
+  policy: 'deny',
+})
+```
+
+정책이 다음과 같이 해결되면`ask`, subscribe for the approval event and return the user's decision with [`session.respondToToolApproval()`](/reference/agent-controller/session#respondtotoolapproval-decision-toolcallid-requestcontext-declinecontext-):
+
+```typescript
+session.subscribe(event => {
+  if (event.type === 'tool_approval_required') {
+    session.respondToToolApproval({
+      toolCallId: event.toolCallId,
+      decision: 'approve',
+    })
+  }
+})
+```
+
+그만큼`always_allow_category` decision grants the tool category for the rest of the live Session. Session grants aren't durable process-level permissions.
+
+다음과 같은 대화형 Tool[`ask_user`](/reference/tools/ask-user-tool) and [`submit_plan`](/reference/tools/submit-plan-tool) use resumable tool suspensions instead. Resume them with [`session.respondToToolSuspension()`](/reference/agent-controller/session#respondtotoolsuspension-resumedata-toolcallid-requestcontext-):
+
+```typescript
+session.subscribe(event => {
+  if (event.type === 'tool_suspended' && event.toolName === 'ask_user') {
+    void session.respondToToolSuspension({
+      toolCallId: event.toolCallId,
+      resumeData: 'Use SQLite.',
+    })
+  }
+})
+```
+
+을 위한`submit_plan`, resume with `{ action: 'approved' }` or `{ action: 'rejected', feedback }`. An approved plan can switch to the mode configured by `transitionsTo` before the run continues.
+
+## 하위 Agent에 위임 {/* #delegate-to-subagents */}
+
+컨트롤러에서 사용 가능한 하위 Agent 유형을 구성합니다. 내장`subagent` tool can then delegate focused tasks using those definitions:
+
+```typescript
+const controller = new AgentController({
+  tools: {
+    searchDocs,
+  },
+  subagents: [
+    {
+      id: 'code-reviewer',
+      name: 'Code reviewer',
+      description: 'Review a change for correctness and regressions.',
+      instructions: 'Inspect the change and report actionable findings.',
+      allowedControllerTools: ['searchDocs'],
+      allowedWorkspaceTools: ['view', 'find_files'],
+      defaultModelId: '__GATEWAY_OPENAI_MODEL_MINI__',
+    },
+  ],
+})
+```
+
+일반 하위 Agent는 구성된 지침과 제한된 Tool 세트로 시작됩니다. 세트`forked: true` when the child should clone the parent thread and run with the parent agent's instructions and tools. Forked subagents preserve the parent prompt prefix, ignore the definition's instructions, tools, allowlists, and default model, and require memory on the controller.
+
+사용[`session.subagents.model.set()`](/reference/agent-controller/session#sessionsubagentsmodelset-modelid-agenttype-) to store one default subagent model or a model for a specific agent type. Read the selection with [`session.subagents.model.get()`](/reference/agent-controller/session#sessionsubagentsmodelget-agenttype-):
+
+```typescript
+await session.subagents.model.set({
+  modelId: '__GATEWAY_OPENAI_MODEL_MINI__',
+})
+
+await session.subagents.model.set({
+  agentType: 'code-reviewer',
+  modelId: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+})
+
+const reviewerModel = session.subagents.model.get({
+  agentType: 'code-reviewer',
+})
+```
+
+이러한 선택 사항은 스레드 설정에 기록됩니다. Agent 유형 선택은 세션의 기본 하위 Agent Model보다 우선합니다.
+
+## 채팅 채널 연결 {/* #connect-chat-channels */}
+
+채널 어댑터를 컨트롤러에 전달하고 이를 컨트롤러에 등록합니다.[`Mastra`](/reference/core/mastra-class) instance:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { AgentController } from '@mastra/core/agent-controller'
+import { createSlackAdapter } from '@chat-adapter/slack'
+
+const controller = new AgentController({
+  id: 'support-controller',
+  agent,
+  storage,
+  workspace,
+  modes,
+  channels: {
+    adapters: {
+      slack: createSlackAdapter(),
+    },
+    resolveResourceId: ({ thread, message, defaultResourceId }) => {
+      if (thread.isDM) return message.author.userId
+      return defaultResourceId
+    },
+    onSessionStart: async ({ session, thread }) => {
+      const plan = await billing.planFor(thread.resourceId)
+      await session.model.switch({ modelId: plan.modelId })
+    },
+  },
+})
+
+export const mastra = new Mastra({
+  agentControllers: { controller },
+  storage,
+})
+```
+
+컨트롤러별 경로에서 각 플랫폼 웹후크를 가리킵니다.
+
+```text
+/api/agent-controllers/<CONTROLLER_ID>/channels/<PLATFORM>/webhook
+```
+
+각 외부 채팅 스레드는 하나의 컨트롤러 세션 및 Mastra 스레드에 매핑됩니다. 기본적으로 새 세션은 어댑터의 채팅 스레드 ID에서 파생된 리소스 ID를 사용합니다.`channel:`. Use `resolveResourceId` to map direct messages to an existing application user or choose another memory owner. The callback only affects new threads; an existing thread keeps its stored resource ID.
+
+채널 세션은 코드가 아닌 컨트롤러에 의해 생성되므로`onSessionStart` is where you configure them. It runs once per session, after the session is bound to its mapped thread and before the first message is handled. Use it to apply a model, memory settings, or session state that a channel session would otherwise miss. Later messages in the same thread reuse the session and don't call it again. Errors are logged and swallowed so a session that can't be configured still answers the message.
+
+컨트롤러 채널 세션과 자동 승인 상태는 Memory에 보관되므로 수명이 긴 서버를 사용하세요. 보류 중인 승인 및 라이브 세션 상태는 프로세스를 다시 시작해도 유지되지 않습니다. 승인 제어를 렌더링할 수 없는 어댑터는 승인 메시지 없이 자동으로 Tool를 실행하므로 실행이 일시 중단된 상태로 유지되지 않습니다.
+
+보다[Channels](/docs/capabilities/channels/overview) for adapter setup and platform-specific webhook configuration.
+
+## UI 연결 {/* #connect-a-ui */}
+
+증분 업데이트를 위해 세션 이벤트를 구독하세요. 축소된 표시 상태를 읽으십시오.[`session.displayState.get()`](/reference/agent-controller/session#sessiondisplaystateget) when the UI needs a complete render snapshot:
+
+```typescript
+const unsubscribe = session.subscribe(event => {
+  if (event.type === 'display_state_changed') {
+    render(event.displayState)
+  }
+})
+
+render(session.displayState.get())
+
+// Call when the UI disconnects.
+unsubscribe()
+```
+
+구독은 세션별로 격리됩니다. 동일한 컨트롤러에 있는 다른 세션의 이벤트는 이 리스너로 전달되지 않습니다. 읽기[Building a coding agent](/guides/guide/coding-agent) guide for a complete TUI example.
+
+## 관련된 {/* #related */}
+
+* [Agent](/docs/agents/overview)
+* [작업공간](/docs/workspace/overview)
+* [관찰 기억](/docs/memory/observational-memory)
+* [채널](/docs/capabilities/channels/overview)

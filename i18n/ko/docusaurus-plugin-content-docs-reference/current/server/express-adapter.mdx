@@ -1,0 +1,247 @@
+---
+title: "참조: Express 어댑터 | 섬기는 사람"
+description: "@mastra/express 서버 어댑터에 대한 API 참조입니다."
+packages:
+  - "@mastra/express"
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# 익스프레스 어댑터
+
+그만큼`@mastra/express`패키지는 Mastra를 실행하기 위한 서버 어댑터를 제공합니다.[표현하다](https://expressjs.com). 일반적인 어댑터 개념(생성자 옵션, 초기화 흐름 등)은 다음을 참조하세요.[서버 어댑터](/docs/server/server-adapters).
+
+## 설치 {/* #installation */}
+
+Express 어댑터 및 Express 프레임워크를 설치합니다.
+
+```bash npm2yarn
+npm install @mastra/express@latest express
+```
+
+## 사용예 {/* #usage-example */}
+
+```typescript title="server.ts"
+import express from 'express'
+import { MastraServer } from '@mastra/express'
+import { mastra } from './mastra'
+
+const app = express()
+app.use(express.json()) // Required for body parsing
+
+const server = new MastraServer({ app, mastra })
+await server.init()
+
+app.listen(4111, () => {
+  console.log('Server running on port 4111')
+})
+```
+
+:::메모
+
+익스프레스가 필요합니다`express.json()` middleware for JSON body parsing. Add it before creating the `MastraServer`.
+
+:::
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'app',
+  type: 'Application',
+  description: 'Express app instance',
+  isOptional: false,
+},
+{
+  name: 'mastra',
+  type: 'Mastra',
+  description: 'Mastra instance',
+  isOptional: false,
+},
+{
+  name: 'prefix',
+  type: 'string',
+  description: 'Route path prefix (e.g., `/api/v2`)',
+  isOptional: true,
+  defaultValue: "''",
+},
+{
+  name: 'openapiPath',
+  type: 'string',
+  description: 'Path to serve OpenAPI spec (e.g., `/openapi.json`)',
+  isOptional: true,
+  defaultValue: "''",
+},
+{
+  name: 'bodyLimitOptions',
+  type: '{ maxSize: number, onError: (err) => unknown }',
+  description: 'Request body size limits',
+  isOptional: true,
+},
+{
+  name: 'streamOptions',
+  type: '{ redact?: boolean }',
+  description: 'Stream redaction config. When true, redacts sensitive data from streams.',
+  isOptional: true,
+  defaultValue: '{ redact: true }',
+},
+{
+  name: 'customRouteAuthConfig',
+  type: 'Map<string, boolean>',
+  description:
+    'Per-route auth overrides. Keys are `METHOD:PATH` (e.g., `GET:/api/health`). Value `false` makes route public, `true` requires auth.',
+  isOptional: true,
+},
+{
+  name: 'tools',
+  type: 'Record<string, Tool>',
+  description: 'Available tools for the server',
+  isOptional: true,
+},
+{
+  name: 'taskStore',
+  type: 'InMemoryTaskStore',
+  description: 'Task store for A2A (Agent-to-Agent) operations',
+  isOptional: true,
+},
+{
+  name: 'mcpOptions',
+  type: 'MCPOptions',
+  typeDescription: '{ serverless?: boolean, sessionIdGenerator?: () => string }',
+  description:
+    'MCP transport options. Set `serverless: true` for stateless environments like Cloudflare Workers or Vercel Edge.',
+  isOptional: true,
+},
+]}
+/>
+
+## 호노와의 차이점 {/* #differences-from-hono */}
+
+| 측면 | 익스프레스 | 호노 |
+| - | - | - |
+| 본문 분석 | 필요하다`express.json()` | Handled by framework |
+| Context storage | `res.locals` | `c.get()` / `c.set()` |
+| Middleware signature | `(req, res, next)` | `(c, next)` |
+| Streaming | `res.write()` / `res.end()` | `stream()`도우미 |
+| 중단신호 | 다음에서 생성됨`req.on('close')` | `c.req.raw.signal` |
+
+## 커스텀 경로 추가 {/* #adding-custom-routes */}
+
+Express 앱에 직접 경로를 추가하세요.
+
+```typescript title="server.ts"
+const app = express()
+app.use(express.json())
+
+const server = new MastraServer({ app, mastra })
+
+// Before init - runs before Mastra middleware
+app.get('/early-health', (req, res) => res.json({ status: 'ok' }))
+
+await server.init()
+
+// After init - has access to Mastra context
+app.get('/custom', (req, res) => {
+  const mastraInstance = res.locals.mastra
+  res.json({ agents: Object.keys(mastraInstance.listAgents()) })
+})
+
+app.listen(4111)
+```
+
+:::팁
+
+이전에 추가된 경로`init()` run without Mastra context. Add routes after `init()` to access the Mastra instance and request context.
+
+:::
+
+다음과 같은 Mastra 관리 인증 및 경로 메타데이터를 원하는 경우`requiresAuth`, prefer [`registerApiRoute()`](/reference/server/register-api-route). For raw Express routes mounted directly on `app`, use `createAuthMiddleware()`:
+
+```typescript title="server.ts"
+import express from 'express'
+import { createAuthMiddleware, MastraServer } from '@mastra/express'
+import { mastra } from './mastra'
+
+const app = express()
+app.use(express.json())
+
+const server = new MastraServer({ app, mastra })
+await server.init()
+
+app.get('/custom/protected', createAuthMiddleware({ mastra }), (req, res) => {
+  const user = res.locals.requestContext.get('user')
+  res.json({ user })
+})
+
+app.get('/custom/public', createAuthMiddleware({ mastra, requiresAuth: false }), (req, res) => {
+  res.json({ ok: true })
+})
+```
+
+## 컨텍스트에 액세스 {/* #accessing-context */}
+
+Express 미들웨어 및 경로에서 다음을 통해 Mastra 컨텍스트에 액세스합니다.`res.locals`:
+
+```typescript
+app.get('/custom', (req, res) => {
+  const mastra = res.locals.mastra
+  const requestContext = res.locals.requestContext
+  const abortSignal = res.locals.abortSignal
+
+  const agent = mastra.getAgent('myAgent')
+  res.json({ agent: agent.name })
+})
+```
+
+사용 가능한 속성`res.locals`:
+
+| 열쇠 | 설명 |
+| - | - |
+|`mastra` | Mastra instance |
+| `requestContext` | Request context map |
+| `abortSignal` | Request cancellation signal |
+| `tools` | Available tools |
+| `taskStore` | Task store for A2A operations |
+| `customRouteAuthConfig` | Per-route auth overrides |
+| `user` | Authenticated user (if auth configured) |
+
+## 미들웨어 추가 {/* #adding-middleware */}
+
+이전 또는 이후에 Express 미들웨어 추가`init()`:
+
+```typescript title="server.ts"
+const app = express()
+app.use(express.json())
+
+// Middleware before init
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.url}`)
+  next()
+})
+
+const server = new MastraServer({ app, mastra })
+await server.init()
+
+// Middleware after init has access to Mastra context
+app.use((req, res, next) => {
+  const mastra = res.locals.mastra
+  next()
+})
+```
+
+## 수동 초기화 {/* #manual-initialization */}
+
+사용자 정의 미들웨어 주문의 경우 대신 각 메소드를 개별적으로 호출하십시오.`init()`. See [manual initialization](/docs/server/server-adapters#manual-initialization) for details.
+
+## 예 {/* #examples */}
+
+* [익스프레스 어댑터](https://github.com/mastra-ai/mastra/tree/main/examples/server-express-adapter): 기본 Express 서버 설정
+
+## 관련된 {/* #related */}
+
+* [서버 어댑터](/docs/server/server-adapters): 공유 어댑터 개념
+* [Mastra서버 참조](/reference/server/mastra-server): 전체 API 참조
+* [createRoute() 참조](/reference/server/create-route): 유형이 안전한 사용자 지정 경로 만들기

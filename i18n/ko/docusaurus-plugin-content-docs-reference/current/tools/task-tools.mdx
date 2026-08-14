@@ -1,0 +1,221 @@
+---
+title: "참고: 작업 Tool | Tool"
+description: "모든 Agent에 구조화된 작업 추적을 추가하는 내장 작업 Tool(task_write, task_update, task_complete, task_check)에 대한 API 참조입니다."
+packages:
+  - "@mastra/core"
+---
+
+# 작업 Tool
+
+Agent 실행을 위해 구조화된 작업 목록을 관리하는 4개의 기본 제공 Agent 독립적 Tool입니다. 작업 목록은 스레드 범위에 유지됩니다.`threadState`스토리지 도메인을 Agent에 투영하여[상태 신호](/docs/long-running-agents/signals)레인 그래서 살아남는다[관찰 기억](/docs/memory/observational-memory)잘림.
+
+작업 추적에는 Memory 지원 스레드가 필요합니다(`threadId` + `resourceId`). Without memory the tools return an error explaining that task tracking requires agent memory.
+
+권장 설정은[`TaskSignalProvider`](/reference/signals/task-signal-provider), which bundles all four tools and the `TaskStateProcessor` in a single registration. See [Built-in tools](/docs/agents/using-tools#task-tracking) for the conceptual guide.
+
+## 사용예 {/* #usage-example */}
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { TaskSignalProvider } from '@mastra/core/signals'
+
+const agent = new Agent({
+  id: 'coder',
+  name: 'Coder',
+  instructions: 'Track your progress with the task tools.',
+  model,
+  memory: new Memory(),
+  signals: [new TaskSignalProvider()],
+})
+```
+
+또는 Tool를 직접 가져옵니다.
+
+```typescript title="src/mastra/agents/index.ts"
+import { taskWriteTool, taskUpdateTool, taskCompleteTool, taskCheckTool } from '@mastra/core/tools'
+
+const agent = new Agent({
+  id: 'coder',
+  name: 'Coder',
+  instructions: 'Track your progress with the task tools.',
+  model,
+  memory: new Memory(),
+  tools: { taskWriteTool, taskUpdateTool, taskCompleteTool, taskCheckTool },
+})
+```
+
+## `task_write` {/* #task_write */}
+
+전체 작업 목록을 생성하거나 교체합니다. 각 호출은 이전 목록을 대체합니다.
+
+### 입력 스키마 {/* #input-schema */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'tasks',
+  type: 'TaskItemInput[]',
+  description: 'The complete updated task list.',
+  isOptional: false,
+  properties: [
+    {
+      type: 'TaskItemInput',
+      parameters: [
+        {
+          name: 'id',
+          type: 'string',
+          description:
+            "Stable task identifier (e.g. 'task_investigate_tests'). Keep this unchanged across updates. Auto-generated when omitted.",
+          isOptional: true,
+        },
+        {
+          name: 'content',
+          type: 'string',
+          description: "Task description in imperative form (e.g. 'Fix authentication bug').",
+        },
+        {
+          name: 'status',
+          type: "'pending' | 'in_progress' | 'completed'",
+          description: 'Current task status.',
+        },
+        {
+          name: 'activeForm',
+          type: 'string',
+          description: "Present continuous form shown during execution (e.g. 'Fixing authentication bug').",
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+### 산출 {/* #output */}
+
+다음을 반환합니다.`TaskToolResult` with a human-readable `content` summary, the full `tasks` array with assigned IDs, and an `isError` flag.
+
+### 행동 {/* #behavior */}
+
+* ID는 통화 내에서 고유해야 합니다. 중복된 명시적 ID는 대체를 생성합니다.
+* 기존 목록을 다시 작성하는 동안 ID가 생략되면 모호하지 않은 하나의 일치 작업은 안정성을 위해 이전 ID를 재사용합니다.
+* 하나의 작업만 가질 수 있습니다.`in_progress` status at a time. Submitting multiple `in_progress` tasks returns an error.
+
+## `task_update` {/* #task_update */}
+
+안정적인 ID로 하나의 작업을 업데이트합니다. 변경된 필드만 포함합니다.
+
+### 입력 스키마 {/* #input-schema-1 */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'The stable task identifier to update.',
+  isOptional: false,
+},
+{
+  name: 'content',
+  type: 'string',
+  description: 'New task description in imperative form.',
+  isOptional: true,
+},
+{
+  name: 'status',
+  type: "'pending' | 'in_progress' | 'completed'",
+  description: 'New task status.',
+  isOptional: true,
+},
+{
+  name: 'activeForm',
+  type: 'string',
+  description: 'New present continuous form.',
+  isOptional: true,
+},
+]}
+/>
+
+다음 중 적어도 하나`content`, `status`, or `activeForm` is required.
+
+### 행동 {/* #behavior-1 */}
+
+* 업데이트가 작업을 다음으로 설정하는 경우`in_progress`, any other `in_progress` task is automatically demoted to `pending`.
+* ID를 찾을 수 없는 경우 사용 가능한 작업 ID에 대한 오류를 반환합니다.
+
+## `task_complete` {/* #task_complete */}
+
+안정적인 ID로 하나의 작업을 완료된 것으로 표시합니다.
+
+### 입력 스키마 {/* #input-schema-2 */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'The stable task identifier to mark completed.',
+  isOptional: false,
+},
+]}
+/>
+
+### 행동 {/* #behavior-2 */}
+
+ID를 찾을 수 없는 경우 사용 가능한 작업 ID에 대한 오류를 반환합니다.
+
+## `task_check` {/* #task_check */}
+
+작업 목록의 완료 상태를 확인하세요. 입력 매개변수를 사용하지 않습니다.
+
+### 산출 {/* #output-1 */}
+
+다음을 반환합니다.`TaskCheckResult` with:
+
+<PropertiesTable
+  content={[
+{
+  name: 'content',
+  type: 'string',
+  description: 'Human-readable summary with task counts and incomplete task IDs.',
+},
+{
+  name: 'tasks',
+  type: 'TaskItem[]',
+  description: 'Full task list snapshot with stable IDs.',
+},
+{
+  name: 'summary',
+  type: 'TaskCheckSummary',
+  description: 'Structured counts.',
+  properties: [
+    {
+      type: 'TaskCheckSummary',
+      parameters: [
+        { name: 'total', type: 'number', description: 'Total tracked tasks.' },
+        { name: 'completed', type: 'number', description: 'Completed tasks.' },
+        { name: 'inProgress', type: 'number', description: 'In-progress tasks.' },
+        { name: 'pending', type: 'number', description: 'Pending tasks.' },
+        { name: 'incomplete', type: 'number', description: 'Tasks not yet completed (in-progress + pending).' },
+        { name: 'hasTasks', type: 'boolean', description: 'True when at least one task exists.' },
+        {
+          name: 'allCompleted',
+          type: 'boolean',
+          description: 'True when at least one task exists and every task is completed.',
+        },
+      ],
+    },
+  ],
+},
+{
+  name: 'incompleteTasks',
+  type: 'TaskItem[]',
+  description: 'Tasks that still need work (in-progress and pending).',
+},
+{
+  name: 'isError',
+  type: 'boolean',
+  description: 'Whether the check encountered an error.',
+},
+]}
+/>

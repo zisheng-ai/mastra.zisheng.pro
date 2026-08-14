@@ -1,0 +1,135 @@
+---
+title: "작업공간 | 마스트라 플랫폼"
+description: "각 Mastra 플랫폼 환경에 파일 시스템 스토리지용 공유 버킷과 명령 실행용 온디맨드 샌드박스가 있는 작업 공간을 제공하세요. 플랫폼은 배포에 필요한 리소스를 프로비저닝합니다."
+---
+
+# 작업공간
+
+작업공간은 Mastra 플랫폼이 배포 시 Agent에 프로비저닝하고 전달하는 런타임 리소스 세트입니다. 각 환경에는 고유한 작업 공간이 있으므로`production`그리고`staging`격리 상태를 유지하세요.
+
+모든 작업공간은 두 가지 기능을 제공합니다.
+
+* 하나**bucket** for filesystem storage, wrapped by [`PlatformFilesystem`](/reference/workspace/platform-filesystem). The bucket is a durable, environment-scoped store agents read from and write to across runs.
+* 수영장**on-demand sandboxes** for command execution, wrapped by [`PlatformSandbox`](/reference/workspace/platform-sandbox). Each `PlatformSandbox` instance provisions its own remote sandbox on `start()`그리고 그것을 파괴합니다`destroy()`. Agent는 일반적으로 세션당 많은 샌드박스를 가동하여 작업에 사용하고 놔둡니다.
+
+작업공간은 단일 범위로 지정됩니다.[environment](/docs/mastra-platform/environments), so `production` and `staging` don't share buckets or sandbox pools. The platform manages provisioning, authentication, and idle cleanup.
+
+## 작업공간이 프로비저닝되는 경우 {/* #when-workspaces-are-provisioned */}
+
+새 프로젝트에는 기본적으로 작업공간이 활성화되어 있습니다. 환경을 생성하면 플랫폼이 해당 환경에 대한 버킷을 자동으로 프로비저닝합니다. 샌드박스 기본 이미지는 배경에서 따뜻해지기 때문에 첫 번째`PlatformSandbox` call starts quickly.
+
+선택하지 않은 기존 프로젝트에는**Enable workspaces** action in the Workspaces tab. Enabling provisions a bucket for every environment on the project.
+
+예를 들어 샌드박스 공급자가 로드 중인 동안 환경에 대한 프로비저닝이 실패하면 작업 영역 탭에 실패가 표시되고 재시도가 제공됩니다. 환경 자체는 여전히 생성됩니다. 다시 시도할 때까지 작업공간만 사용할 수 없습니다.
+
+## 코드에서 작업공간 사용 {/* #use-the-workspace-from-your-code */}
+
+공급자 패키지를 설치합니다.
+
+```bash npm2yarn
+npm install @mastra/platform-workspace
+```
+
+공급자를 작업 공간으로 구성하고 이를 Mastra에 등록합니다.
+
+```typescript title="src/mastra/workspace.ts"
+import { Workspace } from '@mastra/core/workspace'
+import { PlatformFilesystem, PlatformSandbox } from '@mastra/platform-workspace'
+
+export const workspace = new Workspace({
+  filesystem: new PlatformFilesystem(),
+  sandbox: new PlatformSandbox(),
+})
+```
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { workspace } from './workspace'
+
+export const mastra = new Mastra({
+  workspace,
+})
+```
+
+`PlatformFilesystem`그리고`PlatformSandbox` read their configuration from environment variables, so you don't pass any options on the platform. The platform injects them at deploy time. See [Environment variables](#environment-variables).
+
+## 하나의 버킷, 많은 샌드박스 {/* #one-bucket-many-sandboxes */}
+
+`PlatformFilesystem`그리고`PlatformSandbox` have different lifecycles, which matters when you design agents.
+
+**`PlatformFilesystem`환경 버킷에 대한 수명이 긴 핸들입니다.**&#xD658;경의 모든 요청, 모든 Agent 및 모든 샌드박스는 동일한 객체 스토리지를 읽고 씁니다. Agent가 작성한 모든 내용은 명시적으로 삭제하지 않는 한 다음 요청 시 표시됩니다.
+
+**`PlatformSandbox`임시 샌드박스를 프로비저닝하기 위한 클라이언트입니다.**&#xAC01;`PlatformSandbox` instance owns one remote sandbox:
+
+* `start()`새로운 샌드박스를 프로비저닝하거나 통과한 후 다시 연결합니다.`sandboxId`).
+* `executeCommand()`이에 대해 명령을 실행합니다.
+* `destroy()`샌드박스를 무너뜨립니다.`stop()` is an alias.
+
+그만큼`sandbox` you pass to `Workspace` provides the tools an agent uses inside its own request. When your agent needs another isolated environment, for example a per-task workspace, a per-user tenant, or a background job that shouldn't touch the caller's shell state, construct another `PlatformSandbox`:
+
+```typescript title="src/mastra/tools/run-in-fresh-sandbox.ts"
+import { PlatformSandbox } from '@mastra/platform-workspace'
+
+export async function runInFreshSandbox(command: string) {
+  const sandbox = new PlatformSandbox()
+  await sandbox.start()
+  try {
+    return await sandbox.executeCommand(command)
+  } finally {
+    await sandbox.destroy()
+  }
+}
+```
+
+또는 구성된 샌드박스를 플릿의 템플릿으로 복제하여 복제가 자격 증명, 환경, 네트워크 격리 및 기본값을 반복하지 않고 상속하도록 합니다.
+
+```typescript
+const template = new PlatformSandbox({ networkIsolation: 'PRIVATE' })
+
+const perProjectSandbox = template.clone({ id: `project-${projectId}` })
+await perProjectSandbox.start()
+```
+
+보다[`PlatformSandbox` reference](/reference/workspace/platform-sandbox) for the full lifecycle, checkpoint recovery, reattachment, and clone options.
+
+## 환경변수 {/* #environment-variables */}
+
+작업공간이 있는 플랫폼 환경에서 실행되는 모든 배포는 다음 변수를 자동으로 받습니다.
+
+| 변수 | 목차 |
+| - | - |
+|`MASTRA_PLATFORM_ACCESS_TOKEN` | Platform-issued JSON Web Token (JWT) the workspace providers use to authenticate. The token is scoped to the deploy's organization and project. |
+| `MASTRA_PROJECT_ID` | Project the deploy belongs to. |
+| `MASTRA_ENVIRONMENT_ID` | Environment the deploy belongs to. Selects which sandbox pool the platform uses. |
+| `MASTRA_PLATFORM_BUCKET_NAME` | Bucket name attached to the environment. Selects which bucket `PlatformFilesystem` reads and writes. |
+
+이 이름은 예약되어 있습니다. 프로젝트에서 명시적으로 설정한 경우 플랫폼 관리 값이 우선 적용됩니다.
+
+## 지역 발전 {/* #local-development */}
+
+4개의 변수를`.env` file. Get the project, environment, and bucket values from your project's **Workspaces** tab. For `MASTRA_PLATFORM_ACCESS_TOKEN`, create an `sk_` API token on your organization's settings page under **API Tokens**. Platform deploys use an injected JWT instead.
+
+```bash title=".env"
+MASTRA_PLATFORM_ACCESS_TOKEN=sk_your-api-token
+MASTRA_PROJECT_ID=your-project-id
+MASTRA_ENVIRONMENT_ID=your-environment-id
+MASTRA_PLATFORM_BUCKET_NAME=your-bucket-name
+```
+
+`PlatformFilesystem`그리고`PlatformSandbox` behave the same locally as on the platform, they connect to the same bucket and sandbox pool for that environment. Use a `staging` or `preview` environment's variables for local runs if you want to keep production data isolated.
+
+플랫폼에 전혀 영향을 주지 않는 순수 오프라인 루프의 경우 공급자를 다음으로 교체하세요.[`LocalFilesystem`](/reference/workspace/local-filesystem) and [`LocalSandbox`](/reference/workspace/local-sandbox) in a local build.
+
+## 작업 공간 검사 {/* #inspect-the-workspace */}
+
+플랫폼 프로젝트의 작업공간 탭에는 환경별로 다음이 표시됩니다.
+
+* 업로드, 다운로드, 삭제 작업이 포함된 버킷 상태 및 해당 콘텐츠입니다.
+* 해당 명령, 종료 코드 및 기간이 포함된 최근 샌드박스 세션입니다.
+* 프로비저닝 실패**Retry** action.
+
+## 또한보십시오 {/* #see-also */}
+
+* [`PlatformFilesystem`](/reference/workspace/platform-filesystem): 파일 시스템 공급자에 대한 참조입니다.
+* [`PlatformSandbox`](/reference/workspace/platform-sandbox): 체크포인트 복구 및 복제를 포함한 샌드박스 공급자에 대한 참조입니다.
+* [환경](/docs/mastra-platform/environments): 환경이 작업 공간, 변수 및 데이터베이스의 범위를 지정하는 방법입니다.

@@ -1,0 +1,310 @@
+---
+title: "Kubernetes에 Mastra 배포 | 전개"
+description: "공유 게시/구독 및 스토리지를 사용하여 Kubernetes의 여러 포드에 Mastra 애플리케이션을 배포합니다."
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# Kubernetes에 Mastra 배포
+
+여러 포드에서 Mastra 애플리케이션을 실행합니다.[Kubernetes](https://kubernetes.io/)이므로 로드 밸런서 뒤에서 수평으로 확장됩니다. 각 Pod는 별도의 프로세스이므로 Pod는 게시/구독 백엔드와 데이터베이스를 공유해야 합니다. 그렇지 않으면 한 Pod에서 시작된 작업이 다른 Pod에서 보이지 않습니다.
+
+:::정보
+이 가이드에서는[Mastra server](/docs/server/mastra-server). If you're using a [server adapter](/docs/server/server-adapters)또는[웹 프레임워크](/docs/deployment/web-framework), 해당 프레임워크에 대해 일반적인 방식으로 배포합니다.
+:::
+
+:::경고
+다중 포드 지원은 다음에 의존합니다.[durable agents](/docs/long-running-agents/durable-agents), which are currently in **beta**. APIs may change in minor versions. Read [Known limitations](#known-limitations) before you rely on this in production.
+:::
+
+## 시작하기 전에 {/* #before-you-begin */}
+
+다음이 필요합니다.
+
+* 에이[Mastra application](/guides/getting-started/quickstart)
+* 에이[Kubernetes](https://kubernetes.io/docs/setup/) cluster and [`kubectl`](https://kubernetes.io/docs/tasks/tools/)
+* 클러스터가 가져올 수 있는 컨테이너 레지스트리
+* 공유[Redis](https://redis.io/) instance, reachable from every pod
+* 공유[PostgreSQL](https://www.postgresql.org/) database, reachable from every pod
+
+## 여러 포드에 공유 인프라가 필요한 이유 {/* #why-multiple-pods-need-shared-infrastructure */}
+
+단일 Pod는 자체 Memory에 실행 상태를 유지합니다. 모든 요청이 동일한 프로세스에 도달하므로 하나의 Pod를 사용하는 것은 괜찮습니다. Pod 전체에서 중단됩니다. 사용자의 다음 요청이 Pod B로 라우팅되는 동안 브라우저는 Pod A에서 스트리밍할 수 있으며 Pod B에는 Pod A에서의 실행 기록이 없습니다.
+
+Redis와 Postgres는 이러한 격차를 해소합니다.
+
+* **게시/구독**포드 간에 이벤트를 전달합니다. 하나의 Pod에 이벤트가 게시되면 다른 Pod에서도 이를 수신합니다. 마스트라는 다음과 같은 용도로 사용합니다.[`RedisStreamsPubSub`](/reference/pubsub/redis-streams), which also provides the per-thread leasing that keeps a single pod as the owner of a conversation at a time. See [PubSub](/docs/server/pubsub).
+* **저장**실행 상태를 유지합니다.[Durable agents](/docs/long-running-agents/durable-agents) save each run as a workflow snapshot, so any pod can resume a run from the database after a restart or when a request is routed elsewhere.
+
+## 공유 인프라 구성 {/* #configure-shared-infrastructure */}
+
+포인트`Mastra` instance at Redis and Postgres. Read the connection details from environment variables so the same image runs in every pod.
+
+백엔드를 설치합니다.
+
+```bash npm2yarn
+npm install @mastra/redis-streams @mastra/pg @mastra/redis ioredis
+```
+
+Pub/Sub, 스토리지, 공유 캐시를 구성합니다.`Mastra` instance:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RedisStreamsPubSub } from '@mastra/redis-streams'
+import { RedisServerCache } from '@mastra/redis'
+import { PostgresStore } from '@mastra/pg'
+import Redis from 'ioredis'
+
+export const mastra = new Mastra({
+  // Carries events between pods, and provides
+  // per-thread leases so one pod owns a conversation at a time.
+  pubsub: new RedisStreamsPubSub({
+    url: process.env.REDIS_URL!,
+  }),
+  // Persists run state so any pod can resume a run.
+  storage: new PostgresStore({
+    id: 'mastra-storage',
+    connectionString: process.env.DATABASE_URL!,
+  }),
+  // Shared event cache so a reconnecting client can replay missed chunks
+  // from any pod, not only the one that started the run.
+  cache: new RedisServerCache({ client: new Redis(process.env.REDIS_URL!) }),
+})
+```
+
+그만큼`cache` is what makes resumable streams work across pods. A reconnecting client replays missed events from this cache, so it must be shared. The default in-memory cache only serves replays within one process.
+
+## 내구성 Agent 사용 {/* #use-durable-agents */}
+
+평원[`Agent`](/docs/agents/overview) keeps its stream and approval state in one pod's memory, so those don't survive a request landing on another pod. A [durable agent](/docs/long-running-agents/durable-agents) runs the agentic loop inside a workflow and persists its state, so any pod can observe or resume the same run.
+
+Agent를 다음으로 감싸십시오.`createDurableAgent()`:
+
+```typescript title="src/mastra/agents/assistant.ts"
+import { Agent } from '@mastra/core/agent'
+import { createDurableAgent } from '@mastra/core/agent/durable'
+
+const agent = new Agent({
+  id: 'assistant',
+  name: 'Assistant',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+export const durableAssistant = createDurableAgent({ agent })
+```
+
+내구성 Agent를 등록합니다.`Mastra` instance above. Its run state now lives in Postgres and its events flow through Redis, so the run is reachable from every pod.
+
+## 배포 {/* #deploy */}
+
+<Steps>
+  <StepItem>
+    Mastra 서버를 구축하고 컨테이너화한 다음 이미지를 레지스트리에 푸시합니다. 따라가다[Mastra server](/docs/server/mastra-server) guide for the build, and ensure the server reads `process.env.PORT` and listens on `0.0.0.0`.
+  </StepItem>
+
+  <StepItem>
+    공유 연결 문자열을 비밀로 저장합니다.
+
+    ```bash
+    kubectl create secret generic mastra-secrets \
+      --from-literal=REDIS_URL='redis://redis:6379' \
+      --from-literal=DATABASE_URL='postgresql://user:pass@postgres:5432/mastra'
+    ```
+  </StepItem>
+
+  <StepItem>
+    이미지를 실행하는 배포를 적용하고 공유 비밀을 읽습니다. 하나의 복제본으로 시작하여 첫 번째 Pod가 자체적으로 데이터베이스 스키마를 생성한 후 다음 단계에서 확장합니다.
+
+    ```yaml title="deployment.yaml"
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: mastra
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: mastra
+      template:
+        metadata:
+          labels:
+            app: mastra
+        spec:
+          containers:
+            - name: mastra
+              image: your-registry/mastra:latest
+              ports:
+                - containerPort: 8080
+              env:
+                - name: PORT
+                  value: '8080'
+              envFrom:
+                - secretRef:
+                    name: mastra-secrets
+              readinessProbe:
+                tcpSocket:
+                  port: 8080
+              livenessProbe:
+                tcpSocket:
+                  port: 8080
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 512Mi
+    ```
+
+    그만큼`resources.requests.cpu` value is required for the HorizontalPodAutoscaler below. Kubernetes calculates CPU utilization as usage divided by the requested amount, so without a CPU request the autoscaler can't compute a target and won't scale.
+
+    ```bash
+    kubectl apply -f deployment.yaml
+    ```
+
+    첫 번째 Pod가 준비되면 확장합니다.
+
+    ```bash
+    kubectl wait --for=condition=available deployment/mastra
+    kubectl scale deployment/mastra --replicas=3
+    ```
+
+    :::참고
+    모든 복제본은 동일한 이미지를 실행하고 동일한 Redis 및 Postgres에 연결됩니다. 포드 수가 아닌 공유 인프라를 통해 포드 간을 실행할 수 있습니다.
+    :::
+  </StepItem>
+
+  <StepItem>
+    서비스를 사용하여 배포를 노출합니다.
+
+    ```yaml title="service.yaml"
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: mastra
+    spec:
+      selector:
+        app: mastra
+      ports:
+        - port: 80
+          targetPort: 8080
+    ```
+
+    ```bash
+    kubectl apply -f service.yaml
+    ```
+  </StepItem>
+
+  <StepItem>
+    HorizonPodAutoscaler를 사용하여 복제본을 자동으로 확장합니다.
+
+    ```yaml title="hpa.yaml"
+    apiVersion: autoscaling/v2
+    kind: HorizontalPodAutoscaler
+    metadata:
+      name: mastra
+    spec:
+      scaleTargetRef:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: mastra
+      minReplicas: 3
+      maxReplicas: 10
+      metrics:
+        - type: Resource
+          resource:
+            name: cpu
+            target:
+              type: Utilization
+              averageUtilization: 70
+    ```
+
+    ```bash
+    kubectl apply -f hpa.yaml
+    ```
+
+    :::참고
+    CPU 기반 자동 확장에는 다음이 필요합니다.[metrics-server](https://github.com/kubernetes-sigs/metrics-server) running in the cluster. Managed clusters like GKE, EKS, and AKS include it. Local clusters like kind and minikube don't, so enable it there first (for example, `minikube addons enable metrics-server`).
+    :::
+  </StepItem>
+
+  <StepItem>
+    포드가 실행 중인지 확인합니다.
+
+    ```bash
+    kubectl get pods -l app=mastra
+    ```
+
+    하나의 터미널에서 서비스를 전달합니다. 이 명령은 포그라운드에 유지됩니다.
+
+    ```bash
+    kubectl port-forward service/mastra 8080:80
+    ```
+
+    두 번째 터미널에서 API를 호출합니다.
+
+    ```bash
+    curl http://localhost:8080/api/agents
+    ```
+
+    Agent의 JSON 목록은 배포가 제공되고 있음을 의미합니다.
+
+    :::경고
+    설정[authentication](/docs/server/auth) before exposing your endpoints publicly.
+    :::
+  </StepItem>
+</Steps>
+
+## 스트리밍 및 재연결 {/* #streaming-and-reconnection */}
+
+내구성 있는 Agent는 공유 게시/구독을 통해 실행별 주제에 스트림 청크를 게시합니다. 연결을 끊은 클라이언트는 호출을 통해 다시 연결됩니다.`observe()` with the run's ID, and replays the chunks it missed from the shared cache:
+
+```typescript title="src/server/reconnect.ts"
+const { output, cleanup } = await durableAssistant.observe(runId)
+
+for await (const chunk of output.fullStream) {
+  // Chunks from the run, including any missed while disconnected
+}
+
+cleanup()
+```
+
+실행 상태는 Postgres에 있고 이벤트는 Redis에 있으므로 실행을 시작한 Pod뿐만 아니라 모든 Pod에서 다시 연결 요청을 처리할 수 있습니다. 보다[Resumable streams](/docs/long-running-agents/durable-agents#resumable-streams).
+
+여러 클라이언트가 동일한 실행을 동시에 관찰할 수 있습니다. 각`observe()` call receives the full stream, so a user watching from two devices, or two people following the same run, stay in sync.
+
+## 포드 전체의 Tool 승인 {/* #tool-approval-across-pods */}
+
+내구성 있는 Agent는 사람이 승인할 때까지 Tool 호출을 일시 중지합니다. 일시 중지된 실행은 Postgres에 저장되므로 실행을 시작한 Pod뿐만 아니라 모든 Pod에 승인이 도착할 수 있습니다.
+
+승인이 필요한 실행을 시작합니다.
+
+```typescript title="src/server/approval.ts"
+const { runId } = await durableAssistant.stream('Delete the archived records', {
+  requireToolApproval: true,
+  memory: { thread: 'thread-1', resource: 'user-1' },
+})
+```
+
+Tool가 실행되기 전에 실행이 일시 중단됩니다. 나중에 어떤 포드에서든 승인하세요.
+
+```typescript
+await durableAssistant.resume(runId, { approved: true })
+```
+
+승인을 처리하는 Pod는 Postgres에서 일시 중단된 실행을 로드합니다. 그런 다음 승인된 Tool를 실행하고 공유 게시/구독을 통해 결과를 게시하므로 실행을 관찰하는 클라이언트가 연속 내용을 받게 됩니다. 보다[Tool approval](/docs/long-running-agents/durable-agents#tool-approval).
+
+## 알려진 제한사항 {/* #known-limitations */}
+
+* 기본 in-process 설정은 한 Pod의 Memory에 실행 상태를 유지하고 이를 Pod 간에 공유하지 않습니다. 사용[durable agents](/docs/long-running-agents/durable-agents) with shared Redis and Postgres so streaming, approvals, and reconnection work across pods.
+* 포드 간 스트리밍, 승인 및 재연결에는 내구성 있는 Agent 경로가 필요합니다. 일반 Agent는 실행 상태를 Memory에 유지하고 다른 Pod에서 다시 시작하지 않습니다.
+* 초기화되지 않은 데이터베이스에 대해 여러 포드가 동시에 시작되면 스키마 생성을 위해 경쟁할 수 있으며 포드가 시작되지 않을 수 있습니다. 하나의 복제본으로 시작하여 스키마가 한 번 생성된 다음 확장됩니다.
+* 더 엄격한 설정을 위해 앱 외부에서 스키마를 초기화하고(예: 일회성 Kubernetes 작업) 설정합니다.`disableInit: true` on the `PostgresStore` in every pod.
+
+## 관련된 {/* #related */}
+
+* [PubSub](/docs/server/pubsub)
+* [내구성 있는 Agent](/docs/long-running-agents/durable-agents)
+* [노동자](/docs/deployment/workers): 백그라운드 처리를 Kubernetes의 별도 컨테이너로 분할합니다.
+* [작업자 배포 가이드](/guides/deployment/mastra-workers): 오케스트레이션, 스케줄러 및 백그라운드 작업 작업자를 위한 전체 Kubernetes 매니페스트
+* [마스트라 서버](/docs/server/mastra-server)
+* [배포 개요](/docs/deployment/overview)

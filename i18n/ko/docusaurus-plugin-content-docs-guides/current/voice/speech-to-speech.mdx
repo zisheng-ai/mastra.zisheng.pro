@@ -1,0 +1,290 @@
+---
+title: "Mastra의 음성-음성 기능 | 목소리"
+description: "실시간 상호 작용 및 이벤트 중심 아키텍처를 포함하여 Mastra의 음성 간 기능 개요입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/node-audio"
+  - "@mastra/voice-aws-nova-sonic"
+  - "@mastra/voice-google-gemini-live"
+  - "@mastra/voice-inworld"
+  - "@mastra/voice-openai-realtime"
+---
+
+# Mastra의 음성 대 음성 기능
+
+## 소개 {/* #introduction */}
+
+Mastra의 STS(Speech-to-Speech)는 여러 공급자 간의 실시간 상호 작용을 위한 표준화된 인터페이스를 제공합니다.
+STS는 실시간 Model의 이벤트를 청취하여 지속적인 양방향 오디오 통신을 가능하게 합니다. 별도의 TTS 및 STT 작업과 달리 STS는 양방향으로 지속적으로 음성을 처리하는 개방형 연결을 유지합니다.
+
+## 구성 {/* #configuration */}
+
+* **`apiKey`**: OpenAI API 키입니다. 로 다시 떨어진다`OPENAI_API_KEY` environment variable.
+* **`model`**: 실시간 음성 상호작용에 사용할 Model ID(예:`gpt-5.1-realtime`).
+* **`speaker`**: 음성 합성을 위한 기본 음성 ID입니다. 음성 출력에 사용할 음성을 지정할 수 있습니다.
+
+```typescript
+const voice = new OpenAIRealtimeVoice({
+  apiKey: 'your-openai-api-key',
+  model: 'gpt-5.1-realtime',
+  speaker: 'alloy', // Default voice
+})
+
+// If using default settings the configuration can be simplified to:
+const voice = new OpenAIRealtimeVoice()
+```
+
+## STS 사용 {/* #using-sts */}
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { OpenAIRealtimeVoice } from '@mastra/voice-openai-realtime'
+import { playAudio, getMicrophoneStream } from '@mastra/node-audio'
+
+const agent = new Agent({
+  id: 'agent',
+  name: 'OpenAI Realtime Agent',
+  instructions: `You are a helpful assistant with real-time voice capabilities.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  voice: new OpenAIRealtimeVoice(),
+})
+
+// Connect to the voice service
+await agent.voice.connect()
+
+// Listen for agent audio responses
+agent.voice.on('speaker', ({ audio }) => {
+  playAudio(audio)
+})
+
+// Initiate the conversation
+await agent.voice.speak('How can I help you today?')
+
+// Send continuous audio from the microphone
+const micStream = getMicrophoneStream()
+await agent.voice.send(micStream)
+```
+
+Agent의 음성 제공자에 대한 광범위한 개요는 다음을 참조하세요.[Voice in Mastra](/guides/voice/overview).
+
+## 실시간 세션에서 Tool 사용 {/* #use-tools-in-realtime-sessions */}
+
+실시간 음성 제공자는 Agent에 구성된 Tool를 사용할 수 있습니다. Tool를`Agent` definition, then connect and send audio through the voice provider:
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { OpenAIRealtimeVoice } from '@mastra/voice-openai-realtime'
+import { calculate, search } from '../tools'
+
+export const agent = new Agent({
+  id: 'speech-to-speech-agent',
+  name: 'Speech-to-Speech Agent',
+  instructions: 'You are a helpful assistant with speech-to-speech capabilities.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: {
+    search,
+    calculate,
+  },
+  voice: new OpenAIRealtimeVoice(),
+})
+```
+
+## 실시간 이벤트 듣기 {/* #listen-for-realtime-events */}
+
+실시간 음성 제공자는 UI 업데이트, 보조 오디오 재생, 기록 기록 및 오류 처리에 사용할 수 있는 이벤트를 내보냅니다.
+
+```typescript
+agent.voice.on('speaking', ({ audio }) => {
+  playAudio(audio)
+})
+
+agent.voice.on('writing', ({ text, role }) => {
+  console.log(`${role}: ${text}`)
+})
+
+agent.voice.on('error', error => {
+  console.error('Voice error:', error)
+})
+```
+
+이벤트 이름과 페이로드는 공급자에 따라 다릅니다. 전체 이벤트 목록을 보려면 아래 공급자 섹션이나 공급자 참조를 확인하세요.
+
+## 세션별 ​​음성 인스턴스 {/* #per-session-voice-instances */}
+
+정적`voice` instance is shared across every request. This works for one-shot text-to-speech, but real-time and speech-to-speech providers store session state such as the WebSocket connection, tools, instructions, and request context. If one agent handles several live sessions at once, a shared instance can let one session overwrite another session's state.
+
+제공하다`voice` as a resolver when each live session needs its own voice instance. Mastra runs the resolver on each `getVoice()` call and returns a fresh instance for that request context:
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { RequestContext } from '@mastra/core/request-context'
+import { OpenAIRealtimeVoice } from '@mastra/voice-openai-realtime'
+
+export const agent = new Agent({
+  id: 'support-line',
+  name: 'Support Line',
+  instructions: ({ requestContext }) => `Help user ${requestContext.get('user')}.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  voice: ({ requestContext }) =>
+    new OpenAIRealtimeVoice({
+      apiKey: requestContext.get('apiKey'),
+    }),
+})
+
+const requestContext = new RequestContext()
+requestContext.set('user', 'user-123')
+requestContext.set('apiKey', process.env.OPENAI_API_KEY)
+
+const voice = await agent.getVoice({ requestContext })
+await voice.connect()
+```
+
+리졸버를 사용하는 경우:
+
+* 각 호출은`getVoice()` returns a new instance, so concurrent sessions don't share state.
+* Mastra는 리졸버 인스턴스에 Tool나 지침을 추가하지 않습니다. 확인자 내부 또는 공급자에서 구성합니다.
+* 반환된 인스턴스 수명 주기를 소유하고 있으므로 다음을 호출하세요.`disconnect()` or `close()` when the session ends.
+
+그만큼`agent.voice` getter has no request context, so it throws when `voice` is a resolver. Use `agent.getVoice({ requestContext })` instead.
+
+## Google Gemini 라이브(실시간) {/* #google-gemini-live-realtime */}
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { GeminiLiveVoice } from '@mastra/voice-google-gemini-live'
+import { playAudio, getMicrophoneStream } from '@mastra/node-audio'
+
+const agent = new Agent({
+  id: 'agent',
+  name: 'Gemini Live Agent',
+  instructions: 'You are a helpful assistant with real-time voice capabilities.',
+  // Model used for text generation; voice provider handles realtime audio
+  model: '__GATEWAY_OPENAI_MODEL__',
+  voice: new GeminiLiveVoice({
+    apiKey: process.env.GOOGLE_API_KEY,
+    model: 'gemini-2.0-flash-exp',
+    speaker: 'Puck',
+    debug: true,
+    // Vertex AI option:
+    // vertexAI: true,
+    // project: 'your-gcp-project',
+    // location: 'us-central1',
+    // serviceAccountKeyFile: '/path/to/service-account.json',
+  }),
+})
+
+await agent.voice.connect()
+
+agent.voice.on('speaker', ({ audio }) => {
+  playAudio(audio)
+})
+
+agent.voice.on('writing', ({ role, text }) => {
+  console.log(`${role}: ${text}`)
+})
+
+await agent.voice.speak('How can I help you today?')
+
+const micStream = getMicrophoneStream()
+await agent.voice.send(micStream)
+```
+
+메모:
+
+* 라이브 API에는 다음이 필요합니다.`GOOGLE_API_KEY`. Vertex AI requires project/location and service account credentials.
+* 이벤트:`speaker` (audio stream), `writing` (text), `turnComplete`, `usage`, and `error`.
+
+## AWS Nova Sonic(실시간) {/* #aws-nova-sonic-realtime */}
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { NovaSonicVoice } from '@mastra/voice-aws-nova-sonic'
+import { playAudio, getMicrophoneStream } from '@mastra/node-audio'
+
+const agent = new Agent({
+  id: 'agent',
+  name: 'Nova Sonic Agent',
+  instructions: 'You are a helpful assistant with real-time voice capabilities.',
+  // Model used for text generation; voice provider handles realtime audio
+  model: '__GATEWAY_OPENAI_MODEL__',
+  voice: new NovaSonicVoice({
+    region: 'us-east-1',
+    speaker: 'matthew',
+    // Static credentials are optional. The default AWS credential provider
+    // chain is used when none are passed.
+  }),
+})
+
+await agent.voice.connect()
+
+// Assistant audio is emitted as 16-bit PCM on the `speaking` event
+agent.voice.on('speaking', ({ audioData }) => {
+  if (audioData) playAudio(audioData)
+})
+
+agent.voice.on('writing', ({ role, text }) => {
+  console.log(`${role}: ${text}`)
+})
+
+await agent.voice.speak('How can I help you today?')
+
+const micStream = getMicrophoneStream()
+await agent.voice.send(micStream)
+```
+
+메모:
+
+* 사용 가능한 지역:`us-east-1`, `us-west-2`, and `ap-northeast-1`.
+* 표준 AWS 자격 증명 공급자 체인을 통해 인증합니다. 통과하다`credentials` to override.
+* 이벤트:`speaking` (Int16Array audio), `writing` (text with `generationStage`), `toolCall`, `interrupt`, `turnComplete`, `usage`, `session`, and `error`.
+
+## 인월드 실시간 {/* #inworld-realtime */}
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { InworldRealtimeVoice } from '@mastra/voice-inworld'
+import { playAudio, getMicrophoneStream } from '@mastra/node-audio'
+
+const agent = new Agent({
+  id: 'agent',
+  name: 'Inworld Realtime Agent',
+  instructions: 'You are a helpful assistant with real-time voice capabilities.',
+  // Model used for text generation; voice provider handles realtime audio
+  model: '__GATEWAY_OPENAI_MODEL__',
+  voice: new InworldRealtimeVoice({
+    apiKey: process.env.INWORLD_API_KEY,
+    model: 'inworld/models/gemma-4-26b-a4b-it',
+    speaker: 'Sarah',
+    // Typed Inworld realtime knobs (semantic VAD, playback speed, etc.)
+    // session: {
+    //   audio: {
+    //     output: { speed: 1.1 },
+    //     input: { turn_detection: { type: 'semantic_vad', eagerness: 'high' } },
+    //   },
+    // },
+  }),
+})
+
+await agent.voice.connect()
+
+agent.voice.on('speaker', stream => {
+  playAudio(stream)
+})
+
+agent.voice.on('writing', ({ role, text }) => {
+  console.log(`${role}: ${text}`)
+})
+
+await agent.voice.speak('How can I help you today?')
+
+const micStream = getMicrophoneStream()
+await agent.voice.send(micStream)
+```
+
+메모:
+
+* 필요하다`INWORLD_API_KEY`. Inworld API keys are pre-Basic-encoded: paste them verbatim.
+* WebSocket URL은 클라이언트가 생성한 URL을 추가합니다.`?key=...&protocol=realtime`. The model is configured via the initial `session.update`, not in the URL.
+* Inworld의 유선 프로토콜은 OpenAI Realtime GA 사양이므로 이벤트 이름이 일치합니다.`@mastra/voice-openai-realtime`.
+* 입력된 Inworld 실시간 노브(MCP Tool 라우팅, 의미론적 VAD 열망, 재생 속도, 전사 Model, 출력 양식 등)는 다음을 통해 노출됩니다.`session` constructor field. An untyped `providerData` escape hatch is also deep-merged for forward compatibility with new Inworld features.
+* 이벤트:`speaker` (PCM audio stream), `speaking` (audio Buffer per delta), `writing` (text), `conversation.item.added`, `conversation.item.done`, `function_call.arguments`, `tool-call-start`, `tool-call-result`, and `error`.

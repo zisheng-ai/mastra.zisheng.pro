@@ -1,0 +1,307 @@
+---
+title: "Memory | v1 마이그레이션 가이드"
+description: "v1으로 업그레이드할 때 Memory 관련 변경 사항을 마이그레이션하는 방법을 알아보세요."
+---
+
+# Memory
+
+이제 Memory 구성에는 명시적인 매개변수가 필요하며 더 나은 성능과 예측 가능성을 위해 기본 설정이 업데이트되었습니다.
+
+## 변경됨 {/* #changed */}
+
+### 의미 회상 및 마지막 메시지에 대한 기본 설정 {/* #default-settings-for-semantic-recall-and-last-messages */}
+
+기본 설정은 사용 패턴에 따라 보다 합리적인 값으로 변경되었습니다. 그만큼`lastMessages` default decreased from 40 to 10, `semanticRecall` is now disabled by default, and thread title generation is disabled by default. These changes improve performance and reduce unexpected LLM API calls.
+
+마이그레이션하려면 이전 기본값을 사용하는 경우 이러한 설정을 명시적으로 구성합니다.
+
+```diff
+  const memory = new Memory({
+    storage,
+    vector,
+    embedder,
++   options: {
++     lastMessages: 40, // Was default before
++     semanticRecall: {
++       topK: 2,
++       messageRange: 2,
++       scope: 'thread',
++     }, // Was enabled by default before
++     generateTitle: true, // Was enabled by default before
++   },
+  });
+```
+
+### 기본 Memory 범위:`thread` to `resource` {/* #default-memory-scope-from-thread-to-resource */}
+
+작업 Memory와 의미 회상의 기본 범위가 다음에서 변경되었습니다.`'thread'` to `'resource'`. This change aligns with common use cases where applications want to remember user information across conversations. When semantic recall is enabled, it now defaults to searching across all user conversations rather than the current thread.
+
+마이그레이션하려면 대화 스레드별로 Memory가 격리되는 이전 동작을 유지하려면 명시적으로 설정하십시오.`scope: 'thread'`.
+
+```diff
+  const memory = new Memory({
+    storage,
+    vector,
+    embedder,
+    options: {
+      workingMemory: {
+        enabled: true,
++       scope: 'thread', // Explicitly set to thread-scoped
+        template: `# User Profile...`,
+      },
+      semanticRecall: {
+        topK: 3,
++       scope: 'thread', // Explicitly set to thread-scoped
+      },
+    },
+  });
+```
+
+### 스레드 제목 생성 위치 {/* #thread-title-generation-location */}
+
+그만큼`generateTitle` option has been moved from `threads.generateTitle` to the top-level of memory options. This change simplifies the API by moving the option to where it logically belongs.
+
+마이그레이션하려면 이동하세요.`generateTitle` from the `threads` config to the top level of options.
+
+```diff
+  const memory = new Memory({
+    storage,
+    vector,
+    embedder,
+    options: {
+-     threads: {
+-       generateTitle: true,
+-     },
++     generateTitle: true,
+    },
+  });
+```
+
+### 의미적 회상 기본 설정 최적화 {/* #semantic-recall-default-settings-optimization */}
+
+의미적 회상의 기본 설정은 RAG 연구를 기반으로 최적화되었습니다. 그만큼`topK` increased from 2 to 4, and `messageRange` changed from `{ before: 2, after: 2 }` to `{ before: 1, after: 1 }`. These changes provide better accuracy while only slightly increasing message count.
+
+마이그레이션하려면 이전 기본값을 사용하는 경우 이러한 값을 명시적으로 설정하십시오.
+
+```diff
+  const memory = new Memory({
+    storage,
+    vector,
+    embedder,
+    options: {
+      semanticRecall: {
++       topK: 2, // Was default before
++       messageRange: { before: 2, after: 2 }, // Was default before
+      },
+    },
+  });
+```
+
+### `memory.readOnly`이사했다`memory.options.readOnly` {/* #memoryreadonly-moved-to-memoryoptionsreadonly */}
+
+그만큼`readOnly` property has been moved from the top-level of the memory option to inside `options`. This change aligns `readOnly` with other memory configuration options like `lastMessages` and `semanticRecall`.
+
+마이그레이션하려면 이동하세요.`readOnly` from the top level to inside `options`.
+
+```diff
+  agent.stream('Hello', {
+    memory: {
+      thread: threadId,
+      resource: resourceId,
+-     readOnly: true,
++     options: {
++       readOnly: true,
++     },
+    },
+  });
+```
+
+:::팁\[코드모드]
+
+Mastra의 codemod CLI를 사용하여 코드를 자동으로 업데이트할 수 있습니다.
+
+```bash
+npx @mastra/codemod@latest v1/memory-readonly-to-options .
+```
+
+:::
+
+### `Memory.query()`다음으로 이름이 변경됨`Memory.recall()` {/* #memoryquery-renamed-to-memoryrecall */}
+
+그만큼`Memory.query()` method has been renamed to `Memory.recall()`. The new method returns a simpler format with `{ messages: MastraDBMessage[] }` instead of multiple format variations. This change better describes the action of retrieving messages from memory and simplifies the API.
+
+마이그레이션하려면 이름을 바꾸세요.`query()` to `recall()` and update code that expects the old return format.
+
+```diff
+- const result = await memory.query({ threadId: 'thread-123' });
++ const result = await memory.recall({ threadId: 'thread-123' });
+- // result: { messages: CoreMessage[], uiMessages: UIMessageWithMetadata[], messagesV2: MastraMessageV2[] }
++ // result: { messages: MastraDBMessage[] }
++ const messages = result.messages;
+```
+
+:::팁\[코드모드]
+
+Mastra의 codemod CLI를 사용하여 코드를 자동으로 업데이트할 수 있습니다.
+
+```bash
+npx @mastra/codemod@latest v1/memory-query-to-recall .
+```
+
+:::
+
+### `Memory.recall()`매개변수 변경 {/* #memoryrecall-parameter-changes */}
+
+그만큼`Memory.recall()` method now uses `StorageListMessagesInput` format with pagination, and the `vectorMessageSearch` parameter has been renamed to `vectorSearchString`. These changes align the memory API with the storage pagination API and provide more consistent naming.
+
+마이그레이션하려면 메소드 이름, 쿼리 매개변수 및 벡터 검색 매개변수를 업데이트하세요.
+
+```diff
+- memory.query({
++ memory.recall({
+    threadId: 'thread-123',
+-   vectorMessageSearch: 'What did we discuss?',
+-   selectBy: { ... },
++   vectorSearchString: 'What did we discuss?',
++   page: 0,
++   perPage: 20,
++   orderBy: 'createdAt',
++   filter: { ... },
++   threadConfig: { semanticRecall: true },
+  });
+```
+
+:::팁\[코드모드]
+
+Mastra의 codemod CLI를 사용하여 코드를 자동으로 업데이트할 수 있습니다.
+
+```bash
+npx @mastra/codemod@latest v1/memory-vector-search-param .
+```
+
+:::
+
+### `MastraMessageV2`다음으로 이름이 변경된 유형`MastraDBMessage` {/* #mastramessagev2-type-renamed-to-mastradbmessage */}
+
+그만큼`MastraMessageV2` type has been renamed to `MastraDBMessage` for clarity. This change better describes the purpose of this type as the database message format.
+
+마이그레이션하려면 다음의 모든 인스턴스를 교체하세요.`MastraMessageV2` with `MastraDBMessage`.
+
+```diff
+- import { MastraMessageV2 } from '@mastra/core';
+- function yourCustomFunction(input: MastraMessageV2) {}
++ import { MastraDBMessage } from '@mastra/core';
++ function yourCustomFunction(input: MastraDBMessage) {}
+```
+
+:::팁\[코드모드]
+
+Mastra의 codemod CLI를 사용하여 코드를 자동으로 업데이트할 수 있습니다.
+
+```bash
+npx @mastra/codemod@latest v1/memory-message-v2-type .
+```
+
+:::
+
+## 제거됨 {/* #removed */}
+
+### 작업기억`text-stream` mode {/* #working-memory-text-stream-mode */}
+
+작업기억`use: "text-stream"` option has been removed. Only `tool-call` mode is supported. This change simplifies the working memory API by removing the less reliable streaming mode.
+
+마이그레이션하려면`use: "text-stream"` option. Working memory will default to tool-call mode.
+
+```diff
+  const memory = new Memory({
+    storage,
+    vector,
+    embedder,
+    options: {
+      workingMemory: {
+        enabled: true,
+-       use: 'text-stream',
+        template: '...',
+      },
+    },
+  });
+```
+
+### `Memory.rememberMessages()`방법 {/* #memoryremembermessages-method */}
+
+그만큼`Memory.rememberMessages()` method has been removed. This method performed the same function as `query()` (now `recall()`), and consolidating to one method simplifies the API.
+
+마이그레이션하려면 교체하세요.`rememberMessages()` calls with `recall()`.
+
+```diff
+- const { messages } = await memory.rememberMessages({
++ const { messages } = await memory.recall({
+    threadId,
+    resourceId,
+  });
+```
+
+### `format`Memory 메소드의 매개변수 {/* #format-parameter-from-memory-methods */}
+
+그만큼`format` parameter has been removed from all memory get methods. `MastraDBMessage` is now the default return format everywhere. AI SDK format conversion has moved to dedicated utility functions in `@mastra/ai-sdk/ui`. This change improves tree-shaking by moving UI-specific conversion code to a separate package.
+
+마이그레이션하려면`format` parameter and use conversion functions for AI SDK formats.
+
+```diff
+- const messages = await memory.getMessages({ threadId, format: 'v2' });
+- const uiMessages = await memory.getMessages({ threadId, format: 'ui' });
+
++ const result = await memory.recall({ threadId });
++ const messages = result.messages; // Always MastraDBMessage[]
++ 
++ // Use conversion functions for AI SDK formats
++ import { toAISdkV5Messages } from '@mastra/ai-sdk/ui';
++ const uiMessages = toAISdkV5Messages(messages);
+```
+
+### `MastraMessageV3`유형 {/* #mastramessagev3-type */}
+
+그만큼`MastraMessageV3` type and related conversion methods have been removed. Messages now convert directly between `MastraMessageV2` (now `MastraDBMessage`) and AI SDK v5 formats. This change simplifies the architecture by removing an intermediary format.
+
+마이그레이션하려면 다음을 사용하십시오.`MastraDBMessage` for storage or AI SDK v5 message formats directly.
+
+```diff
+- import type { MastraMessageV3 } from '@mastra/core/agent';
+- const v3Messages = messageList.get.all.v3();
+
++ // For storage
++ const v2Messages = messageList.get.all.v2();
++ 
++ // For AI SDK v5
++ const uiMessages = messageList.get.all.aiV5.ui();
++ const modelMessages = messageList.get.all.aiV5.model();
+```
+
+### `processors`Memory 생성자의 구성 {/* #processors-config-from-memory-constructor */}
+
+그만큼`processors` config option in the Memory constructor is no longer supported and throws an error. Configure processors at the Agent level, where processor behavior is scoped to agent execution.
+
+마이그레이션하려면 다음을 사용하여 프로세서 구성을 Memory에서 Agent로 이동하세요.`inputProcessors` and/or `outputProcessors`.
+
+```diff
++ import { TokenLimiter } from '@mastra/core/processors';
++
+  const memory = new Memory({
+    storage,
+    vector,
+    embedder,
+-   processors: [/* ... */],
+  });
+
+  const agent = new Agent({
+    id: 'agent',
+    memory,
++   inputProcessors: [
++     new TokenLimiter({ limit: 4000 }), // Limits historical messages to fit context window
++   ],
+  });
+```
+
+추가적으로,`@mastra/memory/processors` import path has been removed. Import processors from `@mastra/core/processors` instead. See the [processors migration guide](/guides/migrations/upgrade-to-v1/processors#memory-processor-exports-moved-to-core) for details.
+
+Agent와 함께 프로세서를 사용하는 방법에 대한 자세한 내용은[Processors docs](/docs/agents/processors). For a complete example with memory, see the [TokenLimiter reference](/reference/processors/token-limiter-processor#extended-usage-example).

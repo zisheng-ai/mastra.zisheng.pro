@@ -1,0 +1,630 @@
+---
+title: "참조: DaytonaSandbox | 작업공간"
+description: "격리된 클라우드 코드 실행을 위한 DaytonaSandbox 공급자에 대한 문서입니다."
+packages:
+  - "@mastra/daytona"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# 데이토나샌드박스
+
+격리된 상태에서 명령을 실행합니다.[Daytona](https://www.daytona.io)클라우드 샌드박스. 다중 런타임, 리소스 구성, 볼륨, 스냅샷, 스트리밍 출력, 샌드박스 재연결, 파일 시스템 마운트(S3, GCS) 및 네트워크 격리를 지원합니다. 인터페이스에 대한 자세한 내용은 다음을 참조하세요.[WorkspaceSandbox 인터페이스](/reference/workspace/sandbox).
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/daytona
+```
+
+세 가지 방법 중 하나로 Daytona API 키를 설정하세요.
+
+<Tabs>
+  <TabItem value="shell-export" label="Shell export">
+    ```bash
+    export DAYTONA_API_KEY=your-api-key
+    ```
+  </TabItem>
+
+  <TabItem value="env-file" label=".env file">
+    ```bash
+    DAYTONA_API_KEY=your-api-key
+    ```
+  </TabItem>
+
+  <TabItem value="constructor" label="Constructor">
+    ```typescript
+    new DaytonaSandbox({ apiKey: 'your-api-key' })
+    ```
+  </TabItem>
+</Tabs>
+
+## 용법 {/* #usage */}
+
+추가`DaytonaSandbox` to a workspace and assign it to an agent:
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Workspace } from '@mastra/core/workspace'
+import { DaytonaSandbox } from '@mastra/daytona'
+
+const workspace = new Workspace({
+  sandbox: new DaytonaSandbox({
+    language: 'typescript',
+    timeout: 120_000,
+  }),
+})
+
+const agent = new Agent({
+  id: 'code-agent',
+  name: 'Code Agent',
+  instructions: 'You are a coding assistant working in this workspace.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+  workspace,
+})
+
+const response = await agent.generate(
+  'Print "Hello, world!" and show the current working directory.',
+)
+
+console.log(response.text)
+// I'll run both commands simultaneously!
+//
+// Here are the results:
+//
+// 1. **Hello, world!** — Successfully printed the message.
+// 2. **Current Working Directory** — `/home/daytona`
+//
+// Both commands ran in parallel and completed successfully!
+```
+
+### 스냅샷 포함 {/* #with-a-snapshot */}
+
+사전 빌드된 스냅샷을 사용하여 환경 설정 시간을 건너뜁니다.
+
+```typescript
+const workspace = new Workspace({
+  sandbox: new DaytonaSandbox({
+    snapshot: 'my-snapshot-id',
+    timeout: 60_000,
+  }),
+})
+```
+
+### 리소스가 포함된 커스텀 이미지 {/* #custom-image-with-resources */}
+
+특정 리소스 할당이 포함된 사용자 지정 Docker 이미지를 사용합니다.
+
+```typescript
+const workspace = new Workspace({
+  sandbox: new DaytonaSandbox({
+    image: 'node:20-slim',
+    resources: { cpu: 2, memory: 4, disk: 6 },
+    language: 'typescript',
+  }),
+})
+```
+
+### 임시 샌드박스 {/* #ephemeral-sandbox */}
+
+일회성 작업의 경우: 중지 시 샌드박스가 즉시 삭제됩니다.
+
+```typescript
+const workspace = new Workspace({
+  sandbox: new DaytonaSandbox({
+    ephemeral: true,
+    language: 'python',
+  }),
+})
+```
+
+### 스트리밍 출력 {/* #streaming-output */}
+
+다음을 통해 실시간으로 명령 출력 스트리밍`onStdout` and `onStderr` callbacks:
+
+```typescript
+await sandbox.executeCommand('bash', ['-c', 'for i in 1 2 3; do echo "line $i"; sleep 1; done'], {
+  onStdout: chunk => process.stdout.write(chunk),
+  onStderr: chunk => process.stderr.write(chunk),
+})
+```
+
+두 콜백 모두 선택 사항이며 독립적으로 사용할 수 있습니다.
+
+### 재연결 {/* #reconnection */}
+
+동일한 정보를 제공하여 기존 샌드박스에 다시 연결`id`. The sandbox resumes with its files and state intact:
+
+```typescript
+const sandbox = new DaytonaSandbox({ id: 'my-persistent-sandbox' })
+
+// First session
+await sandbox._start()
+await sandbox.executeCommand('sh', ['-c', 'echo "session 1" > /tmp/state.txt'])
+await sandbox._stop()
+
+// Later — reconnects to the same sandbox
+const sandbox2 = new DaytonaSandbox({ id: 'my-persistent-sandbox' })
+await sandbox2._start()
+const result = await sandbox2.executeCommand('cat', ['/tmp/state.txt'])
+console.log(result.stdout) // "session 1"
+```
+
+샌드박스가 중지되거나 보관된 상태인 경우 자동으로 다시 시작됩니다. 작동 불능 상태(파괴, 오류 발생)인 경우 대신 새로운 샌드박스가 생성됩니다.
+
+### 파일 시스템 마운트 {/* #filesystem-mounting */}
+
+S3 또는 GCS 버킷을 샌드박스 내부의 로컬 디렉터리로 마운트합니다.
+
+#### 작업 공간 마운트 구성을 통해 {/* #via-workspace-mounts-config */}
+
+가장 간단한 방법: 샌드박스가 시작될 때 파일 시스템이 자동으로 마운트됩니다.
+
+```typescript
+import { Workspace } from '@mastra/core/workspace'
+import { DaytonaSandbox } from '@mastra/daytona'
+import { GCSFilesystem } from '@mastra/gcs'
+import { S3Filesystem } from '@mastra/s3'
+
+const workspace = new Workspace({
+  mounts: {
+    '/s3-data': new S3Filesystem({
+      bucket: process.env.S3_BUCKET!,
+      region: 'auto',
+      accessKeyId: process.env.S3_ACCESS_KEY_ID,
+      secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
+      endpoint: process.env.S3_ENDPOINT, // e.g. https://<account-id>.r2.cloudflarestorage.com
+    }),
+    '/gcs-data': new GCSFilesystem({
+      bucket: process.env.GCS_BUCKET!,
+      projectId: 'my-project-id',
+      credentials: JSON.parse(process.env.GCS_SERVICE_ACCOUNT_KEY!),
+    }),
+  },
+  sandbox: new DaytonaSandbox({ language: 'python' }),
+})
+```
+
+작업공간이 시작되면 파일 시스템이 지정된 경로에 자동으로 마운트됩니다. 샌드박스에서 실행되는 코드는 다음 위치의 파일에 액세스할 수 있습니다.`/s3-data` and `/gcs-data` as if they were local directories.
+
+#### 을 통해`sandbox.mount()` {/* #via-sandboxmount */}
+
+샌드박스가 시작된 후 언제든지 수동으로 마운트합니다.
+
+#### S3 {/* #s3 */}
+
+```typescript
+import { S3Filesystem } from '@mastra/s3'
+
+await sandbox.mount(
+  new S3Filesystem({
+    bucket: process.env.S3_BUCKET!,
+    region: 'us-east-1',
+    accessKeyId: process.env.S3_ACCESS_KEY_ID,
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
+  }),
+  '/data',
+)
+```
+
+#### S3 호환(Cloudflare R2, MinIO) {/* #s3-compatible-cloudflare-r2-minio */}
+
+```typescript
+import { S3Filesystem } from '@mastra/s3'
+
+await sandbox.mount(
+  new S3Filesystem({
+    bucket: process.env.S3_BUCKET!,
+    region: 'auto',
+    accessKeyId: process.env.S3_ACCESS_KEY_ID,
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
+    endpoint: process.env.S3_ENDPOINT, // e.g. https://<account-id>.r2.cloudflarestorage.com
+  }),
+  '/data',
+)
+```
+
+#### GCS {/* #gcs */}
+
+```typescript
+import { GCSFilesystem } from '@mastra/gcs'
+
+await sandbox.mount(
+  new GCSFilesystem({
+    bucket: process.env.GCS_BUCKET!,
+    projectId: 'my-project-id',
+    credentials: JSON.parse(process.env.GCS_SERVICE_ACCOUNT_KEY!),
+  }),
+  '/data',
+)
+```
+
+### 네트워크 격리 {/* #network-isolation */}
+
+아웃바운드 네트워크 액세스를 제한합니다.
+
+```typescript
+const workspace = new Workspace({
+  sandbox: new DaytonaSandbox({
+    networkBlockAll: true,
+    networkAllowList: '10.0.0.0/8,192.168.0.0/16',
+  }),
+})
+```
+
+사용`domainAllowList` for services whose IP addresses change, such as package registries and hosted APIs:
+
+```typescript
+const workspace = new Workspace({
+  sandbox: new DaytonaSandbox({
+    networkBlockAll: true,
+    domainAllowList: 'registry.npmjs.org,*.githubusercontent.com',
+  }),
+})
+```
+
+두 허용 목록 모두 샌드박스 생성 시 적용되며 다음에 의해 보존됩니다.`clone()`. To change the policy after the sandbox has started, use the underlying Daytona sandbox:
+
+```typescript
+await sandbox.instance.updateNetworkSettings({
+  domainAllowList: 'api.example.com',
+})
+```
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for this sandbox instance.',
+  isOptional: true,
+  defaultValue: 'Auto-generated',
+},
+{
+  name: 'apiKey',
+  type: 'string',
+  description: 'Daytona API key for authentication. Falls back to DAYTONA_API_KEY environment variable.',
+  isOptional: true,
+},
+{
+  name: 'apiUrl',
+  type: 'string',
+  description: 'Daytona API endpoint. Falls back to DAYTONA_API_URL environment variable.',
+  isOptional: true,
+},
+{
+  name: 'target',
+  type: 'string',
+  description: 'Runner region. Falls back to DAYTONA_TARGET environment variable.',
+  isOptional: true,
+},
+{
+  name: 'timeout',
+  type: 'number',
+  description: 'Default execution timeout in milliseconds.',
+  isOptional: true,
+  defaultValue: '300000 (5 minutes)',
+},
+{
+  name: 'language',
+  type: "'typescript' | 'javascript' | 'python'",
+  description: 'Runtime language for the sandbox.',
+  isOptional: true,
+  defaultValue: "'typescript'",
+},
+{
+  name: 'snapshot',
+  type: 'string',
+  description: 'Pre-built snapshot ID to create the sandbox from. Takes precedence over image.',
+  isOptional: true,
+},
+{
+  name: 'image',
+  type: 'string',
+  description:
+    'Docker image for sandbox creation. Triggers image-based creation when set. Can be combined with resources. Ignored when snapshot is set.',
+  isOptional: true,
+},
+{
+  name: 'resources',
+  type: '{ cpu?: number; memory?: number; disk?: number }',
+  description:
+    'Resource allocation for the sandbox (CPU cores, memory in GiB, disk in GiB). Only used when image is set.',
+  isOptional: true,
+},
+{
+  name: 'env',
+  type: 'Record<string, string>',
+  description: 'Environment variables to set in the sandbox.',
+  isOptional: true,
+  defaultValue: '{}',
+},
+{
+  name: 'labels',
+  type: 'Record<string, string>',
+  description: 'Custom metadata labels.',
+  isOptional: true,
+  defaultValue: '{}',
+},
+{
+  name: 'name',
+  type: 'string',
+  description: 'Sandbox display name.',
+  isOptional: true,
+  defaultValue: 'Sandbox id',
+},
+{
+  name: 'user',
+  type: 'string',
+  description: 'OS user to run commands as.',
+  isOptional: true,
+  defaultValue: "'daytona'",
+},
+{
+  name: 'public',
+  type: 'boolean',
+  description: 'Make port previews public.',
+  isOptional: true,
+  defaultValue: 'false',
+},
+{
+  name: 'ephemeral',
+  type: 'boolean',
+  description: 'Delete sandbox immediately on stop.',
+  isOptional: true,
+  defaultValue: 'false',
+},
+{
+  name: 'autoStopInterval',
+  type: 'number',
+  description: 'Auto-stop interval in minutes. Set to 0 to disable.',
+  isOptional: true,
+  defaultValue: '15',
+},
+{
+  name: 'autoArchiveInterval',
+  type: 'number',
+  description: 'Auto-archive interval in minutes. Set to 0 for the maximum interval (7 days).',
+  isOptional: true,
+  defaultValue: '7 days',
+},
+{
+  name: 'autoDeleteInterval',
+  type: 'number',
+  description: 'Auto-delete interval in minutes. Negative values disable auto-delete. Set to 0 to delete on stop.',
+  isOptional: true,
+  defaultValue: 'disabled',
+},
+{
+  name: 'volumes',
+  type: 'Array<{ volumeId: string; mountPath: string }>',
+  description: 'Daytona volumes to attach at sandbox creation time.',
+  isOptional: true,
+},
+{
+  name: 'networkBlockAll',
+  type: 'boolean',
+  description: 'Block all outbound network access from the sandbox.',
+  isOptional: true,
+  defaultValue: 'false',
+},
+{
+  name: 'networkAllowList',
+  type: 'string',
+  description: 'Comma-separated list of allowed CIDR addresses when network access is restricted.',
+  isOptional: true,
+},
+{
+  name: 'domainAllowList',
+  type: 'string',
+  description:
+    'Comma-separated list of allowed domains when network access is restricted. Supports wildcards, for example `*.githubusercontent.com`. Use this instead of `networkAllowList` for services whose IP addresses change.',
+  isOptional: true,
+},
+]}
+/>
+
+## 속성 {/* #properties */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Sandbox instance identifier.',
+},
+{
+  name: 'name',
+  type: 'string',
+  description: "Provider name ('DaytonaSandbox').",
+},
+{
+  name: 'provider',
+  type: 'string',
+  description: "Provider identifier ('daytona').",
+},
+{
+  name: 'status',
+  type: 'ProviderStatus',
+  description: "'pending' | 'initializing' | 'ready' | 'stopped' | 'destroyed' | 'error'",
+},
+{
+  name: 'instance',
+  type: 'Sandbox',
+  description:
+    'The underlying Daytona Sandbox instance. Throws SandboxNotReadyError if the sandbox has not been started.',
+},
+{
+  name: 'processes',
+  type: 'DaytonaProcessManager',
+  description:
+    'Background process manager. See [SandboxProcessManager reference](/reference/workspace/process-manager).',
+},
+]}
+/>
+
+## 백그라운드 프로세스 {/* #background-processes */}
+
+`DaytonaSandbox`백그라운드 프로세스 생성 및 관리를 위한 내장 프로세스 관리자가 포함되어 있습니다. 프로세스는 세션 기반 명령 실행을 사용하여 Daytona 클라우드 샌드박스에서 실행됩니다.
+
+```typescript
+const sandbox = new DaytonaSandbox({ language: 'typescript' })
+await sandbox.start()
+
+// Spawn a background process
+const handle = await sandbox.processes.spawn('node server.js', {
+  env: { PORT: '3000' },
+  onStdout: data => console.log(data),
+})
+
+// Interact with the process
+console.log(handle.stdout)
+await handle.sendStdin('input\n')
+await handle.kill()
+```
+
+보다[`SandboxProcessManager` reference](/reference/workspace/process-manager) for the full API.
+
+## 클라우드 스토리지 마운트 {/* #mounting-cloud-storage */}
+
+Daytona 샌드박스는 S3 또는 GCS 버킷을 마운트할 수 있으므로 샌드박스 내부의 로컬 디렉터리로 클라우드 스토리지에 액세스할 수 있습니다. 이는 다음과 같은 경우에 유용합니다.
+
+* 클라우드 버킷에 저장된 대규모 데이터 세트 처리
+* 출력 파일을 클라우드 스토리지에 직접 쓰기
+* 샌드박스 세션 간 데이터 공유
+
+사용 예는 다음을 참조하세요.[Filesystem mounting](#filesystem-mounting).
+
+Daytona 샌드박스는 FUSE(사용자 공간의 파일 시스템)를 사용하여 클라우드 스토리지를 탑재합니다.
+
+* **S3/R2**: 다음을 통해 장착됨[s3fs-fuse](https://github.com/s3fs-fuse/s3fs-fuse)
+* **GCS**: 다음을 통해 장착됨[gcsfuse](https://github.com/GoogleCloudPlatform/gcsfuse)
+
+필수 FUSE Tool는 샌드박스 이미지에 아직 없는 경우 마운트 시 자동으로 설치됩니다.
+
+### S3 환경 변수 {/* #s3-environment-variables */}
+
+| 변수 | 설명 |
+| - | - |
+|`S3_BUCKET` | Bucket name |
+| `S3_REGION` | AWS region or `auto` for R2/MinIO |
+| `S3_ACCESS_KEY_ID` | Access key ID |
+| `S3_SECRET_ACCESS_KEY` | Secret access key |
+| `S3_ENDPOINT` | Endpoint URL (S3-compatible only) |
+
+### GCS 환경 변수 {/* #gcs-environment-variables */}
+
+| 변수 | 설명 |
+| - | - |
+|`GCS_BUCKET` | Bucket name |
+| `GCS_SERVICE_ACCOUNT_KEY` | Service account key JSON (full JSON string, not a path) |
+
+### 스냅샷으로 콜드 스타트 ​​대기 시간 줄이기 {/* #reducing-cold-start-latency-with-a-snapshot */}
+
+기본적으로`s3fs` and `gcsfuse` are installed at first mount via `apt`, which adds startup time. To eliminate this, prebake them into a Daytona snapshot and pass the snapshot name via the `snapshot` option.
+
+**옵션 1: 선언적 이미지 빌드**
+
+```typescript
+import { Daytona, Image } from '@daytonaio/sdk'
+
+const template = Image.base('daytonaio/sandbox')
+  .runCommands('sudo apt-get update -qq')
+  .runCommands('sudo apt-get install -y s3fs')
+  // gcsfuse requires the Google Cloud apt repository
+  .runCommands(
+    'sudo mkdir -p /etc/apt/keyrings && ' +
+      'curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg -o /tmp/gcsfuse-key.gpg && ' +
+      'sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/gcsfuse.gpg /tmp/gcsfuse-key.gpg && ' +
+      // Use gcsfuse-jammy for Ubuntu, gcsfuse-bookworm for Debian
+      'echo "deb [signed-by=/etc/apt/keyrings/gcsfuse.gpg] https://packages.cloud.google.com/apt gcsfuse-jammy main" | sudo tee /etc/apt/sources.list.d/gcsfuse.list',
+  )
+  .runCommands('sudo apt-get update -qq && sudo apt-get install -y gcsfuse')
+
+const daytona = new Daytona()
+
+await daytona.snapshot.create(
+  {
+    name: 'cloud-fs-mounting',
+    image: template,
+  },
+  { onLogs: console.log },
+)
+```
+
+**옵션 2: Dockerfile:**&#xC0AC;용[`Image.fromDockerfile()`](https://www.daytona.io/docs/typescript-sdk/image#fromdockerfile)
+
+```dockerfile
+FROM daytonaio/sandbox
+RUN sudo apt-get update -qq
+RUN sudo apt-get install -y s3fs
+# Use gcsfuse-jammy for Ubuntu, gcsfuse-bookworm for Debian
+RUN sudo mkdir -p /etc/apt/keyrings && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg -o /tmp/gcsfuse-key.gpg && sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/gcsfuse.gpg /tmp/gcsfuse-key.gpg && echo "deb [signed-by=/etc/apt/keyrings/gcsfuse.gpg] https://packages.cloud.google.com/apt gcsfuse-jammy main" | sudo tee /etc/apt/sources.list.d/gcsfuse.list
+RUN sudo apt-get update -qq && sudo apt-get install -y gcsfuse
+```
+
+```typescript
+import { Daytona, Image } from '@daytonaio/sdk'
+
+const daytona = new Daytona()
+
+await daytona.snapshot.create(
+  {
+    name: 'cloud-fs-mounting',
+    image: Image.fromDockerfile('./Dockerfile'),
+  },
+  { onLogs: console.log },
+)
+```
+
+그런 다음 샌드박스 구성에서 스냅샷 이름을 사용합니다.
+
+```typescript
+const workspace = new Workspace({
+  mounts: {
+    '/s3-data': new S3Filesystem({/* ... */}),
+    '/gcs-data': new GCSFilesystem({/* ... */}),
+  },
+  sandbox: new DaytonaSandbox({ snapshot: 'cloud-fs-mounting' }),
+})
+```
+
+## 직접 SDK 액세스 {/* #direct-sdk-access */}
+
+기본 Daytona에 액세스`Sandbox` instance for filesystem, git, and other operations not exposed through the `WorkspaceSandbox` interface:
+
+```typescript
+const daytonaSandbox = sandbox.instance
+
+// Upload a file
+await daytonaSandbox.fs.uploadFile(Buffer.from('hello'), '/tmp/hello.txt')
+
+// Run git operations
+await daytonaSandbox.git.clone('https://github.com/org/repo', '/workspace/repo')
+```
+
+그만큼`instance` getter throws `SandboxNotReadyError` if the sandbox hasn't been started yet.
+
+## 샌드박스 생성 모드 {/* #sandbox-creation-modes */}
+
+`DaytonaSandbox`제공된 옵션에 따라 생성 모드를 선택합니다.
+
+| 옵션 | 생성 모드 |
+| - | - |
+|`snapshot` set | Snapshot-based (snapshot takes precedence over image) |
+| `image` set (no snapshot) | Image-based (optionally with `resources`) |
+| Neither set | Default snapshot-based |
+
+리소스는 다음 경우에만 적용됩니다.`image` is set. Passing `resources` without `image` has no effect.
+
+## 관련된 {/* #related */}
+
+* [SandboxProcessManager 참조](/reference/workspace/process-manager)
+* [WorkspaceSandbox 인터페이스](/reference/workspace/sandbox)
+* [로컬샌드박스 참조](/reference/workspace/local-sandbox)
+* [S3파일 시스템 참조](/reference/workspace/s3-filesystem)
+* [GCS파일 시스템 참조](/reference/workspace/gcs-filesystem)
+* [작업공간 개요](/docs/workspace/overview)

@@ -1,0 +1,326 @@
+---
+title: "참조: S3파일 시스템 | 작업공간"
+description: "Amazon S3 및 S3 호환 스토리지용 S3Filesystem 공급자에 대한 설명서입니다."
+packages:
+  - "@mastra/s3"
+---
+
+# S3파일 시스템
+
+Cloudflare R2, MinIO, DigitalOcean Spaces 및 Tigris와 같은 Amazon S3 또는 S3 호환 스토리지 서비스에 파일을 저장합니다. 인터페이스에 대한 자세한 내용은 다음을 참조하세요.[WorkspaceFilesystem Interface](/reference/workspace/filesystem).
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/s3
+```
+
+## 용법 {/* #usage */}
+
+추가`S3Filesystem` to a workspace and assign it to an agent:
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Workspace } from '@mastra/core/workspace'
+import { S3Filesystem } from '@mastra/s3'
+
+const workspace = new Workspace({
+  filesystem: new S3Filesystem({
+    bucket: 'my-bucket',
+    region: 'us-east-1',
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  }),
+})
+
+const agent = new Agent({
+  id: 'file-agent',
+  name: 'file-agent',
+  model: '__GATEWAY_ANTHROPIC_MODEL_OPUS__',
+  workspace,
+})
+```
+
+### AWS 자격 증명 공급자 체인 {/* #aws-credential-provider-chain */}
+
+자격 증명이 제공되지 않은 경우,`S3Filesystem` uses the AWS SDK default credential provider chain. This discovers credentials automatically from environment variables, `~/.aws` config files, ECS container credentials, EC2 instance profiles, and other standard sources.
+
+```typescript
+import { S3Filesystem } from '@mastra/s3'
+
+// SDK discovers credentials from the environment automatically
+const filesystem = new S3Filesystem({
+  bucket: 'my-bucket',
+  region: 'us-east-1',
+})
+```
+
+자격 증명 자동 새로 고침을 위해 자격 증명 공급자 기능을 전달합니다. 이는 ECS, Lambda 배포에 유용하거나 임시 자격 증명이 만료되어 새로 고쳐야 하는 SSO/AssumeRole을 사용할 때 유용합니다.
+
+호출 시 AWS SDK 자격 증명 공급자 패키지를 설치합니다.`fromNodeProviderChain()` directly:
+
+```bash npm2yarn
+npm install @aws-sdk/credential-providers
+```
+
+```typescript
+import { S3Filesystem } from '@mastra/s3'
+import { fromNodeProviderChain } from '@aws-sdk/credential-providers'
+
+const filesystem = new S3Filesystem({
+  bucket: 'my-bucket',
+  region: 'us-east-1',
+  credentials: fromNodeProviderChain(),
+})
+```
+
+공급자 기능은 다음에만 적용됩니다.`S3Filesystem` API calls. When mounting the filesystem into an E2B sandbox, mount configuration only supports static `accessKeyId`, `secretAccessKey`, and `sessionToken` values, so credential refresh must be handled outside the mount.
+
+### 클라우드플레어 R2 {/* #cloudflare-r2 */}
+
+```typescript
+import { S3Filesystem } from '@mastra/s3'
+
+const filesystem = new S3Filesystem({
+  bucket: 'my-r2-bucket',
+  region: 'auto',
+  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  accessKeyId: process.env.R2_ACCESS_KEY_ID,
+  secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+})
+```
+
+### 미니IO {/* #minio */}
+
+```typescript
+import { S3Filesystem } from '@mastra/s3'
+
+const filesystem = new S3Filesystem({
+  bucket: 'my-bucket',
+  region: 'us-east-1',
+  endpoint: 'http://localhost:9000',
+  accessKeyId: 'minioadmin',
+  secretAccessKey: 'minioadmin',
+})
+```
+
+### 티그리스 {/* #tigris */}
+
+```typescript
+import { S3Filesystem } from '@mastra/s3'
+
+const filesystem = new S3Filesystem({
+  bucket: 'my-bucket',
+  region: 'auto',
+  endpoint: 'https://t3.storage.dev',
+  accessKeyId: process.env.TIGRIS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.TIGRIS_SECRET_ACCESS_KEY,
+  forcePathStyle: false,
+})
+```
+
+Tigris는 가상 호스팅 방식의 주소 지정을 사용하므로`forcePathStyle` must be set to `false` (the default is `true` when a custom endpoint is provided). Create credentials from the [Tigris Dashboard](https://console.tigris.dev/). Access keys are prefixed `tid_` and secrets `tsec_`.
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'bucket',
+  type: 'string',
+  description: 'S3 bucket name',
+},
+{
+  name: 'region',
+  type: 'string',
+  description: "AWS region (use 'auto' for R2)",
+},
+{
+  name: 'credentials',
+  type: 'AwsCredentialIdentity | AwsCredentialIdentityProvider',
+  description:
+    'AWS credentials or credential provider function. Accepts static credentials or a provider that auto-refreshes (e.g. `fromNodeProviderChain()` from `@aws-sdk/credential-providers`). Takes precedence over `accessKeyId`/`secretAccessKey`/`sessionToken`. When all credential options are omitted, the SDK default credential provider chain is used.',
+  isOptional: true,
+},
+{
+  name: 'accessKeyId',
+  type: 'string',
+  description:
+    'AWS access key ID. When omitted along with `secretAccessKey` and `credentials`, the SDK default credential provider chain is used.',
+  isOptional: true,
+},
+{
+  name: 'secretAccessKey',
+  type: 'string',
+  description:
+    'AWS secret access key. When omitted along with `accessKeyId` and `credentials`, the SDK default credential provider chain is used.',
+  isOptional: true,
+},
+{
+  name: 'sessionToken',
+  type: 'string',
+  description:
+    'AWS session token for static temporary credentials. Use with `accessKeyId`/`secretAccessKey` only when passing a complete temporary credential set manually. For auto-refreshing SSO, AssumeRole, or container credentials, use the `credentials` provider parameter or the SDK default credential provider chain.',
+  isOptional: true,
+},
+{
+  name: 'endpoint',
+  type: 'string',
+  description: 'Custom endpoint URL for S3-compatible storage (R2, MinIO, Tigris, etc.)',
+  isOptional: true,
+},
+{
+  name: 'forcePathStyle',
+  type: 'boolean',
+  description:
+    'Force path-style URLs instead of virtual-hosted-style. Required for some S3-compatible services like MinIO. Defaults to true when a custom endpoint is provided.',
+  isOptional: true,
+  defaultValue: 'true (when endpoint is set)',
+},
+{
+  name: 'prefix',
+  type: 'string',
+  description: 'Optional prefix for all keys (acts like a subdirectory)',
+  isOptional: true,
+},
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for this filesystem instance',
+  isOptional: true,
+  defaultValue: 'Auto-generated',
+},
+{
+  name: 'displayName',
+  type: 'string',
+  description: 'Human-friendly display name for the UI',
+  isOptional: true,
+},
+{
+  name: 'icon',
+  type: 'FilesystemIcon',
+  description: 'Icon identifier for the UI',
+  isOptional: true,
+},
+{
+  name: 'description',
+  type: 'string',
+  description: 'Short description of this filesystem for the UI',
+  isOptional: true,
+},
+{
+  name: 'readOnly',
+  type: 'boolean',
+  description: 'When true, all write operations are blocked',
+  isOptional: true,
+  defaultValue: 'false',
+},
+]}
+/>
+
+## 속성 {/* #properties */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Filesystem instance identifier',
+},
+{
+  name: 'name',
+  type: 'string',
+  description: "Provider name ('S3Filesystem')",
+},
+{
+  name: 'provider',
+  type: 'string',
+  description: "Provider identifier ('s3')",
+},
+{
+  name: 'bucket',
+  type: 'string',
+  description: 'The S3 bucket name',
+},
+{
+  name: 'readOnly',
+  type: 'boolean | undefined',
+  description: 'Whether the filesystem is in read-only mode',
+},
+]}
+/>
+
+## 행동 양식 {/* #methods */}
+
+S3Filesystem은 다음을 구현합니다.[WorkspaceFilesystem interface](/reference/workspace/filesystem), providing all standard filesystem methods:
+
+* `readFile(path, options?)`- 파일 내용 읽기
+* `writeFile(path, content, options?)`- 파일에 콘텐츠 쓰기
+* `appendFile(path, content)`- 파일에 콘텐츠 추가
+* `deleteFile(path, options?)`- 파일 삭제
+* `copyFile(src, dest, options?)`- 파일 복사
+* `moveFile(src, dest, options?)`- 파일 이동 또는 이름 바꾸기
+* `mkdir(path, options?)`- 디렉토리 생성
+* `rmdir(path, options?)`- 디렉토리 제거
+* `readdir(path, options?)`- 디렉토리 내용 나열
+* `exists(path)`- 경로가 존재하는지 확인
+* `stat(path)`- 파일 또는 디렉터리 메타데이터 가져오기
+
+### `init()` {/* #init */}
+
+파일 시스템을 초기화합니다. 버킷 액세스 및 자격 증명을 확인합니다.
+
+```typescript
+await filesystem.init()
+```
+
+### `getInfo()` {/* #getinfo */}
+
+이 파일 시스템 인스턴스에 대한 메타데이터를 반환합니다.
+
+```typescript
+const info = filesystem.getInfo()
+// { id: '...', name: 'S3Filesystem', provider: 's3', status: 'ready' }
+```
+
+### `getMountConfig()` {/* #getmountconfig */}
+
+이 파일 시스템 유형 마운트를 지원하는 샌드박스에 대한 마운트 구성을 반환합니다.
+
+```typescript
+const config = filesystem.getMountConfig()
+// { type: 's3', bucket: 'my-bucket', region: 'us-east-1', ... }
+```
+
+## E2B 샌드박스에 탑재 {/* #mounting-in-e2b-sandboxes */}
+
+S3Filesystem은 E2B 샌드박스에 마운트될 수 있으므로 버킷을 로컬 디렉터리로 액세스할 수 있습니다.
+
+```typescript
+import { Workspace } from '@mastra/core/workspace'
+import { S3Filesystem } from '@mastra/s3'
+import { E2BSandbox } from '@mastra/e2b'
+
+const workspace = new Workspace({
+  mounts: {
+    '/data': new S3Filesystem({
+      bucket: 'my-bucket',
+      region: 'us-east-1',
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    }),
+  },
+  sandbox: new E2BSandbox({ id: 'dev-sandbox' }),
+})
+```
+
+보다[E2BSandbox reference](/reference/workspace/e2b-sandbox) for more details on mounting.
+
+## 관련된 {/* #related */}
+
+* [WorkspaceFilesystem 인터페이스](/reference/workspace/filesystem)
+* [Archil파일 시스템 참조](/reference/workspace/archil-filesystem)
+* [GCS파일 시스템 참조](/reference/workspace/gcs-filesystem)
+* [AzureBlob파일 시스템 참조](/reference/workspace/azure-blob-filesystem)
+* [E2B샌드박스 참조](/reference/workspace/e2b-sandbox)
+* [작업공간 개요](/docs/workspace/overview)

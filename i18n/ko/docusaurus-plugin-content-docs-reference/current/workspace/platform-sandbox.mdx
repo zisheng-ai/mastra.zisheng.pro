@@ -1,0 +1,385 @@
+---
+title: "참조: PlatformSandbox | 작업공간"
+description: "Mastra 플랫폼 환경에서 명령을 실행하기 위한 PlatformSandbox 공급자에 대한 문서입니다."
+packages:
+  - "@mastra/platform-workspace"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# 플랫폼샌드박스
+
+Mastra 플랫폼 환경에서 샌드박스를 프로비저닝하기 위한 클라이언트입니다. 각`PlatformSandbox`인스턴스는 하나의 원격 샌드박스를 소유합니다.`start()`그것을 규정하고,`executeCommand()`그것에 맞서 달리고,`destroy()`그것을 찢어 버리십시오. 추가 원격 샌드박스를 소유하려면 추가 인스턴스를 구성하세요. 사용`clone()`구성된 템플릿에서 이를 파생시킵니다(참조:[복제](#cloning-for-a-fleet-of-sandboxes)).
+
+샌드박스는 Python 3, Node 22, TypeScript, tsx 및 일반 빌드 Tool가 이미 설치된 사전 구축된 레시피 체크포인트에서 부팅됩니다. 마구간을 통과하다`id` to opt into [checkpoint recovery](#checkpoint-recovery) so a new sandbox boots from the previous one's filesystem.
+
+관련 제공자:[`RailwaySandbox`](/reference/workspace/railway-sandbox) for self-hosted Railway sandboxes, [`LocalSandbox`](/reference/workspace/local-sandbox) for local sandboxes.
+
+:::정보
+
+인터페이스에 대한 자세한 내용은 다음을 참조하세요.[WorkspaceSandbox interface](/reference/workspace/sandbox).
+
+:::
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/platform-workspace
+```
+
+플랫폼 자격 증명을 구성합니다. 액세스 토큰, 프로젝트 ID 및 환경 ID는 환경 변수로 대체되므로 Mastra 플랫폼 배포는 생성자 옵션을 0으로 전달할 수 있습니다.
+
+<Tabs>
+  <TabItem value="env-file" label=".env file">
+    ```bash
+    MASTRA_PLATFORM_ACCESS_TOKEN=your-platform-access-token
+    MASTRA_PROJECT_ID=your-project-id
+    MASTRA_ENVIRONMENT_ID=your-environment-id
+    ```
+  </TabItem>
+
+  <TabItem value="constructor" label="Constructor">
+    ```typescript
+    new PlatformSandbox({
+      accessToken: 'your-platform-access-token',
+      projectId: 'your-project-id',
+      environmentId: 'your-environment-id',
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+Mastra 플랫폼 배포에서`MASTRA_PLATFORM_ACCESS_TOKEN`, `MASTRA_PROJECT_ID`, and `MASTRA_ENVIRONMENT_ID` are injected automatically, so the constructor can be called with no options. For local development, `MASTRA_PLATFORM_ACCESS_TOKEN` can contain an `sk_` API token from your organization's settings page under **API Tokens**.
+
+## 용법 {/* #usage */}
+
+추가`PlatformSandbox` to a workspace and assign it to an agent:
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Workspace } from '@mastra/core/workspace'
+import { PlatformSandbox } from '@mastra/platform-workspace'
+
+const workspace = new Workspace({
+  sandbox: new PlatformSandbox({
+    // accessToken, projectId, environmentId all fall back to env vars
+    idleTimeoutMinutes: 30,
+  }),
+})
+
+const agent = new Agent({
+  id: 'code-agent',
+  name: 'Code Agent',
+  instructions: 'You are a coding assistant working in this workspace.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+  workspace,
+})
+
+const response = await agent.generate(
+  'Print "Hello, world!" and show the current working directory.',
+)
+
+console.log(response.text)
+```
+
+### 비공개 네트워킹 {/* #private-networking */}
+
+세트`networkIsolation` to `PRIVATE` to join the environment's private network and reach other services running in the same Mastra Platform environment:
+
+```typescript
+const workspace = new Workspace({
+  sandbox: new PlatformSandbox({
+    networkIsolation: 'PRIVATE',
+  }),
+})
+```
+
+기본값`ISOLATED` mode allows outbound internet access only, with no private network connectivity.
+
+### 실행 중인 샌드박스에 다시 연결 {/* #reattaching-to-a-running-sandbox */}
+
+기존 패스`sandboxId` to reattach to a live sandbox instead of creating a new one:
+
+```typescript
+const sandbox = new PlatformSandbox({
+  sandboxId: 'sbx_abc123',
+})
+await sandbox.start()
+
+const result = await sandbox.executeCommand('cat', ['/workspace/state.json'])
+```
+
+언제`sandboxId` is set, `environmentId` isn't required because the sandbox already exists.
+
+### 체크포인트 복구 {/* #checkpoint-recovery */}
+
+생성자`id` (explicit or auto-generated) is sent to the platform on `POST /sandbox` as an advisory recovery key:
+
+* 플랫폼이 인식하는 경우`id` from a previous session, the new sandbox boots from the most recent checkpoint of that earlier sandbox's filesystem instead of the base recipe.
+* 만약`id` isn't recognised, the platform starts a fresh sandbox from the base recipe. Auto-generated ids never match, so omitting `id` disables checkpoint recovery.
+
+마구간을 통과하다`id` to preserve a sandbox's filesystem across sessions or across a `destroy()`/`start()` cycle:
+
+```typescript
+const sandbox = new PlatformSandbox({
+  id: `project-${projectId}`,
+})
+await sandbox.start() // Boots from the most recent checkpoint for this id, or fresh if unknown
+```
+
+체크포인트 복구는 다음보다 더 거칠다.`sandboxId` reattachment. Reattaching (via `sandboxId`) rejoins the exact live sandbox and its running processes. Checkpoint recovery constructs a brand new sandbox and restores its filesystem from the latest checkpoint the platform captured for the previous sandbox with that `id`. Running processes and any filesystem writes made after the last checkpoint aren't restored.
+
+각`id` maps to one independent filesystem. Reusing the same `id` across unrelated sandboxes causes the platform to boot them from each other's checkpoint.
+
+### 일련의 샌드박스에 대한 복제 {/* #cloning-for-a-fleet-of-sandboxes */}
+
+`clone()`독립된 형제를 반환합니다.`PlatformSandbox` that inherits credentials and defaults (access token, project, environment, network isolation, timeout, instructions, env, idle timeout) with per-instance overrides. The returned sandbox is unstarted and provisions on its own `start()`, so `clone()` performs no I/O:
+
+```typescript
+const template = new PlatformSandbox({
+  networkIsolation: 'PRIVATE',
+  idleTimeoutMinutes: 30,
+})
+
+const perProject = template.clone({ id: `project-${projectId}` })
+await perProject.start()
+```
+
+결합하다`clone()` with a stable `id` per clone to opt each clone into [checkpoint recovery](#checkpoint-recovery) independently.
+
+### 명령 실행 {/* #executing-commands */}
+
+`executeCommand`원격 샌드박스에서 명령을 실행하고 출력을 반환합니다. 통과하다`args` to have arguments safely shell-quoted:
+
+```typescript
+const result = await sandbox.executeCommand('python', ['analyze.py'], {
+  timeout: 30_000,
+  cwd: '/workspace',
+  env: { INPUT: 'repo' },
+})
+
+console.log(result.stdout)
+console.log(result.exitCode)
+```
+
+:::경고
+
+그만큼`command` argument is a shell string and is concatenated verbatim into the remote shell. This lets you use pipes, redirects, and chaining (`ls -la | grep foo`) but means untrusted input must be passed through `args` (safely quoted) or shell-quoted by the caller. Untrusted `command` values allow arbitrary shell execution on the sandbox.
+
+:::
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'accessToken',
+  type: 'string',
+  description: 'Platform access token. Falls back to the MASTRA_PLATFORM_ACCESS_TOKEN environment variable.',
+  isOptional: true,
+},
+{
+  name: 'projectId',
+  type: 'string',
+  description: 'Platform project ID. Falls back to the MASTRA_PROJECT_ID environment variable.',
+  isOptional: true,
+},
+{
+  name: 'environmentId',
+  type: 'string',
+  description:
+    'Platform environment ID the sandbox belongs to. Falls back to the MASTRA_ENVIRONMENT_ID environment variable. Required unless sandboxId is passed.',
+  isOptional: true,
+},
+{
+  name: 'sandboxId',
+  type: 'string',
+  description:
+    'Existing sandbox ID to reattach to instead of creating a new sandbox. When set, environmentId is not required.',
+  isOptional: true,
+},
+{
+  name: 'idleTimeoutMinutes',
+  type: 'number',
+  description: 'How long the sandbox stays alive with no activity before the platform destroys it.',
+  isOptional: true,
+},
+{
+  name: 'networkIsolation',
+  type: "'ISOLATED' | 'PRIVATE'",
+  description:
+    "Network mode. 'ISOLATED' (default) allows outbound internet only. 'PRIVATE' joins the platform environment's private network.",
+  isOptional: true,
+},
+{
+  name: 'env',
+  type: 'Record<string, string>',
+  description:
+    'Environment variables baked into the sandbox at creation time. Per-command environment variables can also be passed to executeCommand.',
+  isOptional: true,
+},
+{
+  name: 'timeout',
+  type: 'number',
+  description:
+    'Default command execution timeout in milliseconds. Overridable per call via ExecuteCommandOptions.timeout.',
+  isOptional: true,
+},
+{
+  name: 'instructions',
+  type: 'string | ((opts: { defaultInstructions: string; requestContext?: RequestContext }) => string)',
+  description:
+    'Custom instructions returned by getInstructions(). A string fully replaces the defaults; a function receives the defaults and can extend or customize them per-request.',
+  isOptional: true,
+},
+{
+  name: 'id',
+  type: 'string',
+  description:
+    "Unique identifier for this sandbox instance. Sent to the platform as an advisory recovery key: if the platform recognizes the id from a previous sandbox, the new sandbox boots from that sandbox's most recent checkpoint instead of the base recipe. Unknown ids fall through to a fresh sandbox. Auto-generated when omitted, which disables checkpoint recovery.",
+  isOptional: true,
+  defaultValue: 'Auto-generated',
+},
+{
+  name: 'fetch',
+  type: 'typeof fetch',
+  description: 'Custom fetch implementation, mainly for testing.',
+  isOptional: true,
+},
+]}
+/>
+
+## 속성 {/* #properties */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Sandbox instance identifier.',
+},
+{
+  name: 'name',
+  type: 'string',
+  description: "Provider name ('PlatformSandbox').",
+},
+{
+  name: 'provider',
+  type: 'string',
+  description: "Provider identifier ('platform').",
+},
+{
+  name: 'status',
+  type: 'ProviderStatus',
+  description:
+    "'pending' | 'initializing' | 'ready' | 'starting' | 'running' | 'stopping' | 'stopped' | 'destroying' | 'destroyed' | 'error'.",
+},
+{
+  name: 'processes',
+  type: 'PlatformProcessManager',
+  description:
+    'Background process manager. See [SandboxProcessManager reference](/reference/workspace/process-manager).',
+},
+]}
+/>
+
+## 행동 양식 {/* #methods */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'start',
+  type: '() => Promise<void>',
+  description:
+    'Provision the remote sandbox, or reattach when sandboxId was passed to the constructor. Idempotent once the sandbox is running. A destroyed reattach target falls through to a fresh provision.',
+},
+{
+  name: 'destroy',
+  type: '() => Promise<void>',
+  description:
+    'Tear down the remote sandbox and clear the cached exec lease. A subsequent start() provisions a fresh sandbox (or restores from checkpoint when a stable id is set).',
+},
+{
+  name: 'stop',
+  type: '() => Promise<void>',
+  description: 'Alias for destroy().',
+},
+{
+  name: 'executeCommand',
+  type: '(command: string, args?: string[], options?: ExecuteCommandOptions) => Promise<CommandResult>',
+  description:
+    'Run a command on the remote sandbox and return its stdout, stderr, exitCode, and executionTimeMs. command is a shell string, args are safely shell-quoted.',
+},
+{
+  name: 'clone',
+  type: '(options?: SandboxCloneOptions) => PlatformSandbox',
+  description:
+    'Construct an unstarted sibling PlatformSandbox that inherits credentials and defaults with per-instance overrides (id, sandboxId, env, idleTimeoutMinutes). Performs no I/O. Use to build a fleet of independent sandboxes from one configured template.',
+},
+{
+  name: 'getInfo',
+  type: '() => Promise<SandboxInfo>',
+  description:
+    "Return the sandbox's platform id, provider, status, createdAt, and metadata (sandboxId, providerResourceId, platformStatus).",
+},
+{
+  name: 'getInstructions',
+  type: '(opts?: { requestContext?: RequestContext }) => string',
+  description:
+    'Return the sandbox instructions the workspace surfaces in tool descriptions. Honors the instructions constructor option; otherwise returns platform-default instructions that include the current remote sandbox id when running.',
+},
+]}
+/>
+
+## 오류 {/* #errors */}
+
+플랫폼 API 오류 발생`PlatformApiError`. Structured `{ error: { message, type } }` responses are parsed into `.code` (machine-readable kind) and `.proxyMessage` (human string); the raw response body stays available on `.body`:
+
+```typescript
+import { PlatformApiError } from '@mastra/platform-workspace'
+
+try {
+  await sandbox.executeCommand('cat', ['/missing.txt'])
+} catch (err) {
+  if (err instanceof PlatformApiError) {
+    if (err.code === 'not_found') {
+      // handle missing resource
+    } else if (err.code === 'authentication_error') {
+      // refresh token
+    }
+    console.error(err.status, err.code, err.proxyMessage)
+  }
+}
+```
+
+`code`그리고`proxyMessage` are `undefined` when the response body isn't JSON, for example an HTML 502 from a load balancer.
+
+`executeCommand`직접 실행 데이터 플레인(철도 tcp-proxy에 대한 WebSocket)을 통해 실행되며 복구할 수 없는 오류가 발생하면 두 가지 유형의 샌드박스 오류가 발생할 수도 있습니다.
+
+```typescript
+import { SandboxDestroyedError, SandboxExecTransportError } from '@mastra/platform-workspace'
+
+try {
+  await sandbox.executeCommand('pytest')
+} catch (err) {
+  if (err instanceof SandboxDestroyedError) {
+    // /exec-lease returned 410; the sandbox has been destroyed.
+    // The cached sandbox id and lease have already been cleared,
+    // so reusing the instance will reprovision on the next call.
+  } else if (err instanceof SandboxExecTransportError) {
+    // Both the initial WebSocket attempt and the built-in retry
+    // closed without an exit frame against a live sandbox.
+    console.error(err.closeCode, err.closeReason, err.wsEndpoint)
+  }
+}
+```
+
+`SandboxExecTransportError`진단 필드(`opened`, `closeCode`, `closeReason`, `wsEndpoint`, plus `sandboxId`, `command`, and `attempts`) so operators can distinguish a broken Railway data plane from a failed command.
+
+## 관련된 {/* #related */}
+
+* [플랫폼파일 시스템 참조](/reference/workspace/platform-filesystem)
+* [철도샌드박스 참조](/reference/workspace/railway-sandbox)
+* [WorkspaceSandbox 인터페이스](/reference/workspace/sandbox)
+* [SandboxProcessManager 참조](/reference/workspace/process-manager)

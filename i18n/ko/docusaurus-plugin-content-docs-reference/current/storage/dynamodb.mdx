@@ -1,0 +1,332 @@
+---
+title: "참조: DynamoDB 스토리지 | 저장"
+description: "ElectroDB와 단일 테이블 설계를 사용하는 Mastra의 DynamoDB 스토리지 구현에 대한 문서입니다."
+packages:
+  - "@mastra/dynamodb"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+  - "@mastra/pg"
+---
+
+# DynamoDB 스토리지
+
+DynamoDB 스토리지 구현은 다음과 같은 단일 테이블 설계 패턴을 사용하여 Mastra를 위한 고용량 및 고성능 NoSQL 데이터베이스 솔루션을 제공합니다.[ElectroDB](https://electrodb.dev/).
+
+:::경고\[관측성이 지원되지 않음]
+
+DynamoDB 스토리지**doesn't support the observability domain**. Traces from the `MastraStorageExporter` can't be persisted to DynamoDB, and [스튜디오의](/docs/studio/overview)관측 가능성 기능은 유일한 스토리지 공급자인 DynamoDB에서는 작동하지 않습니다. Observability을 활성화하려면 다음을 사용하세요.[복합 스토리지](/reference/storage/composite#specialized-storage-for-observability)Observability 데이터를 ClickHouse와 같은 지원되는 Provider로 라우팅합니다.
+
+:::
+
+:::경고\[항목 크기 제한]
+DynamoDB는**400 KB maximum item size**. This limit can be exceeded when storing messages with base64-encoded attachments such as images. See [Handling large attachments](/docs/memory/memory-processors#handling-large-attachments) for workarounds including uploading attachments to external storage.
+:::
+
+## 특징 {/* #features */}
+
+* 모든 Mastra 스토리지 요구 사항을 충족하는 효율적인 단일 테이블 디자인
+* 유형이 안전한 DynamoDB 액세스를 위한 ElectroDB 기반
+* AWS 자격 증명, 지역 및 엔드포인트 지원
+* 개발을 위해 AWS DynamoDB Local과 호환 가능
+* 스레드, 메시지, 평가 및 Workflow 데이터를 저장합니다.
+* 서버리스 환경에 최적화됨
+* 엔터티 유형별로 자동 데이터 만료를 위해 구성 가능한 TTL(Time To Live)
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/dynamodb@latest
+```
+
+## 전제조건 {/* #prerequisites */}
+
+이 패키지를 사용하기 전에**must** create a DynamoDB table with a specific structure, including primary keys and Global Secondary Indexes (GSIs). This adapter expects the DynamoDB table and its GSIs to be provisioned externally.
+
+AWS CloudFormation 또는 AWS CDK를 사용하여 테이블을 설정하는 방법에 대한 자세한 지침은 다음에서 확인할 수 있습니다.[TABLE\_SETUP.md](https://github.com/mastra-ai/mastra/blob/main/stores/dynamodb/TABLE_SETUP.md). Please ensure your table is configured according to those instructions before proceeding.
+
+## 용법 {/* #usage */}
+
+### 기본 사용법 {/* #basic-usage */}
+
+```typescript
+import { Memory } from '@mastra/memory'
+import { DynamoDBStore } from '@mastra/dynamodb'
+
+// Initialize the DynamoDB storage
+const storage = new DynamoDBStore({
+  id: 'dynamodb', // Unique identifier for this storage instance
+  config: {
+    tableName: 'mastra-single-table', // Name of your DynamoDB table
+    region: 'us-east-1', // Optional: AWS region, defaults to 'us-east-1'
+    // endpoint: "http://localhost:8000", // Optional: For local DynamoDB
+    // credentials: { accessKeyId: "YOUR_ACCESS_KEY", secretAccessKey: "YOUR_SECRET_KEY" } // Optional
+  },
+})
+
+// Example: Initialize Memory with DynamoDB storage
+const memory = new Memory({
+  storage,
+  options: {
+    lastMessages: 10,
+  },
+})
+```
+
+### DynamoDB Local을 사용한 로컬 개발 {/* #local-development-with-dynamodb-local */}
+
+로컬 개발을 위해 다음을 사용할 수 있습니다.[DynamoDB Local](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html).
+
+1. **DynamoDB Local을 실행합니다(예: Docker 사용).**
+
+   ```bash
+   docker run -p 8000:8000 amazon/dynamodb-local
+   ```
+
+2. **구성`DynamoDBStore` to use the local endpoint:**
+
+   ```typescript
+   import { DynamoDBStore } from '@mastra/dynamodb'
+
+   const storage = new DynamoDBStore({
+     id: 'dynamodb-local',
+     config: {
+       tableName: 'mastra-single-table', // Ensure this table is created in your local DynamoDB
+       region: 'localhost', // Can be any string for local, 'localhost' is common
+       endpoint: 'http://localhost:8000',
+       // For DynamoDB Local, credentials are not typically required unless configured.
+       // If you've configured local credentials:
+       // credentials: { accessKeyId: "fakeMyKeyId", secretAccessKey: "fakeSecretAccessKey" }
+     },
+   })
+   ```
+
+   예를 들어 로컬 엔드포인트를 가리키는 AWS CLI를 사용하여 로컬 DynamoDB 인스턴스에 테이블과 GSI를 생성해야 합니다.
+
+## 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for this storage instance.',
+  isOptional: false,
+},
+{
+  name: 'config.tableName',
+  type: 'string',
+  description: 'The name of your DynamoDB table.',
+  isOptional: false,
+},
+{
+  name: 'config.region',
+  type: 'string',
+  description: "AWS region. Defaults to 'us-east-1'. For local development, can be set to 'localhost' or similar.",
+  isOptional: true,
+},
+{
+  name: 'config.endpoint',
+  type: 'string',
+  description: "Custom endpoint for DynamoDB (e.g., 'http://localhost:8000' for local development).",
+  isOptional: true,
+},
+{
+  name: 'config.credentials',
+  type: 'object',
+  description:
+    'AWS credentials object with `accessKeyId` and `secretAccessKey`. If not provided, the AWS SDK will attempt to source credentials from environment variables, IAM roles (e.g., for EC2/Lambda), or the shared AWS credentials file.',
+  isOptional: true,
+},
+{
+  name: 'config.ttl',
+  type: 'object',
+  description:
+    "TTL (Time To Live) configuration for automatic data expiration. Configure per entity type: thread, message, trace, eval, workflow_snapshot, resource, score. Each entity config includes: enabled (boolean), attributeName (string, default: 'ttl'), defaultTtlSeconds (number).",
+  isOptional: true,
+},
+]}
+/>
+
+## TTL(Time to Live) 구성 {/* #ttl-time-to-live-configuration */}
+
+DynamoDB TTL을 사용하면 다음 사용 사례에 대해 지정된 기간 이후 항목을 자동으로 삭제할 수 있습니다.
+
+* **비용 최적화**: 오래된 데이터를 자동으로 제거하여 보관 비용 절감
+* **데이터 수명주기 관리**: 규정 준수를 위한 보존 정책 구현
+* **성능**: 테이블이 무한정 커지는 것을 방지
+* **개인정보 보호 규정 준수**: 특정 기간이 지나면 개인정보를 자동으로 삭제합니다.
+
+### TTL 활성화 {/* #enabling-ttl */}
+
+TTL을 사용하려면 다음을 수행해야 합니다.
+
+1. **DynamoDBStore에서 TTL 구성**(아래 표시)
+2. **DynamoDB 테이블에서 TTL 활성화**AWS 콘솔 또는 CLI를 통해 속성 이름 지정(기본값:`ttl`)
+
+```typescript
+import { DynamoDBStore } from '@mastra/dynamodb'
+
+const storage = new DynamoDBStore({
+  name: 'dynamodb',
+  config: {
+    tableName: 'mastra-single-table',
+    region: 'us-east-1',
+    ttl: {
+      // Messages expire after 30 days
+      message: {
+        enabled: true,
+        defaultTtlSeconds: 30 * 24 * 60 * 60, // 30 days
+      },
+      // Threads expire after 90 days
+      thread: {
+        enabled: true,
+        defaultTtlSeconds: 90 * 24 * 60 * 60, // 90 days
+      },
+      // Traces expire after 7 days with custom attribute name
+      trace: {
+        enabled: true,
+        attributeName: 'expiresAt', // Custom TTL attribute
+        defaultTtlSeconds: 7 * 24 * 60 * 60, // 7 days
+      },
+      // Workflow snapshots don't expire
+      workflow_snapshot: {
+        enabled: false,
+      },
+    },
+  },
+})
+```
+
+### 지원되는 엔터티 유형 {/* #supported-entity-types */}
+
+다음 엔터티 유형에 대해 TTL을 구성할 수 있습니다.
+
+| 엔터티 | 설명 |
+| - | - |
+|`thread` | Conversation threads |
+| `message` | Messages within threads |
+| `trace` | Observability traces |
+| `eval` | Evaluation results |
+| `workflow_snapshot` | Workflow state snapshots |
+| `resource` | User/resource data |
+| `score` | Scoring results |
+
+### TTL 엔터티 구성 {/* #ttl-entity-configuration */}
+
+각 엔터티 유형은 다음 구성을 허용합니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'enabled',
+  type: 'boolean',
+  description: 'Whether TTL is enabled for this entity type.',
+  isOptional: false,
+},
+{
+  name: 'attributeName',
+  type: 'string',
+  description:
+    "The DynamoDB attribute name to use for TTL. Must match the TTL attribute configured on your DynamoDB table. Defaults to 'ttl'.",
+  isOptional: true,
+},
+{
+  name: 'defaultTtlSeconds',
+  type: 'number',
+  description:
+    'Default TTL in seconds from item creation time. Items will be automatically deleted by DynamoDB after this duration.',
+  isOptional: true,
+},
+]}
+/>
+
+### DynamoDB 테이블에서 TTL 활성화 {/* #enabling-ttl-on-your-dynamodb-table */}
+
+코드에서 TTL을 구성한 후에는 DynamoDB 테이블 자체에서 TTL을 활성화해야 합니다.
+
+**AWS CLI 사용:**
+
+```bash
+aws dynamodb update-time-to-live \
+  --table-name mastra-single-table \
+  --time-to-live-specification "Enabled=true, AttributeName=ttl"
+```
+
+**AWS 콘솔 사용:**
+
+1. DynamoDB 콘솔로 이동
+2. 테이블을 선택하세요
+3. "추가 설정" 탭으로 이동하세요.
+4. "TTL(Time to Live)"에서 "TTL 관리"를 선택합니다.
+5. TTL을 활성화하고 속성 이름을 지정합니다(기본값:`ttl`)
+
+:::메모
+
+DynamoDB는 만료 후 48시간 이내에 만료된 항목을 삭제합니다. 항목은 실제로 삭제될 때까지 쿼리 가능한 상태로 유지됩니다.
+
+:::
+
+## AWS IAM 권한 {/* #aws-iam-permissions */}
+
+코드를 실행하는 IAM 역할 또는 사용자는 지정된 DynamoDB 테이블 및 해당 인덱스와 상호 작용할 수 있는 적절한 권한이 필요합니다. 다음은 샘플 정책입니다. 바꾸다`${YOUR_TABLE_NAME}` with your actual table name and `${YOUR_AWS_REGION}` and `${YOUR_AWS_ACCOUNT_ID}` with appropriate values.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:BatchGetItem",
+        "dynamodb:BatchWriteItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:${YOUR_AWS_REGION}:${YOUR_AWS_ACCOUNT_ID}:table/${YOUR_TABLE_NAME}",
+        "arn:aws:dynamodb:${YOUR_AWS_REGION}:${YOUR_AWS_ACCOUNT_ID}:table/${YOUR_TABLE_NAME}/index/*"
+      ]
+    }
+  ]
+}
+```
+
+## 주요 고려사항 {/* #key-considerations */}
+
+아키텍처 세부 사항을 자세히 알아보기 전에 DynamoDB 스토리지 어댑터 작업 시 다음 주요 사항을 염두에 두십시오.
+
+* **외부 테이블 프로비저닝:**&#xC774; 어댑터*requires* you to create and configure the DynamoDB table and its Global Secondary Indexes (GSIs) yourself, prior to using the adapter. Follow the guide in [TABLE\_SETUP.md](https://github.com/mastra-ai/mastra/blob/main/stores/dynamodb/TABLE_SETUP.md).
+* **단일 테이블 디자인:**&#xBAA8;든 Mastra 데이터(스레드, 메시지 등)는 하나의 DynamoDB 테이블에 저장됩니다. 이는 관계형 데이터베이스 접근 방식과 달리 DynamoDB에 최적화된 의도적인 설계 선택입니다.
+* **GSI 이해:**&#x47;SI가 어떻게 구성되어 있는지 숙지합니다.`TABLE_SETUP.md`) is important for understanding data retrieval and potential query patterns.
+* **전기DB:**&#xC5B4;댑터는 ElectroDB를 사용하여 DynamoDB와의 상호 작용을 관리하고 원시 DynamoDB 작업에 대한 추상화 계층과 유형 안전성을 제공합니다.
+
+## 아키텍처 접근 방식 {/* #architectural-approach */}
+
+이 스토리지 어댑터는**single-table design pattern** with [ElectroDB](https://electrodb.dev/), a common and recommended approach for DynamoDB. This differs architecturally from relational database adapters (like `@mastra/pg` or `@mastra/libsql`) that typically use multiple tables, each dedicated to a specific entity (threads, messages, etc.).
+
+이 접근 방식의 주요 측면:
+
+* **DynamoDB 네이티브:**&#xB2E8;일 테이블 설계는 DynamoDB의 키-값 및 쿼리 기능에 최적화되어 있어 관계형 Model을 모방하는 것에 비해 성능과 용량이 더 나은 경우가 많습니다.
+* **외부 테이블 관리:**&#xCF54;드를 통해 테이블을 생성하는 도우미 기능을 제공하는 일부 어댑터와 달리 이 어댑터는**expects the DynamoDB table and its associated Global Secondary Indexes (GSIs) to be provisioned externally** before use. Please refer to [TABLE\_SETUP.md](https://github.com/mastra-ai/mastra/blob/main/stores/dynamodb/TABLE_SETUP.md) for detailed instructions using tools like AWS CloudFormation or CDK. The adapter focuses solely on interacting with the pre-existing table structure.
+* **인터페이스를 통한 일관성:**&#xAE30;본 스토리지 Model은 다르지만 이 어댑터는 동일한 스토리지 Model을 준수합니다.`MastraStorage` interface as other adapters, ensuring it can be used interchangeably within the Mastra `Memory` component.
+
+### 단일 테이블의 마스트라 데이터 {/* #mastra-data-in-the-single-table */}
+
+단일 DynamoDB 테이블 내에서 다양한 Mastra 데이터 엔터티(예: 스레드, 메시지, 추적, 평가 및 Workflow)가 ElectroDB를 사용하여 관리되고 구별됩니다. ElectroDB는 고유한 키 구조와 속성을 포함하는 각 엔터티 유형에 대한 특정 Model을 정의합니다. 이를 통해 어댑터는 동일한 테이블 내에서 다양한 데이터 유형을 효율적으로 저장하고 검색할 수 있습니다.
+
+예를 들어,`Thread` item might have a primary key like `THREAD#<threadId>`, while a `Message` item belonging to that thread might use `THREAD#<threadId>` as a partition key and `MESSAGE#<messageId>` as a sort key. The Global Secondary Indexes (GSIs), detailed in `TABLE_SETUP.md`, are strategically designed to support common access patterns across these different entities, such as fetching all messages for a thread or querying traces associated with a workflow.
+
+### 단일 테이블 디자인의 장점 {/* #advantages-of-single-table-design */}
+
+이 구현에서는 ElectroDB와 함께 단일 테이블 설계 패턴을 사용하며, 이는 DynamoDB 컨텍스트 내에서 여러 가지 이점을 제공합니다.
+
+1. **비용 절감(잠재적으로):**&#xD2B9;히 온디맨드 용량의 경우 테이블 수가 적으면 RCU/WCU(읽기/쓰기 용량 단위) 프로비저닝 및 관리가 단순화됩니다.
+2. **더 나은 성능:**&#xAD00;련 데이터는 GSI를 통해 효율적으로 같은 위치에 배치되거나 액세스될 수 있으므로 일반적인 액세스 패턴을 빠르게 조회할 수 있습니다.
+3. **단순화된 관리:**&#xBAA8;니터링하고 백업해야 할 개별 테이블이 줄어들고 관리할 항목도 줄어듭니다.
+4. **액세스 패턴의 복잡성 감소:**&#x45;lectroDB는 단일 테이블에서 항목 유형 및 액세스 패턴의 복잡성을 관리하는 데 도움이 됩니다.
+5. **거래 지원:**&#x44;ynamoDB 트랜잭션은 필요한 경우 동일한 테이블 내에 저장된 다양한 "엔티티" 유형에서 사용할 수 있습니다.

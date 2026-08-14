@@ -1,0 +1,108 @@
+---
+title: "측정항목 개요 | Observability"
+description: "추적된 실행에서 Mastra가 내보내는 자동 메트릭을 이해합니다."
+packages:
+  - "@mastra/observability"
+---
+
+# 측정항목 개요
+
+Mastra는 추적된 실행에서 성능 및 사용량 측정항목을 자동으로 내보냅니다. 수동 계측이 필요하지 않습니다. 측정항목은 완료되면 범위에서 파생됩니다.
+
+다음 측정항목 카테고리가 자동으로 내보내집니다.
+
+* **기간 측정항목**: Agent, Workflow, Tool, Model 호출 및 프로세서의 실행 시간입니다.
+* **토큰 사용 지표**: 유형(텍스트, 캐시, 오디오, 이미지, 추론)별로 분류된 입력 및 출력 토큰 수입니다.
+* **비용 추정**: 내장된 가격 책정 레지스트리를 기반으로 한 Model 호출당 예상 비용입니다.
+
+:::메모
+
+측정항목에는 Observability을 위한 분석 가능 저장소가 필요합니다. 대부분의 관계형 데이터베이스(LibSQL, MSSQL)는 메트릭에 지원되지 않습니다. 다시 시작하면 Memory 내 저장소가 재설정됩니다.
+
+지역 개발을 위해 다음을 사용하십시오.[DuckDB](https://duckdb.org/) through `@mastra/duckdb`. For production, use [ClickHouse](https://clickhouse.com/) through `@mastra/clickhouse`. `PostgresStoreVNext` with the observability domain enabled also supports metrics, but always provide a time range to avoid full partition scans.
+
+Google Cloud Spanner는 측정항목을 지원하지만 측정항목 워크로드가 많은 경우에는 권장되지 않습니다. 측정항목은 쓰기 중심이고 스캔 중심이므로 Spanner 어댑터는 기본적으로 측정항목을 사용 중지합니다. 세트`disableMetrics: false` only for light workloads, or route metrics to an OLAP store.
+
+:::
+
+## 측정항목을 사용해야 하는 경우 {/* #when-to-use-metrics */}
+
+* Agent, Tool, Workflow 및 Model 호출 전반에 걸쳐 대기 시간을 모니터링합니다.
+* 시간 경과에 따른 토큰 소비 및 비용 추세 추적
+* 성공률과 오류율을 비교하여 오류가 많은 Agent 또는 Tool를 식별합니다.
+* Prompt, Model 또는 코드 변경 전후의 성능 비교
+
+## 시작하기 {/* #get-started */}
+
+필수 패키지를 설치합니다:
+
+```bash npm2yarn
+npm install @mastra/observability @mastra/libsql @mastra/duckdb
+```
+
+그런 다음 Observability 도메인을 DuckDB로 라우팅하는 복합 저장소를 사용하여 Observability을 구성합니다.
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { LibSQLStore } from '@mastra/libsql'
+import { DuckDBStore } from '@mastra/duckdb'
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { Observability, MastraStorageExporter, SensitiveDataFilter } from '@mastra/observability'
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite-storage',
+    default: new LibSQLStore({
+      id: 'mastra-storage',
+      url: 'file:./mastra.db',
+    }),
+    domains: {
+      observability: await new DuckDBStore().getStore('observability'),
+    },
+  }),
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'mastra',
+        exporters: [new MastraStorageExporter()],
+        spanOutputProcessors: [new SensitiveDataFilter()],
+      },
+    },
+  }),
+})
+```
+
+## 사진관 {/* #studio */}
+
+Studio 지표 대시보드는 KPI 카드, 세부 분석, 토큰 사용 타임라인 및 구성 가능한 시간 범위를 통해 모든 자동 지표를 시각화합니다. 보다[Studio observability](/docs/studio/observability) for a full walkthrough.
+
+## Mastra가 측정하는 것 {/* #what-mastra-measures */}
+
+Mastra는 세 가지 범주의 지표를 자동으로 내보냅니다.
+
+* **지속**: Agent, Workflow, Tool, Model 호출 및 프로세서의 실행 시간(밀리초)입니다.
+* **토큰 사용**: 유형(텍스트, 캐시, 오디오, 이미지, 추론)별로 분류된 입력 및 출력 토큰 수입니다.
+* **비용 추정**: 내장된 가격 책정 레지스트리를 기반으로 한 Model 호출당 예상 비용입니다.
+
+각 지표는 추적 상관 관계 컨텍스트를 전달하므로 대시보드 급증부터 이를 유발한 정확한 범위까지 드릴링할 수 있습니다.
+
+측정항목 이름, 라벨, 비용 필드의 전체 목록은 다음을 참조하세요.[Automatic metrics reference](/reference/observability/metrics/automatic-metrics).
+
+## 자동 측정항목의 작동 방식 {/* #how-automatic-metrics-work */}
+
+Mastra 자동 계측 Agent 실행, Workflow 단계, Tool 호출 및 Model 생성을 범위로 합니다. 범위가 종료되면 관측 가능성 계층은 범위에서 측정항목을 추출합니다.
+
+1. **지속**: 범위의 시작 및 종료 타임스탬프에서 계산됩니다.
+2. **토큰 사용**: 에서 추출됨`usage` attribute on model generation spans.
+3. **비용 추정**: 공급자 및 Model 이름과 일치하는 내장된 가격 레지스트리를 통해 각 토큰 지표를 실행합니다.
+
+저장하기 전에 모든 측정항목 라벨은 알려진 높은 카디널리티 값(예: 추적 ID 및 UUID)을 차단하는 카디널리티 필터를 통과하여 저장 효율성을 유지합니다. 그런 다음 측정항목은 내부 이벤트 버퍼에 의해 일괄 처리되고`MastraStorageExporter`.
+
+## 다음 단계 {/* #next-steps */}
+
+* [자동 측정항목 참조](/reference/observability/metrics/automatic-metrics)
+* [측정항목 쿼리](/docs/observability/metrics/querying)
+* [추적 개요](/docs/observability/tracing/overview)
+* [스튜디오 Observability](/docs/studio/observability)
+* [Observability 개요](/docs/observability/overview)
+* [MastraStorageExporter 참조](/docs/observability/integrations/exporters/mastra-storage)

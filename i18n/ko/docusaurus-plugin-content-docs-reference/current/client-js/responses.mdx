@@ -1,0 +1,276 @@
+---
+title: "참조: OpenAI 응답 API | 클라이언트 SDK"
+description: "Mastra의 OpenAI 호환 `/v1/responses` 경로를 호출하는 client-js 도우미에 대한 API 참조입니다."
+packages:
+  - "@mastra/client-js"
+---
+
+# OpenAI 응답 API
+
+이 OpenAI 호환 Agent 지원 인터페이스를 통해 Mastra Agent를 응답 API로 사용할 수 있습니다. Mastra Agent를 통해 응답을 생성, 검색, 스트리밍 및 삭제하는 방법을 제공합니다.
+
+이러한 경로는 Mastra Agent, Memory 및 스토리지를 통한 Agent 지원 어댑터입니다. 사용`agent_id` to select the Mastra agent that should handle the request. You can pass `model`단일 요청에 대해 Agent의 구성된 Model을 재정의하거나, Agent에 이미 구성된 Model을 사용하기 위해 이를 생략합니다.
+
+저장된 응답도 반환됩니다.`conversation_id`. In Mastra, this is the raw memory `threadId`.
+
+이 API는 현재 실험적입니다.
+
+## 사용예 {/* #usage-example */}
+
+```typescript
+import { MastraClient } from '@mastra/client-js'
+
+const client = new MastraClient({
+  baseUrl: 'http://localhost:4111',
+})
+
+const response = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Summarize this ticket',
+  store: true,
+})
+
+console.log(response.output_text)
+```
+
+## 행동 양식 {/* #methods */}
+
+### 수명주기 {/* #lifecycle */}
+
+#### `create(params)` {/* #createparams */}
+
+응답을 만듭니다.
+
+```typescript
+const response = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Summarize this ticket',
+})
+```
+
+**보고:** `Promise<ResponsesResponse>` when `stream` is omitted or `false`.
+
+언제`stream: true`, `create()` returns an async iterable of SSE-style event payloads:
+
+```typescript
+const stream = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Summarize this ticket',
+  stream: true,
+})
+
+for await (const event of stream) {
+  if (event.type === 'response.output_text.delta') {
+    process.stdout.write(event.delta)
+  }
+}
+```
+
+스트리밍 응답에는 Tool 이벤트도 포함될 수 있습니다. Tool 호출 스트림 사용`response.output_item.added`, `response.function_call_arguments.delta`, `response.function_call_arguments.done`, and `response.output_item.done` events. Tool results appear as `function_call_output` items with `<toolCallId>:output` IDs.
+
+**보고:** `Promise<ResponsesStream>`.
+
+#### `retrieve(responseId, requestContext?)` {/* #retrieveresponseid-requestcontext */}
+
+저장된 응답을 검색합니다.
+
+```typescript
+const response = await client.responses.retrieve('msg_123')
+```
+
+**보고:** `Promise<ResponsesResponse>`.
+
+#### `delete(responseId, requestContext?)` {/* #deleteresponseid-requestcontext */}
+
+저장된 응답을 삭제합니다.
+
+```typescript
+const deleted = await client.responses.delete('msg_123')
+```
+
+**보고:** `Promise<{ id: string; object: "response"; deleted: true }>`
+
+#### `stream(params)` {/* #streamparams */}
+
+스트리밍 응답을 생성합니다.
+
+```typescript
+const stream = await client.responses.stream({
+  agent_id: 'support-agent',
+  input: 'Say hello',
+})
+
+for await (const event of stream) {
+  console.log(event.type)
+}
+```
+
+**보고:** `Promise<ResponsesStream>`.
+
+## 저장된 응답 및 대화 {/* #stored-responses-and-conversations */}
+
+저장된 응답에는 두 가지가 모두 포함됩니다.`response.id` and `conversation_id`.
+
+* `response.id`응답 ID입니다. 저장된 Agent 지원 응답의 경우 이는 지속형 보조자 메시지 ID입니다.
+* `conversation_id`원시 Mastra 스레드 ID입니다.
+
+사용`previous_response_id` when you want to continue from a previous stored response. Use `conversation_id` when you want to target a known thread directly.
+
+```typescript
+const first = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Start a support thread',
+  store: true,
+})
+
+const second = await client.responses.create({
+  agent_id: 'support-agent',
+  conversation_id: first.conversation_id!,
+  input: 'Add a follow-up to the same thread',
+  store: true,
+})
+```
+
+사용[`client.conversations`](/reference/client-js/conversations) when you want to create, retrieve, delete, or inspect the underlying OpenAI Responses API conversation directly.
+
+## 함수 호출(Tool) {/* #function-calling-tools */}
+
+`response.tools`요청에 사용할 수 있는 구성된 기능 정의가 포함되어 있습니다.
+
+Model이 함수를 호출하면 해당 활동이`response.output` as `function_call` and `function_call_output` items alongside the final assistant `message`.
+
+언제`stream: true`, function calls are also emitted as Responses stream events. Read `response.function_call_arguments.delta` events for partial argument chunks and prefer `response.function_call_arguments.done` for the finalized arguments payload and tool name. Read `response.output_item.done` events for completed `function_call` and `function_call_output` items. Tool output items use `<toolCallId>:output` IDs.
+
+## 구조화된 출력 {/* #structured-output */}
+
+사용`text.format` when you want JSON output.
+
+* `json_object`JSON 모드를 활성화합니다.
+* `json_schema`스키마가 제한된 구조화된 출력을 가능하게 합니다.
+
+두 형식 모두 보조자 메시지 콘텐츠에 JSON을 반환합니다. 사용`json_schema` when you need strict schema enforcement. Use `json_object` when you only need valid JSON output.
+
+```typescript
+const response = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Return a structured support ticket summary.',
+  text: {
+    format: {
+      type: 'json_schema',
+      name: 'ticket_summary',
+      schema: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          priority: { type: 'string' },
+        },
+        required: ['summary', 'priority'],
+        additionalProperties: false,
+      },
+    },
+  },
+})
+```
+
+## 공급자 지원 요청 {/* #provider-backed-requests */}
+
+사용`providerOptions` when you need provider-specific options that Mastra doesn't normalize at the Responses layer.
+
+```typescript
+const response = await client.responses.create({
+  agent_id: 'support-agent',
+  input: 'Continue this exchange',
+  providerOptions: {
+    openai: {
+      previousResponseId: 'resp_123',
+    },
+  },
+})
+```
+
+## 응답 형태 {/* #response-shape */}
+
+반환된 응답 객체에는 다음이 포함됩니다.
+
+* `id`: 응답 ID
+* `output`: 어시스턴트 등 출력 항목`message`, `function_call`, and `function_call_output`
+* `output_text`: 보조 텍스트 출력에 합류하는 편의 게터
+* `tools`: 요청에 대해 구성된 Tool 정의
+* `conversation_id`: 저장된 응답의 원시 스레드 ID
+* `text`: 요청된 텍스트 출력 형식(제공된 경우)
+
+## 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'agent_id',
+  type: 'string',
+  description:
+    'Required on initial requests. Selects the Mastra agent that executes the request. Stored follow-up turns can omit it when continuing with `previous_response_id`.',
+  isOptional: true,
+},
+{
+  name: 'model',
+  type: 'string',
+  description:
+    'Optional model override for this request, such as `openai/gpt-5`. If omitted, Mastra uses the model configured on the selected agent.',
+  isOptional: true,
+},
+{
+  name: 'input',
+  type: "string | Array<{ role: 'system' | 'developer' | 'user' | 'assistant'; content: string | Array<{ type: 'input_text' | 'text' | 'output_text'; text: string }> }>",
+  description: 'Required. Input text or message array for the response.',
+  isOptional: false,
+},
+{
+  name: 'instructions',
+  type: 'string',
+  description: 'Optional instruction override for this request.',
+  isOptional: true,
+},
+{
+  name: 'text',
+  type: "{ format: { type: 'json_object' } | { type: 'json_schema'; name: string; schema: Record<string, unknown>; description?: string; strict?: boolean } }",
+  description:
+    'Optional text output format. Use `json_object` for JSON mode or `json_schema` for schema-constrained structured output.',
+  isOptional: true,
+},
+{
+  name: 'providerOptions',
+  type: 'Record<string, Record<string, unknown> | undefined>',
+  description: 'Optional provider-specific options passed through to the underlying model call.',
+  isOptional: true,
+},
+{
+  name: 'stream',
+  type: 'boolean',
+  description: 'When true, returns an async iterable of Responses API events.',
+  isOptional: true,
+},
+{
+  name: 'store',
+  type: 'boolean',
+  description: 'When true, persists the response through the selected agent memory.',
+  isOptional: true,
+},
+{
+  name: 'conversation_id',
+  type: 'string',
+  description: 'Optional conversation identifier. In Mastra, this is the raw memory thread ID.',
+  isOptional: true,
+},
+{
+  name: 'previous_response_id',
+  type: 'string',
+  description: 'Continues a stored response chain from a previous stored response.',
+  isOptional: true,
+},
+{
+  name: 'requestContext',
+  type: 'RequestContext | Record<string, any>',
+  description: 'Optional request context forwarded to the Mastra server.',
+  isOptional: true,
+},
+]}
+/>

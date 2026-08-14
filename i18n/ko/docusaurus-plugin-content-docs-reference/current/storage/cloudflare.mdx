@@ -1,0 +1,198 @@
+---
+title: "참조: Cloudflare 저장소 | 저장"
+description: "KV 및 내구성 개체를 포함하여 Mastra의 Cloudflare 스토리지 구현에 대한 문서입니다."
+packages:
+  - "@mastra/cloudflare"
+---
+
+# Cloudflare 스토리지
+
+Mastra는 두 가지 Cloudflare 스토리지 구현을 제공합니다.
+
+* **클라우드플레어 KV** (`CloudflareKVStorage`): A globally distributed, eventually consistent key-value store
+* **Cloudflare 내구성 개체** (`CloudflareDOStorage`): A strongly consistent, SQLite-based storage using Durable Objects
+
+:::경고\[관측성이 지원되지 않음]
+
+Cloudflare 스토리지**doesn't support the observability domain**. Traces from the `MastraStorageExporter` can't be persisted, and [Studio's](/docs/studio/overview) observability features won't work with Cloudflare as your only storage provider. To enable observability, use [composite storage](/reference/storage/composite#specialized-storage-for-observability)Observability 데이터를 ClickHouse와 같은 지원되는 Provider로 라우팅합니다.
+
+:::
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/cloudflare@latest
+```
+
+## Cloudflare KV 저장소 {/* #cloudflare-kv-storage */}
+
+KV 저장소 구현은 Cloudflare Workers KV를 사용하여 전 세계적으로 분산된 서버리스 키-값 저장소 솔루션을 제공합니다.
+
+### 용법 {/* #usage */}
+
+```typescript
+import { CloudflareKVStorage } from '@mastra/cloudflare/kv'
+
+// --- Example 1: Using Workers Binding ---
+const storageWorkers = new CloudflareKVStorage({
+  id: 'cloudflare-workers-storage',
+  bindings: {
+    threads: THREADS_KV, // KVNamespace binding for threads table
+    messages: MESSAGES_KV, // KVNamespace binding for messages table
+    // Add other tables as needed
+  },
+  keyPrefix: 'dev_', // Optional: isolate keys per environment
+})
+
+// --- Example 2: Using REST API ---
+const storageRest = new CloudflareKVStorage({
+  id: 'cloudflare-rest-storage',
+  accountId: process.env.CLOUDFLARE_ACCOUNT_ID!, // Cloudflare Account ID
+  apiToken: process.env.CLOUDFLARE_API_TOKEN!, // Cloudflare API Token
+  namespacePrefix: 'dev_', // Optional: isolate namespaces per environment
+})
+```
+
+### 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for this storage instance.',
+  isOptional: false,
+},
+{
+  name: 'bindings',
+  type: 'Record<string, KVNamespace>',
+  description: 'Cloudflare Workers KV bindings (for Workers runtime)',
+  isOptional: true,
+},
+{
+  name: 'accountId',
+  type: 'string',
+  description: 'Cloudflare Account ID (for REST API)',
+  isOptional: true,
+},
+{
+  name: 'apiToken',
+  type: 'string',
+  description: 'Cloudflare API Token (for REST API)',
+  isOptional: true,
+},
+{
+  name: 'namespacePrefix',
+  type: 'string',
+  description: 'Optional prefix for all namespace names (useful for environment isolation)',
+  isOptional: true,
+},
+{
+  name: 'keyPrefix',
+  type: 'string',
+  description: 'Optional prefix for all keys (useful for environment isolation)',
+  isOptional: true,
+},
+]}
+/>
+
+### 추가 참고사항 {/* #additional-notes */}
+
+### 스키마 관리 {/* #schema-management */}
+
+저장소 구현은 스키마 생성 및 업데이트를 자동으로 처리합니다. 다음 테이블이 생성됩니다.
+
+* `threads`: 대화 스레드를 저장합니다.
+* `messages`: 개별 메시지를 저장합니다.
+* `metadata`: 스레드 및 메시지에 대한 추가 메타데이터를 저장합니다.
+
+### 일관성 및 전파 {/* #consistency--propagation */}
+
+Cloudflare KV는 최종적으로 일관된 저장소입니다. 즉, 쓰기 후 모든 지역에서 데이터를 즉시 사용하지 못할 수도 있습니다.
+
+### 주요 구조 및 네임스페이스 {/* #key-structure--namespacing */}
+
+Cloudflare KV의 키는 구성 가능한 접두사와 테이블별 형식의 조합으로 구성됩니다(예:`threads:threadId`).
+For Workers deployments, `keyPrefix` is used to isolate data within a namespace; for REST API deployments, `namespacePrefix` is used to isolate entire namespaces between environments or applications.
+
+## Cloudflare 내구성 개체 스토리지 {/* #cloudflare-durable-objects-storage */}
+
+내구성 개체 스토리지 구현은 Cloudflare 내구성 개체를 사용하여 강력하게 일관된 SQLite 기반 스토리지를 제공합니다. 이는 트랜잭션 일관성과 SQL 쿼리 기능이 필요한 애플리케이션에 이상적입니다.
+
+### 용법 {/* #usage-1 */}
+
+```typescript
+import { DurableObject } from 'cloudflare:workers'
+import { CloudflareDOStorage } from '@mastra/cloudflare/do'
+
+class AgentDurableObject extends DurableObject<Env> {
+  private storage: CloudflareDOStorage
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env)
+    this.storage = new CloudflareDOStorage({
+      sql: ctx.storage.sql,
+      tablePrefix: 'mastra_', // Optional: prefix for table names
+    })
+  }
+
+  async run() {
+    const memory = await this.storage.getStore('memory')
+    await memory?.saveThread({
+      thread: { id: 'thread-1', resourceId: 'user-1', title: 'Chat', metadata: {} },
+    })
+  }
+}
+```
+
+### 매개변수 {/* #parameters-1 */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'sql',
+  type: 'SqlStorage',
+  description: 'SqlStorage instance from Durable Objects ctx.storage.sql',
+  isOptional: false,
+},
+{
+  name: 'tablePrefix',
+  type: 'string',
+  description: 'Optional prefix for table names (only letters, numbers, and underscores allowed)',
+  isOptional: true,
+},
+{
+  name: 'disableInit',
+  type: 'boolean',
+  description:
+    'When true, automatic table creation/migrations are disabled. Useful for CI/CD pipelines where migrations run separately.',
+  isOptional: true,
+},
+]}
+/>
+
+### 강력한 일관성 {/* #strong-consistency */}
+
+KV와 달리 지속성 개체는 강력한 일관성을 보장합니다. 지속성 개체 내의 모든 읽기 및 쓰기는 직렬화되므로 빠르고 오래 실행되는 Agent에 매우 적합합니다.
+
+### SQL 기능 {/* #sql-capabilities */}
+
+내구성 있는 개체 스토리지는 내부적으로 SQLite를 사용하여 키-값 스토리지에서는 불가능한 효율적인 쿼리, 필터링 및 페이지 매김을 가능하게 합니다.
+
+## 스키마 관리 {/* #schema-management-1 */}
+
+두 저장소 구현 모두 스키마 생성 및 업데이트를 자동으로 처리합니다. 그들은 다음과 같은 테이블을 생성합니다:
+
+* `threads`: 대화 스레드를 저장합니다.
+* `messages`: 개별 메시지를 저장합니다.
+* `workflow_snapshot`: Workflow 실행 상태를 저장합니다.
+
+## 더 이상 사용되지 않는 별칭 {/* #deprecated-aliases */}
+
+이전 버전과의 호환성을 위해 다음 별칭을 사용할 수 있습니다.
+
+```typescript
+// These are deprecated - use CloudflareKVStorage and CloudflareDOStorage instead
+import { CloudflareStore } from '@mastra/cloudflare/kv' // alias for CloudflareKVStorage
+import { DOStore } from '@mastra/cloudflare/do' // alias for CloudflareDOStorage
+```

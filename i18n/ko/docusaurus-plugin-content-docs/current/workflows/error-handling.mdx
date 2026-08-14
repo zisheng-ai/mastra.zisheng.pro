@@ -1,0 +1,367 @@
+---
+title: "오류 처리 | Workflow"
+description: "단계 재시도, 조건부 분기 및 모니터링을 사용하여 Mastra Workflow의 오류를 처리하는 방법을 알아보세요."
+packages:
+  - "@mastra/core"
+---
+
+# 오류 처리
+
+Mastra Workflow는 실행 후 결과 상태 확인, 일시적 오류에 대한 재시도 정책, 중앙 집중식 오류 로깅 또는 경고를 위한 수명 주기 콜백을 통해 오류 처리를 지원합니다.
+
+## Workflow 결과 처리 {/* #handling-workflow-results */}
+
+Workflow우를 실행하면 결과 개체에 발생한 상태와 오류가 포함됩니다.
+
+### 결과 상태 확인 {/* #checking-the-result-status */}
+
+```typescript title="src/run-workflow.ts"
+import { mastra } from './mastra'
+
+const workflow = mastra.getWorkflow('myWorkflow')
+const run = await workflow.createRun()
+const result = await run.start({ inputData: { value: 'test' } })
+
+switch (result.status) {
+  case 'success':
+    console.log('Workflow completed:', result.result)
+    break
+  case 'failed':
+    console.error('Workflow failed:', result.error)
+    break
+  case 'suspended':
+    console.log('Workflow suspended, waiting for resume')
+    break
+}
+```
+
+### 결과 객체 구조 {/* #result-object-structure */}
+
+결과 개체에는 다음이 포함됩니다.
+
+* `status`- 작업 흐름 상태:`'success'`, `'failed'`, `'suspended'`, or `'tripwire'`
+* `result`- Workflow 출력(상태가`'success'`)
+* `error`- 오류 내용(상태가`'failed'`)
+* `steps`- 상태 및 출력이 포함된 개별 단계 결과
+
+### 단계 결과에 액세스하기 {/* #accessing-step-results */}
+
+개별 단계 결과를 검사하여 오류가 발생한 위치를 파악할 수 있습니다.
+
+```typescript title="src/run-workflow.ts"
+const result = await run.start({ inputData: { value: 'test' } })
+
+if (result.status === 'failed') {
+  // Find which step failed
+  for (const [stepId, stepResult] of Object.entries(result.steps)) {
+    if (stepResult.status === 'failed') {
+      console.error(`Step ${stepId} failed:`, stepResult.error)
+    }
+  }
+}
+```
+
+## 수명주기 콜백 {/* #lifecycle-callbacks */}
+
+백그라운드 작업, 실행 후 잊어버리는 Workflow 또는 중앙 집중식 로깅과 같이 결과를 기다리지 않고 Workflow 완료를 처리해야 하는 시나리오의 경우 수명 주기 콜백을 사용할 수 있습니다.
+
+### `onFinish` {/* #onfinish */}
+
+Workflow가 상태(성공, 실패, 일시 중지 또는 트립와이어)로 완료되면 호출됩니다.
+
+```typescript {8-17} title="src/mastra/workflows/order-workflow.ts"
+import { createWorkflow } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+const orderWorkflow = createWorkflow({
+  id: 'order-processing',
+  inputSchema: z.object({ orderId: z.string() }),
+  outputSchema: z.object({ orderId: z.string(), status: z.string() }),
+  options: {
+    onFinish: async result => {
+      if (result.status === 'success') {
+        await db.updateOrderStatus(result.result.orderId, result.status)
+      }
+      await analytics.track('workflow_completed', {
+        workflowId: 'order-processing',
+        status: result.status,
+      })
+    },
+  },
+})
+```
+
+그만큼`onFinish` callback receives:
+
+* `status`- Workflow 상태
+* `result`- Workflow 출력(성공 시)
+* `error`- 오류 내용(실패 시)
+* `steps`- 개별 단계 결과
+* `tripwire`- 트립와이어 정보(상태가 다음과 같은 경우)`'tripwire'`)
+* `runId`- 이 Workflow 실행에 대한 고유 식별자입니다.
+* `workflowId`- Workflow의 식별자
+* `resourceId`- 선택적 리소스 식별자(실행 생성 시 제공된 경우)
+* `getInitData<any>()`- 초기 입력 데이터를 반환하는 함수
+* `mastra`- Mastra 인스턴스(Workflow우가 Mastra에 등록된 경우)
+* `requestContext`- 요청 범위 컨텍스트 데이터
+* `logger`- Workflow의 로거 인스턴스
+* `state`- Workflow의 현재 상태 개체
+
+### `onError` {/* #onerror */}
+
+Workflow가 실패할 때만 호출됩니다(상태는`'failed'` or `'tripwire'`):
+
+```typescript {8-14} title="src/mastra/workflows/payment-workflow.ts"
+import { createWorkflow } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+const paymentWorkflow = createWorkflow({
+  id: 'payment-processing',
+  inputSchema: z.object({ amount: z.number() }),
+  outputSchema: z.object({ transactionId: z.string() }),
+  options: {
+    onError: async errorInfo => {
+      await alertService.notify({
+        channel: 'payments-alerts',
+        message: `Payment workflow failed: ${errorInfo.error?.message}`,
+      })
+      await errorTracker.capture(errorInfo.error)
+    },
+  },
+})
+```
+
+그만큼`onError` callback receives:
+
+* `status`- 어느 하나`'failed'` or `'tripwire'`
+* `error`- 오류 내용
+* `steps`- 개별 단계 결과
+* `tripwire`- 트립와이어 정보(상태가 다음과 같은 경우)`'tripwire'`)
+* `runId`- 이 Workflow 실행에 대한 고유 식별자입니다.
+* `workflowId`- Workflow의 식별자
+* `resourceId`- 선택적 리소스 식별자(실행 생성 시 제공된 경우)
+* `getInitData<any>()`- 초기 입력 데이터를 반환하는 함수
+* `mastra`- Mastra 인스턴스(Workflow우가 Mastra에 등록된 경우)
+* `requestContext`- 요청 범위 컨텍스트 데이터
+* `logger`- Workflow의 로거 인스턴스
+* `state`- Workflow의 현재 상태 개체
+
+### 두 콜백 모두 사용 {/* #using-both-callbacks */}
+
+두 콜백을 함께 사용할 수 있습니다.
+
+```typescript {8-16} title="src/mastra/workflows/pipeline-workflow.ts"
+import { createWorkflow } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+const pipelineWorkflow = createWorkflow({
+  id: 'data-pipeline',
+  inputSchema: z.object({ source: z.string() }),
+  outputSchema: z.object({ recordsProcessed: z.number() }),
+  options: {
+    onFinish: async result => {
+      // Always log completion
+      await logger.info('Pipeline completed', { status: result.status })
+    },
+    onError: async errorInfo => {
+      // Alert on failures
+      await pagerDuty.alert('Data pipeline failed', errorInfo.error)
+    },
+  },
+})
+```
+
+### 콜백 오류 처리 {/* #error-handling-in-callbacks */}
+
+콜백 내부에서 발생하는 오류는 포착되어 기록되며 Workflow 결과에 영향을 주거나 실패를 초래하지 않습니다. 결과적으로 콜백 문제로 인해 프로덕션 작업 흐름이 중단되지 않습니다.
+
+```typescript prettier:false
+options: {
+  onFinish: async (result) => {
+    // If this throws, it's logged but the workflow result is unchanged
+    await externalService.notify(result);
+  },
+}
+```
+
+## 재시도 {/* #retries */}
+
+Mastra에는 일시적인 오류(예: 단계가 일시적으로 사용할 수 없는 외부 서비스 또는 리소스와 상호 작용하는 경우)로 인해 실패하는 Workflow 또는 단계에 대한 재시도 메커니즘이 있습니다.
+
+## Workflow 수준 사용`retryConfig` {/* #workflow-level-using-retryconfig */}
+
+Workflow 수준에서 재시도를 구성할 수 있으며 이는 Workflow의 모든 단계에 적용됩니다.
+
+```typescript {7-10} title="src/mastra/workflows/test-workflow.ts" prettier:false
+import { createWorkflow, createStep } from "@mastra/core/workflows";
+import { z } from "zod";
+
+const step1 = createStep({...});
+
+export const testWorkflow = createWorkflow({
+  retryConfig: {
+    attempts: 5,
+    delay: 2000
+  }
+})
+  .then(step1)
+  .commit();
+```
+
+## 다음을 사용하는 단계 수준`retries` {/* #step-level-using-retries */}
+
+다음을 사용하여 개별 단계에 대한 재시도를 구성할 수 있습니다.`retries` property. This overrides the workflow-level retry configuration for that specific step:
+
+```typescript {16} title="src/mastra/workflows/test-workflow.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+const step1 = createStep({
+  execute: async () => {
+    const response = await fetch('example-url')
+
+    if (!response.ok) {
+      throw new Error('Error')
+    }
+
+    return {
+      value: '',
+    }
+  },
+  retries: 3,
+})
+```
+
+## 조건부 분기 {/* #conditional-branching */}
+
+조건부 논리를 사용하여 이전 단계의 성공 또는 실패에 따라 대체 Workflow 경로를 생성할 수 있습니다.
+
+```typescript prettier:false {14,18,29-32} title="src/mastra/workflows/test-workflow.ts"
+import { createWorkflow, createStep } from "@mastra/core/workflows";
+import { z } from "zod";
+
+const step1 = createStep({
+  execute: async () => {
+    try {
+      const response = await fetch('example-url');
+
+      if (!response.ok) {
+        throw new Error('error');
+      }
+
+      return {
+        status: "ok"
+      };
+    } catch (error) {
+      return {
+        status: "error"
+      };
+    }
+  }
+});
+
+const step2 = createStep({...});
+const fallback = createStep({...});
+
+export const testWorkflow = createWorkflow({})
+  .then(step1)
+  .branch([
+    [async ({ inputData: { status } }) => status === "ok", step2],
+    [async ({ inputData: { status } }) => status === "error", fallback]
+  ])
+  .commit();
+```
+
+## 이전 단계 결과 확인 {/* #check-previous-step-results */}
+
+사용`getStepResult()` to inspect a previous step’s results.
+
+```typescript prettier:false {8} title="src/mastra/workflows/test-workflow.ts"
+import { createStep } from "@mastra/core/workflows";
+import { z } from "zod";
+
+const step1 = createStep({...});
+
+const step2 = createStep({
+  execute: async ({ getStepResult }) => {
+    const step1Result = getStepResult(step1);
+
+    return {
+      value: ""
+    };
+  }
+});
+```
+
+## 다음으로 일찍 종료`bail()` {/* #exiting-early-with-bail */}
+
+사용`bail()` in a step to exit early with a successful result. This returns the provided payload as the step output and ends workflow execution.
+
+```typescript prettier:false {7} title="src/mastra/workflows/test-workflow.ts"
+import { createWorkflow, createStep } from "@mastra/core/workflows";
+import { z } from "zod";
+
+const step1 = createStep({
+  id: 'step1',
+  execute: async ({ bail }) => {
+    return bail({ result: 'bailed' });
+  },
+  inputSchema: z.object({ value: z.string() }),
+  outputSchema: z.object({ result: z.string() }),
+});
+
+export const testWorkflow = createWorkflow({...})
+  .then(step1)
+  .commit();
+```
+
+## 다음으로 일찍 종료`Error()` {/* #exiting-early-with-error */}
+
+사용`throw new Error()` in a step to exit with an error.
+
+```typescript prettier:false {7} title="src/mastra/workflows/test-workflow.ts"
+import { createWorkflow, createStep } from "@mastra/core/workflows";
+import { z } from "zod";
+
+const step1 = createStep({
+  id: 'step1',
+  execute: async () => {
+    throw new Error('error');
+  },
+  inputSchema: z.object({ value: z.string() }),
+  outputSchema: z.object({ result: z.string() }),
+});
+
+export const testWorkflow = createWorkflow({...})
+  .then(step1)
+  .commit();
+```
+
+\## 오류를 모니터링합니다.`stream()`
+
+다음을 사용하여 작업 흐름에서 오류를 모니터링할 수 있습니다.`stream`:
+
+```typescript {11} title="src/test-workflow.ts"
+import { mastra } from '../src/mastra'
+
+const workflow = mastra.getWorkflow('testWorkflow')
+
+const run = await workflow.createRun()
+
+const stream = await run.stream({
+  inputData: {
+    value: 'initial data',
+  },
+})
+
+for await (const chunk of stream.stream) {
+  console.log(chunk.payload.output.stats)
+}
+```
+
+## 관련된 {/* #related */}
+
+* [제어 흐름](/docs/workflows/control-flow)
+* [일시중단 및 재개](/docs/workflows/suspend-and-resume)
+* [시간여행](/docs/workflows/time-travel)
+* [인간 참여형](/docs/workflows/human-in-the-loop)

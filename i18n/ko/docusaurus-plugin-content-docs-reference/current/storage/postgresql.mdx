@@ -1,0 +1,637 @@
+---
+title: "참조: PostgreSQL 스토리지 | 저장"
+description: "Mastra의 PostgreSQL 스토리지 구현에 대한 문서입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+  - "@mastra/pg"
+---
+
+# PostgreSQL 스토리지
+
+PostgreSQL 스토리지 구현은 PostgreSQL 데이터베이스를 사용하여 프로덕션에 즉시 사용 가능한 스토리지 솔루션을 제공합니다.
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/pg@latest
+```
+
+## 용법 {/* #usage */}
+
+```typescript
+import { PostgresStore } from '@mastra/pg'
+
+const storage = new PostgresStore({
+  id: 'pg-storage',
+  connectionString: process.env.DATABASE_URL,
+})
+```
+
+## 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for this storage instance.',
+  isOptional: false,
+},
+{
+  name: 'connectionString',
+  type: 'string',
+  description:
+    'PostgreSQL connection string (e.g., postgresql://user:pass@host:5432/dbname). Required unless using `pool` or individual host-based parameters (`host`, `port`, `database`, `user`, `password`).',
+  isOptional: true,
+},
+{
+  name: 'host',
+  type: 'string',
+  description:
+    'Database server hostname or IP address. Used with other host-based parameters as an alternative to connectionString.',
+  isOptional: true,
+},
+{
+  name: 'port',
+  type: 'number',
+  description: 'Database server port number. Defaults to 5432 if not specified.',
+  isOptional: true,
+},
+{
+  name: 'database',
+  type: 'string',
+  description: 'Name of the database to connect to.',
+  isOptional: true,
+},
+{
+  name: 'user',
+  type: 'string',
+  description: 'Database user for authentication.',
+  isOptional: true,
+},
+{
+  name: 'password',
+  type: 'string',
+  description: 'Password for the database user.',
+  isOptional: true,
+},
+{
+  name: 'pool',
+  type: 'pg.Pool',
+  description:
+    'Pre-configured pg.Pool instance. Use this to reuse an existing connection pool. When provided, Mastra will not create its own pool and will not close it when `store.close()` is called.',
+  isOptional: true,
+},
+{
+  name: 'schemaName',
+  type: 'string',
+  description: "The name of the schema you want the storage to use. Defaults to 'public'.",
+  isOptional: true,
+},
+{
+  name: 'ssl',
+  type: 'boolean | ConnectionOptions',
+  description:
+    'SSL configuration for the connection; set to true to use default SSL or provide a ConnectionOptions object for custom SSL settings.',
+  isOptional: true,
+},
+{
+  name: 'max',
+  type: 'number',
+  description: 'Maximum number of connections in the pool. Defaults to 20.',
+  isOptional: true,
+},
+{
+  name: 'idleTimeoutMillis',
+  type: 'number',
+  description: 'How long a connection can sit idle before being closed. Defaults to 30000 (30 seconds).',
+  isOptional: true,
+},
+{
+  name: 'disableInit',
+  type: 'boolean',
+  description:
+    'When true, automatic table creation/migrations are disabled. Useful for CI/CD pipelines where migrations are run separately.',
+  isOptional: true,
+},
+{
+  name: 'skipDefaultIndexes',
+  type: 'boolean',
+  description: 'When true, default indexes will not be created during initialization.',
+  isOptional: true,
+},
+{
+  name: 'indexes',
+  type: 'CreateIndexOptions[]',
+  description: 'Custom indexes to create during initialization.',
+  isOptional: true,
+},
+]}
+/>
+
+## 생성자 예 {/* #constructor-examples */}
+
+인스턴스화할 수 있습니다.`PostgresStore` in the following ways:
+
+```ts
+import { PostgresStore } from '@mastra/pg'
+import { Pool } from 'pg'
+
+// Using a connection string
+const store1 = new PostgresStore({
+  id: 'pg-storage-1',
+  connectionString: 'postgresql://user:password@localhost:5432/mydb',
+})
+
+// Using a connection string with pool options
+const store2 = new PostgresStore({
+  id: 'pg-storage-2',
+  connectionString: 'postgresql://user:password@localhost:5432/mydb',
+  schemaName: 'custom_schema',
+  max: 30, // Max pool connections
+  idleTimeoutMillis: 60000, // Idle timeout
+  ssl: { rejectUnauthorized: false },
+})
+
+// Using individual connection parameters
+const store3 = new PostgresStore({
+  id: 'pg-storage-3',
+  host: 'localhost',
+  port: 5432,
+  database: 'mydb',
+  user: 'user',
+  password: 'password',
+})
+
+// Using a pre-configured pg.Pool (recommended for pool reuse)
+const existingPool = new Pool({
+  connectionString: 'postgresql://user:password@localhost:5432/mydb',
+  max: 20,
+  // ... your custom pool configuration
+})
+
+const store4 = new PostgresStore({
+  id: 'pg-storage-4',
+  pool: existingPool,
+  schemaName: 'custom_schema', // optional
+})
+```
+
+## 추가 참고사항 {/* #additional-notes */}
+
+### 스키마 관리 {/* #schema-management */}
+
+저장소 구현은 스키마 생성 및 업데이트를 자동으로 처리합니다. 다음 테이블이 생성됩니다.
+
+* `mastra_workflow_snapshot`: Workflow 상태 및 실행 데이터를 저장합니다.
+* `mastra_evals`: 평가 결과 및 메타데이터를 저장합니다.
+* `mastra_threads`: 대화 스레드를 저장합니다.
+* `mastra_messages`: 개별 메시지를 저장합니다.
+* `mastra_traces`: 원격 측정 및 추적 데이터를 저장합니다.
+* `mastra_scorers`: 점수 및 평가 데이터를 저장합니다.
+* `mastra_resources`: 자원 작업 Memory 데이터를 저장합니다.
+* `mastra_notifications`: 알림 받은 편지함 기록 및 전달 메타데이터를 저장합니다.
+
+`PostgresStore`다음을 통해 알림 저장소를 노출합니다.`getStore('notifications')`.
+
+### Observability {/* #observability */}
+
+PostgreSQL은 Observability을 지원하고 낮은 추적 볼륨을 처리할 수 있습니다. 처리량 용량은 하드웨어, 스키마 디자인, 인덱싱 및 보존 정책과 같은 배포 요소에 따라 달라지며 특정 환경에 대해 검증되어야 합니다. 대량 생산 환경의 경우 다음을 고려하십시오.
+
+* 사용하여`insert-only` [tracing strategy](/docs/observability/integrations/exporters/mastra-storage#tracing-strategies) to reduce database write operations
+* 효율적인 데이터 보존을 위한 테이블 파티셔닝 설정
+* 관측 가능성을 다음으로 마이그레이션[ClickHouse via composite storage](/reference/storage/composite#specialized-storage-for-observability) if you need to scale further
+
+### 초기화 {/* #initialization */}
+
+Mastra 클래스에 스토리지를 전달하면,`init()` is called automatically before any storage operation:
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { PostgresStore } from '@mastra/pg'
+
+const storage = new PostgresStore({
+  id: 'pg-storage',
+  connectionString: process.env.DATABASE_URL,
+})
+
+const mastra = new Mastra({
+  storage, // init() is called automatically
+})
+```
+
+Mastra 없이 직접 저장소를 사용하는 경우 다음을 호출해야 합니다.`init()` explicitly to create the tables:
+
+```typescript
+import { PostgresStore } from '@mastra/pg'
+
+const storage = new PostgresStore({
+  id: 'pg-storage',
+  connectionString: process.env.DATABASE_URL,
+})
+
+// Required when using storage directly
+await storage.init()
+
+// Access domain-specific stores via getStore()
+const memoryStore = await storage.getStore('memory')
+const thread = await memoryStore?.getThreadById({ threadId: '...' })
+```
+
+:::경고
+만약에`init()` isn't called, tables won't be created and storage operations will fail silently or throw errors.
+:::
+
+### 기존 풀 사용 {/* #using-an-existing-pool */}
+
+이미 가지고 있는 경우`pg.Pool` in your application (e.g., shared with an ORM or for Row Level Security), you can pass it directly to `PostgresStore`:
+
+```typescript
+import { Pool } from 'pg'
+import { PostgresStore } from '@mastra/pg'
+
+// Your existing pool (shared across your application)
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 20,
+})
+
+const storage = new PostgresStore({
+  id: 'shared-storage',
+  pool: pool,
+})
+```
+
+**풀 수명 주기 동작:**
+
+* 당신이**provide a pool**: Mastra uses your pool but **doesn't** close it when `store.close()` is called. You manage the pool lifecycle.
+* 마스트라 할 때**creates a pool**: Mastra owns the pool and will close it when `store.close()` is called.
+
+### 직접 데이터베이스 및 풀 액세스 {/* #direct-database-and-pool-access */}
+
+`PostgresStore`고급 사용 사례를 위해 기본 데이터베이스 클라이언트 및 풀을 공개합니다.
+
+```typescript
+store.db // DbClient - query interface with helpers (any, one, tx, etc.)
+store.pool // pg.Pool - the underlying connection pool
+```
+
+**사용`store.db` for queries:**
+
+```typescript
+// Execute queries with helper methods
+const users = await store.db.any('SELECT * FROM users WHERE active = $1', [true])
+const user = await store.db.one('SELECT * FROM users WHERE id = $1', [userId])
+const maybeUser = await store.db.oneOrNone('SELECT * FROM users WHERE email = $1', [email])
+
+// Use transactions
+const result = await store.db.tx(async t => {
+  await t.none('INSERT INTO logs (message) VALUES ($1)', ['Started'])
+  const data = await t.any('SELECT * FROM items')
+  return data
+})
+```
+
+**사용`store.pool` directly:**
+
+```typescript
+// Get a client for manual connection management
+const client = await store.pool.connect()
+try {
+  await client.query('SET LOCAL app.user_id = $1', [userId])
+  const result = await client.query('SELECT * FROM protected_table')
+  return result.rows
+} finally {
+  client.release()
+}
+```
+
+다음 필드를 사용하는 경우:
+
+* 적절한 연결 및 거래 처리에 대한 책임은 귀하에게 있습니다.
+* 매장 폐쇄 (`store.close()`) will destroy the pool only if Mastra created it.
+* 직접 액세스는 PostgresStore 메서드에서 제공하는 추가 논리나 유효성 검사를 우회합니다.
+
+이 접근 방식은 낮은 수준의 액세스가 필요한 고급 시나리오를 위한 것입니다.
+
+### Next.js와 함께 사용 {/* #using-with-nextjs */}
+
+사용시`PostgresStore` in Next.js applications, [Hot Module Replacement (HMR)](https://nextjs.org/docs/architecture/fast-refresh) during development can cause multiple storage instances to be created, resulting in this warning:
+
+```
+WARNING: Creating a duplicate database object for the same connection.
+```
+
+이를 방지하려면`PostgresStore` instance on the global object so it persists across HMR reloads:
+
+```typescript title="src/mastra/storage.ts"
+import { PostgresStore } from '@mastra/pg'
+import { Memory } from '@mastra/memory'
+
+// Extend the global type to include our instances
+declare global {
+  var pgStore: PostgresStore | undefined
+  var memory: Memory | undefined
+}
+
+// Get or create the PostgresStore instance
+function getPgStore(): PostgresStore {
+  if (!global.pgStore) {
+    if (!process.env.DATABASE_URL) {
+      throw new Error('DATABASE_URL is not defined in environment variables')
+    }
+    global.pgStore = new PostgresStore({
+      id: 'pg-storage',
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : false,
+    })
+  }
+  return global.pgStore
+}
+
+// Get or create the Memory instance
+function getMemory(): Memory {
+  if (!global.memory) {
+    global.memory = new Memory({
+      storage: getPgStore(),
+    })
+  }
+  return global.memory
+}
+
+export const storage = getPgStore()
+export const memory = getMemory()
+```
+
+그런 다음 Mastra 구성에서 내보낸 인스턴스를 사용합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { storage } from './storage'
+
+export const mastra = new Mastra({
+  storage,
+  // ...other config
+})
+```
+
+패턴은 하나만 보장합니다.`PostgresStore` instance is created regardless of how many times the module is reloaded during development. The same pattern can be applied to other storage providers like `LibSQLStore`.
+
+:::팁
+이 싱글톤 패턴은 HMR을 사용한 로컬 개발 중에만 필요합니다. 프로덕션 빌드에서는 모듈이 한 번만 로드됩니다.
+:::
+
+## 사용예 {/* #usage-example */}
+
+### Agent에 Memory 추가 {/* #adding-memory-to-an-agent */}
+
+Agent에 PostgreSQL Memory를 추가하려면 다음을 사용하세요.`Memory` class and create a new `storage` key using `PostgresStore`. The `connectionString` can either be a remote location, or a local database connection.
+
+```typescript title="src/mastra/agents/example-pg-agent.ts"
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+import { PostgresStore } from '@mastra/pg'
+
+export const pgAgent = new Agent({
+  id: 'pg-agent',
+  name: 'PG Agent',
+  instructions:
+    'You are an AI agent with the ability to automatically recall memories from previous interactions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new PostgresStore({
+      id: 'pg-agent-storage',
+      connectionString: process.env.DATABASE_URL!,
+    }),
+    options: {
+      generateTitle: true, // Explicitly enable automatic title generation
+    },
+  }),
+})
+```
+
+### Agent 사용 {/* #using-the-agent */}
+
+사용`memoryOptions` to scope recall for this request. Set `lastMessages: 5` to limit recency-based recall, and use `semanticRecall` to fetch the `topK: 3` most relevant messages, including `messageRange: 2` neighboring messages for context around each match.
+
+```typescript title="src/test-pg-agent.ts" 
+import 'dotenv/config'
+
+import { mastra } from './mastra'
+
+const threadId = '123'
+const resourceId = 'user-456'
+
+const agent = mastra.getAgent('pg-agent')
+
+const message = await agent.stream('My name is Mastra', {
+  memory: {
+    thread: threadId,
+    resource: resourceId,
+  },
+})
+
+await message.textStream.pipeTo(new WritableStream())
+
+const stream = await agent.stream("What's my name?", {
+  memory: {
+    thread: threadId,
+    resource: resourceId,
+  },
+  memoryOptions: {
+    lastMessages: 5,
+    semanticRecall: {
+      topK: 3,
+      messageRange: 2,
+    },
+  },
+})
+
+for await (const chunk of stream.textStream) {
+  process.stdout.write(chunk)
+}
+```
+
+## 인덱스 관리 {/* #index-management */}
+
+PostgreSQL 스토리지는 쿼리 성능을 최적화하기 위한 인덱스 관리를 제공합니다.
+
+### 기본 인덱스 {/* #default-indexes */}
+
+PostgreSQL 스토리지는 일반적인 쿼리 패턴에 대해 초기화 중에 복합 인덱스를 생성합니다.
+
+* `mastra_threads_resourceid_createdat_idx`: (resourceId, DESC에서 생성됨)
+* `mastra_messages_thread_id_createdat_idx`: (thread\_id, DESC에서 생성됨)
+* `mastra_ai_spans_traceid_startedat_idx`: (traceId, DESC에서 시작됨)
+* `mastra_ai_spans_parentspanid_startedat_idx`: (parentSpanId, DESC에서 시작됨)
+* `mastra_ai_spans_name_startedat_idx`: (이름, DESC에서 시작함)
+* `mastra_ai_spans_scope_startedat_idx`: (범위, DESC에서 시작됨)
+* `mastra_scores_trace_id_span_id_created_at_idx`: (traceId, spanId, DESC에서 생성됨)
+
+이러한 인덱스는 다음을 포함하여 정렬을 통해 필터링된 쿼리의 성능을 향상시킵니다.`dateRange` filters on message queries.
+
+### 인덱스 구성 {/* #configuring-indexes */}
+
+생성자 옵션을 통해 인덱스 생성을 제어할 수 있습니다.
+
+```typescript
+import { PostgresStore } from '@mastra/pg'
+
+// Skip default indexes (manage indexes separately)
+const store = new PostgresStore({
+  id: 'pg-storage',
+  connectionString: process.env.DATABASE_URL,
+  skipDefaultIndexes: true,
+})
+
+// Add custom indexes during initialization
+const storeWithCustomIndexes = new PostgresStore({
+  id: 'pg-storage',
+  connectionString: process.env.DATABASE_URL,
+  indexes: [
+    {
+      name: 'idx_threads_metadata_type',
+      table: 'mastra_threads',
+      columns: ["metadata->>'type'"],
+    },
+    {
+      name: 'idx_messages_status',
+      table: 'mastra_messages',
+      columns: ["metadata->>'status'"],
+    },
+  ],
+})
+```
+
+고급 인덱스 유형의 경우 추가 옵션을 지정할 수 있습니다.
+
+* `unique: true`고유 제약 조건의 경우
+* `where: 'condition'`부분 인덱스의 경우
+* `method: 'brin'`시계열 데이터의 경우
+* `storage: { fillfactor: 90 }`업데이트가 많은 테이블의 경우
+* `concurrent: true`비차단 생성용(기본값)
+
+### 인덱스 옵션 {/* #index-options */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'name',
+  type: 'string',
+  description: 'Unique name for the index',
+  isOptional: false,
+},
+{
+  name: 'table',
+  type: 'string',
+  description: "Table name (e.g., 'mastra_threads')",
+  isOptional: false,
+},
+{
+  name: 'columns',
+  type: 'string[]',
+  description: "Array of column names with optional sort order (e.g., ['id', 'createdAt DESC'])",
+  isOptional: false,
+},
+{
+  name: 'unique',
+  type: 'boolean',
+  description: 'Creates a unique constraint index',
+  isOptional: true,
+},
+{
+  name: 'concurrent',
+  type: 'boolean',
+  description: 'Creates index without locking table (default: true)',
+  isOptional: true,
+},
+{
+  name: 'where',
+  type: 'string',
+  description: 'Partial index condition (PostgreSQL specific)',
+  isOptional: true,
+},
+{
+  name: 'method',
+  type: "'btree' | 'hash' | 'gin' | 'gist' | 'spgist' | 'brin'",
+  description: "Index method (default: 'btree')",
+  isOptional: true,
+},
+{
+  name: 'opclass',
+  type: 'string',
+  description: 'Operator class for GIN/GIST indexes',
+  isOptional: true,
+},
+{
+  name: 'storage',
+  type: 'Record<string, any>',
+  description: 'Storage parameters (e.g., { fillfactor: 90 })',
+  isOptional: true,
+},
+{
+  name: 'tablespace',
+  type: 'string',
+  description: 'Tablespace name for index placement',
+  isOptional: true,
+},
+]}
+/>
+
+### 스키마별 인덱스 {/* #schema-specific-indexes */}
+
+사용자 정의 스키마를 사용할 때 인덱스 이름 앞에는 스키마 이름이 붙습니다.
+
+```typescript
+const storage = new PostgresStore({
+  id: 'pg-storage',
+  connectionString: process.env.DATABASE_URL,
+  schemaName: 'custom_schema',
+  indexes: [
+    {
+      name: 'idx_threads_status',
+      table: 'mastra_threads',
+      columns: ['status'],
+    },
+  ],
+})
+
+// Creates index as: custom_schema_idx_threads_status
+```
+
+### SQL을 통한 인덱스 관리 {/* #managing-indexes-via-sql */}
+
+고급 인덱스 관리(나열, 삭제, 분석)를 위해서는 다음을 통해 직접 SQL 쿼리를 사용하세요.`db` accessor:
+
+```typescript
+// List indexes for a table
+const indexes = await storage.db.any(`
+  SELECT indexname, indexdef
+  FROM pg_indexes
+  WHERE tablename = 'mastra_messages'
+`)
+
+// Drop an index
+await storage.db.none('DROP INDEX IF EXISTS idx_my_custom_index')
+
+// Analyze index usage
+const stats = await storage.db.one(`
+  SELECT idx_scan, idx_tup_read
+  FROM pg_stat_user_indexes
+  WHERE indexrelname = 'mastra_messages_thread_id_createdat_idx'
+`)
+```
+
+### 인덱스 유형 및 사용 사례 {/* #index-types-and-use-cases */}
+
+PostgreSQL은 특정 시나리오에 최적화된 다양한 인덱스 유형을 제공합니다.
+
+| 지수 유형 | 최고의 대상 | 저장 | 속도 |
+| - | - | - | - |
+|**btree** (default) | Range queries, sorting, general purpose | Moderate | Fast |
+| **hash** | Equality comparisons only | Small | Very fast for `=` |
+| **gin** | JSONB, arrays, full-text search | Large | Fast for contains |
+| **gist** | Geometric data, full-text search | Moderate | Fast for nearest-neighbor |
+| **spgist** | Non-balanced data, text patterns | Small | Fast for specific patterns |
+| **brin** | Large tables with natural ordering | Very small | Fast for ranges |

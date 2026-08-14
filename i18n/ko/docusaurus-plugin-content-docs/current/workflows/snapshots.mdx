@@ -1,0 +1,248 @@
+---
+title: "스냅샷 | Workflow"
+description: "Mastra에서 스냅샷을 사용하여 Workflow 실행 상태를 저장하고 재개하는 방법을 알아보세요."
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+---
+
+# 스냅샷
+
+Mastra에서 스냅샷은 특정 시점의 Workflow의 전체 실행 상태를 직렬화하여 표현한 것입니다. 스냅샷은 다음을 포함하여 정확히 중단된 위치부터 Workflow우를 재개하는 데 필요한 모든 정보를 캡처합니다.
+
+* Workflow 각 단계의 현재 상태
+* 완료된 단계의 출력
+* Workflow를 통해 수행된 실행 경로
+* 일시 중단된 단계 및 해당 메타데이터
+* 각 단계의 남은 재시도 횟수
+* 실행을 재개하는 데 필요한 추가 상황별 데이터
+
+스냅샷은 Workflow가 일시 중지될 때마다 Mastra에서 자동으로 생성 및 관리되며 구성된 스토리지 시스템에 유지됩니다.
+
+## 일시 중지 및 재개 시 스냅샷의 역할 {/* #the-role-of-snapshots-in-suspend-and-resume */}
+
+스냅샷은 Mastra의 일시 중지 및 재개 기능을 활성화하는 핵심 메커니즘입니다. Workflow 단계에서 호출할 때`await suspend()`:
+
+1. Workflow 실행이 정확한 지점에서 일시 중지됩니다.
+2. Workflow의 현재 상태가 스냅샷으로 캡처됩니다.
+3. 스냅샷은 스토리지에 유지됩니다.
+4. Workflow 단계는 상태가 "일시 중지됨"으로 표시됩니다.`'suspended'`
+5. 나중에 언제`resume()` is called on the suspended step, the snapshot is retrieved
+6. Workflow 실행은 정확히 중단된 지점부터 다시 시작됩니다.
+
+이 메커니즘은 Human-In-The-Loop Workflow를 구현하고, 속도 제한을 처리하고, 외부 리소스를 기다리고, 장기간 일시 중지해야 할 수 있는 복잡한 분기 Workflow를 구현하는 강력한 방법을 제공합니다.
+
+## 스냅샷 분석 {/* #snapshot-anatomy */}
+
+각 스냅샷에는 다음이 포함됩니다.`runId`, input, step status (`success`, `suspended`, etc.), any suspend and resume payloads, and the final output. As a result, full context is available when resuming execution.
+
+```json
+{
+  "runId": "34904c14-e79e-4a12-9804-9655d4616c50",
+  "status": "success",
+  "value": {},
+  "context": {
+    "input": {
+      "value": 100,
+      "user": "Michael",
+      "requiredApprovers": ["manager", "finance"]
+    },
+    "approval-step": {
+      "payload": {
+        "value": 100,
+        "user": "Michael",
+        "requiredApprovers": ["manager", "finance"]
+      },
+      "startedAt": 1758027577955,
+      "status": "success",
+      "suspendPayload": {
+        "message": "Workflow suspended",
+        "requestedBy": "Michael",
+        "approvers": ["manager", "finance"]
+      },
+      "suspendedAt": 1758027578065,
+      "resumePayload": { "confirm": true, "approver": "manager" },
+      "resumedAt": 1758027578517,
+      "output": { "value": 100, "approved": true },
+      "endedAt": 1758027578634
+    }
+  },
+  "activePaths": [],
+  "serializedStepGraph": [
+    {
+      "type": "step",
+      "step": {
+        "id": "approval-step",
+        "description": "Accepts a value, waits for confirmation"
+      }
+    }
+  ],
+  "suspendedPaths": {},
+  "waitingPaths": {},
+  "result": { "value": 100, "approved": true },
+  "requestContext": {},
+  "timestamp": 1758027578740
+}
+```
+
+## 스냅샷을 저장하고 검색하는 방법 {/* #how-snapshots-are-saved-and-retrieved */}
+
+스냅샷은 구성된 스토리지 시스템에 저장됩니다. 기본적으로 libSQL을 사용하지만 대신 Upstash, PostgreSQL 또는 OracleDB를 구성할 수 있습니다. 각 스냅샷은`workflow_snapshots` table and identified by the workflow's `runId`.
+
+자세히 알아보기:
+
+* [libSQL 스토리지](/reference/storage/libsql)
+* [업스태시 스토리지](/reference/storage/upstash)
+* [PostgreSQL 스토리지](/reference/storage/postgresql)
+* [OracleDB 스토리지](/reference/storage/oracledb)
+
+### 스냅샷 저장 {/* #saving-snapshots */}
+
+Workflow가 일시 중지되면 Mastra는 다음 단계에 따라 Workflow 스냅샷을 자동으로 유지합니다.
+
+1. 그만큼`suspend()` function in a step execution triggers the snapshot process
+2. 그만큼`WorkflowInstance.suspend()` method records the suspended machine
+3. `persistWorkflowSnapshot()`현재 상태를 저장하기 위해 호출됩니다.
+4. 스냅샷은 직렬화되어 구성된 데이터베이스에 저장됩니다.`workflow_snapshots` table
+5. 스토리지 레코드에는 Workflow 이름, 실행 ID, 직렬화된 스냅샷이 포함됩니다.
+
+### 스냅샷 검색 중 {/* #retrieving-snapshots */}
+
+Workflow가 재개되면 Mastra는 다음 단계를 통해 지속된 스냅샷을 검색합니다.
+
+1. 그만큼`resume()` method is called with a specific step ID
+2. 스냅샷은 다음을 사용하여 스토리지에서 로드됩니다.`loadWorkflowSnapshot()`
+3. 스냅샷이 구문 분석되어 재개를 위해 준비되었습니다.
+4. Workflow 실행이 스냅샷 상태로 다시 생성됩니다.
+5. 일시 중단된 단계가 재개되고 실행이 계속됩니다.
+
+```typescript
+const storage = mastra.getStorage()
+const workflowStore = await storage?.getStore('workflows')
+
+const snapshot = await workflowStore?.loadWorkflowSnapshot({
+  runId: '<run-id>',
+  workflowName: '<workflow-id>',
+})
+
+console.log(snapshot)
+```
+
+## 스냅샷을 위한 스토리지 옵션 {/* #storage-options-for-snapshots */}
+
+스냅샷은 다음을 사용하여 유지됩니다.`storage` instance configured on the `Mastra` class. This storage layer is shared across all workflows registered to that instance. Mastra supports multiple storage options for flexibility in different environments.
+
+```typescript title="src/mastra/index.ts" 
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+import { approvalWorkflow } from './workflows'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: ':memory:',
+  }),
+  workflows: { approvalWorkflow },
+})
+```
+
+* [libSQL 스토리지](/reference/storage/libsql)
+* [PostgreSQL 스토리지](/reference/storage/postgresql)
+* [OracleDB 스토리지](/reference/storage/oracledb)
+* [몽고DB 스토리지](/reference/storage/mongodb)
+* [업스태시 스토리지](/reference/storage/upstash)
+* [클라우드플레어 D1](/reference/storage/cloudflare-d1)
+* [DynamoDB](/reference/storage/dynamodb)
+* [더 많은 스토리지 Provider](/docs/storage/overview)
+
+## 모범 사례 {/* #best-practices */}
+
+1. **직렬화 가능성 보장**: 스냅샷에 포함되어야 하는 모든 데이터는 직렬화 가능해야 합니다(JSON으로 변환 가능).
+2. **스냅샷 크기 최소화**: Workflow우 컨텍스트에 직접 대규모 데이터 개체를 저장하지 마십시오. 대신, 이에 대한 참조(예: ID)를 저장하고 필요할 때 데이터를 검색하세요.
+3. **이력서 컨텍스트를 신중하게 처리하세요.**: Workflow를 재개할 때 제공할 컨텍스트를 신중하게 고려하세요. 이는 기존 스냅샷 데이터와 병합됩니다.
+4. **적절한 모니터링 설정**: 일시 중단된 Workflow, 특히 장기 실행 Workflow에 대한 모니터링을 구현하고 제대로 재개되는지 확인합니다.
+5. **스토리지 확장 고려**: 일시 중단된 Workflow가 많은 애플리케이션의 경우 스토리지 솔루션의 크기가 적절하게 조정되었는지 확인하세요.
+
+## 커스텀 스냅샷 메타데이터 {/* #custom-snapshot-metadata */}
+
+Workflow를 일시 중단할 때 다음을 정의하여 사용자 정의 메타데이터를 첨부할 수 있습니다.`suspendSchema`. This metadata is stored in the snapshot and made available when the workflow is resumed.
+
+```typescript {30-34} title="src/mastra/workflows/test-workflow.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+const approvalStep = createStep({
+  id: 'approval-step',
+  description: 'Accepts a value, waits for confirmation',
+  inputSchema: z.object({
+    value: z.number(),
+    user: z.string(),
+    requiredApprovers: z.array(z.string()),
+  }),
+  suspendSchema: z.object({
+    message: z.string(),
+    requestedBy: z.string(),
+    approvers: z.array(z.string()),
+  }),
+  resumeSchema: z.object({
+    confirm: z.boolean(),
+    approver: z.string(),
+  }),
+  outputSchema: z.object({
+    value: z.number(),
+    approved: z.boolean(),
+  }),
+  execute: async ({ inputData, resumeData, suspend }) => {
+    const { value, user, requiredApprovers } = inputData
+    const { confirm } = resumeData ?? {}
+
+    if (!confirm) {
+      return await suspend({
+        message: 'Workflow suspended',
+        requestedBy: user,
+        approvers: [...requiredApprovers],
+      })
+    }
+
+    return {
+      value,
+      approved: confirm,
+    }
+  },
+})
+```
+
+### 이력서 데이터 제공 {/* #providing-resume-data */}
+
+사용`resumeData` to pass structured input when resuming a suspended step. It must match the step’s `resumeSchema`.
+
+```typescript {14-20}
+const workflow = mastra.getWorkflow('approvalWorkflow')
+
+const run = await workflow.createRun()
+
+const result = await run.start({
+  inputData: {
+    value: 100,
+    user: 'Michael',
+    requiredApprovers: ['manager', 'finance'],
+  },
+})
+
+if (result.status === 'suspended') {
+  const resumedResult = await run.resume({
+    step: 'approval-step',
+    resumeData: {
+      confirm: true,
+      approver: 'manager',
+    },
+  })
+}
+```
+
+## 관련된 {/* #related */}
+
+* [제어 흐름](/docs/workflows/control-flow)
+* [일시중단 및 재개](/docs/workflows/suspend-and-resume)
+* [시간여행](/docs/workflows/time-travel)
+* [인간 참여형](/docs/workflows/human-in-the-loop)

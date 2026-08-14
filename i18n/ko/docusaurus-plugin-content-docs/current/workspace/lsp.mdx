@@ -1,0 +1,195 @@
+---
+title: "LSP 검사 | 작업공간"
+description: "작업 영역 파일에서 의미 체계 코드 검사를 위한 언어 서버 프로토콜 지원을 구성합니다."
+packages:
+  - "@mastra/core"
+---
+
+# LSP 검사
+
+**추가된 항목:** `@mastra/core@1.1.0`
+
+LSP 검사는 작업 공간 지원 Agent에 의미 체계 코드 인텔리전스를 제공합니다. 작업 영역에서 LSP를 활성화하면 Agent는 지원되는 파일의 기호를 검사하여 가리키기 정보를 검색하고 정의로 이동할 수 있습니다. 구현을 찾을 수도 있습니다.
+
+## LSP 검사를 사용해야 하는 경우 {/* #when-to-use-lsp-inspection */}
+
+일반 텍스트 검색만 사용하는 대신 Agent에 의미 체계 코드 이해가 필요한 경우 LSP 검사를 사용하세요.
+
+* 지원되는 언어로 기호와 추론된 유형을 검사합니다.
+* 관련 코드를 편집하기 전에 기호가 선언된 위치를 찾으세요.
+* 모든 파일을 수동으로 추적하지 않고도 코드베이스 전체에서 구현을 탐색합니다.
+* 의미론적 검사를 다음과 결합합니다.`view` and `search_content` for faster navigation
+* 다음을 통해 추가 언어에 대한 LSP 지원을 추가하세요.[registering custom language servers](#custom-language-servers)
+
+## 기본 사용법 {/* #basic-usage */}
+
+설정하여 작업 공간에서 LSP를 활성화합니다.`lsp: true`:
+
+```typescript title="src/mastra/workspaces.ts"
+import { Workspace, LocalFilesystem, LocalSandbox } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  sandbox: new LocalSandbox({ workingDirectory: './workspace' }),
+  lsp: true,
+})
+```
+
+이 구성을 사용하면 작업공간은 구성된 파일 시스템 및 샌드박스 Tool와 함께 기본 LSP 검사 Tool를 등록합니다.
+
+## Agent Tool {/* #agent-tool */}
+
+LSP가 활성화되면 작업 공간이 노출됩니다.`mastra_workspace_lsp_inspect` by default.
+
+```json
+{
+  "path": "/absolute/path/to/file.ts",
+  "line": 10,
+  "match": "const foo = <<<bar()"
+}
+```
+
+그만큼`match` field must include exactly one `<<<` cursor marker. The marker identifies the symbol position on the specified line.
+
+이 Tool는 최대 3개의 결과 그룹을 반환합니다.
+
+| 결과 | 설명 |
+| - | - |
+|`hover` | Type information or documentation for the symbol at the cursor |
+| `diagnostics` | Line-scoped LSP diagnostics for the inspected line, when present |
+| `definition` | Declaration locations with a one-line preview |
+| `implementation` | Implementation or usage locations |
+
+## Tool 이름 다시 매핑 {/* #tool-name-remapping */}
+
+Agent가 더 짧은 이름을 기대하는 경우 Tool 이름을 바꾸십시오.
+
+```typescript title="src/mastra/workspaces.ts"
+import { Workspace, LocalFilesystem, WORKSPACE_TOOLS } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  lsp: true,
+  tools: {
+    [WORKSPACE_TOOLS.LSP.LSP_INSPECT]: {
+      name: 'lsp_inspect',
+    },
+  },
+})
+```
+
+이렇게 하면 노출된 Tool 이름만 변경됩니다. 구성 키는 그대로 유지됩니다.`WORKSPACE_TOOLS.LSP.LSP_INSPECT`.
+
+## LSP 구성 {/* #lsp-configuration */}
+
+세트`lsp` to `true` for default behavior, or provide an object to customize server startup and diagnostics:
+
+```typescript title="src/mastra/workspaces.ts"
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  lsp: {
+    diagnosticTimeout: 4000,
+    initTimeout: 8000,
+    disableServers: ['eslint'],
+    binaryOverrides: {
+      typescript: '/custom/path/to/typescript-language-server --stdio',
+    },
+    searchPaths: ['/opt/homebrew/bin'],
+  },
+})
+```
+
+다음이 필요한 경우 사용자 정의 구성을 사용하십시오.
+
+* 대규모 저장소의 시간 제한 늘리기
+* 특정 언어 서버 비활성화
+* 사용자 정의 언어 서버 바이너리의 Point Mastra
+* 제한된 환경에서 추가 이진 검색 경로 추가
+
+## 사용자 정의 언어 서버 {/* #custom-language-servers */}
+
+기본적으로 Mastra에는 TypeScript, JavaScript, Python, Go 및 Rust에 대한 지원이 내장되어 있습니다. 다른 언어(예: PHP, Ruby, Java, Kotlin, Swift, Elixir)에서 LSP 검사를 사용하려면 다음을 통해 사용자 정의 언어 서버를 등록하세요.`servers` field:
+
+```typescript title="src/mastra/workspaces.ts"
+import { Workspace, LocalFilesystem, LocalSandbox } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  sandbox: new LocalSandbox({ workingDirectory: './workspace' }),
+  lsp: {
+    servers: {
+      phpactor: {
+        id: 'phpactor',
+        name: 'Phpactor Language Server',
+        languageIds: ['php'],
+        extensions: ['.php'],
+        markers: ['composer.json'],
+        command: 'phpactor language-server',
+      },
+    },
+  },
+})
+```
+
+각 사용자 정의 서버 정의에는 다음 필드가 필요합니다.
+
+| 필드 | 설명 |
+| - | - |
+|`id` | Unique identifier for the server |
+| `name` | Human-readable name shown in logs |
+| `languageIds` | Language Server Protocol (LSP) language identifiers this server handles |
+| `extensions` | File extensions, including the dot |
+| `markers` | Files or directories that identify the project root (e.g. `composer.json`, `Gemfile`) |
+| `command` | Full command string to start the server |
+
+서버에 여러 언어 ID가 있는 경우 Mastra는 각 확장을 다음 항목의 첫 번째 항목에 매핑합니다.`languageIds`.
+
+선택적으로 패스할 수도 있습니다.`initializationOptions` to send custom settings during the LSP handshake.
+
+사용자 정의 서버는 내장 서버와 병합됩니다. 내장 서버를 교체하려면 동일한 서버를 사용하십시오.`id` (e.g. `id: 'go'` replaces the built-in Go server). Register multiple servers to support several languages at once:
+
+```typescript title="src/mastra/workspaces.ts"
+import { Workspace, LocalFilesystem, LocalSandbox } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  sandbox: new LocalSandbox({ workingDirectory: './workspace' }),
+  lsp: {
+    servers: {
+      phpactor: {
+        id: 'phpactor',
+        name: 'Phpactor Language Server',
+        languageIds: ['php'],
+        extensions: ['.php'],
+        markers: ['composer.json'],
+        command: 'phpactor language-server',
+      },
+      solargraph: {
+        id: 'solargraph',
+        name: 'Solargraph',
+        languageIds: ['ruby'],
+        extensions: ['.rb', '.erb'],
+        markers: ['Gemfile'],
+        command: 'solargraph stdio',
+      },
+    },
+  },
+})
+```
+
+## 요구 사항 및 제한 사항 {/* #requirements-and-limitations */}
+
+* LSP 검사는 일치하는 내장 또는 사용자 정의 언어 서버가 있는 파일 형식에 대해서만 작동합니다.
+* 그만큼`path` you inspect must resolve inside the workspace filesystem or allowed paths
+* 외부 패키지 검사는 다음과 같은 선언 파일로 분석될 수 있습니다.`.d.ts` instead of runtime source files
+* `lsp_inspect`보완물`view` and `search_content`, but doesn't replace reading implementation code when you need full context
+
+## 관련된 {/* #related */}
+
+* [작업공간 개요](/docs/workspace/overview)
+* [파일 시스템](/docs/workspace/filesystem)
+* [모래 상자](/docs/workspace/sandbox)
+* [검색 및 인덱싱](/docs/workspace/search)
+* [작업공간 클래스 참조](/reference/workspace/workspace-class)

@@ -1,0 +1,326 @@
+---
+title: "마스트라 클라이언트 SDK | 섬기는 사람"
+description: "Mastra Client SDK 설정 및 사용 방법 알아보기"
+packages:
+  - "@mastra/client-js"
+  - "@mastra/core"
+  - "@mastra/react"
+---
+
+# 마스트라 클라이언트 SDK
+
+Mastra Client SDK는 사용자와 상호 작용하기 위한 간결하고 유형이 안전한 인터페이스를 제공합니다.[Mastra Server](/docs/server/mastra-server)클라이언트 환경에서.
+
+## 전제조건 {/* #prerequisites */}
+
+로컬 개발을 시작하기 전에 다음을 갖추십시오.
+
+* Node.js`v22.13.0` or later
+* 타입스크립트`v4.7` or higher (if using TypeScript)
+* 로컬 Mastra 서버가 실행 중입니다(일반적으로 포트에서`4111`)
+
+:::메모
+
+Mastra Client SDK는 브라우저 환경을 위해 설계되었으며 기본`fetch` API for making HTTP requests to your Mastra server.
+
+:::
+
+## 설치 {/* #installation */}
+
+Mastra Client SDK를 사용하려면 필수 종속성을 설치하십시오.
+
+```bash npm2yarn
+npm install @mastra/client-js@latest
+```
+
+### 초기화`MastraClient` {/* #initialize-the-mastraclient */}
+
+일단 초기화되면`baseUrl`, `MastraClient` exposes a type-safe interface for calling agents, tools, and workflows.
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  baseUrl: process.env.MASTRA_API_URL || 'http://localhost:4111',
+})
+```
+
+## 핵심 API {/* #core-apis */}
+
+Mastra Client SDK는 Mastra Server가 제공하는 모든 리소스를 노출합니다.
+
+* **[Agent](/reference/client-js/agents)**: 응답을 생성하고 대화를 스트리밍합니다.
+* **[A2A](/docs/agents/a2a)**: Agent 카드를 통해 Agent를 검색하고 작업 기반 A2A 스트림으로 작업합니다.
+* **[Memory](/reference/client-js/memory)**: 대화 스레드 및 메시지 기록을 관리합니다.
+* **[Tool](/reference/client-js/tools)**: 실행 및 관리되는 Tool입니다.
+* **[Workflow](/reference/client-js/workflows)**: Workflow를 트리거하고 실행을 추적합니다.
+* **[벡터](/reference/client-js/vectors)**: 의미론적 검색을 위해 벡터 임베딩을 사용합니다.
+* **[응답](/reference/client-js/responses)**: OpenAI 호환 Agent 지원 인터페이스를 통해 Mastra Agent를 응답 API로 사용합니다. 이 API는 현재 실험적입니다.
+* **[대화](/reference/client-js/conversations)**: Mastra Agents 뒤에 저장된 대화 스레드 및 항목 기록을 응답 API로 사용합니다. 이 API는 현재 실험적입니다.
+* **[로그](/reference/client-js/logs)**: 로그를 보고 시스템 동작을 디버그합니다.
+* **[원격 측정](/reference/client-js/telemetry)**: 앱 성능을 확인하고 활동을 추적합니다.
+
+## 동적 Workflow우 생성 및 실행 {/* #create-and-run-dynamic-workflows */}
+
+사용`upsertDynamicWorkflow()` to create or replace a persisted workflow definition. A successful upsert validates the complete definition, registers it with the running Mastra instance, and makes it available through the standard workflow execution API.
+
+다음 예에서는 생성 및 검사부터 실행 및 삭제까지 매핑 Workflow의 전체 수명 주기를 보여줍니다.
+
+```typescript title="lib/dynamic-workflow.ts"
+import { MastraClient } from '@mastra/client-js'
+import type { UpsertDynamicWorkflowParams } from '@mastra/client-js'
+
+const client = new MastraClient({
+  baseUrl: process.env.MASTRA_API_URL || 'http://localhost:4111',
+})
+
+const definition = {
+  id: 'greeting-workflow',
+  description: 'Returns a greeting for the supplied name',
+  inputSchema: {
+    type: 'object',
+    properties: { name: { type: 'string' } },
+    required: ['name'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: { message: { type: 'string' } },
+    required: ['message'],
+  },
+  graph: [
+    {
+      type: 'mapping',
+      id: 'create-greeting',
+      mapConfig: JSON.stringify({
+        message: { template: 'Hello, ${initData.name}!' },
+      }),
+    },
+  ],
+} satisfies UpsertDynamicWorkflowParams
+
+await client.upsertDynamicWorkflow(definition)
+
+const dynamicWorkflow = client.getDynamicWorkflow(definition.id)
+const dynamicDefinition = await dynamicWorkflow.details()
+
+const workflow = client.getWorkflow(dynamicDefinition.id)
+const run = await workflow.createRun()
+const result = await run.startAsync({ inputData: { name: 'Ada' } })
+
+console.log(result)
+
+await dynamicWorkflow.delete()
+```
+
+사용`listDynamicWorkflows()` to list persisted definitions. Calling `upsertDynamicWorkflow()` again with the same `id` replaces the stored definition and live workflow registration.
+
+:::경고
+
+내구성 있는 스토리지에는 다음을 지원하는 구성된 스토리지 어댑터가 필요합니다.`workflowDefinitions` domain. Without that domain, Core can register a workflow in memory, but the server's dynamic-workflow API can't preserve it across restarts.
+
+저장된 정의는 선언적 Agent, Tool, 매핑, 중첩된 Workflow, 병렬, foreach, 절전, 절전 종료까지, 조건부 및 루프 항목을 지원합니다. JavaScript 클로저를 포함할 수 없습니다. 조건부 및 루프 논리는 선언적 조건자 형식을 사용해야 하며 참조된 Agent, Tool 및 중첩된 Workflow가 이미 등록되어 있어야 합니다.
+
+인증된 서버에는 다음이 필요합니다.`stored-workflows:read` or `stored-workflows:write` for definition operations and `workflows:execute` to run the workflow.
+
+:::
+
+## 응답 생성 {/* #generating-responses */}
+
+부르다`.generate()` with a string prompt:
+
+```typescript
+import { mastraClient } from 'lib/mastra-client'
+
+const testAgent = async () => {
+  try {
+    const agent = mastraClient.getAgent('testAgent')
+
+    const response = await agent.generate('Hello')
+
+    console.log(response.text)
+  } catch (error) {
+    return 'Error occurred while generating response'
+  }
+}
+```
+
+:::정보
+
+당신은 또한 전화할 수 있습니다`.generate()` with an array of message objects that include `role` and `content`. Visit the [.generate() reference](/reference/client-js/agents#generate) for more information.
+
+:::
+
+## 스트리밍 응답 {/* #streaming-responses */}
+
+사용`.stream()` for real-time responses with a string prompt:
+
+```typescript
+import { mastraClient } from 'lib/mastra-client'
+
+const testAgent = async () => {
+  try {
+    const agent = mastraClient.getAgent('testAgent')
+
+    const stream = await agent.stream('Hello')
+
+    stream.processDataStream({
+      onTextPart: text => {
+        console.log(text)
+      },
+    })
+  } catch (error) {
+    return 'Error occurred while generating response'
+  }
+}
+```
+
+:::정보
+
+당신은 또한 전화할 수 있습니다`.stream()` with an array of message objects that include `role` and `content`. Visit the [.stream() reference](/reference/client-js/agents#stream) for more information.
+
+:::
+
+## 구성 옵션 {/* #configuration-options */}
+
+`MastraClient`다음과 같은 선택적 매개변수를 허용합니다.`retries`, `backoffMs`, and `headers` to control request behavior. These parameters are useful for controlling retry behavior and including diagnostic metadata.
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  retries: 3,
+  backoffMs: 300,
+  maxBackoffMs: 5000,
+  headers: {
+    'X-Development': 'true',
+  },
+})
+```
+
+방문하다[MastraClient](/reference/client-js/mastra-client) for more configuration options.
+
+## 자격 증명 및 세션 쿠키 {/* #credentials-and-session-cookies */}
+
+**세션 쿠키를 사용하여 Mastra API 호출 인증**UI와 Mastra API가 동일한 원본, 다른 호스트, 하위 도메인 또는 포트에 있지 않은 경우(예: 한 포트에는 Mastra Studio가 있고 다른 포트에는 사용자 지정 서버가 있음) 추가하&#xB2E4;**`credentials: 'include'`** to `MastraClient` so each request carries the cookies the user already has after sign-in. Skip this and you will often get **`401`** responses from Mastra even though login succeeded in the browser.
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  baseUrl: process.env.MASTRA_API_URL || 'http://localhost:4111',
+  credentials: 'include',
+})
+```
+
+**서버에서 인증된 교차 출처 요청 허용**, 보다[CORS: requests with credentials](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS#requests_with_credentials). You need a concrete `Access-Control-Allow-Origin` (not `*`) and `Access-Control-Allow-Credentials: true`, or the browser will block the call before it reaches Mastra.
+
+**사용`@mastra/react`?**&#xC571;을 다음으로 감싸세요.`MastraReactProvider`, set `baseUrl` and `apiPrefix` to match your server, and rely on the default `credentials: 'include'`. Change `credentials` only when you want `same-origin` or `omit` behavior.
+
+## 요청 취소 추가 중 {/* #adding-request-cancelling */}
+
+`MastraClient`표준 Node.js를 사용한 요청 취소 지원`AbortSignal` API. Useful for canceling in-flight requests, such as when users abort an operation or to clean up stale network calls.
+
+통과`AbortSignal` to the client constructor to enable cancellation across all requests.
+
+```typescript {3,7} title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const controller = new AbortController()
+
+export const mastraClient = new MastraClient({
+  baseUrl: process.env.MASTRA_API_URL || 'http://localhost:4111',
+  abortSignal: controller.signal,
+})
+```
+
+### 사용하여`AbortController` {/* #using-the-abortcontroller */}
+
+부름`.abort()` will cancel any ongoing requests tied to that signal.
+
+```typescript
+import { mastraClient, controller } from 'lib/mastra-client'
+
+const handleAbort = () => {
+  controller.abort()
+}
+```
+
+## 클라이언트 Tool {/* #client-tools */}
+
+다음을 사용하여 클라이언트측 애플리케이션에서 직접 Tool를 정의합니다.`createTool()` function. Pass them to agents via the `clientTools` parameter in `.generate()` or `.stream()` calls.
+
+이를 통해 Agent는 DOM 조작, 로컬 저장소 액세스 또는 기타 웹 API와 같은 브라우저 측 기능을 트리거하여 서버가 아닌 사용자 환경에서 Tool를 실행할 수 있습니다.
+
+```typescript {26}
+import { createTool } from '@mastra/client-js'
+import { z } from 'zod'
+
+const handleClientTool = async () => {
+  try {
+    const agent = mastraClient.getAgent('colorAgent')
+
+    const colorChangeTool = createTool({
+      id: 'color-change-tool',
+      description: 'Changes the HTML background color',
+      inputSchema: z.object({
+        color: z.string(),
+      }),
+      outputSchema: z.object({
+        success: z.boolean(),
+      }),
+      execute: async inputData => {
+        const { color } = inputData
+
+        document.body.style.backgroundColor = color
+        return { success: true }
+      },
+    })
+
+    const response = await agent.generate('Change the background to blue', {
+      clientTools: { colorChangeTool },
+    })
+
+    console.log(response)
+  } catch (error) {
+    console.error(error)
+  }
+}
+```
+
+### 클라이언트 Tool Agent {/* #client-tool-agent */}
+
+이것은 표준 마스트라입니다[agent](../agents/overview#quickstart) configured to return hex color codes, intended to work with the browser-based client tool defined above.
+
+```typescript title="src/mastra/agents/color-agent"
+import { Agent } from '@mastra/core/agent'
+
+export const colorAgent = new Agent({
+  id: 'color-agent',
+  name: 'Color Agent',
+  instructions: `You are a helpful CSS assistant.
+  You can change the background color of web pages.
+  Respond with a hex reference for the color requested by the user`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+## 서버에서 MastraClient 사용 {/* #use-mastraclient-on-the-server */}
+
+당신은 또한 사용할 수 있습니다`MastraClient` in server-side environments such as API routes, serverless functions, or actions. The usage remains the same, but you may need to recreate the response for your client:
+
+```typescript {8}
+export async function action() {
+  const agent = mastraClient.getAgent('testAgent')
+
+  const stream = await agent.stream('Hello')
+
+  return new Response(stream.body)
+}
+```
+
+## 모범 사례 {/* #best-practices */}
+
+1. **오류 처리**: 사용[error handling](/reference/client-js/error-handling) for development scenarios.
+2. **환경 변수**: 구성을 위해 환경 변수를 사용합니다.
+3. **디버깅**: 상세 활성화[logging](/reference/client-js/logs) when needed.
+4. **성능**: 애플리케이션 성능 추적,[telemetry](/reference/client-js/telemetry), and traces.

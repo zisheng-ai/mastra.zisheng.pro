@@ -1,0 +1,176 @@
+---
+title: "참조: CostGuardProcessor | 프로세서"
+description: "Agent 실행에 금전적 비용 제한을 적용하는 프로세서인 CostGuardProcessor에 대한 API 참조입니다."
+packages:
+  - "@mastra/core"
+---
+
+# CostGuard 프로세서
+
+그만큼`CostGuardProcessor`구성 가능한 비용 임계값이 초과되면 Agent 루프 전체에 금전적 비용 제한을 적용하고 차단하거나 경고합니다.
+
+그것은 사용한다`processInputStep` to check the cost limit before each LLM call. Cost data is queried from the observability storage APIs (`getMetricAggregate`) 모든 범위에 적용됩니다. 을 위한`resource`그리고`thread`범위에 따라 구성 가능한 기간(기본값은 7일) 내에서 실행 전반에 걸쳐 비용을 집계합니다. 을 위한`run`범위에서는 현재 추적에 대한 비용을 쿼리합니다.
+
+토큰 기반 제한의 경우 다음을 사용하세요.`TokenLimiterProcessor` instead.
+
+세 가지 범위 지정 모드를 지원합니다.
+
+* **실행 범위**: 추적 ID를 통해 단일 Agent 실행 내 비용을 추적합니다.
+* **자원 범위**(기본값): 당 누적 비용을 추적합니다.`resourceId` across runs
+* **스레드 범위**: 당 누적 비용을 추적합니다.`threadId` across runs
+
+> **대략적인 비용 가드.**&#xBE44;용 데이터는 관측 가능성 파이프라인의 버퍼링된 내보내기를 통해 비동기적으로 유지됩니다. 빠르게 실행되는 Agent는 메트릭을 쿼리에 사용할 수 있기 전에 구성된 제한을 초과할 수 있습니다. 대하다`maxCost` as an approximate threshold that fast-running agents may exceed.
+
+## 사용예 {/* #usage-example */}
+
+리소스당 누적 비용 추적(기본 범위):
+
+```typescript
+import { CostGuardProcessor } from '@mastra/core/processors'
+
+const costGuard = new CostGuardProcessor({
+  maxCost: 1.0,
+})
+```
+
+24시간 동안 스레드당 누적 비용을 추적합니다.
+
+```typescript
+import { CostGuardProcessor } from '@mastra/core/processors'
+
+const costGuard = new CostGuardProcessor({
+  maxCost: 5.0,
+  scope: 'thread',
+  window: '24h',
+})
+```
+
+다음을 사용하여 Agent에 연결합니다.`onViolation` callback:
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { CostGuardProcessor } from '@mastra/core/processors'
+
+const costGuard = new CostGuardProcessor({
+  maxCost: 5.0,
+  scope: 'resource',
+  window: '30d',
+})
+
+costGuard.onViolation = ({ detail }) => {
+  console.log(`Cost exceeded for ${detail.scopeKey}: $${detail.usage}/$${detail.limit}`)
+}
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  model: '__GATEWAY_OPENAI_MODEL_NANO__',
+  processors: {
+    input: [costGuard],
+  },
+})
+```
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'maxCost',
+  type: 'number',
+  description:
+    'Maximum estimated cost allowed (e.g. 0.50 for $0.50 USD). Must be a positive number. Uses cost data from observability metrics. This is an approximate limit due to metric persistence delays.',
+  isOptional: false,
+},
+{
+  name: 'scope',
+  type: "'run' | 'resource' | 'thread'",
+  description:
+    "Scope for cost tracking. 'run' tracks cost within the current agent run via trace ID. 'resource' tracks cumulative cost per resourceId across runs (default). 'thread' tracks cumulative cost per threadId across runs. All scopes require observability storage with getMetricAggregate support.",
+  isOptional: true,
+  defaultValue: "'resource'",
+},
+{
+  name: 'window',
+  type: "'1h' | '6h' | '24h' | '7d' | '30d' | '365d'",
+  description:
+    "Time window for cost aggregation when using 'resource' or 'thread' scope. Only applicable to non-run scopes.",
+  isOptional: true,
+  defaultValue: "'7d'",
+},
+{
+  name: 'strategy',
+  type: "'block' | 'warn'",
+  description:
+    "Strategy when the cost limit is exceeded. 'block' aborts with a TripWire error. 'warn' logs a warning but allows the step to proceed.",
+  isOptional: true,
+  defaultValue: "'block'",
+},
+{
+  name: 'message',
+  type: 'string',
+  description: 'Custom message template for the abort reason. Supports {usage} and {limit} placeholders.',
+  isOptional: true,
+  defaultValue: "'Cost guard: cost limit exceeded ({usage}/{limit})'",
+},
+]}
+/>
+
+## 인스턴스 속성 {/* #instance-properties */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: "'cost-guard'",
+  description: 'Processor identifier.',
+  isOptional: false,
+},
+{
+  name: 'name',
+  type: "'Cost Guard'",
+  description: 'Processor display name.',
+  isOptional: false,
+},
+{
+  name: 'onViolation',
+  type: '(violation: ProcessorViolation) => void | Promise<void>',
+  description:
+    'Callback invoked when a cost violation is detected, regardless of strategy. Part of the generalized Processor interface. Use for side effects like alerting, logging to external systems, or emailing users. Errors thrown by this callback are silently caught.',
+  isOptional: true,
+},
+{
+  name: 'processInputStep',
+  type: '(args: ProcessInputStepArgs) => Promise<void>',
+  description:
+    'Checks cumulative estimated cost against maxCost before each LLM call. Queries observability storage for cost data: run scope filters by trace ID, resource/thread scopes filter by their respective IDs with a time window. Calls abort() when the limit is exceeded (block strategy) or logs a warning (warn strategy). Cost checks are approximate due to metric persistence delays.',
+  isOptional: false,
+},
+]}
+/>
+
+## 오류 동작 {/* #error-behavior */}
+
+때`block` strategy is active (default), `CostGuardProcessor` calls `abort()` with `retry: false` when the cost limit is exceeded. The TripWire metadata includes:
+
+* `processorId`: `'cost-guard'`
+* `usage`: 현재 누적 사용량(`estimatedCost`, `costUnit`)
+* `maxCost`: 구성된 비용 한도
+* `scope`: 활성 범위(`'run'`, `'resource'`, or `'thread'`)
+* `scopeKey`: 리소스/스레드 범위의 범위 식별자(해당되는 경우)
+
+## 범위 지정 동작 {/* #scoping-behavior */}
+
+| 범위 | 실행 전반에 걸친 트랙 | 필터 | 컨텍스트가 필요합니다 |
+| - | - | - | - |
+|`run` | No | `traceId` from current span | Tracing context (automatic) |
+| `resource` | Yes | `resourceId` + time window | `resourceId` in `RequestContext` |
+| `thread` | Yes | `threadId` + time window | `threadId` in `RequestContext` |
+
+모든 범위에는 다음과 같은 관측 가능성 저장소가 필요합니다.`getMetricAggregate` support. If the Mastra instance doesn't have observability storage configured, an error is thrown at registration time.
+
+을 위한`run` scope, the processor reads the trace ID from the current span's tracing context. If no tracing context is available, the check is skipped (fail-open).
+
+을 위한`resource` and `thread` scopes, if the required context ID is missing at runtime, the check is skipped. Observability query failures are handled with a fail-open strategy: if a query fails, cost is treated as zero.
+
+> **메트릭 지속성 지연에 대한 참고 사항입니다.**&#xAD00;측 가능성 파이프라인은 측정항목을 비동기적으로 플러시하는 버퍼링된 내보내기를 사용합니다. LLM 호출이 완료되는 시점과 해당 비용 지표를 쿼리에 사용할 수 있는 시점 사이에 짧은 지연이 존재합니다. 빈도가 높은 Agent 실행 중에 비용 가드는 실제 비용이 임계값을 초과한 후 하나 이상의 단계가 나타날 때까지 한도 위반을 감지하지 못할 수 있습니다.

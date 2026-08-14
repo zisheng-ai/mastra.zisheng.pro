@@ -1,0 +1,394 @@
+---
+title: "Memory 프로세서 | Memory"
+description: "컨텍스트 창 제한을 관리하기 위해 메시지가 언어 Model로 전송되기 전에 Mastra에서 Memory 프로세서를 사용하여 메시지를 필터링, 정리 및 변환하는 방법을 알아보세요."
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+  - "@mastra/openai"
+  - "@mastra/pinecone"
+---
+
+# Memory 프로세서
+
+Memory 프로세서는 Memory가 활성화된 Agent를 통과할 때 메시지를 변환하고 필터링합니다. 컨텍스트 창 제한을 관리하고 불필요한 콘텐츠를 제거하며 언어 Model로 전송되는 정보를 최적화합니다.
+
+Agent에서 Memory가 활성화되면 Mastra는 Agent의 프로세서 파이프라인에 Memory 프로세서를 추가합니다. 이러한 프로세서는 메시지 기록, 작업 Memory, 의미상 관련된 메시지를 검색한 다음 Model이 응답한 후에도 새 메시지를 유지합니다.
+
+Memory 프로세서는[processors](/docs/agents/processors) that operate specifically on memory-related messages and state.
+
+## 내장 Memory 프로세서 {/* #built-in-memory-processors */}
+
+Mastra는 Memory가 활성화되면 자동으로 다음 프로세서를 추가합니다.
+
+### `MessageHistory` {/* #messagehistory */}
+
+메시지 기록을 검색하고 새 메시지를 유지합니다.
+
+**구성할 때:**
+
+```typescript
+memory: new Memory({
+  lastMessages: 10,
+})
+```
+
+**내부적으로 마스트라:**
+
+1. 생성`MessageHistory` processor with `limit: 10`
+2. Agent의 입력 프로세서에 추가합니다(LLM 이전에 실행).
+3. Agent의 출력 프로세서에 추가합니다(LLM 이후 실행).
+
+**기능:**
+
+* **입력**: 저장소에서 마지막 10개의 메시지를 가져와서 대화 앞에 추가합니다.
+* **산출**: Model이 응답한 후 스토리지에 새 메시지를 유지합니다.
+
+**예:**
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+import { openai } from '@ai-sdk/openai'
+
+const agent = new Agent({
+  id: 'test-agent',
+  name: 'Test Agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({
+      id: 'memory-store',
+      url: 'file:memory.db',
+    }),
+    lastMessages: 10, // MessageHistory processor automatically added
+  }),
+})
+```
+
+### `SemanticRecall` {/* #semanticrecall */}
+
+현재 입력을 기반으로 의미론적으로 관련된 메시지를 검색하고 새 메시지에 대한 임베딩을 만듭니다.
+
+**구성할 때:**
+
+```typescript
+memory: new Memory({
+  semanticRecall: { enabled: true },
+  vector: myVectorStore,
+  embedder: myEmbedder,
+})
+```
+
+**내부적으로 마스트라:**
+
+1. 생성`SemanticRecall` processor
+2. Agent의 입력 프로세서에 추가합니다(LLM 이전에 실행).
+3. Agent의 출력 프로세서에 추가합니다(LLM 이후 실행).
+4. 벡터 저장소와 임베더를 모두 구성해야 합니다.
+
+**기능:**
+
+* **입력**: 벡터 유사성 검색을 수행하여 관련성이 높은 과거 메시지를 찾아 대화에 추가합니다.
+* **산출**: 새 메시지에 대한 임베딩을 생성하고 향후 검색을 위해 벡터 저장소에 저장합니다.
+
+**예:**
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+import { PineconeVector } from '@mastra/pinecone'
+import { OpenAIEmbedder } from '@mastra/openai'
+import { openai } from '@ai-sdk/openai'
+
+const agent = new Agent({
+  name: 'semantic-agent',
+  instructions: 'You are a helpful assistant with semantic memory',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({
+      id: 'memory-store',
+      url: 'file:memory.db',
+    }),
+    vector: new PineconeVector({
+      id: 'memory-vector',
+      apiKey: process.env.PINECONE_API_KEY!,
+    }),
+    embedder: new OpenAIEmbedder({
+      model: 'text-embedding-3-small',
+      apiKey: process.env.OPENAI_API_KEY!,
+    }),
+    semanticRecall: { enabled: true }, // SemanticRecall processor automatically added
+  }),
+})
+```
+
+### `WorkingMemory` {/* #workingmemory */}
+
+대화 전반에 걸쳐 작업 Memory 상태를 관리합니다.
+
+**구성할 때:**
+
+```typescript
+memory: new Memory({
+  workingMemory: { enabled: true },
+})
+```
+
+**내부적으로 마스트라:**
+
+1. 생성`WorkingMemory` processor
+2. Agent의 입력 프로세서에 추가합니다(LLM 이전에 실행).
+3. 구성하려면 스토리지 어댑터가 필요합니다.
+
+**기능:**
+
+* **입력**: 현재 스레드의 작업 Memory 상태를 검색하여 대화 앞에 추가합니다.
+* **산출**: 출력 처리 없음
+
+**예:**
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+import { openai } from '@ai-sdk/openai'
+
+const agent = new Agent({
+  name: 'working-memory-agent',
+  instructions: 'You are an assistant with working memory',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({
+      id: 'memory-store',
+      url: 'file:memory.db',
+    }),
+    workingMemory: { enabled: true }, // WorkingMemory processor automatically added
+  }),
+})
+```
+
+## 수동 제어 및 중복 제거 {/* #manual-control-and-deduplication */}
+
+Memory 프로세서를 수동으로 추가하는 경우`inputProcessors` or `outputProcessors`, Mastra **won't** automatically add it. This gives you full control over processor ordering:
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { MessageHistory } from '@mastra/core/processors'
+import { TokenLimiter } from '@mastra/core/processors'
+import { LibSQLStore } from '@mastra/libsql'
+import { openai } from '@ai-sdk/openai'
+
+// Custom MessageHistory with different configuration
+const customMessageHistory = new MessageHistory({
+  storage: new LibSQLStore({ id: 'memory-store', url: 'file:memory.db' }),
+  lastMessages: 20,
+})
+
+const agent = new Agent({
+  name: 'custom-memory-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({ id: 'memory-store', url: 'file:memory.db' }),
+    lastMessages: 10, // This would normally add MessageHistory(10)
+  }),
+  inputProcessors: [
+    customMessageHistory, // Your custom one is used instead
+    new TokenLimiter({ limit: 4000 }), // Runs after your custom MessageHistory
+  ],
+})
+```
+
+## 프로세서 실행 순서 {/* #processor-execution-order */}
+
+가드레일을 Memory와 결합할 때 실행 순서를 이해하는 것이 중요합니다.
+
+### 입력 프로세서 {/* #input-processors */}
+
+```
+[Memory Processors] → [Your inputProcessors]
+```
+
+1. **Memory 프로세서가 가장 먼저 실행됩니다.**: `WorkingMemory`, `MessageHistory`, `SemanticRecall`
+2. **입력 프로세서는 이후에 실행됩니다.**: 가드레일, 필터, 검증기
+
+결과적으로 Memory는 프로세서가 입력을 검증하거나 필터링하기 전에 메시지 기록을 로드합니다.
+
+### 출력 프로세서 {/* #output-processors */}
+
+```
+[Your outputProcessors] → [Memory Processors]
+```
+
+1. **출력 프로세서가 먼저 실행됩니다.**: 가드레일, 필터, 검증기
+2. **Memory 프로세서는 이후에 실행됩니다.**: `SemanticRecall` (embeddings), `MessageHistory` (persistence)
+
+이 주문은 다음과 같이 설계되었습니다.**safe by default**: if your output guardrail calls `abort()`, the memory processors never run and **no messages are saved**.
+
+## 가드레일과 Memory {/* #guardrails-and-memory */}
+
+기본 실행 순서는 안전한 가드레일 동작을 제공합니다.
+
+### 출력 가드레일(권장) {/* #output-guardrails-recommended */}
+
+출력 가드레일 실행**before** memory processors save messages. If a guardrail aborts:
+
+* 트립와이어가 작동됩니다.
+* Memory 프로세서를 건너뜁니다.
+* **메시지가 저장소에 유지되지 않습니다.**
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { openai } from '@ai-sdk/openai'
+
+// Output guardrail that blocks inappropriate content
+const contentBlocker = {
+  id: 'content-blocker',
+  processOutputResult: async ({ messages, abort }) => {
+    const hasInappropriateContent = messages.some(msg => containsBadContent(msg))
+    if (hasInappropriateContent) {
+      abort('Content blocked by guardrail')
+    }
+    return messages
+  },
+}
+
+const agent = new Agent({
+  id: 'safe-agent',
+  name: 'safe-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({ lastMessages: 10 }),
+  // Your guardrail runs BEFORE memory saves
+  outputProcessors: [contentBlocker],
+})
+
+// If the guardrail aborts, nothing is saved to memory
+const result = await agent.generate('Hello')
+if (result.tripwire) {
+  console.log('Blocked:', result.tripwire.reason)
+  // Memory is empty - no messages were persisted
+}
+```
+
+### 입력 가드레일 {/* #input-guardrails */}
+
+입력 가드레일 실행**after** memory processors load history. If a guardrail aborts:
+
+* 트립와이어가 작동됩니다.
+* LLM은 호출되지 않습니다.
+* 출력 프로세서(Memory 지속성 포함)를 건너뜁니다.
+* **메시지가 저장소에 유지되지 않습니다.**
+
+```typescript
+// Input guardrail that validates user input
+const inputValidator = {
+  id: 'input-validator',
+  processInput: async ({ messages, abort }) => {
+    const lastUserMessage = messages.findLast(m => m.role === 'user')
+    if (isInvalidInput(lastUserMessage)) {
+      abort('Invalid input detected')
+    }
+    return messages
+  },
+}
+
+const agent = new Agent({
+  id: 'validated-agent',
+  name: 'validated-agent',
+  instructions: 'You are a helpful assistant',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({ lastMessages: 10 }),
+  // Your guardrail runs AFTER memory loads history
+  inputProcessors: [inputValidator],
+})
+```
+
+### 요약 {/* #summary */}
+
+| 난간 유형 | 실행될 때 | 중단된 경우 |
+| - | - | - |
+| 입력 | Memory 로드 후 기록 | LLM이 호출되지 않았으며 아무것도 저장되지 않았습니다 |
+| 출력 | 기억이 저장되기 전 | 저장공간에 아무것도 저장되지 않았습니다 |
+
+두 시나리오 모두 안전합니다. 가드레일은 부적절한 콘텐츠가 Memory에 유지되는 것을 방지합니다.
+
+## 대용량 첨부 파일 처리 {/* #handling-large-attachments */}
+
+일부 저장소 공급자는 base64로 인코딩된 첨부 파일이 초과할 수 있는 레코드 크기 제한을 적용합니다.
+
+| 공급자 | 레코드 크기 제한 |
+| - | - |
+|[DynamoDB](/reference/storage/dynamodb) | 400 KB |
+| [Convex](/reference/storage/convex) | 1 MiB |
+| [Cloudflare D1](/reference/storage/cloudflare-d1) | 1 MiB |
+
+PostgreSQL, MongoDB 및 libSQL은 한도가 더 높으며 일반적으로 영향을 받지 않습니다.
+
+입력 프로세서를 사용하여 첨부 파일을 외부 저장소에 업로드한 다음 메시지가 유지되기 전에 URL 참조로 바꿉니다.
+
+```typescript title="src/mastra/processors/attachment-uploader.ts"
+import type { Processor } from '@mastra/core/processors'
+import type { MastraDBMessage } from '@mastra/core/memory'
+
+export class AttachmentUploader implements Processor {
+  id = 'attachment-uploader'
+
+  async processInput({ messages }: { messages: MastraDBMessage[] }) {
+    return Promise.all(messages.map(message => this.processMessage(message)))
+  }
+
+  async processMessage(message: MastraDBMessage) {
+    const attachments = message.content.experimental_attachments
+    if (!attachments?.length) return message
+
+    const uploaded = await Promise.all(
+      attachments.map(async attachment => {
+        if (!attachment.url?.startsWith('data:')) return attachment
+
+        const url = await this.upload(attachment.url, attachment.contentType)
+        return { ...attachment, url }
+      }),
+    )
+
+    return { ...message, content: { ...message.content, experimental_attachments: uploaded } }
+  }
+
+  async upload(dataUri: string, contentType?: string): Promise<string> {
+    const base64 = dataUri.split(',')[1]
+    const buffer = Buffer.from(base64, 'base64')
+
+    throw new Error('Implement upload() with your storage provider')
+  }
+}
+```
+
+Agent와 함께 프로세서를 사용하십시오.
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { AttachmentUploader } from '../processors/attachment-uploader'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support agent',
+  instructions: 'Answer customer support questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({ lastMessages: 10 }),
+  inputProcessors: [new AttachmentUploader()],
+})
+```
+
+## 관련 문서 {/* #related-documentation */}
+
+* [프로세서](/docs/agents/processors): 일반적인 프로세서 개념 및 맞춤형 프로세서 생성
+* [난간](/docs/agents/guardrails): 보안 및 검증 프로세서
+* [Memory 개요](/docs/memory/overview): Memory 유형 및 구성
+
+맞춤형 프로세서를 생성할 때 입력을 변경하지 마십시오.`messages` array or its objects directly.

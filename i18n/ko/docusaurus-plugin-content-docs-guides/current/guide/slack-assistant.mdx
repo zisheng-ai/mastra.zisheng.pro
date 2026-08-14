@@ -1,0 +1,162 @@
+---
+title: "가이드: Slack 어시스턴트 구축"
+description: "채널 어댑터를 사용하여 Slack의 메시지 및 멘션에 응답하는 Mastra Agent를 구축하세요."
+---
+
+# Slack 어시스턴트 구축
+
+이 가이드에서는 Slack의 메시지 및 멘션에 응답하는 Mastra Agent를 구축합니다. 채널 어댑터를 구성하고, 올바른 권한으로 Slack 앱을 설정하고, 웹후크를 통해 Agent에 연결하고, 상호 작용을 테스트하는 방법을 배우게 됩니다.
+
+## 전제조건 {/* #prerequisites */}
+
+* Node.js`v22.13.0` or later installed
+* 지원되는 API 키[Model Provider](/models)
+* 기존 Mastra 프로젝트. 따라가다[installation guide](/guides/getting-started/quickstart) if needed.
+* 에이[Slack workspace](https://slack.com/) where you can create apps
+
+## Agent 만들기 {/* #create-the-agent */}
+
+Slack 어댑터를 설치합니다.
+
+```bash npm2yarn
+npm install @chat-adapter/slack
+```
+
+새 파일 만들기`src/mastra/agents/slack-agent.ts` and define your agent:
+
+```ts title="src/mastra/agents/slack-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createSlackAdapter } from '@chat-adapter/slack'
+
+export const slackAgent = new Agent({
+  id: 'slack-agent',
+  name: 'Slack Agent',
+  instructions:
+    'You are a helpful assistant. Answer questions, help with tasks, and have natural conversations.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_OPUS__',
+  channels: {
+    adapters: {
+      slack: createSlackAdapter(),
+    },
+  },
+})
+```
+
+그만큼`channels` property tells Mastra to generate a webhook endpoint for each adapter. In this case, the Slack adapter handles event verification, signature validation, and message formatting automatically.
+
+귀하의 대리인을 등록하십시오.`src/mastra/index.ts` file:
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+// highlight-next-line
+import { slackAgent } from './agents/slack-agent'
+
+export const mastra = new Mastra({
+  // highlight-next-line
+  agents: { slackAgent },
+})
+```
+
+## Slack 앱 만들기 {/* #create-a-slack-app */}
+
+Agent를 작업 공간에 연결하려면 Slack 앱이 필요합니다.
+
+이동[https://api.slack.com/apps](https://api.slack.com/apps) and select **Create New App** > **From scratch**. Give it a name and select your workspace.
+
+다음으로 이동**OAuth & Permissions** and scroll to **Bot Token Scopes**. Add the following scopes:
+
+* `app_mentions:read`
+* `channels:history`
+* `channels:read`
+* `chat:write`
+* `users:read`
+
+상단에는**OAuth & Permissions**, select **Install to Workspace**. Copy the **Bot User OAuth Token** (`xoxb-...`).
+
+이동**Basic Information** > **App Credentials** and copy the **Signing Secret** (e.g. `c3a4...`).
+
+보장하다**Socket Mode** is turned **off** under **Settings** > **Socket Mode**.
+
+자격 증명을`.env` file:
+
+```bash title=".env"
+SLACK_SIGNING_SECRET=your-signing-secret
+SLACK_BOT_TOKEN=xoxb-your-bot-token
+```
+
+어댑터는 기본적으로 이러한 환경 변수를 읽습니다. 참조[Chat SDK Slack adapter docs](https://chat-sdk.dev/adapters/slack) for more details.
+
+## 웹훅 연결 {/* #connect-the-webhook */}
+
+Slack은 웹훅을 통해 Agent에 이벤트를 전달합니다. Mastra는 각 채널 어댑터에 대해 이 끝점을 자동으로 생성합니다.
+
+개발 서버를 시작합니다:
+
+```bash npm2yarn
+npm run dev
+```
+
+로컬 개발 중에 Slack이 로컬 서버에 연결하려면 공개 URL이 필요합니다. 새 터미널을 열고 터널을 시작합니다.
+
+```bash
+npx cloudflared tunnel --url http://localhost:4111
+```
+
+그러면 다음과 같은 임시 공개 URL이 출력됩니다.`https://triple-arms-solutions-kit.trycloudflare.com`. The URL changes each time you restart the tunnel.
+
+Slack 앱 설정에서 다음으로 이동하세요.**Event Subscriptions** and toggle **Enable Events** to **On**.
+
+설정**Request URL** to your tunnel URL with the agent webhook path:
+
+```text
+https://<your-tunnel-url>/api/agents/slack-agent/channels/slack/webhook
+```
+
+Slack이 확인 요청을 보냅니다. 개발 서버가 실행 중인 경우 녹색 확인 표시로 응답합니다.
+
+아래에**Subscribe to bot events**, add:
+
+* `app_mention`
+* `message.channels`
+
+선택하다**Save Changes**. Slack requires you to reinstall the app after changing event subscriptions. Go to **OAuth & Permissions** and select **Reinstall to Workspace** to apply the updated permissions.
+
+:::메모
+
+터널 URL은 로컬 개발 전용입니다. 당신이[deploy your application](/docs/deployment/overview), update the **Request URL** in your Slack app's **Event Subscriptions** to your production URL (e.g. `https://your-app.example.com/api/agents/slack-agent/channels/slack/webhook`).
+
+:::
+
+## Agent 테스트 {/* #test-the-agent */}
+
+Slack으로 테스트하기 전에 다음에서 Agent의 동작을 개선할 수 있습니다.[Studio](/docs/studio/overview). Open [http://localhost:4111/](http://localhost:4111/) to chat with your agent and adjust its instructions. Inspect traces to see how responses are generated.
+
+Agent의 응답이 만족스러우면 Slack 통합을 테스트하세요. Slack의 채널에 봇을 초대합니다.
+
+```text
+/invite @your-bot-name
+```
+
+채널에서 봇을 언급하세요.
+
+```text
+@your-bot-name What can you help me with?
+```
+
+Agent는 스레드에서 응답합니다. 출력은 Model 및 지침에 따라 다를 수 있습니다.
+
+## 다음 단계 {/* #next-steps */}
+
+이 Agent를 다음으로 확장할 수 있습니다.
+
+* [애플리케이션 배포](/docs/deployment/overview)Slack을 업데이트하고**Request URL** to your production endpoint
+* 여러 플랫폼에서 응답할 수 있도록 동일한 Agent에 더 많은 어댑터(Discord, Telegram)를 추가하세요.
+* 구성[multimodal content](/docs/capabilities/channels/overview#multimodal-content) to let your agent process images, video, and audio shared in chat
+* 추가하다[tools](/docs/agents/using-tools) to give the agent access to external APIs and data
+
+자세히 알아보기:
+
+* [채널 개요](/docs/capabilities/channels/overview)
+* [사진관](/docs/studio/overview)
+* [배포 개요](/docs/deployment/overview)
+* [Chat SDK 어댑터 문서](https://chat-sdk.dev)

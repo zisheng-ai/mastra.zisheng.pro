@@ -1,0 +1,144 @@
+---
+title: "노동자 | 인증"
+description: "독립형 작업자와 Mastra API 서버 간의 보안 통신."
+packages:
+  - "@mastra/core"
+---
+
+# 노동자
+
+작업자가 API와 별도의 프로세스에서 실행되면 HTTP를 통해 통신합니다. 오케스트레이션 작업자는 API의 단계 실행 엔드포인트를 호출하여 API 서버에서 Workflow 단계를 실행합니다. 푸시 모드 PubSub 브로커(예: 푸시 모드의 Google Cloud Pub/Sub)도 API의 이벤트 엔드포인트에 직접 이벤트를 전달할 수 있습니다. 이는 브로커 자체에서 이벤트를 가져오는 풀 모드 작업자와는 별개의 통합 경로입니다. 인증 공급자가 구성되면 두 HTTP 끝점 모두 인증이 필요합니다.
+
+## 작동 원리 {/* #how-it-works */}
+
+작업자 인증은 나머지 Mastra 서버와 동일한 인증 파이프라인을 사용합니다. 오케스트레이션 작업자는 각 HTTP 요청과 함께 자격 증명을 보내고 서버가 구성한`authenticateToken` provider validates them.
+
+| 엔드포인트 | 사용하는 사람 | 목적 |
+| - | - | - |
+|`POST /api/workflows/:workflowId/runs/:runId/steps/execute` | Orchestration worker via `HttpRemoteStrategy` | Execute a workflow step on the API |
+| `POST /api/workflows/events`| 푸시 모드 브로커(GCP Pub/Sub, SNS) | API에 Workflow 이벤트 전달 |
+
+두 노선 모두`requiresAuth: true`. When no auth provider is configured, they're publicly accessible.
+
+:::경고
+
+작업자를 별도의 프로세스로 배포하는 경우 항상 서버에 인증 공급자를 구성하세요. 이것이 없으면 단계 실행 및 이벤트 엔드포인트가 모든 호출자에게 공개됩니다.
+
+:::
+
+## 작업자 인증 설정 {/* #setting-up-worker-auth */}
+
+### 서버에서 인증 공급자 구성 {/* #configure-an-auth-provider-on-the-server */}
+
+Mastra 인증 공급자를 사용하십시오.`SimpleAuth` works well for worker tokens:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { SimpleAuth } from '@mastra/core/server'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new SimpleAuth({
+      tokens: {
+        [process.env.WORKER_TOKEN!]: {
+          id: 'worker',
+          name: 'Orchestration Worker',
+          role: 'worker',
+        },
+      },
+    }),
+  },
+  // ... storage, pubsub, etc.
+})
+```
+
+### 작업자 토큰 설정 {/* #set-the-worker-token */}
+
+각 작업자 컨테이너에서 다음을 설정합니다.`MASTRA_WORKER_AUTH_TOKEN` to a token that the server's auth provider recognizes:
+
+```yaml title="docker-compose.yml"
+services:
+  api:
+    environment:
+      WORKER_TOKEN: ${WORKER_TOKEN}
+      # ... other env vars
+
+  orchestration-worker:
+    environment:
+      MASTRA_WORKER_AUTH_TOKEN: ${WORKER_TOKEN}
+      MASTRA_STEP_EXECUTION_URL: http://api:4111/api # Use HTTPS in production
+      # ... other env vars
+```
+
+```bash title=".env"
+WORKER_TOKEN=sk-worker-secret-token
+```
+
+이 예제에서는`http://` for local development. In production, use HTTPS URLs and terminate TLS with a service mesh or ingress controller. See [Security recommendations](#security-recommendations).
+
+오케스트레이션 작업자가 읽습니다.`MASTRA_WORKER_AUTH_TOKEN` and sends it as a `Bearer` token in the `Authorization` header on every step execution request.
+
+## 인증 자격 증명 유형 {/* #auth-credential-types */}
+
+그만큼`HttpRemoteStrategy` supports three credential formats. The default (`bearer`) covers most setups.
+
+### 무기명 토큰 {/* #bearer-token */}
+
+세트`MASTRA_WORKER_AUTH_TOKEN` and the strategy sends `Authorization: Bearer <token>`:
+
+```bash
+MASTRA_WORKER_AUTH_TOKEN=sk-worker-secret-token
+```
+
+### API 키 헤더 {/* #api-key-header */}
+
+자격 증명을 다음과 같이 보냅니다.`x-worker-api-key` instead of `Authorization`:
+
+```typescript
+import { HttpRemoteStrategy } from '@mastra/core/worker'
+
+const strategy = new HttpRemoteStrategy({
+  serverUrl: 'http://api:4111/api', // Use HTTPS in production
+  auth: { type: 'api-key', key: process.env.WORKER_API_KEY! },
+})
+```
+
+서버의 인증 공급자는 다음을 읽어야 합니다.`x-worker-api-key` header to validate this credential.
+
+### 맞춤 헤더 {/* #custom-header */}
+
+헤더 이름과 값을 사용하십시오.
+
+```typescript
+import { HttpRemoteStrategy } from '@mastra/core/worker'
+
+const strategy = new HttpRemoteStrategy({
+  serverUrl: 'http://api:4111/api', // Use HTTPS in production
+  auth: {
+    type: 'header',
+    name: 'X-Internal-Service-Key',
+    value: process.env.INTERNAL_KEY!,
+  },
+})
+```
+
+## 푸시 모드 브로커 인증 {/* #push-mode-broker-auth */}
+
+푸시 모드 PubSub(예: Google Cloud Pub/Sub)를 사용하는 경우 브로커는 이벤트를 직접 게시합니다.`/api/workflows/events` endpoint. The broker attaches its own credentials. For example, Google Cloud Pub/Sub sends a Google-signed OIDC token.
+
+귀하의 인증 Provider`authenticateToken` callback must recognize whatever credential the broker sends. See your broker's documentation for the authentication scheme it uses.
+
+## 보안 권장 사항 {/* #security-recommendations */}
+
+* **다양한 작업자 유형에 대해 서로 다른 토큰을 사용합니다.**&#xC774;를 통해 다른 작업자에게 영향을 주지 않고 한 작업자에 대한 액세스 권한을 취소할 수 있습니다.
+* **일정에 따라 토큰을 순환합니다.**&#xC5C5;데이트`WORKER_TOKEN` environment variable and restart the affected containers.
+* **프로덕션에서 TLS를 사용하십시오.**&#xC791;업자와 API 간 통신은 전송 중인 토큰을 보호하기 위해 HTTPS를 통해 이루어져야 합니다. 이는 Kubernetes 클러스터 및 Docker 네트워크를 포함한 모든 환경에 적용됩니다. 서비스 메시(예: Istio, Linkerd) 또는 TLS 종료 수신을 사용하여 내부 트래픽을 암호화합니다.
+* **네트워크 액세스를 제한합니다.**&#xB2E8;계 실행 및 이벤트 엔드포인트는 내부적입니다. 가능하다면 네트워크 정책이나 방화벽 규칙을 사용하여 공용 인터넷에서 차단하세요.
+
+## 관련된 {/* #related */}
+
+* [인증 개요](/docs/server/auth): 사용 가능한 인증 Provider 및 작동 방식
+* [토큰 기반 인증](/docs/server/auth/simple-auth): 토큰-사용자 매핑 인증
+* [작업자 배포](/guides/deployment/mastra-workers): 분할 작업자 프로세스 설정
+* [근로자 참조](/reference/workers/overview): 모든 작업자 유형에 대한 구성 세부정보
+* [CLI 참조](/reference/cli/mastra#mastra-worker-build): `mastra worker build` and `mastra worker start`

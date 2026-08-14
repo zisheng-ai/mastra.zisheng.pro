@@ -1,0 +1,198 @@
+---
+title: "센트리 수출 | 통합 | Observability"
+description: "AI 추적 및 모니터링을 위해 Sentry에 추적 보내기"
+packages:
+  - "@mastra/sentry"
+  - "@mastra/observability"
+---
+
+# 센트리 수출업체
+
+[보초](https://sentry.io/)AI별 추적 기능을 갖춘 애플리케이션 모니터링 플랫폼입니다. Sentry 내보내기는 OpenTelemetry 의미론적 규칙을 사용하여 추적을 Sentry로 보내 Model 성능, 토큰 사용, Tool 실행에 대한 통찰력을 제공합니다.
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/sentry@latest
+```
+
+## 구성 {/* #configuration */}
+
+### 전제조건 {/* #prerequisites */}
+
+1. **센트리 계정**: 가입하세요[sentry.io](https://sentry.io/)
+2. **DSN**: 당신의[Data Source Name](https://docs.sentry.io/concepts/key-terms/dsn-explainer/) from Project Settings → Client Keys
+3. **환경 변수**: 구성 설정
+
+```bash title=".env"
+SENTRY_DSN=https://...@...sentry.io/...
+
+# Optional
+SENTRY_ENVIRONMENT=production
+SENTRY_RELEASE=1.0.0
+```
+
+### 제로 구성 설정 {/* #zero-config-setup */}
+
+환경 변수가 설정된 경우 구성 없이 내보내기를 사용합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { SentryExporter } from '@mastra/sentry'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      sentry: {
+        serviceName: 'my-service',
+        exporters: [new SentryExporter()],
+      },
+    },
+  }),
+})
+```
+
+### 명시적 구성 {/* #explicit-configuration */}
+
+자격 증명을 직접 전달할 수도 있습니다(환경 변수보다 우선 적용됨).
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { SentryExporter } from '@mastra/sentry'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      sentry: {
+        serviceName: 'my-service',
+        exporters: [
+          new SentryExporter({
+            dsn: process.env.SENTRY_DSN!,
+            environment: 'production',
+            tracesSampleRate: 1.0, // Send 100% of transactions to Sentry
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+## 구성 옵션 {/* #configuration-options */}
+
+### 완전한 구성 {/* #complete-configuration */}
+
+```typescript
+new SentryExporter({
+  // Required settings
+  dsn: process.env.SENTRY_DSN!, // Data Source Name - tells the SDK where to send events
+
+  // Optional settings
+  environment: 'production', // Deployment environment (enables filtering issues and alerts by environment)
+  tracesSampleRate: 1.0, // Percentage of transactions sent to Sentry (0.0 = 0%, 1.0 = 100%)
+  release: '1.0.0', // Version of your code deployed (helps identify regressions and track deployments)
+
+  // Advanced Sentry options
+  options: {
+    // Any additional Sentry.NodeOptions
+    integrations: [],
+    beforeSend: event => event,
+    // ... other Sentry SDK options
+  },
+
+  // Diagnostic logging
+  logLevel: 'info', // debug | info | warn | error
+})
+```
+
+### 샘플링 구성 {/* #sampling-configuration */}
+
+Sentry로 전송되는 트랜잭션의 비율을 제어합니다. 이는 대용량 애플리케이션에 유용합니다.
+
+```typescript
+new SentryExporter({
+  dsn: process.env.SENTRY_DSN!,
+  tracesSampleRate: 0.1, // Send 10% of transactions to Sentry (recommended for high-load backends)
+})
+```
+
+:::팁
+다음으로 설정`1.0` (100%) for development and `0.1` to `0.2` (10-20%) for production high-load applications. To disable tracing entirely, don't set `tracesSampleRate` at all rather than setting it to `0`.
+:::
+
+## 스팬 유형 매핑 {/* #span-type-mapping */}
+
+Mastra 스팬 유형은 Sentry 작업에 자동으로 매핑됩니다.
+
+| 마스트라 스팬타입 | 센트리 작전 | 메모 |
+| - | - | - |
+|`AGENT_RUN` | `gen_ai.invoke_agent` | Contains tokens from child MODEL\_GENERATION span |
+| `MODEL_GENERATION` | `gen_ai.chat` | Includes usage stats, streaming data |
+| `MODEL_STEP` | *(skipped)* | Skipped to simplify trace hierarchy |
+| `MODEL_CHUNK` | *(skipped)* | Data aggregated in MODEL\_GENERATION |
+| `TOOL_CALL` | `gen_ai.execute_tool` | Tool execution with input/output |
+| `MCP_TOOL_CALL` | `gen_ai.execute_tool`| MCP Tool 실행 |
+|`WORKFLOW_RUN` | `workflow.run` | |
+| `WORKFLOW_STEP` | `workflow.step` | |
+| `WORKFLOW_CONDITIONAL` | `workflow.conditional` | |
+| `WORKFLOW_CONDITIONAL_EVAL` | `workflow.conditional` | |
+| `WORKFLOW_PARALLEL` | `workflow.parallel` | |
+| `WORKFLOW_LOOP` | `workflow.loop` | |
+| `WORKFLOW_SLEEP` | `workflow.sleep` | |
+| `WORKFLOW_WAIT_EVENT` | `workflow.wait` | |
+| `PROCESSOR_RUN` | `ai.processor` | |
+| `GENERIC` | `ai.span` | |
+
+## OpenTelemetry 의미 규칙 {/* #opentelemetry-semantic-conventions */}
+
+내보내기는 Sentry 관련 속성과 함께 표준 GenAI 의미 규칙을 사용합니다.
+
+**MODEL\_GENERATION 범위의 경우:**
+
+* `gen_ai.system`: Model 제공자(예:`openai`, `anthropic`)
+* `gen_ai.request.model`: Model 식별자(예:`gpt-5.4`)
+* `gen_ai.response.model`: 응답 Model
+* `gen_ai.response.text`: 출력 텍스트 응답
+* `gen_ai.response.tool_calls`: 생성 중 발생한 Tool 호출(JSON 배열)
+* `gen_ai.usage.input_tokens`: 입력 토큰 개수
+* `gen_ai.usage.output_tokens`: 출력 토큰 개수
+* `gen_ai.request.temperature`: 온도 매개변수
+* `gen_ai.request.stream`: 스트리밍 요청 여부
+* `gen_ai.request.messages`: 입력 메시지/Prompt(JSON)
+* `gen_ai.completion_start_time`: 첫 번째 토큰이 도착한 시간
+
+**TOOL\_CALL 범위의 경우:**
+
+* `gen_ai.tool.name`: Tool 식별자
+* `gen_ai.tool.type`: `function`
+* `gen_ai.tool.call.id`: Tool 호출 ID
+* `gen_ai.tool.input`: Tool 입력(JSON)
+* `gen_ai.tool.output`: Tool 출력(JSON)
+* `tool.success`: Tool 호출 성공 여부
+
+**AGENT\_RUN 범위의 경우:**
+
+* `gen_ai.agent.name`: Agent 식별자
+* `gen_ai.pipeline.name`: Agent 이름(Sentry AI 보기용)
+* `gen_ai.agent.instructions`: Agent 안내
+* `gen_ai.response.model`: 아동세대 Model
+* `gen_ai.response.text`: 자식 세대의 출력 텍스트
+* `gen_ai.usage.*`: 자식 세대의 토큰 사용
+
+## 특징 {/* #features */}
+
+* **계층적 추적**: 부모-자식 관계를 유지합니다.
+* **토큰 추적**: 세대별 토큰 사용량 자동 추적
+* **Tool 호출 추적**: 입력/출력을 통해 Tool 실행을 캡처합니다.
+* **스트리밍 지원**: 스트리밍 응답을 집계합니다.
+* **오류 추적**: 자동 오류 상태 및 예외 캡처
+* **Workflow 지원**: Workflow 실행 단계를 추적합니다.
+* **단순화된 계층 구조**: 노이즈를 줄이기 위해 MODEL\_STEP 및 MODEL\_CHUNK 범위를 건너뜁니다.
+
+## 관련된 {/* #related */}
+
+* [추적 개요](/docs/observability/tracing/overview)
+* [센트리 문서](https://docs.sentry.io/)
+* [OpenTelemetry 의미 체계 규칙](https://opentelemetry.io/docs/concepts/semantic-conventions/)

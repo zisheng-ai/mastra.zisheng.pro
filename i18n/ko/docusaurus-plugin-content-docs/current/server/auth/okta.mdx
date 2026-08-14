@@ -1,0 +1,225 @@
+---
+title: "옥타 | 인증"
+description: "SSO 로그인 및 그룹 기반 RBAC를 갖춘 Okta를 사용하여 Mastra 서버와 Studio를 인증하세요."
+packages:
+  - "@mastra/auth-okta"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# 옥타
+
+그만큼`@mastra/auth-okta`패키지는 Okta를 사용하여 Mastra에 대한 인증 및 역할 기반 액세스 제어를 제공합니다. 암호화된 세션 쿠키를 사용하여 OAuth 2.0/OIDC 로그인 흐름을 지원하고 Okta 그룹을 Mastra 권한에 매핑합니다.
+
+## 전제조건 {/* #prerequisites */}
+
+이 가이드에서는 Okta 인증을 사용합니다. 다음을 확인하세요.
+
+1. 다음에서 Okta 계정을 만드세요.[okta.com](https://www.okta.com/)
+2. Okta 관리 콘솔에서 OAuth 애플리케이션 설정(웹 앱, 인증 코드 부여)
+3. 애플리케이션의 로그인 리디렉션 URI에 리디렉션 URI를 추가합니다.
+4. API 토큰 생성(RBAC에 필요)
+
+환경 변수가 설정되어 있는지 확인하세요.
+
+```env title=".env"
+OKTA_DOMAIN=dev-123456.okta.com
+OKTA_CLIENT_ID=your-client-id
+OKTA_CLIENT_SECRET=your-client-secret
+OKTA_REDIRECT_URI=http://localhost:4111/api/auth/callback
+OKTA_COOKIE_PASSWORD=a-random-string-at-least-32-characters-long
+OKTA_API_TOKEN=your-api-token
+```
+
+:::메모
+
+`OKTA_COOKIE_PASSWORD`세션 쿠키를 암호화합니다. 생략하면 서버를 다시 시작해도 유지되지 않는 자동 생성 값이 사용됩니다. 프로덕션을 위해 명시적으로 설정합니다.
+
+`OKTA_API_TOKEN`사용할 때만 필요합니다.`MastraRBACOkta` to map Okta groups to permissions.
+
+:::
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/auth-okta
+```
+
+## 사용 예 {/* #usage-examples */}
+
+### 환경 변수를 사용한 기본 사용법 {/* #basic-usage-with-environment-variables */}
+
+위의 환경 변수를 설정하면 모든 생성자 매개변수는 선택사항입니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthOkta } from '@mastra/auth-okta'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthOkta(),
+  },
+})
+```
+
+### RBAC로 인증 {/* #auth-with-rbac */}
+
+추가하다`MastraRBACOkta` to map Okta groups to Mastra permissions:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthOkta, MastraRBACOkta } from '@mastra/auth-okta'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthOkta(),
+    rbac: new MastraRBACOkta({
+      roleMapping: {
+        Admin: ['*'],
+        Engineering: ['agents:*', 'workflows:*', 'tools:*'],
+        Viewer: ['agents:read', 'workflows:read'],
+        _default: [], // users with unmapped groups get no permissions
+      },
+    }),
+  },
+})
+```
+
+### 공급자 간 사용 {/* #cross-provider-usage */}
+
+로그인에는 다른 인증 공급자(Auth0, Clerk 등)를 사용하고 RBAC에는 Okta를 사용하세요. 통과`getUserId` function to resolve the Okta user ID from the other provider's user object:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthAuth0 } from '@mastra/auth-auth0'
+import { MastraRBACOkta } from '@mastra/auth-okta'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthAuth0(),
+    rbac: new MastraRBACOkta({
+      getUserId: user => user.metadata?.oktaUserId || user.email,
+      roleMapping: {
+        Engineering: ['agents:*', 'workflows:*'],
+        Admin: ['*'],
+        _default: [],
+      },
+    }),
+  },
+})
+```
+
+:::메모
+
+공급자 간에 사용자를 연결하려면 Okta 사용자 ID를 다른 공급자의 사용자 메타데이터에 저장하세요. Mastra는 이 ID를 사용하여 Okta에서 그룹을 가져옵니다.
+
+:::
+
+방문하다[MastraAuthOkta](/reference/auth/okta) for all available configuration options.
+
+## 역할 매핑 {/* #role-mapping */}
+
+그만큼`roleMapping` option maps Okta group names to arrays of Mastra permission strings. Permissions follow a `resource:action` pattern and support wildcards:
+
+```typescript
+const rbac = new MastraRBACOkta({
+  roleMapping: {
+    // full access to everything
+    Admin: ['*'],
+
+    // full access to agents and workflows
+    Engineering: ['agents:*', 'workflows:*'],
+
+    // read-only access
+    Viewer: ['agents:read', 'workflows:read'],
+
+    // users whose groups don't match any key above
+    _default: [],
+  },
+})
+```
+
+그만큼`_default` key assigns permissions to users whose Okta groups don't match any other key.
+
+## 클라이언트 측 설정 {/* #client-side-setup */}
+
+인증이 활성화되면 Mastra 경로에 대한 요청에는 인증이 필요합니다.`MastraAuthOkta` uses SSO, so users authenticate through Okta's hosted login page. After login, an encrypted session cookie is set automatically.
+
+### 쿠키 세션(권장) {/* #cookie-session-recommended */}
+
+교차 출처 요청의 경우(예: 프런트엔드`:3000` calling Mastra on `:4111`), enable CORS credentials on the Mastra server:
+
+```typescript title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthOkta(),
+    cors: {
+      origin: 'http://localhost:3000',
+      credentials: true,
+    },
+  },
+})
+```
+
+자격 증명을 포함하도록 클라이언트를 구성합니다.
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const mastraClient = new MastraClient({
+  baseUrl: 'http://localhost:4111',
+  credentials: 'include',
+})
+```
+
+### 무기명 토큰 {/* #bearer-token */}
+
+Okta 액세스 토큰을 Bearer 토큰으로 전달할 수도 있습니다. 토큰은 Okta의 JWKS 엔드포인트에 대해 확인됩니다.
+
+```typescript title="lib/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const createMastraClient = (accessToken: string) => {
+  return new MastraClient({
+    baseUrl: 'http://localhost:4111',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  })
+}
+```
+
+방문하다[Mastra Client SDK](/docs/server/mastra-client) for more configuration options.
+
+### 인증된 요청 만들기 {/* #making-authenticated-requests */}
+
+<Tabs>
+  <TabItem value="client" label="MastraClient">
+    ```typescript title="src/api/agents.ts"
+    import { mastraClient } from '../lib/mastra-client'
+
+    const agent = mastraClient.getAgent('weatherAgent')
+    const response = await agent.generate('Weather in London')
+    console.log(response)
+    ```
+  </TabItem>
+
+  <TabItem value="curl" label="cURL">
+    ```bash
+    curl -X POST http://localhost:4111/api/agents/weatherAgent/generate \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer <your-okta-access-token>" \
+      -d '{
+        "messages": "Weather in London"
+      }'
+    ```
+  </TabItem>
+</Tabs>
+
+## 문제 해결 {/* #troubleshooting */}
+
+* **모든 요청에 ​​401**: Okta 도메인, 클라이언트 ID, 클라이언트 비밀번호가 올바른지 확인하세요. Okta 애플리케이션의 리디렉션 URI가 일치하는지 확인하세요.`OKTA_REDIRECT_URI`.
+* **쿠키가 교차 출처로 전송되지 않음**: 세트`credentials: "include"` in `MastraClient` and configure `server.cors` with your frontend origin and `credentials: true`.
+* **다시 시작 시 세션이 손실됨**: 세트`OKTA_COOKIE_PASSWORD` to a stable value (at least 32 characters). Without it, an auto-generated key is used that changes on each restart.
+* **RBAC가 빈 권한을 반환합니다.**: 확인하다`OKTA_API_TOKEN` is set and the token has permission to list user groups. Check that group names in `roleMapping` match your Okta group names exactly.

@@ -1,0 +1,222 @@
+---
+title: "인간 참여 루프(HITL) | Workflow"
+description: "Mastra의 Human-in-the-loop Workflow를 사용하면 계속하기 전에 수동 승인, 검토 또는 사용자 입력을 위해 실행을 일시 중지할 수 있습니다."
+packages:
+  - "@mastra/core"
+---
+
+# 인간 참여 루프(HITL)
+
+일부 Workflow는 계속하기 전에 사람의 입력을 위해 일시 ​​중지해야 합니다. Workflow가 다음과 같은 경우[suspended](/docs/workflows/suspend-and-resume#pausing-a-workflow-with-suspend), 일시 중지된 이유와 진행하는 데 필요한 사항을 설명하는 메시지를 반환할 수 있습니다. 그러면 Workflow는 다음 중 하나를 수행할 수 있습니다.[재개하다](#resuming-workflows-with-human-input)또는[보석](#handling-human-rejection-with-bail)수신된 입력을 기반으로 합니다. 이 접근 방식은 수동 승인, 거부, 제한적 결정 또는 사람의 감독이 필요한 모든 단계에 적합합니다.
+
+## 사람의 입력을 위한 Workflow 일시 중지 {/* #pausing-workflows-for-human-input */}
+
+Human-in-the-loop 입력은 다음과 같이 작동합니다.[pausing a workflow](/docs/workflows/suspend-and-resume) using `suspend()`. The key difference is that when human input is required, you can return `suspend()` with a payload that provides context or guidance to the user on how to continue.
+
+![Pausing a workflow with suspend()](/img/workflows/workflows-suspend.jpg)
+
+```typescript {12-17,22-26} title="src/mastra/workflows/test-workflow.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+const step1 = createStep({
+  id: 'step-1',
+  inputSchema: z.object({
+    userEmail: z.string(),
+  }),
+  outputSchema: z.object({
+    output: z.string(),
+  }),
+  resumeSchema: z.object({
+    approved: z.boolean(),
+  }),
+  suspendSchema: z.object({
+    reason: z.string(),
+  }),
+  execute: async ({ inputData, resumeData, suspend }) => {
+    const { userEmail } = inputData
+    const { approved } = resumeData ?? {}
+
+    if (!approved) {
+      return await suspend({
+        reason: 'Human approval required.',
+      })
+    }
+
+    return {
+      output: `Email sent to ${userEmail}`,
+    }
+  },
+})
+
+export const testWorkflow = createWorkflow({
+  id: 'test-workflow',
+  inputSchema: z.object({
+    userEmail: z.string(),
+  }),
+  outputSchema: z.object({
+    output: z.string(),
+  }),
+})
+  .then(step1)
+  .commit()
+```
+
+## 사용자 피드백 제공 {/* #providing-user-feedback */}
+
+Workflow가 일시 중지되면 다음에서 반환된 페이로드에 액세스할 수 있습니다.`suspend()` by identifying the suspended step and reading its `suspendPayload`.
+
+```typescript {12} title="src/test-workflow.ts"
+const workflow = mastra.getWorkflow('testWorkflow')
+const run = await workflow.createRun()
+
+const result = await run.start({
+  inputData: {
+    userEmail: 'alex@example.com',
+  },
+})
+
+if (result.status === 'suspended') {
+  const suspendStep = result.suspended[0]
+  const suspendedPayload = result.steps[suspendStep[0]].suspendPayload
+
+  console.log(suspendedPayload)
+}
+```
+
+### 예제 출력 {/* #example-output */}
+
+단계에서 반환된 데이터에는 이유가 포함될 수 있으며 사용자가 Workflow를 재개하는 데 필요한 것이 무엇인지 이해하는 데 도움이 될 수 있습니다.
+
+```typescript
+{
+  reason: 'Confirm to send email.'
+}
+```
+
+## 사람의 입력으로 Workflow 재개 {/* #resuming-workflows-with-human-input */}
+
+마찬가지로[restarting a workflow](/docs/workflows/suspend-and-resume#restarting-a-workflow-with-resume), use `resume()` with `resumeData` to continue a workflow after receiving input from a human. The workflow resumes from the step where it was paused.
+
+![Restarting a workflow with resume()](/img/workflows/workflows-resume.jpg)
+
+```typescript {13}
+const workflow = mastra.getWorkflow('testWorkflow')
+const run = await workflow.createRun()
+
+await run.start({
+  inputData: {
+    userEmail: 'alex@example.com',
+  },
+})
+
+const handleResume = async () => {
+  const result = await run.resume({
+    step: 'step-1',
+    resumeData: { approved: true },
+  })
+}
+```
+
+### 인간의 거부 처리`bail()` {/* #handling-human-rejection-with-bail */}
+
+사용`bail()` to stop workflow execution at a step without triggering an error. This can be useful when a human explicitly rejects an action. The workflow completes with a `success` status, and any logic after the call to `bail()` is skipped.
+
+```typescript {6-10}
+const step1 = createStep({
+  execute: async ({ inputData, resumeData, suspend, bail }) => {
+    const { userEmail } = inputData
+    const { approved } = resumeData ?? {}
+
+    if (approved === false) {
+      return bail({
+        reason: 'User rejected the request.',
+      })
+    }
+
+    if (!approved) {
+      return await suspend({
+        reason: 'Human approval required.',
+      })
+    }
+
+    return {
+      message: `Email sent to ${userEmail}`,
+    }
+  },
+})
+```
+
+## 다중 회전 인간 입력 {/* #multi-turn-human-input */}
+
+여러 단계에서 입력이 필요한 Workflow의 경우 일시 중단 패턴은 동일하게 유지됩니다. 각 단계는`resumeSchema`, and `suspendSchema` typically with a reason that can be used to provide user feedback.
+
+```typescript {11-16,21-25} title="src/mastra/workflows/test-workflow.ts" prettier:false
+const step1 = createStep({...});
+
+const step2 = createStep({
+  id: "step-2",
+  inputSchema: z.object({
+    message: z.string()
+  }),
+  outputSchema: z.object({
+    output: z.string()
+  }),
+  resumeSchema: z.object({
+    approved: z.boolean()
+  }),
+  suspendSchema: z.object({
+    reason: z.string()
+  }),
+  execute: async ({ inputData, resumeData, suspend }) => {
+    const { message } = inputData;
+    const { approved } = resumeData ?? {};
+
+    if (!approved) {
+      return await suspend({
+        reason: "Human approval required."
+      });
+    }
+
+    return {
+      output: `${message} - Deleted`
+    };
+  }
+});
+
+export const testWorkflow = createWorkflow({
+  id: "test-workflow",
+  inputSchema: z.object({
+    userEmail: z.string()
+  }),
+  outputSchema: z.object({
+    output: z.string()
+  })
+})
+  .then(step1)
+  .then(step2)
+  .commit();
+```
+
+각 단계는 별도의 호출을 통해 순서대로 재개되어야 합니다.`resume()` for each suspended step. This approach helps manage multi-step approvals with consistent UI feedback and clear input handling at each stage.
+
+```typescript {4,11}
+const handleResume = async () => {
+  const result = await run.resume({
+    step: 'step-1',
+    resumeData: { approved: true },
+  })
+}
+
+const handleDelete = async () => {
+  const result = await run.resume({
+    step: 'step-2',
+    resumeData: { approved: true },
+  })
+}
+```
+
+## 관련된 {/* #related */}
+
+* [제어 흐름](/docs/workflows/control-flow)
+* [일시중단 및 재개](/docs/workflows/suspend-and-resume)

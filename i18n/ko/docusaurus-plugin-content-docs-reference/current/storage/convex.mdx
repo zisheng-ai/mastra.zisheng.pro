@@ -1,0 +1,277 @@
+---
+title: "참고: 볼록형 저장 | 저장"
+description: "Mastra의 Convex 저장소 구현에 대한 문서입니다."
+packages:
+  - "@mastra/convex"
+---
+
+# 볼록한 저장
+
+Convex 스토리지 구현은 다음을 사용하여 서버리스 스토리지 솔루션을 제공합니다.[Convex](https://convex.dev), 실시간 동기화 및 자동 캐싱 기능을 갖춘 풀 스택 TypeScript 개발 플랫폼입니다.
+
+:::경고\[관측성이 지원되지 않음]
+
+볼록한 저장**doesn't support the observability domain**. Traces from the `MastraStorageExporter` can't be persisted to Convex, and [스튜디오의](/docs/studio/overview)Observability 기능은 유일한 스토리지 제공자인 Convex에서는 작동하지 않습니다. Observability을 활성화하려면 다음을 사용하세요.[복합 스토리지](/reference/storage/composite#specialized-storage-for-observability)Observability 데이터를 ClickHouse와 같은 지원되는 Provider로 라우팅합니다.
+
+:::
+
+:::경고\[레코드 크기 제한]
+Convex는**1 MiB maximum record size**. This limit can be exceeded when storing messages with base64-encoded attachments such as images. See [Handling large attachments](/docs/memory/memory-processors#handling-large-attachments) for workarounds including uploading attachments to external storage like S3, Cloudflare R2, or [Convex file storage](https://docs.convex.dev/file-storage).
+:::
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/convex@latest
+```
+
+## 볼록한 설정 {/* #convex-setup */}
+
+사용하기 전에`ConvexStore`, set up the Convex schema and storage handler in your Convex project.
+The schema example below includes the full `ConvexStore` and `ConvexServerCache` setup. If you only use `ConvexStore`, omit `mastraCacheTable` and `mastraCacheListItemsTable`; if you use `ConvexServerCache`, 해당 테이블을 포함하고 캐시 처리기를 만듭니다.
+
+### 1. 볼록 스키마 설정 {/* #1-set-up-convex-schema */}
+
+\~ 안에`convex/schema.ts`:
+
+```typescript
+import { defineSchema } from 'convex/server'
+import {
+  mastraThreadsTable,
+  mastraMessagesTable,
+  mastraResourcesTable,
+  mastraWorkflowSnapshotsTable,
+  mastraScoresTable,
+  mastraObservationalMemoryTable,
+  mastraVectorIndexesTable,
+  mastraVectorsTable,
+  mastraCacheTable,
+  mastraCacheListItemsTable,
+  mastraDocumentsTable,
+} from '@mastra/convex/schema'
+
+export default defineSchema({
+  mastra_threads: mastraThreadsTable,
+  mastra_messages: mastraMessagesTable,
+  mastra_resources: mastraResourcesTable,
+  mastra_workflow_snapshots: mastraWorkflowSnapshotsTable,
+  mastra_scorers: mastraScoresTable,
+  mastra_observational_memory: mastraObservationalMemoryTable,
+  mastra_vector_indexes: mastraVectorIndexesTable,
+  mastra_vectors: mastraVectorsTable,
+  mastra_cache: mastraCacheTable,
+  mastra_cache_list_items: mastraCacheListItemsTable,
+  mastra_documents: mastraDocumentsTable,
+})
+```
+
+### 2. 스토리지 핸들러 생성 {/* #2-create-the-storage-handler */}
+
+\~ 안에`convex/mastra/storage.ts`:
+
+```typescript
+import { mastraStorage } from '@mastra/convex/server'
+
+export const handle = mastraStorage
+```
+
+당신이 사용하는 경우`ConvexServerCache`, create `convex/mastra/cache.ts`:
+
+```typescript
+import { mastraCache } from '@mastra/convex/server'
+
+export const handle = mastraCache
+```
+
+### 3. Convex에 배포 {/* #3-deploy-to-convex */}
+
+```bash
+npx convex dev
+# or for production
+npx convex deploy
+```
+
+## 용법 {/* #usage */}
+
+```typescript
+import { ConvexServerCache, ConvexStore } from '@mastra/convex'
+
+const storage = new ConvexStore({
+  id: 'convex-storage',
+  deploymentUrl: process.env.CONVEX_URL!,
+  adminAuthToken: process.env.CONVEX_ADMIN_KEY!,
+})
+
+const cache = new ConvexServerCache({
+  deploymentUrl: process.env.CONVEX_URL!,
+  adminAuthToken: process.env.CONVEX_ADMIN_KEY!,
+})
+```
+
+## ConvexStore 매개변수 {/* #convexstore-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'deploymentUrl',
+  type: 'string',
+  description: 'Convex deployment URL (e.g., https://your-project.convex.cloud)',
+  isOptional: false,
+},
+{
+  name: 'adminAuthToken',
+  type: 'string',
+  description: 'Convex admin authentication token for backend access',
+  isOptional: false,
+},
+{
+  name: 'storageFunction',
+  type: 'string',
+  description: "Path to the storage mutation function (default: 'mastra/storage:handle')",
+  isOptional: true,
+  defaultValue: 'mastra/storage:handle',
+},
+]}
+/>
+
+## ConvexServerCache 매개변수 {/* #convexservercache-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'deploymentUrl',
+  type: 'string',
+  description: 'Convex deployment URL (e.g., https://your-project.convex.cloud)',
+  isOptional: false,
+},
+{
+  name: 'adminAuthToken',
+  type: 'string',
+  description: 'Convex admin authentication token for backend access',
+  isOptional: false,
+},
+{
+  name: 'cacheFunction',
+  type: 'string',
+  description: "Path to the cache mutation function for ConvexServerCache (default: 'mastra/cache:handle')",
+  isOptional: true,
+  defaultValue: 'mastra/cache:handle',
+},
+{
+  name: 'requestTimeoutMs',
+  type: 'number',
+  description:
+    'Timeout for Convex cache mutation requests in milliseconds. Set to 0 to disable the client-side timeout.',
+  isOptional: true,
+  defaultValue: 30000,
+},
+{
+  name: 'keyPrefix',
+  type: 'string',
+  description:
+    'Prefix applied to ConvexServerCache keys. clear() removes rows whose stored prefix exactly matches this value.',
+  isOptional: true,
+  defaultValue: 'mastra:cache:',
+},
+{
+  name: 'ttlMs',
+  type: 'number',
+  description: 'Default ConvexServerCache TTL in milliseconds. Set to 0 to disable expiry.',
+  isOptional: true,
+  defaultValue: 300000,
+},
+]}
+/>
+
+## 생성자 예 {/* #constructor-examples */}
+
+```ts
+import { ConvexServerCache, ConvexStore } from '@mastra/convex'
+
+// Basic configuration
+const store = new ConvexStore({
+  id: 'convex-storage',
+  deploymentUrl: 'https://your-project.convex.cloud',
+  adminAuthToken: 'your-admin-token',
+})
+
+// With custom storage function path
+const storeCustom = new ConvexStore({
+  id: 'convex-storage',
+  deploymentUrl: 'https://your-project.convex.cloud',
+  adminAuthToken: 'your-admin-token',
+  storageFunction: 'custom/path:handler',
+})
+
+// Server cache for durable stream replay and response caching
+const cache = new ConvexServerCache({
+  deploymentUrl: 'https://your-project.convex.cloud',
+  adminAuthToken: 'your-admin-token',
+  cacheFunction: 'mastra/cache:handle',
+})
+```
+
+## 서버 캐시 {/* #server-cache */}
+
+`ConvexServerCache`Convex와 Mastra의 서버 캐시 계약을 구현합니다. 재개 가능한 내구성 Agent 스트림, Workflow 스트림 재생 또는 응답 캐싱과 같은 기능에 대해 내구성 있는 캐시 상태를 원할 때 사용합니다.
+
+`ConvexServerCache`목록 항목을 별도의 Convex 문서로 저장합니다. 이렇게 하면 하나의 문서 내에서 스트림 재생 목록이 커지는 것을 방지하고 Convex의 레코드 크기 제한 내에서 유지하는 데 도움이 됩니다.
+
+각 스칼라 캐시 값과 각 목록 항목은 하나의 Convex 행으로 저장되며 Convex의 행 크기 제한 내에 있어야 합니다. 범위를 재생할 때 매우 큰 목록은 여전히 ​​Convex 쿼리 제한으로 제한됩니다.
+
+캐시 정리 및`clear()` run in bounded batches. A single client call can loop through up to 1,000 Convex mutations, with each mutation handling up to 25 list items. While `clear()` is cleaning a key, reads for that key can return empty results until cleanup finishes.
+
+매우 큰 캐시 네임스페이스의 경우 점진적으로 지우거나 더 좁은 접두사를 사용하여 장기 실행 정리 작업을 방지합니다.
+
+일괄 정리 중에 캐시 메타데이터는 일시적으로 내부`deleted` state. The next cleanup pass removes those rows. Avoid writing new values with the same prefix until `clear()` finishes.
+
+`clear()`저장된 행만 제거합니다.`keyPrefix` exactly matches the configured `keyPrefix`. It doesn't clear nested prefixes by string prefix matching. Each `listPush()` refreshes the list TTL using the cache's configured `ttlMs`.
+
+비어 있지 않은 것을 사용하세요`keyPrefix` unless you intentionally want `clear()` to remove every cache key in the deployment. Expired list rows are reclaimed incrementally during reads and writes. `clear()` removes all rows for the prefix.
+
+`ConvexServerCache`중간 빈도 이벤트의 내구성 있는 재생에 가장 적합합니다. 빈도가 높은 토큰 스트림의 경우 이벤트를 일괄 처리하거나 지연 시간이 짧은 캐시 백엔드를 사용하는 것이 좋습니다.
+
+`ConvexServerCache`분산 pub/sub 전송을 대체하지 않습니다. 앱에 실시간 크로스 프로세스 이벤트 전달이 필요한 경우 프로덕션 게시/구독 백엔드를 별도로 구성하세요.
+
+## 추가 참고사항 {/* #additional-notes */}
+
+### 스키마 관리 {/* #schema-management */}
+
+스토리지 구현에서는 각 Mastra 도메인에 대해 유형이 지정된 Convex 테이블을 사용합니다.
+
+| 도메인 | 볼록 테이블 | 목적 |
+| - | - | - |
+| 스레드 |`mastra_threads` | Conversation threads |
+| Messages | `mastra_messages` | Chat messages |
+| Resources | `mastra_resources` | User working memory |
+| Observational Memory | `mastra_observational_memory` | Observational memory generations |
+| Workflows | `mastra_workflow_snapshots` | Workflow state |
+| Scorers | `mastra_scorers` | Evaluation data |
+| Cache | `mastra_cache` | Cache values, counters, and list metadata |
+| Cache Items | `mastra_cache_list_items` | Cache list entries |
+| Fallback | `mastra_documents` | Unknown tables |
+
+### 관찰 기억 {/* #observational-memory */}
+
+`ConvexStore`지원하다[observational memory](/docs/memory/observational-memory). Add `mastraObservationalMemoryTable` to your Convex schema and redeploy with `npx convex deploy` to enable it. Existing deployments created before this table was added need the same schema update.
+
+### 건축학 {/* #architecture */}
+
+모든 유형의 테이블에는 다음이 포함됩니다.
+
+* 안`id` field for Mastra's record ID (distinct from Convex's auto-generated `_id`)
+* 에이`by_record_id` index for efficient lookups by Mastra ID
+
+이 디자인은 Convex의 자동 인덱싱 및 실시간 기능을 사용하면서 Mastra의 스토리지 계약과의 호환성을 보장합니다.
+
+### 환경변수 {/* #environment-variables */}
+
+배포에 대해 다음 환경 변수를 설정합니다.
+
+* `CONVEX_URL`: Convex 배포 URL
+* `CONVEX_ADMIN_KEY`: 관리자 인증 토큰(Convex 대시보드에서 가져오기)
+
+## 관련된 {/* #related */}
+
+* [볼록 벡터 저장소](../vectors/convex)
+* [볼록 문서](https://docs.convex.dev/)

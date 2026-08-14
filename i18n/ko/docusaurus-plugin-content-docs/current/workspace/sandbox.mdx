@@ -1,0 +1,263 @@
+---
+title: "샌드박스 | 작업공간"
+description: "Agent에 명령 실행 기능을 제공하도록 샌드박스 공급자를 구성합니다."
+packages:
+  - "@mastra/core"
+---
+
+# 모래 상자
+
+**추가된 항목:** `@mastra/core@1.1.0`
+
+샌드박스 공급자는 Agent에 셸 명령을 실행할 수 있는 기능을 제공합니다. 작업 영역에서 샌드박스를 구성하면 Agent는 작업의 일부로 명령을 실행할 수 있습니다.
+
+샌드박스 공급자는 통제된 환경에서 명령을 실행합니다.
+
+* **명령 실행**: 인수를 사용하여 셸 명령 실행
+* **백그라운드 프로세스**: 개발 서버 및 감시자와 같은 장기 실행 프로세스 생성
+* **작업 디렉토리**: 특정 디렉터리에서 실행되는 명령
+* **환경변수**: 사용 가능한 변수를 제어합니다.
+* **시간 초과**: 장기 실행 명령이 중단되는 것을 방지합니다.
+* **격리**: 보안을 위한 선택적 OS 수준 샌드박싱
+
+:::팁\[📹 보기]
+
+보다[Mastra remote sandboxes overview](https://www.youtube.com/watch?v=Ix2X-sjVXjw) to see how remote sandboxes give agents an isolated computer to work in.
+
+:::
+
+## 지원되는 Provider {/* #supported-providers */}
+
+* [`LocalSandbox`](/reference/workspace/local-sandbox): 로컬 머신에서 명령을 실행합니다.
+* [`AgentCoreRuntimeSandbox`](/reference/workspace/agentcore-runtime-sandbox): AWS Bedrock AgentCore Runtime 세션에서 명령을 실행합니다.
+* [`AppleContainerSandbox`](/reference/workspace/apple-container-sandbox): Apple의 OCI Linux 컨테이너에서 명령을 실행합니다.`container` CLI
+* [`BlaxelSandbox`](/reference/workspace/blaxel-sandbox): 격리된 Blaxel 클라우드 샌드박스에서 명령을 실행합니다.
+* [`DaytonaSandbox`](/reference/workspace/daytona-sandbox): 격리된 Daytona 클라우드 샌드박스에서 명령을 실행합니다.
+* [`DockerSandbox`](/reference/workspace/docker-sandbox): 로컬 시스템의 수명이 긴 Docker 컨테이너에서 명령을 실행합니다.
+* [`E2BSandbox`](/reference/workspace/e2b-sandbox): 격리된 E2B 클라우드 샌드박스에서 명령을 실행합니다.
+* [`ModalSandbox`](/reference/workspace/modal-sandbox): 격리된 Modal 클라우드 샌드박스에서 명령을 실행합니다.
+* [`PlatformSandbox`](/reference/workspace/platform-sandbox): Mastra Platform 환경에 연결된 샌드박스에서 명령을 실행합니다.
+* [`RailwaySandbox`](/reference/workspace/railway-sandbox): 일시적이고 격리된 철도 클라우드 샌드박스에서 명령을 실행합니다.
+* [`VercelSandbox`](/reference/workspace/vercel-sandbox): 임시 Vercel Sandbox Firecracker MicroVM에서 명령을 실행합니다.
+* [`VercelServerlessSandbox`](/reference/workspace/vercel-serverless): 상태 비저장 Vercel 서버리스 함수로 명령을 실행합니다.
+
+## 기본 사용법 {/* #basic-usage */}
+
+샌드박스를 사용하여 작업 영역을 만들고 Agent에 할당합니다. 그러면 Agent는 셸 명령을 실행할 수 있습니다.
+
+```typescript title="src/mastra/agents/dev-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Workspace, LocalFilesystem, LocalSandbox } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({
+    basePath: './workspace',
+  }),
+  sandbox: new LocalSandbox({
+    workingDirectory: './workspace',
+  }),
+})
+
+const agent = new Agent({
+  id: 'dev-agent',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  instructions: 'You are a helpful development assistant.',
+  workspace,
+})
+
+// The agent now has the execute_command tool available
+const response = await agent.generate('Run `ls -la` in the workspace directory')
+```
+
+보다[`LocalSandbox` reference](/reference/workspace/local-sandbox) for configuration options including environment isolation and native OS sandboxing.
+
+## 동적 샌드박스 {/* #dynamic-sandbox */}
+
+그만큼`sandbox` option accepts a resolver function instead of a static instance. The resolver receives `requestContext` and returns a sandbox per request, allowing a single workspace to serve different sandboxes based on the caller's identity, role, or tenant.
+
+```typescript title="src/mastra/workspaces.ts"
+import { Agent } from '@mastra/core/agent'
+import { Workspace, LocalSandbox } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  // highlight-start
+  sandbox: ({ requestContext }) => {
+    const userId = requestContext.get('user-id') as string
+    return new LocalSandbox({
+      workingDirectory: `/workspaces/${userId}`,
+    })
+  },
+  // highlight-end
+})
+
+const agent = new Agent({
+  id: 'multi-tenant-agent',
+  model: 'your-provider/your-model',
+  workspace,
+})
+```
+
+각 요청은 Tool 실행 시 자체 샌드박스를 확인합니다.
+
+```typescript
+import { RequestContext } from '@mastra/core/request-context'
+
+// User Alice — commands run in /workspaces/alice
+const aliceCtx = new RequestContext([['user-id', 'alice']])
+await agent.generate('List files in cwd', { requestContext: aliceCtx })
+
+// User Bob — commands run in /workspaces/bob
+const bobCtx = new RequestContext([['user-id', 'bob']])
+await agent.generate('List files in cwd', { requestContext: bobCtx })
+```
+
+기본적으로 작업 공간 지침은 안정적인 자리 표시자 텍스트가 있는 런타임 샌드박스를 설명합니다. 보다[Workspace instructions](#workspace-instructions) to include concrete per-request details.
+
+예를 들어 데이터베이스에서 테넌트 구성을 조회하기 위해 확인자는 비동기식일 수도 있습니다.
+
+```typescript
+const workspace = new Workspace({
+  sandbox: async ({ requestContext }) => {
+    const tenant = await db.getTenant(requestContext.get('tenant-id'))
+    return new LocalSandbox({ workingDirectory: tenant.workspacePath })
+  },
+})
+```
+
+### 수명주기 소유권 {/* #lifecycle-ownership */}
+
+샌드박스가 정적 인스턴스인 경우,`workspace.init()` calls its `start()` method and `workspace.destroy()` calls its `destroy()` method. With a resolver, the workspace has no instance to manage at construction time, the caller owns the returned sandbox's lifecycle.
+
+확인자는 이미 시작되었거나 명시적인 시작 없이 호출을 처리할 수 있는, 사용할 준비가 된 샌드박스를 반환해야 합니다. 또한 호출자는 반환된 샌드박스에 대한 정리 타이밍을 소유합니다.
+
+요청, 테넌트 또는 사용자별로 정리가 발생할 수 있습니다. 또한 수명이 긴 샌드박스 풀의 일부일 수도 있습니다.`workspace.destroy()` doesn't destroy resolver-returned sandboxes.
+
+:::메모
+
+`sandbox`리졸버는 다음과 호환되지 않습니다.`mounts` and `lsp: true`. Both require a concrete sandbox instance at construction time, so combining them with a resolver throws an `INVALID_CONFIG` error (for `mounts`) or disables LSP with a warning (for `lsp: true`).
+
+:::
+
+### Tool 등록 {/* #tool-registration */}
+
+정적 샌드박스를 사용하면 작업공간에서 인스턴스를 검사하여 등록할 Tool를 결정합니다. 리졸버를 사용하면 작업공간은 전체 기능과 레지스터를 가정합니다.`execute_command` (with `background` support), `get_process_output`, and `kill_process`. If the resolved sandbox doesn't implement a capability, the runtime throws a clear `SandboxFeatureNotSupportedError`.
+
+### 백그라운드 프로세스 연속성 {/* #background-process-continuity */}
+
+백그라운드 프로세스는 단일 Tool 호출보다 오래 지속될 수 있으므로`get_process_output` and `kill_process` must reach the same sandbox that started the process. By default, a resolved sandbox is cached per request. For continuity across follow-up requests, such as a later conversation turn, set `sandboxCacheKey` to a stable identifier. The resolved sandbox is then cached by that key instead of by request:
+
+```typescript
+const workspace = new Workspace({
+  sandbox: ({ requestContext }) => resolveSandbox(requestContext),
+  sandboxCacheKey: ({ requestContext }) => requestContext.get('thread-id') as string,
+})
+```
+
+없이`sandboxCacheKey`, the resolver must return the same sandbox itself for follow-up calls that share a tenant, user, or session.
+
+캐시된 샌드박스가 더 이상 필요하지 않으면 자체 수명 주기 코드에서 샌드박스를 삭제하고 호출하세요.`workspace.clearSandboxCache(cacheKey)` to drop the workspace cache entry. Call `workspace.clearSandboxCache()` to clear all keyed sandbox entries.
+
+### 작업공간 지침 {/* #workspace-instructions */}
+
+작업 공간 지침은 Agent 시스템 메시지의 환경을 설명합니다. 샌드박스 해석기를 사용하면 작업공간은 이러한 지침을 작성하기 위해 해석기를 호출하지 않습니다. 안정적인 자리 표시자 텍스트를 내보내므로 Prompt를 구성할 때 호출자가 소유한 샌드박스를 프로비저닝하지 않으며 시스템 메시지가 요청 전체에서 일관되게 유지되므로 Prompt 캐싱이 효과적으로 유지됩니다.
+
+구체적인 요청별 샌드박스 세부정보를 포함하려면 다음을 설정하세요.`instructions.dynamicSandbox` to `'resolve'`:
+
+```typescript
+const workspace = new Workspace({
+  sandbox: ({ requestContext }) => resolveSandbox(requestContext),
+  instructions: { dynamicSandbox: 'resolve' },
+})
+```
+
+`'resolve'`모든 요청에 ​​대해 확인자를 호출하여 샌드박스를 프로비저닝하고 시스템 메시지를 요청별로 만들 수 있습니다. 사용자 정의 텍스트를 반환하려면 대신 함수를 전달하세요.`requestContext` without resolving the sandbox:
+
+```typescript
+const workspace = new Workspace({
+  sandbox: ({ requestContext }) => resolveSandbox(requestContext),
+  instructions: {
+    dynamicSandbox: ({ requestContext }) =>
+      `Sandbox scoped to tenant ${requestContext.get('tenant-id')}.`,
+  },
+})
+```
+
+## Agent Tool {/* #agent-tools */}
+
+작업 영역에서 샌드박스를 구성하면 Agent는`execute_command` tool for running shell commands.
+
+샌드박스 공급자가 백그라운드에서 프로세스 실행을 지원하는 경우`execute_command` tool also accepts `background: true` for starting long-running processes, and two additional tools are registered:
+
+| Tool | 설명 |
+| - | - |
+|`execute_command` | Run a shell command. Returns stdout, stderr, and exit code. Supports `background: true` to spawn a long-running process and return a PID. |
+| `get_process_output` | Get stdout, stderr, and status of a background process by PID. Supports `tail` to limit output lines and `wait: true` to block until exit. |
+| `kill_process` | Stop a background process by PID. Returns recent output. |
+
+이러한 Tool는 자동으로 등록됩니다. 보다[Workspace class reference](/reference/workspace/workspace-class#sandbox-tools) for the full tool name list.
+
+## 백그라운드 프로세스 콜백 {/* #background-process-callbacks */}
+
+Agent가 다음을 통해 백그라운드 프로세스를 시작할 때`execute_command` tool, you can receive lifecycle callbacks for stdout, stderr, and process exit. Configure these through the `backgroundProcesses` option on the `execute_command` tool:
+
+```typescript title="src/mastra/workspaces.ts"
+import { Workspace, LocalSandbox, WORKSPACE_TOOLS } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  sandbox: new LocalSandbox({ workingDirectory: './workspace' }),
+  tools: {
+    [WORKSPACE_TOOLS.SANDBOX.EXECUTE_COMMAND]: {
+      backgroundProcesses: {
+        onStdout: (data, { pid }) => console.log(`[${pid}] ${data}`),
+        onStderr: (data, { pid }) => console.error(`[${pid}] ${data}`),
+        onExit: ({ pid, exitCode }) => console.log(`Process ${pid} exited: ${exitCode}`),
+      },
+    },
+  },
+})
+```
+
+이러한 콜백은 Agent가 다음을 통해 시작한 모든 백그라운드 프로세스에 대해 실행됩니다.`execute_command` tool.
+
+### 중단 신호 {/* #abort-signal */}
+
+기본적으로 백그라운드 프로세스는 Agent의 중단 신호를 상속하며 Agent 연결이 끊어지면 종료됩니다. 다음을 사용하여 이 동작을 제어하세요.`abortSignal` option:
+
+* **`undefined`**(기본값): Agent의 중단 신호를 사용합니다.
+* **`AbortSignal`**: 맞춤 신호를 사용합니다.
+* **`null`또는`false`**: 중단을 비활성화합니다. Agent 종료 후에도 프로세스가 지속됩니다.
+
+```typescript title="src/mastra/workspaces.ts"
+import { Workspace, LocalSandbox, WORKSPACE_TOOLS } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  sandbox: new LocalSandbox({ workingDirectory: './workspace' }),
+  tools: {
+    [WORKSPACE_TOOLS.SANDBOX.EXECUTE_COMMAND]: {
+      backgroundProcesses: {
+        abortSignal: null, // Processes survive agent disconnection
+      },
+    },
+  },
+})
+```
+
+사용`null` or `false` for cloud sandboxes (for example, E2B, Daytona, or Modal) where processes should outlive the agent.
+
+:::참고
+전체를 위해`SandboxProcessManager` API (spawning processes programmatically and reading output, plus sending stdin), see the [`SandboxProcessManager` reference](/reference/workspace/process-manager).
+:::
+
+## 관련된 {/* #related */}
+
+* [`SandboxProcessManager`참조](/reference/workspace/process-manager)
+* [`AgentCoreRuntimeSandbox`참조](/reference/workspace/agentcore-runtime-sandbox)
+* [`AppleContainerSandbox`참조](/reference/workspace/apple-container-sandbox)
+* [`DaytonaSandbox`참조](/reference/workspace/daytona-sandbox)
+* [`E2BSandbox`참조](/reference/workspace/e2b-sandbox)
+* [`LocalSandbox`참조](/reference/workspace/local-sandbox)
+* [`ModalSandbox`참조](/reference/workspace/modal-sandbox)
+* [`VercelSandbox`참조](/reference/workspace/vercel-sandbox)
+* [`VercelServerlessSandbox`참조](/reference/workspace/vercel-serverless)
+* [작업공간 개요](/docs/workspace/overview)
+* [파일 시스템](/docs/workspace/filesystem)

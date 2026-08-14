@@ -1,0 +1,274 @@
+---
+title: "채널 개요"
+description: "채널은 Mastra Agent를 Slack, Discord 및 Telegram과 같은 메시징 플랫폼에 연결합니다."
+packages:
+  - "@mastra/core"
+---
+
+# 채널 개요
+
+**추가된 항목:** `@mastra/core@1.22.0`
+
+채널은 Agent을 Slack, Microsoft Teams, Discord, Telegram, WhatsApp, GitHub 및 Linear와 같은 메시징 및 협업 플랫폼에 연결합니다. 사용자가 플랫폼에서 메시지나 댓글을 보내면 Agent는 이를 수신하여 일반 Agent 파이프라인을 통해 처리하고 응답을 다시 대화로 스트리밍합니다. 마스트라는 다음과 같은 용도로 사용합니다.[Chat SDK](https://chat-sdk.dev/) for this channel layer.
+
+귀하의 플랫폼에 맞는 페이지로 시작하세요:
+
+* [느슨하게](/docs/capabilities/channels/slack)
+* [마이크로소프트 팀즈](/docs/capabilities/channels/teams)
+* [불화](/docs/capabilities/channels/discord)
+* [전보](/docs/capabilities/channels/telegram)
+* [왓츠앱](/docs/capabilities/channels/whatsapp)
+* [아이메시지](/docs/capabilities/channels/imessage)
+
+[더](/docs/capabilities/channels/other-adapters)추가 플랫폼을 나열합니다. Mastra 채널은 호환 가능[Chat SDK adapters](https://chat-sdk.dev/adapters) beyond the platforms listed here, and the same Mastra configuration pattern applies across adapters.
+
+## 채널을 사용해야 하는 경우 {/* #when-to-use-channels */}
+
+Agent이 다음을 수행해야 하는 경우 채널을 사용하세요.
+
+* 이미 대화하거나 일하고 있는 사용자를 만나보세요.
+* Slack, Microsoft Teams, Discord, Telegram, WhatsApp 등의 채팅 플랫폼에서 응답하세요.
+* 여러 사람이 공유 채널 또는 스레드에서 동일한 Agent와 상호 작용하는 멀티플레이어 Agent를 지원합니다.
+* GitHub 문제, 풀 요청 스레드, 선형 댓글과 같은 협업 Workflow와 통합됩니다.
+
+## Agent 구성 {/* #configure-an-agent */}
+
+채널은 Chat SDK 어댑터를 사용하고 동일한 Mastra 측 패턴을 따릅니다. 즉, 채널 어댑터를 생성하여 Agent에 추가합니다.
+
+```typescript title="src/mastra/agents/your-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createSlackAdapter } from '@chat-adapter/slack'
+
+export const yourAgent = new Agent({
+  id: 'your-agent',
+  name: 'Your Agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  channels: {
+    adapters: {
+      slack: createSlackAdapter(),
+    },
+  },
+})
+```
+
+:::메모
+
+채널 어댑터에는 봇 토큰, 서명 비밀, 앱 ID, 웹훅 확인 토큰 등 자격 증명 및 요청 확인을 위한 공급자별 환경 변수가 필요합니다. 귀하의 플랫폼에 대한 가이드를 확인하십시오.[Chat SDK adapter catalog](https://chat-sdk.dev/adapters) for the exact variable names.
+
+:::
+
+구성하는 것이 좋습니다[storage](/docs/storage/overview) for channels. Storage lets Mastra persist channel state, thread subscriptions, tool approvals, and memory across restarts:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+import { yourAgent } from './agents/your-agent'
+
+export const mastra = new Mastra({
+  agents: { yourAgent },
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: process.env.DATABASE_URL,
+  }),
+})
+```
+
+## 웹훅 경로 {/* #webhook-routes */}
+
+플랫폼은 웹후크를 통해 채널 활동을 Mastra로 보냅니다. 웹후크는 새 메시지, 멘션 또는 사용자가 대화형 Tool 승인 카드에서 "승인"을 선택하는 등 어떤 일이 발생할 때 플랫폼이 호출하는 HTTP 엔드포인트입니다. 이는 Agent가 새 메시지를 수신하고 처리를 시작하며 동일한 채널에서 응답하는 방법입니다.
+
+Mastra는 구성된 각 어댑터에 대한 웹훅 경로를 등록하고 요청을 처리합니다.
+
+```text
+/api/agents/<AGENT_ID>/channels/<PLATFORM>/webhook
+```
+
+예를 들어 Agent의 Slack 어댑터는 다음과 같습니다.`your-agent` ID uses:
+
+```text
+/api/agents/your-agent/channels/slack/webhook
+```
+
+플랫폼의 웹훅, 이벤트 또는 상호 작용 URL이 이 경로를 가리키도록 합니다. 귀하의 플랫폼에 대한 가이드를 따르십시오.[Chat SDK docs](https://chat-sdk.dev/adapters).
+
+로컬 개발 중에 플랫폼 웹훅이 로컬 서버에 연결하려면 공개 URL이 필요합니다. 다음과 같은 터널을 사용하십시오.[cloudflared](https://github.com/cloudflare/cloudflared) or [ngrok](https://ngrok.com/) to expose your server, `localhost:4111` by default:
+
+```bash npm2yarn
+npx cloudflared tunnel --url http://localhost:4111
+```
+
+생성된 공개 URL을 웹훅 경로의 기본 URL로 사용합니다. 예를 들면 다음과 같습니다.`https://abc123.trycloudflare.com/api/agents/your-agent/channels/slack/webhook`.
+
+:::메모
+
+터널 URL은 로컬 개발을 위한 것입니다. Mastra 서버를 배포한 후 플랫폼의 웹훅, 이벤트 또는 상호 작용 URL을 프로덕션 URL로 업데이트하세요.
+
+:::
+
+## 스레드 컨텍스트 {/* #thread-context */}
+
+사용자가 채널 스레드의 대화 중에 Agent를 언급하는 경우 Agent는 사전 컨텍스트를 갖고 있지 않을 수 있습니다. 기본적으로 Mastra는 첫 번째 언급 시 플랫폼에서 마지막 10개의 메시지를 가져옵니다.
+
+1. 스레드의 첫 번째 언급에서 Agent는 플랫폼에서 최근 메시지를 가져옵니다.
+2. 이러한 메시지는 대화 컨텍스트로 사용자의 메시지 앞에 추가됩니다.
+3. 응답 후 Agent는 스레드를 구독하고 Mastra Memory를 통해 전체 기록을 갖습니다.
+4. 해당 스레드의 후속 메시지는 플랫폼에서 다시 가져오지 않습니다.
+
+세트`threadContext: { maxMessages: 0 }` to disable this behavior. This only applies to non-direct message threads.
+
+Mastra는 또한 메시지가 다이렉트 메시지에서 왔는지 공개 채널에서 왔는지와 같이 요청이 어떤 채널과 플랫폼에서 왔는지 Agent에게 알려주는 짧은 시스템 메시지를 추가합니다. 세트`threadContext: { addSystemMessage: false }` to skip it.
+
+## Tool 승인 {/* #tool-approval */}
+
+Tool`requireApproval: true` render as interactive cards with Approve and Deny buttons:
+
+```typescript title="src/mastra/tools/delete-file.ts"
+import { promises as fs } from 'node:fs'
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const deleteFile = createTool({
+  id: 'delete-file',
+  description: 'Delete a file from the system',
+  inputSchema: z.object({
+    path: z.string().describe('Path to the file to delete'),
+  }),
+  requireApproval: true,
+  execute: async ({ path }) => {
+    await fs.unlink(path)
+    return { deleted: path }
+  },
+})
+```
+
+Agent가 이 Tool를 호출하면 사용자에게 Tool 이름, 인수, 승인 및 거부 작업이 포함된 카드가 표시됩니다. 이 Tool는 승인 후에만 실행됩니다.
+
+세트`toolDisplay: 'text'` on an adapter to render tool calls as plain text instead of interactive cards. In `'hidden'` mode, `autoResumeSuspendedTools` can resume suspended tools when a later user message arrives on the same thread. This requires memory. Hidden mode only suppresses the approval buttons.
+
+## 답장 형식 {/* #reply-formatting */}
+
+Agent은 기본적으로 마크다운으로 게시물에 답장을 보냅니다. Slack과 같은 기본 마크다운 렌더링 기능을 갖춘 플랫폼은 굵은 텍스트, 링크 및 테이블을 직접 렌더링합니다. 다른 플랫폼은 마크다운을 자체 형식으로 변환합니다. Agent은 표준 마크다운을 작성하고 Studio에서 동일한 응답이 렌더링되는 방식과 일치하도록 어디에서나 올바르게 렌더링됩니다.
+
+세트`textFormat: 'plain'` on an adapter to post replies as literal plain text instead:
+
+```typescript title="src/mastra/agents/your-agent.ts"
+channels: {
+  adapters: {
+    slack: {
+      adapter: createSlackAdapter(),
+      textFormat: 'plain',
+    },
+  },
+},
+```
+
+표준 마크다운 대신 Slack mrkdwn과 같은 플랫폼별 언어를 내보내라는 메시지가 Agent에 표시되는 경우 이 탈출구를 사용하세요. 문자 그대로 마크다운 렌더링 문제를 해결하기 위해 이러한 Prompt 지침을 추가한 경우 대신 제거하세요. 이제 기본값은 기본적으로 표준 마크다운을 렌더링합니다.`textFormat` affects final reply text only. Tool cards, error messages, and natively streamed text are unaffected.
+
+## 다중 사용자 인식 {/* #multi-user-awareness */}
+
+그룹 대화에서 Mastra는 Agent가 화자를 구별할 수 있도록 각 메시지 앞에 발신자 이름과 플랫폼 ID를 붙입니다.
+
+```text
+[Alice (@U123ABC)]: Can you help me with this?
+[Bob (@U456DEF)]: I have a question too.
+```
+
+## 다중 모드 콘텐츠 {/* #multimodal-content */}
+
+Gemini와 같은 Model은 기본적으로 이미지, 비디오 및 오디오를 처리할 수 있습니다. 결합하다`inlineMedia` and `inlineLinks` to let users share rich content with your agent across platforms:
+
+```typescript title="src/mastra/agents/vision-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createDiscordAdapter } from '@chat-adapter/discord'
+
+export const visionAgent = new Agent({
+  id: 'vision-agent',
+  name: 'Vision Agent',
+  instructions: 'You can see images, watch videos, and listen to audio.',
+  model: '__GATEWAY_GOOGLE_MODEL_FLASH__',
+  channels: {
+    adapters: {
+      discord: createDiscordAdapter(),
+    },
+    inlineMedia: ['image/*', 'video/*', 'audio/*'],
+    inlineLinks: [
+      { match: 'youtube.com', mimeType: 'video/*' },
+      { match: 'youtu.be', mimeType: 'video/*' },
+      'imgur.com',
+    ],
+  },
+})
+```
+
+이 구성을 사용하면 다음과 같습니다.
+
+* 사용자가 스크린샷을 업로드하면 Agent이 스크린샷에 표시된 내용을 설명합니다.
+* 사용자가`.mp4` clip and the agent summarizes the video.
+* 사용자가 YouTube 링크를 붙여넣으면 Agent이 동영상을 시청하고 토론합니다.
+* 사용자가 imgur 링크를 붙여넣으면 Agent이 이미지를 직접 볼 수 있습니다.
+
+기본적으로 이미지만 인라인으로 전송됩니다(`inlineMedia: ['image/*']`). Unsupported types are described as text summaries so the agent knows about the file without failing on models that reject them. See [Channels reference](/reference/agents/channels#inline-media) for all `inlineMedia` patterns and [inlineLinks reference](/reference/agents/channels#inline-links) for domain matching, HEAD detection, and forced MIME types.
+
+## 서버리스 배포 {/* #serverless-deployment */}
+
+Vercel과 같은 서버리스 플랫폼에서는 각 요청이 별도의 단기 인스턴스에서 실행됩니다. 채널이 해당 환경에서 안정적으로 작동하려면 두 가지가 필요합니다. Agent가 응답하는 동안 함수를 활성 상태로 유지하는 방법과 인스턴스가 조정할 수 있도록 공유 게시/구독이 필요합니다.
+
+### 기능을 계속 유지하십시오.`waitUntil` {/* #keep-the-function-alive-with-waituntil */}
+
+채널 웹훅은 다음을 반환합니다.`200` response right away, then the agent runs in the background to post its reply. On most serverless platforms the function is frozen as soon as it responds, which stops the run before the agent answers. Pass a `waitUntil` function so the platform keeps the instance alive until the run finishes.
+
+Vercel에서는 통과`waitUntil` from `@vercel/functions`:
+
+```typescript title="src/mastra/agents/your-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createSlackAdapter } from '@chat-adapter/slack'
+import { waitUntil } from '@vercel/functions'
+
+export const yourAgent = new Agent({
+  id: 'your-agent',
+  name: 'Your Agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  channels: {
+    adapters: {
+      slack: createSlackAdapter(),
+    },
+    waitUntil,
+  },
+})
+```
+
+Vercel 및 AWS Lambda에는 다음이 필요합니다.`waitUntil`, since they freeze the function as soon as the response is sent. Cloudflare Workers and Netlify Functions are detected automatically from the request context, so they don't need it. For runtimes where `waitUntil` lives on the request context but isn't detected automatically, use `resolveWaitUntil`. See the [Channels reference](/reference/agents/channels#parameters) for details.
+
+### 공유 게시/구독으로 인스턴스 조정 {/* #coordinate-instances-with-a-shared-pubsub */}
+
+채널은 Agent를 통해 메시지를 라우팅합니다.[signal pipeline](/docs/long-running-agents/signals), and each run acquires a lease on its thread so one run owns the conversation at a time.
+
+기본 Memory 내 게시/구독은 인스턴스 경계를 ​​넘을 수 없으므로 서버리스에서는 후속 메시지가 Agent를 실행하는 인스턴스가 아닌 다른 인스턴스로 라우팅될 수 있습니다.
+
+공유 게시/구독이 없으면 해당 인스턴스는 활성 실행에 도달할 수 없으며 자체적으로 시작되므로 원래 실행은 그대로 유지되고 스레드는 두 번 처리됩니다.
+
+Redis Streams가 지원하는 공유 게시/구독을 구성합니다.`Mastra` instance so leases and signals coordinate across instances:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RedisStreamsPubSub } from '@mastra/redis-streams'
+import { yourAgent } from './agents/your-agent'
+
+export const mastra = new Mastra({
+  agents: { yourAgent },
+  pubsub: new RedisStreamsPubSub({
+    url: process.env.REDIS_URL,
+    keyPrefix: 'mastra:my-app',
+  }),
+})
+```
+
+Vercel의 관리형 Redis 통합과 Upstash Redis는 모두 잘 작동합니다. 분산 게시/구독이 필요한 경우에 대한 자세한 내용은 다음을 참조하세요.[PubSub guide](/docs/server/pubsub) and the [`RedisStreamsPubSub` reference](/reference/pubsub/redis-streams).
+
+## 관련된 {/* #related */}
+
+* [채널 참조](/reference/agents/channels)
+* [AgentController 채널](/docs/harness/agent-controller#connect-chat-channels)
+* 📹 [Mastra channels workshop](https://www.youtube.com/watch?v=E9KFsZEnQO8\&t=5s)

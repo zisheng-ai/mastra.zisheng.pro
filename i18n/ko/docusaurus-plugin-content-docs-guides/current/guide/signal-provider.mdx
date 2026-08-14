@@ -1,0 +1,211 @@
+---
+title: "가이드: 신호 제공자 구축"
+description: "외부 서비스를 감시하고 Agent 스레드에 알림을 푸시하는 폴링 신호 제공자를 구축합니다."
+---
+
+# 신호 제공자 구축
+
+이 가이드에서는 일정 간격으로 외부 서비스를 폴링하고 감시된 리소스가 변경될 때마다 Agent 스레드에 알림을 푸시하는 신호 공급자를 구축합니다. 연장하는 방법을 배우게 됩니다.`SignalProvider`기본 클래스, 구독 추적, 폴 루프에서 알림 보내기, Agent에 공급자 등록 등이 있습니다.
+
+예제에서는 가짜 CI 서비스에서 빌드 파이프라인을 감시하지만 패턴은 문제 추적기, 상태 API, 대기열 또는 자체 백엔드 등 모든 풀 기반 소스에 적용됩니다.
+
+:::실험적
+
+신호 제공자는 베타 버전입니다. API가 안정될 때까지 주요 버전 변경 없이 주요 변경 사항이 발생할 수 있습니다.
+
+:::
+
+## 전제조건 {/* #prerequisites */}
+
+* Node.js`v22.13.0` or later installed
+* 지원되는 API 키[Model Provider](/models)
+* 기존 Mastra 프로젝트. 따라가다[installation guide](/guides/getting-started/quickstart) if needed.
+
+이 가이드는 또한 귀하가 이해하고 있다고 가정합니다.[signals](/docs/long-running-agents/signals) at a high level. For the full API surface, see the [`SignalProvider` reference](/reference/signals/signal-provider).
+
+## 알림 저장소 추가 {/* #add-notification-storage */}
+
+신호 제공자가 푸시합니다.[notification signals](/docs/long-running-agents/signals#notification-signals) into threads, and notifications require a storage adapter that supports the notifications domain. Configure storage on your Mastra instance.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+})
+```
+
+LibSQL, PostgreSQL 및 MongoDB는 모두 알림 레코드를 지원합니다. 알림 저장이 없으면 공급자의`notify()` calls throw at runtime.
+
+## 외부 서비스 클라이언트 생성 {/* #create-the-external-service-client */}
+
+실제 공급자는 외부 API를 호출합니다. 이 가이드를 독립적으로 유지하려면 파이프라인의 빌드 상태를 반환하는 작은 가짜 CI 클라이언트를 생성하세요. 나중에 실제 API 클라이언트로 바꾸세요.
+
+```typescript title="src/mastra/signals/ci-client.ts"
+export type BuildStatus = {
+  id: string
+  pipeline: string
+  status: 'passed' | 'failed' | 'running'
+}
+
+// Returns a random status so you can see notifications fire while testing.
+export async function fetchBuildStatus(pipeline: string): Promise<BuildStatus> {
+  const states: BuildStatus['status'][] = ['passed', 'failed', 'running']
+  const status = states[Math.floor(Math.random() * states.length)]!
+  return { id: `build_${Date.now()}`, pipeline, status }
+}
+```
+
+이 클라이언트는 호출할 때마다 무작위 상태를 반환합니다. 실제 API에 연결하면 이 파일만 변경됩니다.
+
+## 신호 제공자 구축 {/* #build-the-signal-provider */}
+
+연장하다`SignalProvider`, implement the abstract `id` field, set a `pollInterval`, and override `poll()`. The base class calls `poll()` on the interval with every active subscription. Emit a notification only for the builds you care about.
+
+```typescript title="src/mastra/signals/ci-signals.ts"
+import { SignalProvider } from '@mastra/core/signals'
+import type { SignalProviderTarget, SignalSubscription } from '@mastra/core/signals'
+import { fetchBuildStatus } from './ci-client'
+
+export class CiSignals extends SignalProvider<'ci-signals'> {
+  readonly id = 'ci-signals' as const
+  readonly pollInterval = 10_000 // poll every 10 seconds
+
+  // Public API so callers can subscribe a thread to a pipeline.
+  watch(target: SignalProviderTarget, pipeline: string): SignalSubscription {
+    return this.subscribe(target, pipeline)
+  }
+
+  unwatch(target: SignalProviderTarget, pipeline: string): boolean {
+    return this.unsubscribe(target, pipeline)
+  }
+
+  async poll(subscriptions: SignalSubscription[]): Promise<void> {
+    for (const sub of subscriptions) {
+      const build = await fetchBuildStatus(sub.externalResourceId)
+      if (build.status !== 'failed') continue
+
+      await this.notify(
+        {
+          source: this.id,
+          kind: 'ci-status',
+          priority: 'high',
+          summary: `Build failed for ${sub.externalResourceId}`,
+          payload: build,
+          dedupeKey: `${this.id}:${sub.externalResourceId}:${build.id}`,
+        },
+        { resourceId: sub.resourceId, threadId: sub.threadId },
+      )
+    }
+  }
+}
+```
+
+참고할 몇 가지 사항:
+
+* `subscribe()`그리고`unsubscribe()` are protected on the base class. Wrap them in your own public methods (`watch` / `unwatch`) so callers can manage subscriptions.
+* `externalResourceId`공급자별 문자열입니다. 파이프라인 이름은 다음과 같습니다. GitHub 공급자는 다음을 사용할 수 있습니다.`"github:owner/repo#123"`.
+* `notify()`연결된 Agent의 스레드에 알림 신호를 전달합니다. 공급자가 Agent에 등록된 적이 없는 경우 발생합니다.
+* `dedupeKey`동일한 오류를 두 번 저장하는 것을 방지합니다.
+
+## Agent에 공급자 등록 {/* #register-the-provider-on-an-agent */}
+
+다음을 통해 공급자를 Agent에 전달합니다.`signals`. The agent connects it and starts the poll loop automatically.
+
+```typescript title="src/mastra/agents/dev-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { CiSignals } from '../signals/ci-signals'
+
+export const ciSignals = new CiSignals()
+
+export const devAgent = new Agent({
+  id: 'dev-agent',
+  name: 'Dev Agent',
+  instructions: 'Help the user triage CI build failures.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // highlight-next-line
+  signals: [ciSignals],
+})
+```
+
+Mastra에 Agent를 등록하고 첫 번째 단계부터 스토리지를 추가합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+// highlight-next-line
+import { devAgent } from './agents/dev-agent'
+
+export const mastra = new Mastra({
+  // highlight-next-line
+  agents: { devAgent },
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+})
+```
+
+## 스레드 구독 {/* #subscribe-a-thread */}
+
+공급자는 스레드가 감시하는 리소스만 폴링합니다. 스레드를 파이프라인에 구독하여`poll()` has something to check.
+
+```typescript title="src/mastra/subscribe.ts"
+import { ciSignals } from './agents/dev-agent'
+
+ciSignals.watch({ resourceId: 'user_123', threadId: 'thread_456' }, 'acme/app:main')
+```
+
+예를 들어 설정 스크립트 또는 API 경로에서 Agent가 등록된 후 이 작업을 한 번 실행합니다. 구독은 공급자의 Memory 내 레지스트리에 있으므로 다시 시작한 후에 다시 구독하세요.
+
+## 신호 제공자 테스트 {/* #test-the-signal-provider */}
+
+개발 서버를 시작합니다:
+
+```bash npm2yarn
+npm run dev
+```
+
+스레드가 구독되었는지 확인한 다음 로그를 살펴보세요. 가짜 클라이언트는 각 폴링마다 무작위 상태를 반환하므로 몇 주기 내에 실패한 빌드가 구독 스레드에 대한 알림을 트리거하는 것을 볼 수 있습니다.
+
+Agent가 알림에 반응하는 것을 보려면 스레드를 구독하고 스트리밍하세요.
+
+```typescript title="src/mastra/watch-thread.ts"
+const subscription = await devAgent.subscribeToThread({
+  resourceId: 'user_123',
+  threadId: 'thread_456',
+})
+
+for await (const chunk of subscription.stream) {
+  console.log(chunk)
+}
+```
+
+빌드가 실패하면 Model은 알림을 컨텍스트로 받습니다.
+
+```xml
+<notification source="ci-signals" type="ci-status" priority="high" status="delivered">Build failed for acme/app:main</notification>
+```
+
+가짜 클라이언트는 상태를 무작위로 지정하고 Model은 응답을 자유롭게 표현하므로 출력은 비결정적이므로 정확한 표현은 다양합니다.
+
+## 다음 단계 {/* #next-steps */}
+
+이 신호 제공자를 다음으로 확장할 수 있습니다.
+
+* 바꾸기`fetchBuildStatus()` with a real API client.
+* 다시 시작해도 유지되도록 구독을 유지한 다음 다시 수분을 공급합니다.[`start()`](/reference/signals/signal-provider#start).
+* 추가[webhook](/docs/long-running-agents/signal-providers#polling-and-webhook-providers) entry point with [`handleWebhook()`](/reference/signals/signal-provider#handlewebhookrequest) for push-based sources.
+* 폭로하다`subscribe` and `unsubscribe` tools with [`getTools()`](/reference/signals/signal-provider#gettools) so the agent can manage its own subscriptions.
+* 사용[`dedupeKey` and `coalesceKey`](/reference/agents/agent#sendnotificationsignalnotification-options) when notifications need deduplication or batching.
+
+자세히 알아보기:
+
+* [신호 제공자 구축](/docs/long-running-agents/signal-providers)
+* [신호](/docs/long-running-agents/signals)
+* [`SignalProvider`참조](/reference/signals/signal-provider)
+* [`WebhookSignalProvider`참조](/reference/signals/webhook-signal-provider)

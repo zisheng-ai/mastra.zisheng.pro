@@ -1,0 +1,825 @@
+---
+title: "참고: 궤적 정확도 득점자 | 평가"
+description: "Agent 또는 Workflow가 예상되는 작업 순서를 따르는지 여부를 평가하는 Mastra의 궤도 정확도 점수 측정기에 대한 문서입니다."
+packages:
+  - "@mastra/evals"
+  - "@mastra/core"
+---
+
+# 궤도 정확도 채점자
+
+Mastra는 Agent 또는 Workflow가 예상되는 작업 순서를 따르는지 여부를 평가하기 위해 두 가지 궤적 정확도 점수 측정기를 제공합니다.
+
+1. **코드 기반 득점자**- 정확한 스텝 매칭과 정렬을 이용한 결정론적 평가
+2. **LLM 기반 채점자**- AI를 활용한 의미론적 평가로 궤적 품질 및 적합성 평가
+
+두 득점자 모두 Agent 및 Workflow와 함께 작업합니다. 그만큼`runEvals` pipeline automatically extracts trajectories, so scorers receive a `Trajectory` object directly.
+
+## 궤적 추출 {/* #trajectory-extraction */}
+
+그만큼`runEvals` pipeline uses two extraction strategies, depending on whether observability storage is configured:
+
+### 추적 기반 추출(선호) {/* #trace-based-extraction-preferred */}
+
+대상의 때`Mastra` instance has storage configured, the pipeline fetches the full execution trace from the observability store and calls `extractTrajectoryFromTrace()`. This produces a hierarchical trajectory with nested `children` that captures the complete execution tree. The tree includes nested agent runs and tool calls within workflow steps. It also includes model generations.
+
+예를 들어 Agent를 호출하고 Agent가 Tool를 호출하는 Workflow는 다음을 생성합니다.
+
+```
+workflow_run
+  └─ workflow_step (validate-input)
+  └─ workflow_step (process-data)
+       └─ agent_run (my-agent)
+            └─ model_generation
+            └─ tool_call (search)
+            └─ model_generation
+            └─ tool_call (summarize)
+  └─ workflow_step (save-result)
+```
+
+### 대체 추출 {/* #fallback-extraction */}
+
+스토리지를 사용할 수 없는 경우 파이프라인은 다음으로 대체됩니다.
+
+* **Agent:** `extractTrajectory()`, Extracts `ToolCallStep` entries from `toolInvocations` in the agent's message output. Produces a flat list of tool calls.
+* **작업 흐름:** `extractWorkflowTrajectory()`, Extracts `WorkflowStepStep` entries from `stepResults`. Produces a flat list of workflow steps.
+
+이러한 대체는 중첩된 실행이나 Tool 호출이 아닌 범위를 캡처하지 않습니다.
+
+## 궤적 유형 {/* #trajectory-types */}
+
+궤적 단계에서는 식별된 합집합을 사용합니다.`stepType`. Each step type has specific properties:
+
+### `ToolCallStep` {/* #toolcallstep */}
+
+Agent Tool 호출을 나타냅니다.
+
+<PropertiesTable
+  content={[
+{ name: 'stepType', type: "'tool_call'", description: 'Discriminant.', required: true },
+{ name: 'name', type: 'string', description: 'Tool name.', required: true },
+{ name: 'toolArgs', type: 'Record<string, unknown>', description: 'Arguments passed to the tool.', isOptional: true },
+{
+  name: 'toolResult',
+  type: 'Record<string, unknown>',
+  description: 'Result returned by the tool.',
+  isOptional: true,
+},
+{ name: 'success', type: 'boolean', description: 'Whether the call succeeded.', isOptional: true },
+{ name: 'durationMs', type: 'number', description: 'Execution time in milliseconds.', isOptional: true },
+{ name: 'metadata', type: 'Record<string, unknown>', description: 'Arbitrary metadata.', isOptional: true },
+{ name: 'children', type: 'TrajectoryStep[]', description: 'Nested sub-steps.', isOptional: true },
+]}
+/>
+
+### `WorkflowStepStep` {/* #workflowstepstep */}
+
+Workflow 단계 실행을 나타냅니다.
+
+<PropertiesTable
+  content={[
+{ name: 'stepType', type: "'workflow_step'", description: 'Discriminant.', required: true },
+{ name: 'name', type: 'string', description: 'Step identifier.', required: true },
+{ name: 'stepId', type: 'string', description: 'Step ID in the workflow.', isOptional: true },
+{
+  name: 'status',
+  type: 'string',
+  description: 'Step result status (success, failed, suspended, etc.).',
+  isOptional: true,
+},
+{ name: 'output', type: 'Record<string, unknown>', description: 'Step output data.', isOptional: true },
+{ name: 'durationMs', type: 'number', description: 'Execution time in milliseconds.', isOptional: true },
+{ name: 'metadata', type: 'Record<string, unknown>', description: 'Arbitrary metadata.', isOptional: true },
+{
+  name: 'children',
+  type: 'TrajectoryStep[]',
+  description: 'Nested sub-steps (e.g. tool calls inside the step).',
+  isOptional: true,
+},
+]}
+/>
+
+### 기타 단계 유형 {/* #other-step-types */}
+
+구별된 공용체에는 다음과 같은 추가 단계 유형이 포함됩니다.
+
+| 단계 유형 | 주요 속성 |
+| - | - |
+|`mcp_tool_call` | `toolArgs`, `toolResult`, `mcpServer`, `success` |
+| `model_generation` | `modelId`, `promptTokens`, `completionTokens`, `finishReason` |
+| `agent_run` | `agentId` |
+| `workflow_run` | `workflowId`, `status` |
+| `workflow_conditional` | `conditionCount`, `selectedSteps` |
+| `workflow_parallel` | `branchCount`, `parallelSteps` |
+| `workflow_loop` | `loopType`, `totalIterations` |
+| `workflow_sleep` | `durationMs`, `sleepType` |
+| `workflow_wait_event` | `eventName`, `eventReceived` |
+| `processor_run` | `processorId` |
+
+모든 단계 유형은 기본 속성을 공유합니다.`name`, `durationMs`, `metadata`, and `children`.
+
+## 예상 단계 {/* #expected-steps */}
+
+예상 궤적을 정의할 때 다음을 사용하세요.`ExpectedStep` instead of the full `TrajectoryStep` discriminated union. `ExpectedStep` is a discriminated union that mirrors `TrajectoryStep`: when you specify a `stepType`, you get autocomplete for that variant's fields (e.g., `toolArgs` for `tool_call`, `modelId` for `model_generation`). All variant-specific fields are optional, so you only assert against what you care about.
+
+생략`stepType` entirely to match any step by name only.
+
+<PropertiesTable
+  content={[
+{
+  name: 'name',
+  type: 'string',
+  description: 'Step name to match (tool name, agent ID, workflow step name, etc.).',
+  required: true,
+},
+{
+  name: 'stepType',
+  type: 'TrajectoryStepType',
+  description:
+    "Step type discriminant. When set, enables autocomplete for that variant's fields. If omitted, matches any step type with the given name.",
+  isOptional: true,
+},
+{
+  name: '(variant fields)',
+  type: 'varies',
+  description:
+    'Type-specific fields from the corresponding TrajectoryStep variant. For example, `toolArgs` and `toolResult` for `tool_call`, `modelId` for `model_generation`, `output` for `workflow_step`. All optional — only specified fields are compared.',
+  isOptional: true,
+},
+{
+  name: 'children',
+  type: 'TrajectoryExpectation',
+  description:
+    "Nested expectation config for this step's children. Overrides the parent config for evaluating children of this step.",
+  isOptional: true,
+},
+]}
+/>
+
+### 간단한 예상 단계 {/* #simple-expected-steps */}
+
+```typescript
+const steps: ExpectedStep[] = [
+  // Match by name only (any step type)
+  { name: 'search' },
+
+  // Match by name and step type (autocomplete for tool_call fields)
+  { name: 'search', stepType: 'tool_call' },
+
+  // Match with specific toolArgs (auto-compared when present)
+  { name: 'search', stepType: 'tool_call', toolArgs: { query: 'weather' } },
+
+  // Match a model generation step by model ID
+  { name: 'gpt-4o', stepType: 'model_generation', modelId: 'gpt-4o' },
+]
+```
+
+### 중첩된 기대 {/* #nested-expectations */}
+
+각 예상 단계에는 다음이 포함될 수 있습니다.`children` config with its own evaluation rules. This lets you set different ordering or comparison rules at each level of the hierarchy.
+
+```typescript
+const scorer = createTrajectoryScorerCode({
+  defaults: {
+    ordering: 'strict',
+    steps: [
+      { name: 'validate-input', stepType: 'workflow_step' },
+      {
+        name: 'research-agent',
+        stepType: 'agent_run',
+        children: {
+          // Sub-agent can call tools in any order
+          ordering: 'unordered',
+          steps: [
+            { name: 'search', stepType: 'tool_call' },
+            { name: 'summarize', stepType: 'tool_call' },
+          ],
+        },
+      },
+      { name: 'save-result', stepType: 'workflow_step' },
+    ],
+  },
+})
+```
+
+이 예에서 상위 Workflow는 단계의 엄격한 순서를 요구하지만 중첩된`research-agent` allows its tool calls in any order.
+
+## 득점자 중에서 선택 {/* #choosing-between-scorers */}
+
+### 다음과 같은 경우 코드 기반 채점기를 사용하세요. {/* #use-the-code-based-scorer-when */}
+
+* 당신은 필요**deterministic, reproducible** results
+* 당신은**known expected trajectory** to compare against
+* 검증하고 싶으신가요?**exact step sequences**
+* 속도와 비용이 우선입니다(LLM 호출 없음)
+* CI/CD에서 자동화된 테스트를 실행 중입니다.
+
+### 다음과 같은 경우 LLM 기반 채점자를 사용하세요. {/* #use-the-llm-based-scorer-when */}
+
+* 당신은 필요**semantic understanding** of whether steps were appropriate
+* 최적의 궤적**isn't predetermined** (evaluate based on task requirements)
+* 당신은 감지하고 싶습니다**unnecessary, redundant, or missing** steps
+* 당신은 필요**explanations** for scoring decisions
+* 평가하고 계십니다**production agent behavior**
+
+## 코드 기반 궤도 정확도 채점기 {/* #code-based-trajectory-accuracy-scorer */}
+
+그만큼`createTrajectoryAccuracyScorerCode()` function from `@mastra/evals/scorers/prebuilt` provides deterministic scoring based on step matching and ordering against an expected trajectory.
+
+### 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'expectedTrajectory',
+  type: 'Trajectory | ExpectedStep[]',
+  description:
+    'Static expected trajectory to compare against. Accepts a full Trajectory or an array of ExpectedStep matchers. When omitted, the scorer reads expectedTrajectory from each dataset item at runtime.',
+  isOptional: true,
+},
+{
+  name: 'comparisonOptions',
+  type: 'TrajectoryComparisonOptions',
+  description: 'Controls how the comparison is performed.',
+  isOptional: true,
+  properties: [
+    {
+      name: 'strictOrder',
+      type: 'boolean',
+      description:
+        'Requires exact match of trajectory (same steps in same order, no extra steps). When false, allows additional steps as long as expected steps appear in order.',
+      isOptional: true,
+      defaultValue: 'false',
+    },
+    {
+      name: 'allowRepeatedSteps',
+      type: 'boolean',
+      description: 'Whether to allow repeated steps in the trajectory without penalty.',
+      isOptional: true,
+      defaultValue: 'true',
+    },
+  ],
+},
+]}
+/>
+
+이 함수는 MastraScorer 클래스의 인스턴스를 반환합니다. 참조[MastraScorer reference](./mastra-scorer) for details on the `.run()` method and its input/output.
+
+### 예상 궤적 소스 {/* #expected-trajectory-sources */}
+
+코드 기반 채점자는 다음을 해결합니다.`expectedTrajectory` from two sources, in order of priority:
+
+1. **생성자 옵션**: 채점자를 생성할 때 전달되는 정적 궤적입니다. 모든 데이터세트 항목에 사용됩니다.
+2. **데이터 세트 항목**: 안`expectedTrajectory` field on the dataset item, passed through the `runEvals` pipeline. Allows different expected trajectories per item.
+
+```typescript title="src/static-expected.ts"
+// Static: same expected trajectory for all items
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'search' },
+      { stepType: 'tool_call', name: 'summarize' },
+    ],
+  },
+})
+```
+
+```typescript title="src/per-item-expected.ts"
+// Per-item: each dataset item has its own expectedTrajectory
+const scorer = createTrajectoryAccuracyScorerCode()
+
+await runEvals({
+  target: myAgent,
+  scorers: { trajectory: [scorer] },
+  data: [
+    {
+      input: 'Search and summarize weather',
+      expectedTrajectory: {
+        steps: [
+          { stepType: 'tool_call', name: 'search' },
+          { stepType: 'tool_call', name: 'summarize' },
+        ],
+      },
+    },
+    {
+      input: 'Just search for weather',
+      expectedTrajectory: {
+        steps: [{ stepType: 'tool_call', name: 'search' }],
+      },
+    },
+  ],
+})
+```
+
+### 평가 모드 {/* #evaluation-modes */}
+
+코드 기반 채점기는 다음을 기반으로 두 가지 모드로 작동합니다.`strictOrder`:
+
+#### 엄격 모드(`strictOrder: true`) {/* #strict-mode-strictorder-true */}
+
+정확히 일치해야 합니다. 실제 단계는 추가 또는 누락된 단계 없이 동일한 순서로 예상 단계와 일치해야 합니다. 보고`1.0` for an exact match and `0.0` otherwise.
+
+#### 편안한 모드(`strictOrder: false`, default) {/* #relaxed-mode-strictorder-false-default */}
+
+추가 단계를 허용합니다. 예상 단계는 올바른 상대 순서로 나타나야 합니다. 점수는 일치하는 예상 단계 수를 기준으로 계산되며, 추가 또는 반복 단계에 대한 선택적인 페널티도 포함됩니다.
+
+## 코드 기반 채점 세부정보 {/* #code-based-scoring-details */}
+
+* **연속 점수**: 완화 모드에서 0.0에서 1.0 사이의 값을 반환합니다. 엄격 모드의 이진수(0 또는 1)
+* **결정론적**: 동일한 입력은 항상 동일한 출력을 생성합니다.
+* **빠른**: 외부 API 호출 없음
+
+### 코드 기반 채점자 결과 {/* #code-based-scorer-results */}
+
+```typescript prettier:false
+{
+  runId: string,
+  preprocessStepResult: {
+    actualTrajectory: Trajectory,
+    expectedTrajectory: Trajectory,
+    comparison: {
+      score: number,
+      matchedSteps: number,
+      totalExpectedSteps: number,
+      totalActualSteps: number,
+      missingSteps: string[],
+      extraSteps: string[],
+      outOfOrderSteps: string[],
+      repeatedSteps: string[]
+    },
+    actualStepNames: string[],
+    expectedStepNames: string[]
+  },
+  score: number
+}
+```
+
+## 코드 기반 채점기의 예 {/* #code-based-scorer-examples */}
+
+### 엄격한 순서를 적용한 Agent 궤적 {/* #agent-trajectory-with-strict-ordering */}
+
+Agent가 Tool 호출의 정확한 순서를 따르는지 확인합니다.
+
+```typescript title="src/example-strict-trajectory.ts"
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'auth-tool' },
+      { stepType: 'tool_call', name: 'fetch-tool' },
+    ],
+  },
+  comparisonOptions: { strictOrder: true },
+})
+
+const result = await runEvals({
+  target: myAgent,
+  scorers: { trajectory: [scorer] },
+  data: [{ input: 'Get my data' }],
+})
+
+console.log(result.scores.trajectory['trajectory-accuracy']) // 1.0
+```
+
+### 편안한 순서의 Agent 궤적 {/* #agent-trajectory-with-relaxed-ordering */}
+
+예상 단계가 올바른 상대 순서로 나타나는 한 추가 단계를 허용합니다.
+
+```typescript title="src/example-relaxed-trajectory.ts"
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'search-tool' },
+      { stepType: 'tool_call', name: 'summarize-tool' },
+    ],
+  },
+  comparisonOptions: { strictOrder: false },
+})
+
+// Agent called search-tool → log-tool → summarize-tool
+// The extra log-tool is allowed in relaxed mode
+// score: 0.75 — all expected steps matched, small penalty for extra step
+```
+
+### Workflow우 궤적 {/* #workflow-trajectory */}
+
+Workflow의 실행 경로를 평가합니다.
+
+```typescript title="src/example-workflow-trajectory.ts"
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'workflow_step', name: 'validate-input' },
+      { stepType: 'workflow_step', name: 'process-data' },
+      { stepType: 'workflow_step', name: 'save-result' },
+    ],
+  },
+})
+
+const result = await runEvals({
+  target: myWorkflow,
+  scorers: { trajectory: [scorer] },
+  data: [{ input: { data: 'test' } }],
+})
+
+console.log(result.scores.trajectory['trajectory-accuracy'])
+```
+
+### 걸음 수 데이터 비교 {/* #comparing-step-data */}
+
+단계 이름과 단계별 데이터를 검증합니다. Tool 호출의 경우 이는 다음과 같습니다.`toolArgs` and `toolResult`. For workflow steps, this compares `output`.
+
+```typescript title="src/example-trajectory-with-data.ts"
+const scorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      {
+        stepType: 'tool_call',
+        name: 'search-tool',
+        toolArgs: { query: 'weather in NYC' },
+      },
+    ],
+  },
+})
+// Data fields like toolArgs are auto-compared when present on expected steps
+```
+
+## LLM 기반 궤도 정확도 채점기 {/* #llm-based-trajectory-accuracy-scorer */}
+
+그만큼`createTrajectoryAccuracyScorerLLM()` function from `@mastra/evals/scorers/prebuilt` uses an LLM to evaluate whether an agent's or workflow's trajectory was appropriate, efficient, and complete.
+
+### 매개변수 {/* #parameters-1 */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'model',
+  type: 'MastraModelConfig',
+  description: 'The LLM model to use for evaluating trajectory quality.',
+  required: true,
+},
+{
+  name: 'expectedTrajectory',
+  type: 'Trajectory | ExpectedStep[]',
+  description:
+    'Optional static expected trajectory to compare against. Accepts a full Trajectory or an array of ExpectedStep matchers. When omitted, the LLM evaluates the trajectory based on the task requirements alone. Can also come from dataset items at runtime.',
+  isOptional: true,
+},
+]}
+/>
+
+### 특징 {/* #features */}
+
+LLM 기반 채점자는 다음을 제공합니다.
+
+* **과제 인식 평가**: 사용자의 요청에 따라 각 단계가 필요한지 여부를 평가합니다.
+* **평가 주문**: 단계가 논리적 순서대로 수행되었는지 평가합니다.
+* **누락된 걸음 감지**: 취했어야 하는 단계를 식별합니다.
+* **중복 감지**: 불필요하거나 반복되는 단계에 플래그를 지정합니다.
+* **추론 생성**: 채점 결정에 대해 사람이 읽을 수 있는 설명을 제공합니다.
+
+### 평가과정 {/* #evaluation-process */}
+
+1. **궤적 수신**: 사전 추출된 내용을 가져옵니다.`Trajectory` object from the pipeline
+2. **단계 분석**: LLM을 활용하여 각 단계의 필요성과 순서를 평가합니다.
+3. **점수 생성**: 필요 60%, 순서 30%, 누락 페널티 10%를 가중하여 점수를 계산합니다.
+4. **추론 생성**: 사람이 읽을 수 있는 설명을 제공합니다.
+
+## LLM 기반 점수 세부 정보 {/* #llm-based-scoring-details */}
+
+* **분수 점수**: 0.0에서 1.0 사이의 값을 반환합니다.
+* **상황 인식**: 사용자 의도 및 작업 요구사항을 고려합니다.
+* **설명**: 점수에 대한 추론 제공
+* **유연한**: 예상 궤적 유무에 관계없이 작동합니다.
+
+### LLM 기반 채점자 옵션 {/* #llm-based-scorer-options */}
+
+```typescript
+// Evaluate based on task requirements (no expected trajectory)
+const openScorer = createTrajectoryAccuracyScorerLLM({
+  model: { provider: 'openai', name: 'gpt-5.4' },
+})
+
+// Evaluate against a static expected trajectory
+const guidedScorer = createTrajectoryAccuracyScorerLLM({
+  model: { provider: 'openai', name: 'gpt-5.4' },
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'search-tool' },
+      { stepType: 'tool_call', name: 'summarize-tool' },
+    ],
+  },
+})
+```
+
+### LLM 기반 득점자 결과 {/* #llm-based-scorer-results */}
+
+```typescript prettier:false
+{
+  runId: string,
+  preprocessStepResult: {
+    actualTrajectory: Trajectory,
+    actualTrajectoryFormatted: string,
+    expectedTrajectoryFormatted?: string,
+    hasSteps: boolean
+  },
+  analyzeStepResult: {
+    stepEvaluations: Array<{
+      stepName: string,
+      wasNecessary: boolean,
+      wasInOrder: boolean,
+      reasoning: string
+    }>,
+    missingSteps?: string[],
+    extraSteps?: string[],
+    overallAssessment: string
+  },
+  score: number,
+  reason: string
+}
+```
+
+## 통합 궤적 득점자 {/* #unified-trajectory-scorer */}
+
+그만큼`createTrajectoryScorerCode()` function from `@mastra/evals/scorers/prebuilt` provides a multi-dimensional trajectory evaluation that checks accuracy, efficiency, blacklisted tools, and tool failure patterns in a single pass.
+
+### 매개변수 {/* #parameters-2 */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'defaults',
+  type: 'TrajectoryExpectation',
+  description:
+    'Default expectations applied to all dataset items. Per-item expectedTrajectory values override these defaults.',
+  isOptional: true,
+  properties: [
+    {
+      name: 'steps',
+      type: 'ExpectedStep[]',
+      description: 'Expected steps for accuracy scoring. See [Expected steps](#expected-steps).',
+      isOptional: true,
+    },
+    {
+      name: 'ordering',
+      type: "'strict' | 'relaxed' | 'unordered'",
+      description:
+        "How step ordering is evaluated. 'strict' requires exact match, 'relaxed' (default) allows extra steps, 'unordered' only checks presence.",
+      isOptional: true,
+      defaultValue: "'relaxed'",
+    },
+    {
+      name: 'allowRepeatedSteps',
+      type: 'boolean',
+      description: 'Whether to allow repeated steps without penalty.',
+      isOptional: true,
+      defaultValue: 'true',
+    },
+    {
+      name: 'maxSteps',
+      type: 'number',
+      description: 'Maximum allowed number of steps. Steps beyond this budget reduce the efficiency score.',
+      isOptional: true,
+    },
+    {
+      name: 'maxTotalTokens',
+      type: 'number',
+      description: 'Maximum total tokens across model_generation steps.',
+      isOptional: true,
+    },
+    {
+      name: 'maxTotalDurationMs',
+      type: 'number',
+      description: 'Maximum total duration across all steps.',
+      isOptional: true,
+    },
+    {
+      name: 'noRedundantCalls',
+      type: 'boolean',
+      description: 'Whether to penalize redundant calls (same tool with same args).',
+      isOptional: true,
+      defaultValue: 'true',
+    },
+    {
+      name: 'blacklistedTools',
+      type: 'string[]',
+      description: 'Tools that must not be called. Presence of any blacklisted tool results in a score of 0.',
+      isOptional: true,
+    },
+    {
+      name: 'blacklistedSequences',
+      type: 'string[][]',
+      description:
+        'Sequences of tool names that must not appear in order. Any matching sequence results in a score of 0.',
+      isOptional: true,
+    },
+    {
+      name: 'maxRetriesPerTool',
+      type: 'number',
+      description: 'Maximum retries per tool before flagging as a failure pattern.',
+      isOptional: true,
+      defaultValue: '2',
+    },
+  ],
+},
+{
+  name: 'weights',
+  type: 'TrajectoryScoreWeights',
+  description: 'Custom weights for combining dimension scores. Weights are normalized to sum to 1.0.',
+  isOptional: true,
+  properties: [
+    {
+      name: 'accuracy',
+      type: 'number',
+      description: 'Weight for accuracy scoring.',
+      isOptional: true,
+      defaultValue: '0.4',
+    },
+    {
+      name: 'efficiency',
+      type: 'number',
+      description: 'Weight for efficiency scoring.',
+      isOptional: true,
+      defaultValue: '0.3',
+    },
+    {
+      name: 'toolFailures',
+      type: 'number',
+      description: 'Weight for tool failure analysis.',
+      isOptional: true,
+      defaultValue: '0.2',
+    },
+    {
+      name: 'blacklist',
+      type: 'number',
+      description: 'Weight for blacklist scoring (when no violations occur).',
+      isOptional: true,
+      defaultValue: '0.1',
+    },
+  ],
+},
+]}
+/>
+
+### 채점 행동 {/* #scoring-behavior */}
+
+통합 채점원은 다음 네 가지 차원을 평가합니다.
+
+1. **정확성**: 예상 단계와 실제 단계를 일치시킵니다.`steps` is configured). Uses the `ordering` mode.
+2. **능률**: 단계 예산을 확인합니다(`maxSteps`, `maxTotalTokens`, `maxTotalDurationMs`) and redundant calls (`noRedundantCalls`).
+3. **블랙리스트**: 금지된 Tool나 시퀀스를 확인합니다. 위반 시 즉시 다음 점수가 부과됩니다.**0.0** regardless of other dimensions.
+4. **Tool 실패**: 재시도 및 대체 패턴을 감지합니다. 또한 인수 수정 패턴도 감지합니다.
+
+최종 점수는 활성 차원의 가중치 조합으로, 활성 차원에 따라 정규화됩니다. 기본 가중치는 정확도 0.4, 효율성 0.3, Tool 오류 0.2, 블랙리스트 0.1이지만 다음을 통해 사용자 정의할 수 있습니다.`weights` option. Blacklist violations override everything to 0. When nested evaluations are present, the score is 70% top-level and 30% nested average.
+
+### 통합 득점자 결과 {/* #unified-scorer-results */}
+
+```typescript prettier:false
+{
+  runId: string,
+  preprocessStepResult: {
+    accuracy?: TrajectoryComparisonResult,
+    efficiency?: TrajectoryEfficiencyResult,
+    blacklist?: TrajectoryBlacklistResult,
+    toolFailures?: ToolFailureAnalysisResult,
+    nested?: NestedEvaluationResult[],
+  },
+  score: number,
+  reason: string
+}
+```
+
+### 품목별 기대치 {/* #per-item-expectations */}
+
+각 데이터세트 항목은 자체 항목으로 기본값을 재정의할 수 있습니다.`expectedTrajectory`. This lets you vary expectations per prompt:
+
+```typescript title="src/unified-per-item.ts"
+import { createTrajectoryScorerCode } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+
+// Default blacklist applies to all items
+const scorer = createTrajectoryScorerCode({
+  defaults: {
+    blacklistedTools: ['deleteAll'],
+    maxSteps: 5,
+  },
+})
+
+const result = await runEvals({
+  target: myAgent,
+  scorers: { trajectory: [scorer] },
+  data: [
+    {
+      input: 'Search for weather',
+      expectedTrajectory: {
+        steps: [{ stepType: 'tool_call', name: 'search' }],
+        maxSteps: 2,
+      },
+    },
+    {
+      input: 'Search and summarize',
+      expectedTrajectory: {
+        steps: [
+          { stepType: 'tool_call', name: 'search' },
+          { stepType: 'tool_call', name: 'summarize' },
+        ],
+      },
+    },
+  ],
+})
+```
+
+### 예: 효율성 및 블랙리스트 {/* #example-efficiency-and-blacklist */}
+
+```typescript title="src/unified-scorer.ts"
+import { createTrajectoryScorerCode } from '@mastra/evals/scorers/prebuilt'
+
+const scorer = createTrajectoryScorerCode({
+  defaults: {
+    blacklistedTools: ['escalate', 'admin-override'],
+    blacklistedSequences: [['escalate', 'admin-override']],
+    maxSteps: 10,
+    noRedundantCalls: true,
+    maxRetriesPerTool: 2,
+  },
+  // Customize how dimensions contribute to the final score
+  weights: {
+    accuracy: 0.5, // prioritize step accuracy
+    efficiency: 0.3,
+    toolFailures: 0.1,
+    blacklist: 0.1,
+  },
+})
+```
+
+## 궤적 스코어러 사용`runEvals` {/* #using-trajectory-scorers-with-runevals */}
+
+궤적 득점자는 다음에서 구성됩니다.`trajectory` key in the scorer config. The `runEvals` pipeline handles trajectory extraction automatically.
+
+### Agent 궤적 평가 {/* #agent-trajectory-evaluation */}
+
+```typescript title="src/agent-trajectory-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt'
+
+const trajectoryScorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'tool_call', name: 'search' },
+      { stepType: 'tool_call', name: 'format' },
+    ],
+  },
+})
+
+const result = await runEvals({
+  target: myAgent,
+  scorers: {
+    agent: [qualityScorer], // receives raw MastraDBMessage[] output
+    trajectory: [trajectoryScorer], // receives pre-extracted Trajectory
+  },
+  data: [{ input: 'Find and format the data' }],
+})
+
+// result.scores.agent['quality'] — agent-level score
+// result.scores.trajectory['trajectory-accuracy'] — trajectory score
+```
+
+### Workflow우 궤적 평가 {/* #workflow-trajectory-evaluation */}
+
+```typescript title="src/workflow-trajectory-eval.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createTrajectoryAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt'
+
+const workflowTrajectoryScorer = createTrajectoryAccuracyScorerCode({
+  expectedTrajectory: {
+    steps: [
+      { stepType: 'workflow_step', name: 'validate' },
+      { stepType: 'workflow_step', name: 'process' },
+      { stepType: 'workflow_step', name: 'notify' },
+    ],
+  },
+})
+
+const result = await runEvals({
+  target: myWorkflow,
+  scorers: {
+    workflow: [outputScorer], // receives workflow output
+    trajectory: [workflowTrajectoryScorer], // receives pre-extracted Trajectory from step results
+  },
+  data: [{ input: { userId: '123' } }],
+})
+
+// result.scores.workflow['output-quality'] — workflow-level score
+// result.scores.trajectory['trajectory-accuracy'] — trajectory score
+```
+
+## 관련된 {/* #related */}
+
+* [runEvals 참조](./run-evals): 궤적을 추출하여 채점자에게 전달하는 파이프라인
+* [MastraScorer 참조](./mastra-scorer): 기본 득점자 인터페이스
+* [득점자 유틸리티](./scorer-utils): 다음을 포함한 유틸리티 기능`extractTrajectory` and `compareTrajectories`

@@ -1,0 +1,207 @@
+---
+title: "참조: WebhookSignalProvider | 신호"
+description: "수신되는 웹훅 페이로드를 구독된 Agent 스레드로 라우팅하는 푸시 기반 신호 제공자인 WebhookSignalProvider에 대한 API 참조입니다."
+packages:
+  - "@mastra/core"
+---
+
+# 웹훅신호 제공자
+
+**추가된 항목:** `@mastra/core@1.39.0`
+
+푸시 기반 이벤트 전달을 위한 구체적인 신호 제공자입니다. 구성 가능한 리소스 ID 추출기와 페이로드를 일치시켜 수신 웹후크 페이로드를 구독된 Agent 스레드로 라우팅합니다.
+
+확장[`SignalProvider`](/reference/signals/signal-provider) with public subscription management and a built-in `handleWebhook()` implementation.
+
+## 사용예 {/* #usage-example */}
+
+GitHub 웹훅 이벤트를 구독 스레드로 라우팅합니다.
+
+```typescript title="src/signals/webhook.ts"
+import { WebhookSignalProvider } from '@mastra/core/signals'
+
+const webhookProvider = new WebhookSignalProvider({
+  extractResourceId: payload => `${payload.repository?.full_name}`,
+  buildNotification: (payload, subscription) => ({
+    source: 'github-webhook',
+    kind: payload.action ?? 'event',
+    summary: `${payload.action} on ${subscription.externalResourceId}`,
+    payload,
+  }),
+})
+```
+
+Agent에 등록하고 스레드를 구독하세요.
+
+```typescript title="src/mastra/index.ts"
+import { Agent } from '@mastra/core/agent'
+
+const agent = new Agent({
+  id: 'agent',
+  signals: [webhookProvider],
+})
+
+// subscribe a thread to a specific repo
+webhookProvider.subscribeThread({ threadId: 'thread-1', resourceId: 'user-1' }, 'mastra-ai/mastra')
+
+// handle an incoming webhook
+const result = await webhookProvider.handleWebhook({
+  body: { repository: { full_name: 'mastra-ai/mastra' }, action: 'push' },
+  headers: {},
+})
+// result.matched === 1
+```
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for the provider instance.',
+  isOptional: true,
+  defaultValue: "'webhook-signals'",
+},
+{
+  name: 'name',
+  type: 'string',
+  description: 'Human-readable name.',
+  isOptional: true,
+  defaultValue: "'Webhook Signals'",
+},
+{
+  name: 'extractResourceId',
+  type: '(payload: unknown) => string | string[] | undefined',
+  description:
+    'Extract the external resource ID from a webhook payload. Return `undefined` to skip the event. Can return an array to match multiple resources.',
+  isOptional: true,
+  defaultValue: 'Returns `payload.resource` or `payload.externalResourceId` if present',
+},
+{
+  name: 'buildNotification',
+  type: '(payload: unknown, subscription: SignalSubscription) => SendNotificationSignalInput',
+  description: 'Build the notification object from a webhook payload and the matched subscription.',
+  isOptional: true,
+  defaultValue: "Returns `{ source: id, kind: 'webhook-event', summary, payload }`",
+},
+]}
+/>
+
+## 행동 양식 {/* #methods */}
+
+### 구독 관리 {/* #subscription-management */}
+
+#### `subscribeThread(target, externalResourceId, metadata?)` {/* #subscribethreadtarget-externalresourceid-metadata */}
+
+특정 외부 리소스에 대한 웹훅 이벤트를 수신하려면 스레드를 구독하세요.
+
+```typescript prettier:false
+webhookProvider.subscribeThread(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'mastra-ai/mastra',
+  { watchType: 'push' },
+)
+```
+
+보고:`SignalSubscription`
+
+<PropertiesTable
+  content={[
+{
+  name: 'target',
+  type: 'SignalProviderTarget',
+  description: 'The thread to subscribe. Must include `threadId` and `resourceId`.',
+},
+{
+  name: 'externalResourceId',
+  type: 'string',
+  description: 'The external resource to monitor (for example, a repository full name).',
+},
+{
+  name: 'metadata',
+  type: 'Record<string, unknown>',
+  description: 'Additional data to store with the subscription.',
+  isOptional: true,
+},
+]}
+/>
+
+#### `unsubscribeThread(target, externalResourceId)` {/* #unsubscribethreadtarget-externalresourceid */}
+
+특정 외부 리소스에서 스레드 구독을 취소합니다.
+
+```typescript prettier:false
+const removed = webhookProvider.unsubscribeThread(
+  { threadId: 'thread-1', resourceId: 'user-1' },
+  'mastra-ai/mastra',
+)
+```
+
+보고:`boolean`
+
+### 웹훅 처리 {/* #webhook-handling */}
+
+#### `handleWebhook(request)` {/* #handlewebhookrequest */}
+
+들어오는 웹훅 요청을 처리합니다. 페이로드에서 리소스 ID를 추출하고, 일치하는 구독을 찾고, 각각에 대한 알림을 작성하고, 호출합니다.`notify()`.
+
+```typescript prettier:false
+const result = await webhookProvider.handleWebhook({
+  body: { repository: { full_name: 'mastra-ai/mastra' }, action: 'push' },
+  headers: { 'x-github-event': 'push' },
+})
+```
+
+보고:`Promise<{ status: number; body: { matched: number } }>`
+
+보고`{ status: 200, body: { matched: N } }` where `N` is the number of subscriptions that received notifications. Returns `matched: 0` when no resource ID could be extracted or no subscriptions match.
+
+<PropertiesTable
+  content={[
+{
+  name: 'request',
+  type: 'object',
+  description: 'The incoming webhook request.',
+  properties: [
+    {
+      type: 'object',
+      parameters: [
+        {
+          name: 'body',
+          type: 'unknown',
+          description: 'The parsed webhook payload.',
+        },
+        {
+          name: 'headers',
+          type: 'Record<string, string>',
+          description: 'HTTP headers from the webhook request.',
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+### 정적 신호 공장 {/* #static-signal-factories */}
+
+#### `WebhookSignalProvider.signals.subscribe(externalResourceId)` {/* #webhooksignalprovidersignalssubscribeexternalresourceid */}
+
+현재 스레드를 외부 리소스에 구독하는 반응 신호 입력을 만듭니다.
+
+```typescript prettier:false
+const signal = WebhookSignalProvider.signals.subscribe('mastra-ai/mastra')
+```
+
+보고:`{ type: 'reactive'; tagName: string; contents: string; attributes: { resource: string } }`
+
+#### `WebhookSignalProvider.signals.unsubscribe(externalResourceId)` {/* #webhooksignalprovidersignalsunsubscribeexternalresourceid */}
+
+외부 리소스에서 현재 스레드를 구독 취소하는 반응적 신호 입력을 만듭니다.
+
+```typescript prettier:false
+const signal = WebhookSignalProvider.signals.unsubscribe('mastra-ai/mastra')
+```
+
+보고:`{ type: 'reactive'; tagName: string; contents: string; attributes: { resource: string } }`

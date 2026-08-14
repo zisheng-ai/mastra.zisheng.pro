@@ -1,11 +1,13 @@
 import { expect, test } from '@playwright/test'
 
-const LOCALES = ['zh-CN', 'en', 'ja', 'zh-TW', 'zh-HK', 'x-default']
+const LOCALES = ['zh-CN', 'en', 'fr', 'ja', 'ko', 'zh-TW', 'zh-HK', 'x-default']
 const PAGES = [
   { path: '/', lang: 'zh-CN' },
   { path: '/docs/agents/overview', lang: 'zh-CN' },
   { path: '/en/docs/agents/overview', lang: 'en' },
+  { path: '/fr/docs/agents/overview', lang: 'fr' },
   { path: '/ja/docs/agents/overview', lang: 'ja' },
+  { path: '/ko/docs/agents/overview', lang: 'ko' },
   { path: '/zh-TW/docs/agents/overview', lang: 'zh-TW' },
   { path: '/zh-HK/docs/agents/overview', lang: 'zh-HK' },
 ]

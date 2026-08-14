@@ -1,0 +1,212 @@
+---
+title: "기술 | 작업공간"
+description: "Agent 기술 사양을 통해 Agent에게 재사용 가능한 기능을 가르칩니다."
+packages:
+  - "@mastra/core"
+---
+
+# 작업 공간 기술
+
+**추가된 항목:** `@mastra/core@1.1.0`
+
+기술은 Agent에게 특정 작업을 수행하는 방법을 가르치는 재사용 가능한 지침입니다. 그들은 다음을 따릅니다.[Agent Skills specification](https://agentskills.io) - an open standard for packaging agent capabilities.
+
+스킬은 다음을 포함하는 폴더입니다.
+
+* `SKILL.md`: Agent에 대한 지침 및 메타데이터
+* `references/`: 지원 문서(선택 사항)
+* `scripts/`: 실행 가능한 스크립트(선택 사항)
+* `assets/`: 이미지 및 기타 파일(선택사항)
+
+```plaintext title="Folder structure"
+skills/
+  code-review/
+    SKILL.md
+    references/
+      style-guide.md
+      pr-checklist.md
+    scripts/
+      lint.ts
+```
+
+작업 영역에 기술이 구성되면 Agent은 대화 중에 해당 기술을 검색하고 활성화할 수 있습니다.
+
+## `SKILL.md`체재 {/* #skillmd-format */}
+
+공식 팔로우[skill specification](https://agentskills.io/specification) when creating your skill. Here is an example `SKILL.md` for a code review skill:
+
+```markdown title="SKILL.md"
+---
+name: code-review
+description: Reviews code for quality, style, and potential issues
+version: 1.0.0
+tags:
+  - development
+  - review
+---
+
+# Code Review
+
+You are a code reviewer. When reviewing code:
+
+1. Check for bugs and edge cases
+2. Verify the code follows the style guide in references/style-guide.md
+3. Suggest improvements for readability
+4. Run the linter using scripts/lint.ts
+
+## What to look out for
+
+- Unused variables and imports
+- Missing error handling
+- Security vulnerabilities
+- Performance issues
+```
+
+## 기술 구성 {/* #configuring-skills */}
+
+다음을 설정하여 기술 검색을 활성화합니다.`skills` option on your workspace:
+
+```typescript title="src/mastra/workspaces.ts"
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  skills: ['skills'],
+})
+```
+
+여러 기술 디렉터리를 지정할 수 있습니다.
+
+```typescript title="src/mastra/workspaces.ts"
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  skills: [
+    'skills', // Project skills
+    'team-skills', // Shared team skills
+  ],
+})
+```
+
+기술 디렉터리에 대한 직접 경로를 전달할 수도 있습니다.`SKILL.md` file:
+
+```typescript
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  skills: ['path/to/my-skill'],
+})
+```
+
+Glob 패턴을 사용하면 중첩된 디렉터리에서 기술을 검색할 수 있습니다.
+
+```typescript
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  skills: ['./**/skills'],
+})
+```
+
+## 다이나믹한 스킬 {/* #dynamic-skills */}
+
+컨텍스트 기반 런타임 기술 경로의 경우 함수를 전달합니다.
+
+```typescript
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  skills: ctx => {
+    const paths = ['skills']
+    if (ctx.requestContext?.get('userRole') === 'developer') {
+      paths.push('dev-skills')
+    }
+    return paths
+  },
+})
+```
+
+## Agent이 스킬을 사용하는 방법 {/* #how-agents-use-skills */}
+
+작업 영역에 기술이 구성되면 Agent은 자동으로 기술 Tool에 액세스할 수 있습니다. 사용 가능한 기술이 시스템 메시지에 나열되므로 Agent은 사용 가능한 기술을 알 수 있으며 Agent은 요청 시 모든 기술을 로드할 수 있습니다.
+
+Agent에는 세 가지 기술 Tool가 있습니다.
+
+* **`skill`**: 스킬의 전체 지침을 로드하고 Tool 결과에 반환합니다. Agent는 스킬 안내가 필요할 때마다 이를 호출합니다.
+* **`skill_read`**: 스킬의 파일을 읽습니다.`references/`, `scripts/`, or `assets/` directory.
+* **`skill_search`**: 모든 스킬 콘텐츠를 검색합니다. 구성된 경우 BM25 또는 벡터 검색을 사용하고, 그렇지 않은 경우 기본 텍스트 일치로 대체합니다.
+
+이 디자인은 상태 비저장이며 추적할 활성화 상태가 없습니다. 기술 지침이 대화 컨텍스트를 벗어나는 경우(컨텍스트 창 제한 또는 압축으로 인해) Agent는 전화를 걸 수 있습니다.`skill` again to reload them.
+
+## 같은 이름의 스킬 {/* #same-named-skills */}
+
+여러 스킬 디렉터리에 동일한 이름의 스킬이 포함되어 있으면 해당 스킬이 모두 검색되어 나열됩니다. Agent는 각 기술의 경로 및 소스 유형과 함께 시스템 메시지의 모든 기술을 확인하여 이를 구분할 수 있습니다.
+
+Agent가 이름으로 스킬을 활성화하면 순위 결정에 따라 반환되는 스킬이 결정됩니다.
+
+1. **소스 유형 우선순위**: 로컬 기술이 관리되는 기술보다 우선합니다(`.mastra/`) skills, which take precedence over external (`node_modules/`) skills.
+2. **해결할 수 없는 충돌이 발생합니다.**: 두 개의 스킬이 동일한 이름과 동일한 소스 유형을 공유하는 경우(예를 들어 두 개의 로컬 스킬이 모두 이름이 지정됨)`brand-guidelines`), `get()` throws an error. Rename one or move it to a different source type to resolve the conflict.
+3. **경로 탈출 해치**: Agent는 이름 대신 스킬의 전체 경로를 전달하여 타이 브레이킹을 완전히 우회하여 특정 스킬을 활성화할 수 있습니다.
+
+```typescript title="Example: local skill shadows an external package skill"
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  skills: [
+    'node_modules/@myorg/skills', // external: provides "brand-guidelines"
+    'skills', // local: also provides "brand-guidelines"
+  ],
+})
+
+// get('brand-guidelines') returns the local copy (local > external)
+// get('node_modules/@myorg/skills/brand-guidelines') returns the external copy
+```
+
+## 스킬 검색 {/* #skill-search */}
+
+작업 공간에서 BM25 또는 벡터 검색이 활성화된 경우 스킬이 자동으로 인덱싱됩니다. Agent은 기술 콘텐츠를 검색하여 관련 지침을 찾을 수 있습니다.
+
+```typescript
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  skills: ['skills'],
+  // highlight-next-line
+  bm25: true,
+})
+```
+
+## 맞춤형 스킬 소스 {/* #custom-skill-source */}
+
+기본적으로 기술은 작업공간 파일 시스템에서 읽혀집니다. 고급 사용 사례의 경우 맞춤 설정을 제공하세요.`skillSource` to load skills from a different backend.
+
+`VersionedSkillSource` 콘텐츠 주소 지정이 가능한 Blob 저장소에서 게시된 기술 버전을 제공하므로 프로덕션 Agent는 라이브 파일 시스템을 건드리지 않고 특정 게시된 버전을 사용합니다.
+
+```typescript
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+// highlight-next-line
+import { VersionedSkillSource } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  skills: ['skills'],
+  // highlight-next-line
+  skillSource: new VersionedSkillSource(versionTree, blobStore, versionCreatedAt),
+})
+```
+
+`VersionedSkillSource`세 가지 매개변수를 허용합니다:
+
+* **`versionTree`** (`SkillVersionTree`): A manifest mapping relative file paths to blob entries (`{ entries: Record<string, { blobHash, size, mimeType?, encoding? }> }`).
+* **`blobStore`** (`BlobStore`): A content-addressable blob store instance that holds the actual file contents referenced by hash.
+* **`versionCreatedAt`** (`Date`): The timestamp when this skill version was published. Used as the modification time for all files in the version.
+
+언제`skillSource` is provided, it's used instead of the workspace filesystem for skill discovery.
+
+## Agent 수준의 기술 {/* #agent-level-skills */}
+
+다음을 사용하여 작업 영역 없이 Agent에게 직접 기술을 연결할 수도 있습니다.`createSkill()` and the agent's `skills` config. When both agent-level and workspace-level skills exist, they merge, agent-level skills take precedence on name conflicts.
+
+보다[Agent skills](/docs/agents/skills) for details.
+
+## 관련된 {/* #related */}
+
+* [Agent 기술](/docs/agents/skills)
+* [Agent 기술 사양](https://agentskills.io)
+* [작업공간 개요](/docs/workspace/overview)
+* [검색 및 인덱싱](/docs/workspace/search)
+* [`createSkill()`참조](/reference/agents/createSkill)

@@ -1,0 +1,157 @@
+---
+title: "득점자 개요 | 평가"
+description: "AI 결과를 평가하고 성능을 측정하는 기능을 자세히 설명하는 Mastra의 채점자 개요입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+# 득점자 개요
+
+기존 소프트웨어 테스트에는 명확한 통과/실패 조건이 있지만 AI 출력은 비결정적이며 동일한 입력에 따라 달라질 수 있습니다.**Scorers**Agent 품질 측정을 위한 수량화 가능한 지표를 제공하여 이러한 격차를 해소하는 데 도움을 줍니다.
+
+채점자는 Model 등급, 규칙 기반 및 통계 방법을 사용하여 Agent 출력을 평가하는 자동화된 테스트입니다. 득점자 복귀**scores**: numerical values (typically between 0 and 1) that quantify how well an output meets your evaluation criteria. These scores enable you to objectively track performance, compare different approaches, and identify areas for improvement in your AI systems. Scorers can be customized with your own prompts and scoring functions.
+
+채점자는 클라우드에서 실행되어 실시간 결과를 캡처할 수 있습니다. 그러나 채점자는 CI/CD 파이프라인의 일부일 수도 있으므로 시간이 지남에 따라 Agent를 테스트하고 모니터링할 수 있습니다.
+
+:::팁\[📹 보기]
+
+보다[Mastra evals overview](https://www.youtube.com/watch?v=12WN6u2DrBk) for an introduction to evals and how to reason about agent quality.
+
+:::
+
+## 득점자의 유형 {/* #types-of-scorers */}
+
+Mastra는 각각 특정 목적을 수행하는 다양한 종류의 득점자를 제공합니다. 다음은 몇 가지 일반적인 유형입니다.
+
+1. **텍스트 득점자**: Agent 응답의 정확성, 신뢰성, 상황 이해도를 평가합니다.
+2. **분류 채점자**: 미리 정의된 카테고리를 기반으로 데이터 분류의 정확성을 측정합니다.
+3. **신속한 엔지니어링 득점자**: 다양한 명령어와 입력 형식의 영향을 살펴보세요.
+
+## 설치 {/* #installation */}
+
+Mastra의 득점자 기능에 액세스하려면 다음을 설치하십시오.`@mastra/evals` package.
+
+```bash npm2yarn
+npm install @mastra/evals@latest
+```
+
+## 실시간 평가 {/* #live-evaluations */}
+
+**실시간 평가**Agent와 Workflow가 작동할 때 실시간으로 AI 출력의 점수를 자동으로 매길 수 있습니다. 평가를 수동으로 또는 일괄적으로 실행하는 대신 채점자는 AI 시스템과 함께 비동기식으로 실행되어 지속적인 품질 모니터링을 제공합니다.
+
+### Agent에 득점자 추가 {/* #adding-scorers-to-agents */}
+
+Agent에 내장 채점자를 추가하여 출력을 자동으로 평가할 수 있습니다. 참조[full list of built-in scorers](/docs/evals/built-in-scorers) for all available options.
+
+```typescript title="src/mastra/agents/evaluated-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createAnswerRelevancyScorer, createToxicityScorer } from '@mastra/evals/scorers/prebuilt'
+
+export const evaluatedAgent = new Agent({
+  id: 'evaluated-agent',
+  scorers: {
+    relevancy: {
+      scorer: createAnswerRelevancyScorer({ model: '__GATEWAY_OPENAI_MODEL_MINI__' }),
+      sampling: { type: 'ratio', rate: 0.5 },
+    },
+    safety: {
+      scorer: createToxicityScorer({ model: '__GATEWAY_OPENAI_MODEL_MINI__' }),
+      sampling: { type: 'ratio', rate: 1 },
+    },
+  },
+})
+```
+
+### Workflow 단계에 채점자 추가 {/* #adding-scorers-to-workflow-steps */}
+
+또한 개별 Workflow 단계에 채점자를 추가하여 프로세스의 특정 지점에서 출력을 평가할 수도 있습니다. 각 채점자는 해당 단계의 자체 입력 및 출력을 수신하므로 최종 답변에만 점수를 매기는 대신 각 단계의 품질을 측정할 수 있습니다.
+
+```typescript title="src/mastra/workflows/content-generation.ts" prettier:false
+import { createWorkflow, createStep } from "@mastra/core/workflows";
+import { z } from "zod";
+import { customStepScorer } from "../scorers/custom-step-scorer";
+
+const contentStep = createStep({
+  id: "content-step",
+  inputSchema: z.object({ topic: z.string() }),
+  outputSchema: z.object({ content: z.string() }),
+  scorers: {
+    customStepScorer: {
+      scorer: customStepScorer(),
+      sampling: {
+        type: "ratio",
+        rate: 1, // Score every step execution
+      },
+    },
+  },
+  execute: async ({ inputData }) => {
+    return { content: await generateContent(inputData.topic) };
+  },
+});
+
+export const contentWorkflow = createWorkflow({
+  id: "content-workflow",
+  inputSchema: z.object({ topic: z.string() }),
+  outputSchema: z.object({ content: z.string() }),
+})
+  .then(contentStep)
+  .commit();
+```
+
+단계 수준의 경우`scorers` API, see the [Step class reference](/reference/workflows/step#scoring-step-output).
+
+### 실시간 평가 작동 방식 {/* #how-live-evaluations-work */}
+
+**비동기 실행**: 실시간 평가는 Agent 응답이나 Workflow 실행을 차단하지 않고 백그라운드에서 실행됩니다. 이를 통해 AI 시스템이 모니터링되는 동안에도 성능을 유지할 수 있습니다.
+
+**샘플링 제어**:`sampling.rate` parameter (0-1) controls what percentage of outputs get scored:
+
+* `1.0`: 모든 응답에 점수를 매깁니다(100%).
+* `0.5`: 전체 응답의 절반 점수(50%)
+* `0.1`: 응답의 10% 점수
+* `0.0`: 채점 비활성화
+
+**자동 저장**: 모든 채점 결과는 자동으로 저장됩니다.`mastra_scorers` table in your configured database, allowing you to analyze performance trends over time.
+
+## 추적 평가 {/* #trace-evaluations */}
+
+실시간 평가 외에도 채점자를 사용하여 Agent 상호 작용 및 Workflow의 기록 추적을 평가할 수 있습니다.
+
+이는 과거 성능을 분석하거나 문제를 디버깅하거나 일괄 평가를 실행하는 데 특히 유용합니다.
+
+:::참고\[관찰성이 필요함]
+
+추적 점수를 매기려면 먼저 추적 데이터를 수집하도록 Mastra 인스턴스에서 Observability을 구성해야 합니다. 보다[Tracing documentation](../observability/tracing/overview) for setup instructions.
+
+:::
+
+## 사진관 {/* #studio */}
+
+추적을 기록하려면 먼저 기록자를 Mastra 인스턴스에 등록해야 합니다.
+
+```typescript
+const mastra = new Mastra({
+  scorers: {
+    answerRelevancy: myAnswerRelevancyScorer,
+    responseQuality: myResponseQualityScorer,
+  },
+})
+```
+
+등록한 후에는 Studio 내에서 대화형으로 추적 점수를 매길 수 있습니다.**Observability** section. Open Studio to manage scorers and review scores, plus run experiments.
+
+* **득점자 목록**: 등록된 모든 득점자를 설명과 함께 찾아보고, 각 득점자가 연결된 Agent 및 Workflow 수를 찾아보세요.
+* **점수 결과**: 득점자를 선택하면 해당 득점자가 생성한 모든 점수의 페이지가 매겨진 목록을 볼 수 있습니다. 행을 클릭하면 점수 값, 사유, 입력, 출력 및 심사위원이 사용하는 Prompt가 표시되는 세부 패널이 열립니다. 이 패널에서 결과를 향후 실험을 위한 데이터세트 항목으로 저장합니다.
+* **Agent 평가 탭**: 득점자 및 데이터 세트를 관리하려면 Agent에서 평가 탭을 엽니다. 거기에서 실험을 실행할 수도 있습니다. 실험 결과에는 통과/실패 상태 및 버전 태그와 함께 항목별 점수가 표시됩니다.
+* **추적 점수**: Observability 섹션에서 기록 추적 또는 범위에 대해 채점기를 실행하여 과거 상호 작용을 평가합니다. Agent 또는 Workflow별로 점수를 필터링합니다.
+
+## 다음 단계 {/* #next-steps */}
+
+* 사용[Quick Checks](/docs/evals/quick-checks) for fast, deterministic assertions on text and tool usage
+* 추가하다[gates and verdicts](/docs/evals/gates-and-verdicts) to enforce hard requirements and quality thresholds
+* 시험[multi-turn conversations](/docs/evals/multi-turn) where behavior emerges across sequential turns
+* 다음에서 나만의 채점자를 만드는 방법을 알아보세요.[Creating Custom Scorers](/docs/evals/custom-scorers) guide
+* 내장된 득점 장치를 살펴보세요.[Built-in Scorers](/docs/evals/built-in-scorers) section
+* 시험 득점자[Studio](/docs/studio/overview)
+* 📹 [Mastra evals workshop](https://www.youtube.com/watch?v=OHOZ5PgPj5M\&t=3578s)

@@ -1,0 +1,342 @@
+---
+title: "샌드박스에 배포 | 전개"
+description: "임시 작업 공간 샌드박스에 Mastra 서버를 배포하고 라이브 공개 URL을 받으세요."
+packages:
+  - "@mastra/deployer-sandbox"
+---
+
+# 샌드박스에 배포
+
+`@mastra/deployer-sandbox`Studio를 포함한 전체 Mastra 서버를 임시 작업 공간 샌드박스에 배포하고 라이브 공개 URL을 반환합니다. 배포자가 종속성 설치를 건너뛰기 때문에 반복 배포가 더 빨리 완료될 수 있습니다.
+
+다음과 같은 경우 샌드박스 배포를 사용하세요.
+
+* Agent 구축 앱: Agent는 Mastra 프로젝트를 생성하고 배포하여 결과를 확인합니다.
+* 지속적 통합(CI): 점검을 위해 실제 서버를 가동한 후 해체합니다.
+* 즉시 미리보기: 병합하기 전에 작업 중인 Agent를 팀과 공유하세요.
+* 신뢰할 수 없는 다중 테넌트 코드: 인프라에서 격리된 사용자별 Mastra 인스턴스를 실행합니다.
+
+샌드박스에는 공급자가 적용하는 런타임 한도가 있으며 만료됩니다. 프로덕션 호스팅에 대해서는 다음을 참조하세요.[deployment overview](/docs/deployment/overview).
+
+## 지원되는 샌드박스 {/* #supported-sandboxes */}
+
+배포자는 네트워킹(공용 포트 URL)을 지원하는 모든 작업 공간 샌드박스에서 작동합니다.
+
+* [버셀 샌드박스](/reference/workspace/vercel-sandbox) (`@mastra/vercel`)
+* [E2B](/reference/workspace/e2b-sandbox) (`@mastra/e2b`)
+* [데이토나](/reference/workspace/daytona-sandbox) (`@mastra/daytona`)
+
+공급자 작성자는 선택 사항을 구현하여 지원을 추가할 수 있습니다.`networking` capability on [`WorkspaceSandbox`](/reference/workspace/sandbox).
+
+## 빠른 시작 {/* #quickstart */}
+
+원하는 배포자와 샌드박스 공급자를 설치합니다. 이 예에서는 Vercel Sandbox를 사용합니다.
+
+```bash npm2yarn
+npm install @mastra/deployer-sandbox @mastra/vercel
+```
+
+배포자를 구성합니다.`src/mastra/index.ts` file. The `sandboxName` identifies the deployment, so subsequent deployments with the same name reuse the existing sandbox.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { SandboxDeployer } from '@mastra/deployer-sandbox'
+import { VercelSandbox } from '@mastra/vercel'
+
+export const mastra = new Mastra({
+  deployer: new SandboxDeployer({
+    sandbox: new VercelSandbox({
+      sandboxName: 'my-preview',
+      timeout: 2_400_000, // 40 minutes
+      ports: [4111],
+    }),
+  }),
+})
+```
+
+두 가지 Vercel 관련 요구사항:
+
+* `timeout`계획의 최대 샌드박스 수명인 Pro의 경우 45분을 초과할 수 없습니다. Vercel API에서 400을 사용하면 값이 높을수록 배포가 실패합니다.
+* 서버 포트를 선언하십시오.`ports`. Vercel exposes only ports declared at creation, unlike E2B and Daytona.
+
+하나의 명령으로 빌드 및 배포:
+
+```bash
+mastra build
+```
+
+언제`SandboxDeployer()` is configured, `mastra build` bundles your project and deploys it into the sandbox. The deploy prints the API and Studio URLs and writes a `sandbox-deployment.json` manifest into `.mastra/output`:
+
+```text
+API:    https://<sandbox-id>-4111.vercel.run/api
+Studio: https://<sandbox-id>-4111.vercel.run
+```
+
+매니페스트에는 다음이 포함됩니다.`expiresAt` when the sandbox provider reports an expiration time.
+
+동일한 샌드박스에 재배포하면 입력이 변경되지 않은 경우 종속성 설치를 건너뜁니다. 이러한 입력은`package.json`, the bundled lockfiles, and the install command.
+
+### URL의 역할 {/* #what-the-urls-serve */}
+
+Studio URL은 샌드박스 루트입니다.`/api`. Open it in a browser to use Studio. When the deploy runs with `studio: false`, the root serves the Mastra welcome page instead.
+
+API URL은 아래 엔드포인트에 대한 접두사일 뿐입니다.`/api/agents`. `/api` has no handler of its own, so opening it in a browser returns a "Not Found" response even though the server is healthy.
+
+배포를 확인하려면 엔드포인트를 직접 호출하세요.
+
+```bash
+curl -s -X POST https://4111-<sandbox-id>.e2b.app/api/agents/weatherAgent/generate \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Weather in London"}]}' | jq -r '.text'
+```
+
+### 공급자 자격 증명 {/* #provider-credentials */}
+
+각 공급자는 자체 자격 증명으로 인증합니다. 배포할 샌드박스에 대한 항목을 설정합니다.
+
+```bash title=".env"
+# E2B
+E2B_API_KEY=
+
+# Daytona
+DAYTONA_API_KEY=
+
+# Vercel
+VERCEL_TOKEN=
+VERCEL_TEAM_ID=
+VERCEL_PROJECT_ID=
+```
+
+모든 공급자는 이를 생성자 옵션으로도 허용합니다. 자체 호스팅 E2B 및 Daytona 설치에는`E2B_DOMAIN` or `DAYTONA_API_URL`.
+
+같지 않은`mastra dev`, `mastra build` doesn't load `.env` files. The deploy happens inside the build, so a sandbox provider that reads its credentials from the environment, such as E2B with `E2B_API_KEY`, sees an empty value and the deploy fails with an authentication error.
+
+첨가`import 'dotenv/config'` to `src/mastra/index.ts` doesn't fix this. To find the deployer, the build extracts only the `deployer` option from your entry file and tree-shakes everything else away, including that import.
+
+로드`.env` file into the shell environment before the build runs. [`dotenv-cli`](https://www.npmjs.com/package/dotenv-cli) is one way to do that:
+
+```bash npm2yarn
+npm install --save-dev dotenv-cli
+```
+
+```json title="package.json"
+{
+  "scripts": {
+    "deploy": "dotenv -e .env -- mastra build"
+  }
+}
+```
+
+그런 다음 실행`npm run deploy`. The script is named for what it does, since `mastra build` deploys once a `SandboxDeployer()` is configured. Keep it separate from a plain `build` script so a hosting platform or CI job that runs `npm run build` doesn't deploy a sandbox by accident.
+
+CI(지속적 통합)에서는 대신 자격 증명을 비밀로 내보냅니다. 어떤 메커니즘을 사용하든 변수는 쉘 환경뿐만 아니라 쉘 환경에도 존재해야 합니다.`.env` file.
+
+이는 배포자가 머신에 필요로 하는 자격 증명에 적용됩니다. 배포된 서버에 필요한 변수는 별도로 처리됩니다. 배포자가 읽습니다.`.env`, `.env.production`, and `.env.local` and injects them into the sandbox. See [Security](#security).
+
+### E2B 사용 {/* #using-e2b */}
+
+E2B의 경우,`id` identifies the deployment, so subsequent deployments with the same value reconnect to the existing sandbox, whether it's running or paused.
+
+```typescript title="src/mastra/index.ts"
+import { SandboxDeployer } from '@mastra/deployer-sandbox'
+import { E2BSandbox } from '@mastra/e2b'
+
+const deployer = new SandboxDeployer({
+  sandbox: new E2BSandbox({
+    id: 'my-preview',
+    template: 'base',
+    timeout: 3_600_000, // 1 hour
+  }),
+})
+```
+
+통과하다`template: 'base'` unless you need filesystem mounts; without it, the provider builds a custom Filesystem in Userspace (FUSE) template on first use. E2B pauses instead of stopping: `stop()` snapshots the whole virtual machine (VM), including memory and running processes. When a paused sandbox wakes, the Mastra server resumes where it left off, and there's no relaunch step like on Vercel.
+
+### 데이토나 사용 {/* #using-daytona */}
+
+데이토나의 경우,`id` identifies the deployment, so subsequent deployments with the same value reconnect to the existing sandbox. Set `public: true` to make the preview URL accessible without a token.
+
+```typescript title="src/mastra/index.ts"
+import { SandboxDeployer } from '@mastra/deployer-sandbox'
+import { DaytonaSandbox } from '@mastra/daytona'
+
+const deployer = new SandboxDeployer({
+  sandbox: new DaytonaSandbox({
+    id: 'my-preview',
+    public: true,
+    autoStopInterval: 30, // minutes
+  }),
+})
+```
+
+Daytona 샌드박스를 중지하면 파일 시스템은 유지되지만 프로세스는 실행되지 않으므로 깨우기는 Vercel처럼 작동합니다. 확인자는 서버를 다시 시작합니다.`wake: true`.
+
+Daytona는 목적지별로 아웃바운드 트래픽을 필터링합니다. 일부 호스트에 대한 요청은 일반적으로 TLS(전송 계층 보안)를 통해 연결되는 반면 다른 호스트는 핸드셰이크 중에 재설정됩니다. 이는 Agent나 Tool에 노드의 일반 정보로 표시됩니다.`fetch failed`. Rule out your code before debugging it, by running `curl` against the same host from inside the sandbox:
+
+```typescript
+const sandbox = new DaytonaSandbox({ id: 'my-preview' })
+await sandbox.start()
+
+const result = await sandbox.executeCommand('curl -v --max-time 10 https://api.example.com')
+console.info(result.stdout, result.stderr)
+```
+
+에이`Connection reset by peer` during the TLS handshake points at the filtering rather than your agent. Ask Daytona support to allow the destination. Restricted Daytona tiers also block cloud storage endpoints, which the mount helpers report with a dedicated error.
+
+## 프로그래밍 방식으로 배포 {/* #deploying-programmatically */}
+
+`deployToSandbox()`번들러 없이 미리 빌드된 출력 디렉터리를 배포합니다. 같지 않은`SandboxDeployer()`, it doesn't include Studio unless you pass `studio: true`. Use it in CI or from agent code:
+
+```typescript
+import { deployToSandbox } from '@mastra/deployer-sandbox'
+import { VercelSandbox } from '@mastra/vercel'
+
+const deployment = await deployToSandbox({
+  sandbox: new VercelSandbox({ sandboxName: 'ci-smoke', ports: [4111] }),
+  dir: '.mastra/output',
+})
+
+console.info(deployment.url) // https://<sandbox-id>-4111.vercel.run
+await deployment.logs() // tail the server log
+await deployment.stop() // stop the sandbox (resumable)
+await deployment.destroy() // permanently delete the sandbox
+```
+
+## 수명주기 {/* #lifecycle */}
+
+### 배포 관리 {/* #managing-a-deployment */}
+
+서버 전용 사용`getDeployment()` export from `@mastra/deployer-sandbox/client` to retrieve an existing deployment. It identifies the sandbox through provider-specific configuration, such as a Vercel `sandboxName` or an E2B or Daytona `id`. The lookup isn't tied to the process that created the deployment, so you can use it from another server-side service or in CI.
+
+```typescript title="scripts/stop.ts"
+import { getDeployment } from '@mastra/deployer-sandbox/client'
+import { VercelSandbox } from '@mastra/vercel'
+
+const deployment = await getDeployment({
+  sandbox: new VercelSandbox({ sandboxName: 'my-preview', ports: [4111] }),
+  port: 4111,
+})
+
+console.info(deployment.status, deployment.url)
+await deployment.logs() // tail the server log
+await deployment.stop() // stop the sandbox (resumable)
+await deployment.destroy() // permanently delete the sandbox
+```
+
+통과하다`wake: true` to resume a stopped sandbox before returning. The server is relaunched only if it isn't healthy after the resume. Provider tooling works too, for example `vercel sandbox ls`, `vercel sandbox stop`, and `vercel sandbox rm`.
+
+### 만료 및 URL {/* #expiry-and-urls */}
+
+샌드박스는 공급자의 런타임 제한에 따라 만료됩니다. 공급자가 만료 시간을 보고하면 배포는 이를 기록하고`deployment.expiresAt` exposes it programmatically.
+
+샌드박스 URL은 샌드박스가 중지되고 다시 시작될 때 변경될 수 있습니다. URL을 연결 및 샌드박스 ID로 처리합니다(예:`sandboxName`) as the stable handle. The routing tiers below deal with URL rotation.
+
+## 라우팅 계층 {/* #routing-tiers */}
+
+### 계층 1: 직접 URL {/* #tier-1-direct-url */}
+
+배포 시 새로운 URL이 허용되는 개발, 데모 및 CI에는 인쇄된 URL을 직접 사용하세요.
+
+### 계층 2: 런타임에 해결 {/* #tier-2-resolve-at-runtime */}
+
+`getDeployment()`런타임 시 현재 URL을 확인하므로 소비자는 오래된 URL을 보유하지 않습니다. Mastra 프로젝트와 다른 코드베이스에 있는 서버를 포함하여 샌드박스 이름을 알고 있는 모든 서버가 이를 해결할 수 있습니다.
+
+```typescript title="app/api/agent-url/route.ts"
+import { getDeployment } from '@mastra/deployer-sandbox/client'
+import { VercelSandbox } from '@mastra/vercel'
+
+const deployment = await getDeployment({
+  sandbox: new VercelSandbox({ sandboxName: 'my-preview', ports: [4111] }),
+  wake: true,
+})
+
+console.info(deployment.url, deployment.status)
+```
+
+와 함께`wake: false` (the default) the sandbox isn't started and you get `{ url, status }` to act on. Resolving the URL, `stop()`, and `destroy()` attach to the existing sandbox by name without resuming it, so lifecycle operations on a stopped sandbox never wake it or start billing. With `wake: true` the sandbox resumes and the server is relaunched if it isn't answering. Whether a relaunch is needed depends on the provider: Vercel and Daytona restore the filesystem but not running processes, while E2B resumes the whole VM including the server process.
+
+:::경고
+
+`@mastra/deployer-sandbox/client`서버 전용입니다. 샌드박스를 해결하려면 브라우저에 절대 도달해서는 안 되는 공급자 자격 증명을 사용합니다. 브라우저 컨텍스트에서 가져온 경우 모듈이 발생합니다.
+
+:::
+
+### 계층 3: 최종 사용자를 위한 안정적인 URL {/* #tier-3-stable-url-for-end-users */}
+
+최종 사용자에게 자신의 도메인에 안정적인 URL을 제공하고 경로 처리기 프록시 또는 Edge Config 별칭을 사용하여 샌드박스 서버측으로 전달합니다.
+
+아래 예는 Vercel 및 Next.js 설정을 보여주지만 이 개념은 요청을 전달할 수 있는 모든 서버 측 프레임워크 또는 공급자에 적용됩니다.
+
+* **경로 처리기 프록시.** `createSandboxHandler()` caches the sandbox URL and re-resolves after a connection-level failure, which covers URL rotation and cold wakes:
+
+  ```typescript title="app/api/[...path]/route.ts"
+  import { createSandboxHandler, getDeployment } from '@mastra/deployer-sandbox/client'
+  import { VercelSandbox } from '@mastra/vercel'
+
+  const handler = createSandboxHandler({
+    resolve: async () => {
+      const deployment = await getDeployment({
+        sandbox: new VercelSandbox({ sandboxName: 'my-preview', ports: [4111] }),
+        wake: true,
+      })
+      return deployment.url!
+    },
+  })
+
+  export { handler as GET, handler as POST }
+  ```
+
+* **Edge 구성 별칭.**&#xC124;정`alias` option on the deployer to keep a [Vercel Edge Config](https://vercel.com/docs/edge-config) item pointed at the current URL on every deploy:
+
+  ```typescript title="src/mastra/index.ts"
+  const deployer = new SandboxDeployer({
+    sandbox: new VercelSandbox({ sandboxName: 'my-preview', ports: [4111] }),
+    alias: { edgeConfigId: 'ecfg_...', key: 'my-preview', token: process.env.VERCEL_TOKEN! },
+  })
+  ```
+
+  그런 다음 Next.js 미들웨어에서 요청을 다시 작성합니다.`createSandboxProxy()`:
+
+  ```typescript title="middleware.ts"
+  import { createSandboxProxy } from '@mastra/deployer-sandbox/client'
+
+  export const middleware = createSandboxProxy({ key: 'my-preview' })
+  export const config = { matcher: '/api/:path*' }
+  ```
+
+## CI 예시 {/* #ci-example */}
+
+모든 끌어오기 요청에 미리보기를 배포합니다.
+
+```yaml title=".github/workflows/preview.yml"
+name: Sandbox preview
+on: pull_request
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npx mastra build
+      - run: curl --fail "$(jq -r .url .mastra/output/sandbox-deployment.json)/api"
+```
+
+## 보안 {/* #security */}
+
+* 샌드박스 URL은 공개됩니다. URL이 있는 사람은 누구나 Studio를 포함하여 Mastra 서버에 연결할 수 있습니다. 할 수 있게 하다[server auth](/docs/server/auth) for anything beyond throwaway previews.
+* 귀하의 환경 변수`.env` files are injected into the remote sandbox VM so the server can run. The deploy logs a warning when this happens. Don't deploy secrets you wouldn't put on a shared preview server.
+* Tier 3 트래픽에 대한 액세스를 제한하려면`secret` to `createSandboxHandler()` or `createSandboxProxy()`. The helpers attach it as the `x-mastra-sandbox-secret` header on forwarded requests. Configure [server auth](/docs/server/auth) to require that header, and direct hits to the sandbox URL get rejected while traffic through your domain works.
+
+## 관련된 {/* #related */}
+
+* [배포 개요](/docs/deployment/overview)
+* [서버 인증](/docs/server/auth)
+* [`WorkspaceSandbox` 참조](/reference/workspace/sandbox)

@@ -1,0 +1,198 @@
+---
+title: "참조: StreamErrorRetryProcessor | 프로세서"
+description: "일시적인 스트림 오류를 재시도하는 Mastra의 StreamErrorRetryProcessor 프로세서에 대한 API 참조입니다."
+packages:
+  - "@mastra/core"
+---
+
+# StreamErrorRetry프로세서
+
+`StreamErrorRetryProcessor`은**오류 프로세서**일시적인 LLM API 및 스트림 오류를 재시도합니다. OpenAI 응답 스트림 오류에 대한 기본 일치 기능이 포함되어 있으며 다른 공급자별 오류 형태에 대한 추가 일치자를 지원합니다.
+
+프로세서는 기본적으로 코어에서 활성화되지 않습니다. 다음에 추가하세요`errorProcessors` for agents that need bounded retry handling.
+
+## 사용예 {/* #usage-example */}
+
+추가하다`StreamErrorRetryProcessor` to `errorProcessors`:
+
+```typescript title="src/mastra/agents/openai-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { StreamErrorRetryProcessor } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'openai-agent',
+  name: 'openai-agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  errorProcessors: [new StreamErrorRetryProcessor()],
+})
+```
+
+## 작동 원리 {/* #how-it-works */}
+
+프로세서는 다음 사항에 대해 오류와 원인 체인을 확인합니다.
+
+* 공급자 재시도 메타데이터:`isRetryable === true`
+* 내장된 OpenAI 응답 스트림 오류 일치
+* 일치자 결과: 반환하는 구성된 모든 일치자`true`
+
+오류를 재시도할 수 있으면 프로세서가 반환합니다.`{ retry: true }`. It doesn't mutate messages.
+
+언제`delayMs` is set, the processor waits before signaling a retry. This is useful for transient network errors like `ECONNRESET` where immediately retrying is likely to fail again. The delay can be a fixed number of milliseconds or a function evaluated with the error args (for example, to implement exponential backoff).
+
+### 재시도 한도 {/* #retry-limits */}
+
+`maxRetries`기본값은`1` and limits this processor's retry requests. The agent also limits processor retries with `maxProcessorRetries`. When error processors are configured without an agent limit, the runtime cap is `10`.
+
+단일 재시도 예산이 필요한 경우 두 값을 모두 동일한 제한된 값으로 명시적으로 설정합니다. Model 유지`maxRetries` at `0` for that call to avoid multiplying provider attempts.
+
+### `Retry-After`손질 {/* #retry-after-handling */}
+
+재시도 가능한 오류의 경우`Retry-After` response header, the processor reads case-insensitive delta-seconds and HTTP-date values through the error cause chain. It waits for the longer of `delayMs` and the bounded server delay.
+
+`maxRetryAfterMs`기본값은`30_000`. It caps only provider-provided wait time. A longer explicit `delayMs` remains unchanged. Invalid or expired headers are ignored.
+
+## 알 수 없는 오류 재시도 {/* #retry-unknown-errors */}
+
+세트`retryUnknownErrors` to retry errors that don't match provider metadata, the built-in OpenAI matcher, or a custom matcher. Unknown-error retries use the processor-level `maxRetries` and `delayMs` values. Known authorization failures, including HTTP `401` and `403` responses, aren't retried:
+
+```typescript title="src/mastra/agents/resilient-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { StreamErrorRetryProcessor } from '@mastra/core/processors'
+
+export const agent = new Agent({
+  id: 'resilient-agent',
+  name: 'Resilient agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  errorProcessors: [
+    new StreamErrorRetryProcessor({
+      retryUnknownErrors: true,
+      maxRetries: 2,
+      delayMs: 3000,
+    }),
+  ],
+})
+```
+
+특정 매처 정책은 여전히 ​​알 수 없는 오류 값보다 우선합니다. 옵션의 기본값은`false`, so unknown errors aren't retried unless you enable it.
+
+## 재시도 지연 {/* #delaying-retries */}
+
+사용`delayMs` with a custom matcher to retry transient network resets with a wait:
+
+```typescript title="src/mastra/agents/resilient-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { StreamErrorRetryProcessor } from '@mastra/core/processors'
+
+const isECONNRESET = (error: unknown) => {
+  if (!error || typeof error !== 'object') return false
+  const code = (error as { code?: unknown }).code
+  if (typeof code === 'string' && code.toUpperCase() === 'ECONNRESET') return true
+  const message = error instanceof Error ? error.message : undefined
+  return typeof message === 'string' && /econnreset|socket hang up/i.test(message)
+}
+
+export const agent = new Agent({
+  id: 'resilient-agent',
+  name: 'resilient-agent',
+  instructions: 'You are a helpful assistant.',
+  model: '__GATEWAY_OPENAI_MODEL_BASE__',
+  errorProcessors: [
+    new StreamErrorRetryProcessor({
+      maxRetries: 2,
+      delayMs: ({ retryCount }) => Math.min(1000 * 2 ** retryCount, 30000),
+      matchers: [isECONNRESET],
+    }),
+  ],
+})
+```
+
+## 기본 OpenAI 응답 일치자 {/* #default-openai-responses-matcher */}
+
+`isRetryableOpenAIResponsesStreamError`OpenAI 응답 스트림 오류 청크와 일치합니다.`type: 'error'` or `type: 'response.failed'`. It retries known transient OpenAI error codes and, as a fallback, errors with explicit retry guidance such as `You can retry your request`.
+
+`StreamErrorRetryProcessor`기본적으로 이 매처를 포함합니다. 이를 가져와서 사용자 지정 재시도 논리에서 재사용할 수도 있습니다.
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'options',
+  type: 'StreamErrorRetryProcessorOptions',
+  description: 'Configuration for retry handling.',
+  isOptional: true,
+  properties: [
+    {
+      name: 'maxRetries',
+      type: 'number',
+      description: 'Maximum number of retries requested by this processor.',
+      isOptional: true,
+      defaultValue: '1',
+    },
+    {
+      name: 'matchers',
+      type: 'StreamErrorRetryMatcher[]',
+      description: 'Additional functions that identify provider-specific retryable stream errors.',
+      isOptional: true,
+      defaultValue: '[]',
+    },
+    {
+      name: 'retryUnknownErrors',
+      type: 'boolean',
+      description:
+        'Whether to retry unknown errors left unmatched by provider metadata, built-in matchers, and custom matchers. Known authorization failures are excluded. Uses the processor-level maxRetries and delayMs values.',
+      isOptional: true,
+      defaultValue: 'false',
+    },
+    {
+      name: 'delayMs',
+      type: 'number | ((args: ProcessAPIErrorArgs) => number | Promise<number>)',
+      description:
+        'Delay in milliseconds to wait before signaling a retry. Accepts a fixed number or a function evaluated with the current error args (for example, for exponential backoff). Negative or non-finite values are clamped to 0.',
+      isOptional: true,
+      defaultValue: '0',
+    },
+    {
+      name: 'maxRetryAfterMs',
+      type: 'number',
+      description:
+        'Maximum provider-controlled delay read from a Retry-After header. This does not cap an explicit delayMs value. Negative or non-finite values are clamped to 0.',
+      isOptional: true,
+      defaultValue: '30000',
+    },
+  ],
+},
+]}
+/>
+
+## 속성 {/* #properties */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: "'stream-error-retry-processor'",
+  description: 'Processor identifier.',
+  isOptional: false,
+},
+{
+  name: 'name',
+  type: "'Stream Error Retry Processor'",
+  description: 'Processor display name.',
+  isOptional: false,
+},
+{
+  name: 'processAPIError',
+  type: '(args: ProcessAPIErrorArgs) => ProcessAPIErrorResult | void',
+  description: 'Retries stream errors up to the configured retry limit.',
+  isOptional: false,
+},
+]}
+/>
+
+## 관련된 {/* #related */}
+
+* [프로세서 인터페이스](/reference/processors/processor-interface)
+* [프로세서](/docs/agents/processors)

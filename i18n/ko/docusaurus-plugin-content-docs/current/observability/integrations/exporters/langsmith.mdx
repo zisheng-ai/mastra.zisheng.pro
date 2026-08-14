@@ -1,0 +1,186 @@
+---
+title: "LangSmith 수출업체 | 통합 | Observability"
+description: "LLM 관찰 및 평가를 위해 LangSmith에 추적 보내기"
+packages:
+  - "@mastra/langsmith"
+  - "@mastra/observability"
+---
+
+# LangSmith 수출업체
+
+[랭스미스](https://smith.langchain.com/)LLM 응용 프로그램을 모니터링하고 평가하기 위한 LangChain의 플랫폼입니다. LangSmith 내보내기는 추적을 LangSmith로 보내 Model 성능, 디버깅 기능, 평가 Workflow에 대한 통찰력을 제공합니다.
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/langsmith@latest
+```
+
+## 구성 {/* #configuration */}
+
+### 전제조건 {/* #prerequisites */}
+
+1. **랭스미스 계정**: 가입하세요[smith.langchain.com](https://smith.langchain.com)
+2. **API 키**: LangSmith 설정 → API 키에서 API 키를 생성합니다.
+3. **환경 변수**: 자격 증명을 설정하세요
+
+```bash title=".env"
+# Required
+LANGSMITH_API_KEY=ls-xxxxxxxxxxxx
+
+# Optional
+LANGCHAIN_PROJECT=my-project  # Default project for traces
+LANGSMITH_BASE_URL=https://api.smith.langchain.com  # For self-hosted
+```
+
+### 제로 구성 설정 {/* #zero-config-setup */}
+
+환경 변수가 설정된 경우 구성 없이 내보내기를 사용합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { LangSmithExporter } from '@mastra/langsmith'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      langsmith: {
+        serviceName: 'my-service',
+        exporters: [new LangSmithExporter()],
+      },
+    },
+  }),
+})
+```
+
+### 명시적 구성 {/* #explicit-configuration */}
+
+자격 증명을 직접 전달할 수도 있습니다(환경 변수보다 우선 적용됨).
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { LangSmithExporter } from '@mastra/langsmith'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      langsmith: {
+        serviceName: 'my-service',
+        exporters: [
+          new LangSmithExporter({
+            apiKey: process.env.LANGSMITH_API_KEY,
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+## 구성 옵션 {/* #configuration-options */}
+
+### 완전한 구성 {/* #complete-configuration */}
+
+```typescript
+new LangSmithExporter({
+  // Required credentials
+  apiKey: process.env.LANGSMITH_API_KEY!,
+
+  // Optional settings
+  apiUrl: process.env.LANGSMITH_BASE_URL, // Default: https://api.smith.langchain.com
+  projectName: 'my-project', // Project to send traces to (overrides LANGCHAIN_PROJECT env var)
+  callerOptions: {
+    // HTTP client options
+    timeout: 30000, // Request timeout in ms
+    maxRetries: 3, // Retry attempts
+  },
+  logLevel: 'info', // Diagnostic logging: debug | info | warn | error
+
+  // LangSmith-specific options
+  hideInputs: false, // Hide input data in UI
+  hideOutputs: false, // Hide output data in UI
+})
+```
+
+### 환경변수 {/* #environment-variables */}
+
+| 변수 | 설명 |
+| - | - |
+|`LANGSMITH_API_KEY` | Your LangSmith API key (required) |
+| `LANGCHAIN_PROJECT` | Default project name for traces (optional, defaults to "default") |
+| `LANGSMITH_BASE_URL` | API URL for self-hosted instances (optional) |
+
+그만큼`projectName` config option takes precedence over the `LANGCHAIN_PROJECT` environment variable, allowing you to programmatically route traces to different projects.
+
+## 동적 구성 {/* #dynamic-configuration */}
+
+런타임 시 다음을 사용하여 범위별 LangSmith 설정을 재정의할 수 있습니다.`withLangsmithMetadata`. This is useful for routing traces to different projects based on runtime conditions (e.g., customer, environment, or feature).
+
+### 도우미 사용 {/* #using-the-helper */}
+
+사용`withLangsmithMetadata` with `buildTracingOptions` to set LangSmith-specific options:
+
+```typescript title="src/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { buildTracingOptions } from '@mastra/observability'
+import { withLangsmithMetadata } from '@mastra/langsmith'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  instructions: 'You are a helpful support agent.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  defaultOptions: {
+    tracingOptions: buildTracingOptions(withLangsmithMetadata({ projectName: 'customer-support' })),
+  },
+})
+```
+
+### 동적 프로젝트 라우팅 {/* #dynamic-project-routing */}
+
+사용`requestContext` to route traces to different projects based on runtime conditions.
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { buildTracingOptions } from '@mastra/observability'
+import { withLangsmithMetadata } from '@mastra/langsmith'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  instructions: 'You are a helpful support agent.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  defaultOptions: ({ requestContext }) => {
+    const userTier = requestContext?.get('user-tier') as string
+    const userId = requestContext?.get('user-id') as string
+
+    return {
+      tracingOptions: buildTracingOptions(
+        withLangsmithMetadata({
+          projectName: userTier === 'enterprise' ? 'enterprise-traces' : 'standard-traces',
+          sessionId: userId,
+        }),
+      ),
+    }
+  },
+})
+```
+
+### 사용 가능한 필드 {/* #available-fields */}
+
+그만큼`withLangsmithMetadata` helper accepts these fields:
+
+| 필드 | 유형 | 설명 |
+| - | - | - |
+|`projectName` | string | Override the project for this trace |
+| `sessionId` | string | Group related traces by session |
+| `sessionName` | string | Display name for the session |
+
+모든 필드는 선택 사항입니다. 도우미는 기존 메타데이터와 병합되므로 여러 번 호출하거나 다른 추적 옵션과 결합할 수 있습니다.
+
+## 관련된 {/* #related */}
+
+* [추적 개요](/docs/observability/tracing/overview)
+* [LangSmith 문서](https://docs.smith.langchain.com/)

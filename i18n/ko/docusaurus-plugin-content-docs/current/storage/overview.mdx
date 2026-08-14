@@ -1,0 +1,238 @@
+---
+title: "스토리지 개요"
+description: "Agent, Workflow, Observability, 평가, 일정 및 Memory 전반에 걸쳐 런타임 상태를 유지하도록 Mastra용 스토리지를 구성합니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+  - "@mastra/mongodb"
+  - "@mastra/oracledb"
+  - "@mastra/pg"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# 스토리지 개요
+
+스토리지는 Mastra 런타임의 지속성 계층입니다. 프로세스가 다시 시작된 후에도 Memory, Workflow 상태, Observability 데이터, 평가 결과, 일정 및 장기 실행 Agent 상태를 유지합니다.
+
+저장 능력:
+
+* [Memory](/docs/memory/overview): 메시지 기록, 스레드, 리소스 및 작업 Memory입니다.
+* [Workflow](/docs/workflows/overview): 일시 중단 및 재개된 Workflow 실행을 위한 내구성 있는 스냅샷입니다.
+* [Observability](/docs/observability/overview): 추적, 범위, 측정항목, 로그, 피드백입니다.
+* [평가](/docs/evals/overview): 점수, 데이터 세트, 실험, 평가 결과입니다.
+* [장기 실행 Agent](/docs/long-running-agents/durable-agents): 백그라운드 작업, 일정, 목표 및 스레드 상태입니다.
+
+## 스토리지를 구성해야 하는 경우 {/* #when-to-configure-storage */}
+
+상태가 다시 시작 후에도 유지되어야 하거나 프로세스 간에 공유되어야 하는 경우 영구 스토리지 어댑터를 구성합니다. 영구 저장소는 또한 세션 전반에 걸쳐 Studio에서 상태를 계속 표시합니다. 기본 Memory 내 저장소는 테스트 및 짧은 로컬 실험에 유용하지만 프로세스가 종료되면 데이터가 손실됩니다.
+
+애플리케이션에 다음 동작이 필요할 때 스토리지를 사용하세요.
+
+* Agent은 과거 메시지나 사용자 사실을 기억합니다.
+* 다시 시작한 후 Workflow가 일시 중지되고 다시 시작됩니다.
+* 분석을 위해 추적, 지표, 로그, 점수 또는 피드백을 계속 사용할 수 있습니다.
+* 일정과 백그라운드 작업은 배포 전반에 걸쳐 계속됩니다.
+* 여러 런타임 프로세스가 동일한 상태를 읽고 씁니다.
+
+## 스토리지 작동 방식 {/* #how-storage-works */}
+
+마스트라 스토리지는 다음과 같이 구성됩니다.**domains**. A domain owns one type of runtime data, and a storage adapter implements one or more domains.
+
+| 도메인 | 무엇을 저장하나요?
+| - | - |
+|`memory` | Threads, messages, resources, working memory, and other agent memory state. |
+| `workflows` | Workflow snapshots used to suspend and resume runs. |
+| `observability` | Traces, spans, metrics, logs, and feedback. |
+| `scores` | Eval score records. |
+| `datasets` | Dataset records and dataset items used by evals and experiments. |
+| `experiments` | Experiment runs and per-item experiment results. |
+| `backgroundTasks` | Background task records and execution state. |
+| `schedules` | Schedule definitions and trigger history. |
+| `threadState` | Durable task, goal, and thread state. |
+
+어댑터 지원은 도메인에 따라 다릅니다. 전체 도메인 목록과 기본 제공 스키마는 다음을 참조하세요.[storage overview reference](/reference/storage/overview).
+
+## 데이터 형태에 따라 백엔드 선택 {/* #choose-a-backend-by-data-shape */}
+
+다양한 도메인은 다양한 종류의 데이터를 작성하고 쿼리합니다. 도메인의 액세스 패턴에 따라 백엔드를 선택하세요.
+
+* `memory`: 기억된 모든 Agent 호출 중에 행을 읽고 씁니다. libSQL, PostgreSQL 또는 MongoDB와 같은 트랜잭션 데이터베이스를 사용합니다.
+* `observability`: 대용량 원격 분석을 작성하고 종종 집계를 쿼리합니다. 전용 Observability 저장소나 ClickHouse 또는 DuckDB와 같은 온라인 분석 처리(OLAP) 백엔드를 사용하세요.
+* `workflows`: 실행이 다시 시작될 때 사용할 수 있어야 하는 내구성 있는 스냅샷을 저장합니다. 안정적인 영구 데이터베이스를 사용하세요.
+* `scores`, `datasets`, and `experiments`: Store lower-frequency evaluation data that's often read later for analysis.
+* `schedules`: 일정 정의 및 화재 이력을 저장합니다. 일정 도메인을 구현하는 어댑터를 사용하세요.
+
+도메인의 운영 요구사항이 다른 경우 다음을 사용하세요.[composite storage](#composite-storage) to route each domain to the right backend.
+
+## 로컬에서 시작하기 {/* #get-started-locally */}
+
+로컬 개발의 경우 파일 지원 데이터베이스와 함께 libSQL을 사용하십시오. 별도의 데이터베이스 서버가 필요하지 않으며 다시 시작하는 동안 상태를 유지합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+})
+```
+
+:::tip\[Studio와 데이터베이스 공유하기]
+
+달릴 때`mastra dev` alongside your application, use an absolute path so both processes access the same database:
+
+```typescript
+url: 'file:/absolute/path/to/your/project/mastra.db'
+```
+
+다음과 같은 상대 경로`file:./mastra.db` resolve based on each process's working directory, which may differ.
+
+:::
+
+Mastra는 처음 사용할 때 필요한 저장 구조를 초기화합니다.
+
+## 프로덕션을 위한 구성 {/* #configure-for-production */}
+
+프로덕션의 경우 영구 관리형 데이터베이스를 사용합니다. PostgreSQL은 트랜잭션 런타임 상태에 적합하고 관리형 서비스로 널리 사용 가능하므로 대부분의 팀에 좋은 기본값입니다.
+
+생산 지침:
+
+* 백업, 모니터링, 연결 풀링이 포함된 관리형 데이터베이스를 사용하세요.
+* 다음과 같은 로컬 파일 데이터베이스를 유지합니다.`file:./mastra.db` out of multi-process production deployments.
+* 특히 대용량 도메인 라우팅`observability`, to a dedicated backend with [composite storage](#composite-storage).
+* 구성[retention](/reference/storage/retention) policies on the storage adapter or composite store, then call `storage.prune()` from a scheduler or maintenance job.
+* 애플리케이션에서 사용하는 도메인을 기반으로 공급자를 선택하세요. 예를 들어 일정에는 다음을 구현하는 어댑터가 필요합니다.`schedules` domain.
+
+## 구성 범위 {/* #configuration-scope */}
+
+스토리지는 Mastra 인스턴스 수준 또는 Agent 수준에서 구성할 수 있습니다.
+
+### 인스턴스 수준 스토리지 {/* #instance-level-storage */}
+
+인스턴스 수준 스토리지는 동일한 Mastra 인스턴스에 등록된 Agent, Workflow, Observability, 평가, 일정 및 기타 런타임 기능에 의해 공유됩니다.
+
+<Tabs>
+  <TabItem value="postgresql" label="PostgreSQL">
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core'
+    import { PostgresStore } from '@mastra/pg'
+
+    export const mastra = new Mastra({
+      storage: new PostgresStore({
+        id: 'mastra-storage',
+        connectionString: process.env.DATABASE_URL,
+      }),
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="mongodb" label="MongoDB">
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core'
+    import { MongoDBStore } from '@mastra/mongodb'
+
+    export const mastra = new Mastra({
+      storage: new MongoDBStore({
+        id: 'mastra-storage',
+        uri: process.env.MONGODB_URI,
+        dbName: process.env.MONGODB_DB_NAME,
+      }),
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+대부분의 런타임 도메인이 동일한 데이터베이스를 공유할 수 있는 경우 인스턴스 수준 스토리지를 사용하십시오.
+
+### Agent 수준 스토리지 {/* #agent-level-storage */}
+
+Agent 수준 스토리지는`Memory` instance. It overrides instance-level storage for that agent's memory data only.
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { PostgresStore } from '@mastra/pg'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support agent',
+  instructions: 'Answer customer support questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new PostgresStore({
+      id: 'support-agent-storage',
+      connectionString: process.env.SUPPORT_AGENT_DATABASE_URL,
+    }),
+  }),
+})
+```
+
+Agent에 격리된 Memory 경계나 다른 Memory 백엔드가 필요한 경우 Agent 수준 스토리지를 사용하세요.
+
+## 복합 스토리지 {/* #composite-storage */}
+
+[`MastraCompositeStore`](/reference/storage/composite)도메인을 다른 백엔드로 라우팅합니다. 하나의 데이터베이스가 모든 도메인에 적합하지 않을 때 사용하세요.
+
+다음 예에서는 libSQL을 기본 저장소로 사용하고 Workflow 상태를 PostgreSQL로 라우팅합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { LibSQLStore } from '@mastra/libsql'
+import { WorkflowsPG } from '@mastra/pg'
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite-storage',
+    default: new LibSQLStore({
+      id: 'default-storage',
+      url: 'file:./mastra.db',
+    }),
+    domains: {
+      workflows: new WorkflowsPG({
+        connectionString: process.env.DATABASE_URL,
+      }),
+    },
+  }),
+})
+```
+
+라우팅할 수도 있습니다.`observability` to a dedicated analytics backend. See the [observability quickstart](/docs/observability/overview#quickstart) for an observability-specific example.
+
+## 지원되는 Provider {/* #supported-providers */}
+
+각 공급자 페이지에는 설치 지침, 구성 매개변수 및 사용 예가 포함되어 있습니다.
+
+* [libSQL](/reference/storage/libsql)
+* [포스트그레SQL](/reference/storage/postgresql)
+* [몽고DB](/reference/storage/mongodb)
+* [오라클DB](/reference/storage/oracledb)
+* [업스태시](/reference/storage/upstash)
+* [레디스](/reference/storage/redis)
+* [클라우드플레어 D1](/reference/storage/cloudflare-d1)
+* [Cloudflare KV 및 내구성 개체](/reference/storage/cloudflare)
+* [볼록한](/reference/storage/convex)
+* [DynamoDB](/reference/storage/dynamodb)
+* [랜스DB](/reference/storage/lance)
+* [마이크로소프트 SQL 서버](/reference/storage/mssql)
+* [구글 클라우드 스패너](/reference/storage/spanner)
+
+:::팁
+
+libSQL은 별도의 데이터베이스 서버를 실행할 필요가 없기 때문에 로컬 개발을 위한 가장 빠른 경로입니다.
+
+:::
+
+## 다음 단계 {/* #next-steps */}
+
+* [복합 스토리지](/reference/storage/composite)
+* [보관 유지](/reference/storage/retention)
+* [스토리지 스키마](/reference/storage/overview)
+* [Memory](/docs/memory/overview)
+* [관측 가능성 저장소](/docs/observability/overview#storage)

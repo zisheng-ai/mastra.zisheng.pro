@@ -1,0 +1,640 @@
+---
+title: "Tool | Agent"
+description: "Tool를 만들고 이를 Agent에 추가하여 텍스트 생성 이상의 기능을 확장하는 방법을 알아보세요."
+packages:
+  - "@mastra/core"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Tool
+
+Agent는 Tool를 사용하여 API를 호출하고, 데이터베이스를 쿼리하고, 코드베이스에서 사용자 지정 기능을 실행합니다. Tool는 데이터에 대한 구조화된 액세스를 제공하고 명확하게 정의된 작업을 수행함으로써 Agent에게 언어 생성 이상의 기능을 제공합니다. 원격에서 Tool를 로드할 수도 있습니다.[MCP servers](/docs/mcp/overview)Agent의 역량을 확장합니다.
+
+<Inject>
+  **AI Agent의 경우:**&#xB2EC;리다`npx mastra api tool execute weather-tool '{"location":"San Francisco"}'` to test this tool directly instead of writing a temporary script. The command requires a running Mastra server; start the local server with `npx mastra dev`, 또는 연결 가능한 서버의 기본 URL을 다음과 함께 전달합니다.`--url`. 달리다`npx mastra api tool execute --schema`다른 입력을 구성하기 전에. 마스트라의 스킬을 설치하세요.`npx skills add mastra-ai/skills --skill mastra`완전한 API CLI 검색, 타겟팅, 스키마, 인증 및 오류 처리 지침을 제공합니다.
+</Inject>
+
+## Tool를 사용해야 하는 경우 {/* #when-to-use-tools */}
+
+Agent에 원격 리소스의 추가 컨텍스트나 정보가 필요한 경우 또는 특정 작업을 수행하는 코드를 실행해야 하는 경우 Tool를 사용하세요. 여기에는 실시간 데이터를 가져오거나 일관되고 잘 정의된 출력을 반환하는 등 Model이 자체적으로 안정적으로 처리할 수 없는 작업이 포함됩니다.
+
+## 빠른 시작 {/* #quickstart */}
+
+수입[`createTool`](/reference/tools/create-tool) from `@mastra/core/tools` and define a tool with an `id`, `description`, `inputSchema`, `outputSchema`, and `execute` function.
+
+이 예에서는 API에서 날씨 데이터를 가져오는 Tool를 만듭니다. 그만큼`execute` function receives input validated against `inputSchema` as its first argument and an optional execution context as its second. You can destructure the input fields directly in the function signature.
+
+```typescript title="src/mastra/tools/weather-tool.ts"
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const weatherTool = createTool({
+  id: 'weather-tool',
+  description: 'Fetches weather for a location',
+  inputSchema: z.object({
+    location: z.string(),
+  }),
+  outputSchema: z.object({
+    location: z.string(),
+    temperatureCelsius: z.number(),
+    conditions: z.string(),
+  }),
+  execute: async ({ location }, { abortSignal }) => {
+    const response = await fetch(`https://wttr.in/${location}?format=j1`, {
+      signal: abortSignal,
+    })
+    const data = await response.json()
+
+    return {
+      location,
+      temperatureCelsius: Number(data.current_condition[0].temp_C),
+      conditions: data.current_condition[0].weatherDesc[0].value,
+    }
+  },
+})
+```
+
+Tool를 만들 때 설명을 간결하게 유지하고 Tool의 기능에 초점을 맞춰 기본 사용 사례를 강조하세요. 설명적인 스키마 이름은 Agent가 Tool를 사용하는 방법을 안내하는 데도 도움이 될 수 있습니다. 방문[`createTool`](/reference/tools/create-tool) reference for more information on available properties, configurations, and examples.
+
+Agent이 Tool를 사용할 수 있도록 하려면 해당 Tool를`tools` property on the `Agent` class. Mentioning available tools and their general purpose in the agent's system prompt helps the agent decide when to call a tool and when not to.
+
+```typescript {11} title="src/mastra/agents/weather-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { weatherTool } from '../tools/weather-tool'
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: `
+    You are a helpful weather assistant.
+    Use the weatherTool to fetch current weather data.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { weatherTool },
+})
+```
+
+## 스키마 정의 {/* #define-schemas */}
+
+Tool의 내용을 정의할 수 있습니다.`inputSchema` and `outputSchema` with any library that supports [Standard JSON Schema](https://standardschema.dev/json-schema). This includes libraries like [Zod](https://zod.dev/), [Valibot](https://valibot.dev/), and [ArkType](https://arktype.io/).
+
+<Tabs>
+  <TabItem value="zod" label="Zod">
+    ```typescript title="src/mastra/tools/weather-tool.ts"
+    import { createTool } from '@mastra/core/tools'
+    import { z } from 'zod'
+
+    export const weatherTool = createTool({
+      id: 'weather-tool',
+      description: 'Fetches weather for a location',
+      inputSchema: z.object({
+        location: z.string(),
+      }),
+      outputSchema: z.object({
+        location: z.string(),
+        temperatureCelsius: z.number(),
+        conditions: z.string(),
+      }),
+      execute: async ({ location }) => {
+        return { location, temperatureCelsius: 21, conditions: 'sunny' }
+      },
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="valibot" label="Valibot">
+    ```typescript title="src/mastra/tools/weather-tool.ts"
+    import { createTool } from '@mastra/core/tools'
+    import * as v from 'valibot'
+    import { toStandardJsonSchema } from '@valibot/to-json-schema'
+
+    export const weatherTool = createTool({
+      id: 'weather-tool',
+      description: 'Fetches weather for a location',
+      inputSchema: toStandardJsonSchema(
+        v.object({
+          location: v.string(),
+        }),
+      ),
+      outputSchema: toStandardJsonSchema(
+        v.object({
+          location: v.string(),
+          temperatureCelsius: v.number(),
+          conditions: v.string(),
+        }),
+      ),
+      execute: async ({ location }) => {
+        return { location, temperatureCelsius: 21, conditions: 'sunny' }
+      },
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="arktype" label="ArkType">
+    ```typescript title="src/mastra/tools/weather-tool.ts"
+    import { createTool } from '@mastra/core/tools'
+    import { type } from 'arktype'
+
+    export const weatherTool = createTool({
+      id: 'weather-tool',
+      description: 'Fetches weather for a location',
+      inputSchema: type({
+        location: 'string',
+      }),
+      outputSchema: type({
+        location: 'string',
+        temperatureCelsius: 'number',
+        conditions: 'string',
+      }),
+      execute: async ({ location }) => {
+        return { location, temperatureCelsius: 21, conditions: 'sunny' }
+      },
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+## 다양한 Tool {/* #multiple-tools */}
+
+Agent는 여러 Tool를 사용하여 특정 부분을 개별 Tool에 위임함으로써 보다 복잡한 작업을 처리할 수 있습니다. Agent는 사용자의 메시지, Agent의 지침, Tool 설명 및 스키마를 기반으로 사용할 Tool를 결정합니다.
+
+```typescript {13} title="src/mastra/agents/weather-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { weatherTool } from '../tools/weather-tool'
+import { hazardsTool } from '../tools/hazards-tool'
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: `
+    You are a helpful weather assistant.
+    Use the weatherTool to fetch current weather data.
+    Use the hazardsTool to provide information about potential weather hazards.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { weatherTool, hazardsTool },
+})
+```
+
+## Tool로서의 Agent {/* #agents-as-tools */}
+
+다음을 통해 하위 Agent를 추가합니다.`agents` configuration to create a [supervisor](/docs/capabilities/subagents). Mastra converts each subagent to an `agent-<key>` tool. Include a `description` on each subagent so the supervisor knows when to delegate.
+
+```typescript title="src/mastra/agents/supervisor.ts"
+import { Agent } from '@mastra/core/agent'
+
+const writer = new Agent({
+  id: 'writer',
+  name: 'Writer',
+  description: 'Drafts and edits written content',
+  instructions: 'You are a skilled writer.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+export const supervisor = new Agent({
+  id: 'supervisor',
+  name: 'Supervisor',
+  instructions: 'Coordinate the writer to produce content.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // highlight-next-line
+  agents: { writer },
+})
+```
+
+## Tool로서의 Workflow우 {/* #workflows-as-tools */}
+
+다음을 통해 Workflow를 추가하세요.`workflows` configuration. Mastra converts each workflow to a `workflow-<key>` tool that uses the workflow's `inputSchema` and `outputSchema`. Include a `description` on the workflow so the agent knows when to trigger it.
+
+```typescript title="src/mastra/agents/research-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { researchWorkflow } from '../workflows/research-workflow'
+
+export const researchAgent = new Agent({
+  id: 'research-agent',
+  name: 'Research Agent',
+  instructions: 'You are a research assistant.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // highlight-next-line
+  workflows: { researchWorkflow },
+})
+```
+
+## Agent 간 Tool 공유 {/* #share-tools-across-agents */}
+
+여러 Agent가 하나의 Tool를 사용하는 경우 직접 가져오기가 최선의 선택입니다. 각 Agent는 Tool를 가져와서 해당 Tool에 추가합니다.`tools` record. Dependencies remain explicit and each agent can be used independently.
+
+```typescript title="src/mastra/tools/weather-tool.ts"
+import { createTool } from '@mastra/core/tools'
+
+export const weatherTool = createTool({
+  id: 'weather-tool',
+  // Rest of the tool definition...
+})
+```
+
+```typescript title="src/mastra/agents/weather-agents.ts"
+import { Agent } from '@mastra/core/agent'
+import { weatherTool } from '../tools/weather-tool'
+
+export const weatherAgent = new Agent({
+  id: 'weather-agent',
+  name: 'Weather Agent',
+  instructions: 'Answer questions about current weather.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { weatherTool },
+})
+```
+
+```typescript title="src/mastra/agents/travel-agents.ts"
+import { Agent } from '@mastra/core/agent'
+import { weatherTool } from '../tools/weather-tool'
+
+export const travelAgent = new Agent({
+  id: 'travel-agent',
+  name: 'Travel Agent',
+  instructions: 'Help users plan trips.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: { weatherTool },
+})
+```
+
+Mastra 인스턴스에서 Tool에 액세스해야 하는 경우 다음을 참조하세요.[`Mastra.getTool()`](/reference/core/getTool), [`Mastra.getToolById()`](/reference/core/getToolById), [`Mastra.listTools()`](/reference/core/listTools), and the [`Agent` reference](/reference/agents/agent).
+
+## Model의 모양 출력 {/* #shape-output-for-the-model */}
+
+사용`toModelOutput` when your tool returns rich structured data for your application, but you want the model to receive a smaller or multimodal representation. This keeps model context focused while preserving the full tool result in your app.
+
+```typescript title="src/mastra/tools/weather-tool.ts"
+export const weatherTool = createTool({
+  execute: async ({ location }) => {
+    const response = await fetch(`https://wttr.in/${location}?format=j1`)
+    const data = await response.json()
+
+    return {
+      location,
+      temperatureCelsius: Number(data.current_condition[0].temp_C),
+      conditions: data.current_condition[0].weatherDesc[0].value,
+      weatherIconUrl: data.current_condition[0].weatherIconUrl[0].value,
+      source: data,
+    }
+  },
+  toModelOutput: output => {
+    return {
+      type: 'content',
+      value: [
+        {
+          type: 'text',
+          text: `${output.location}: ${output.temperatureCelsius}°C and ${output.conditions}`,
+        },
+        { type: 'image-url', url: output.weatherIconUrl },
+      ],
+    }
+  },
+})
+```
+
+`toModelOutput`또한 전달된 클라이언트 측 Tool에서도 작동합니다.`clientTools`. The mapping runs on the client after the tool executes, and the transformed output is sent back to the server alongside the raw result.
+
+## UI 및 기록을 위한 변환 Tool 페이로드 {/* #transform-tool-payloads-for-ui-and-transcripts */}
+
+사용`transform` when a tool returns raw data your application needs, but browser-facing streams or user-visible transcript messages should receive a smaller or safer shape. `transform` is separate from `toModelOutput`: `toModelOutput` shapes the payload sent back to the model, while `transform` shapes tool input, output, errors, approval payloads, and suspension payloads for `display` and `transcript` targets.
+
+변환이 구성되어 실패하는 경우 Mastra는 표시 또는 기록 대상에 대한 원시 페이로드로 대체되지 않습니다. 안전하지 않으면 입력 델타가 억제됩니다.`inputDelta` transform is available.
+
+참조[`createTool()` reference](/reference/tools/create-tool#example-with-transform) for a `transform` example. For shared rules across several tools, configure the agent-level `transform` policy in the [`Agent` constructor](/reference/agents/agent#constructor-parameters).
+
+## Tool 호출에 대한 논리 실행 {/* #run-logic-around-tool-calls */}
+
+사용`hooks` to run custom logic before and after every tool call an agent makes. Hooks apply to all tool sources: assigned tools, memory tools, toolsets, client tools, agent and workflow tools, and [workspace tools](/docs/workspace/overview#tool-hooks). Common uses include logging, auditing, input validation, and blocking specific calls.
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'support-agent',
+  instructions: 'Help users with their questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // highlight-start
+  hooks: {
+    beforeToolCall: ({ toolName, input }) => {
+      console.log(`Running ${toolName}`, input)
+    },
+    afterToolCall: ({ toolName, output, error }) => {
+      console.log(`Finished ${toolName}`, { output, error })
+    },
+  },
+  // highlight-end
+})
+```
+
+`beforeToolCall`Tool가 실행되기 전에 실행되며 Tool 이름, 입력 및 실행 컨텍스트를 받습니다. 반품`{ proceed: false, output }` to skip the tool call entirely, the agent receives `output` as the tool result:
+
+```typescript
+const guardedAgent = new Agent({
+  id: 'guarded-agent',
+  name: 'guarded-agent',
+  instructions: 'Run shell commands for the user.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  hooks: {
+    beforeToolCall: ({ toolName, input }) => {
+      const command = (input as { command?: string }).command ?? ''
+      if (toolName === 'execute_command' && command.includes('rm -rf')) {
+        return { proceed: false, output: 'Command blocked by policy.' }
+      }
+    },
+  },
+})
+```
+
+`afterToolCall`성공 여부에 관계없이 Tool가 완료된 후에 실행됩니다. 성공하면 수신됩니다.`output`; if the tool threw, it receives `error` instead and the error is re-thrown after the hook runs.
+
+### 실행별 후크 {/* #per-execution-hooks */}
+
+통과하다`hooks` to `.generate()` or `.stream()` to set hooks for a single execution. Per-execution hooks override matching agent-level hooks:
+
+```typescript
+await supportAgent.generate('Look up the order status', {
+  hooks: {
+    beforeToolCall: ({ toolName }) => {
+      console.log(`This run only: ${toolName}`)
+    },
+  },
+})
+```
+
+Agent 수준 및 실행별 후크가 키별로 병합: 전달만 가능`beforeToolCall` at execution time keeps the agent-level `afterToolCall`.
+
+## 스트리밍 {/* #streaming */}
+
+Tool는 스트리밍 중에 Tool 실행의 다양한 단계를 모니터링할 수 있는 수명 주기 후크를 지원합니다. 이러한 후크는 로깅이나 분석에 특히 유용합니다.
+
+일반용`writer` API usage, see [Streaming](/guides/concepts/streaming#writer-api).
+
+### 사용 가능한 후크 {/* #available-hooks */}
+
+* **onInputStart**: Tool 호출 입력 스트리밍이 시작될 때 호출됩니다.
+* **onInputDelta**: 스트리밍되는 입력의 각 청크에 대해 호출됩니다.
+* **onInput 사용 가능**: 완전한 입력이 구문 분석되고 검증될 때 호출됩니다.
+* **onOutput**: Tool가 출력과 함께 성공적으로 실행된 후에 호출됩니다.
+
+모든 수명 주기 후크에 대한 자세한 문서는 다음을 참조하세요.[createTool() reference](/reference/tools/create-tool#tool-lifecycle-hooks).
+
+### 예: 사용`onInputAvailable` and `onOutput` {/* #example-using-oninputavailable-and-onoutput */}
+
+```typescript
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+
+export const weatherTool = createTool({
+  id: 'weather-tool',
+  description: 'Get weather information',
+  inputSchema: z.object({
+    location: z.string(),
+  }),
+  outputSchema: z.object({
+    location: z.string(),
+    temperatureCelsius: z.number(),
+    conditions: z.string(),
+  }),
+  // Called when the complete input is available
+  onInputAvailable: ({ input, toolCallId }) => {
+    console.log(`Weather requested for: ${input.location}`)
+  },
+  execute: async ({ location }) => {
+    const weather = await fetchWeather(location)
+    return weather
+  },
+  // Called after successful execution
+  onOutput: ({ output, toolName }) => {
+    console.log(`${toolName} result: ${output.temperatureCelsius}°C, ${output.conditions}`)
+  },
+})
+```
+
+### UI의 스트리밍 Tool 입력 {/* #streaming-tool-input-in-uis */}
+
+Model이 Tool 호출을 생성하면 인수는 다음과 같이 증분적으로 도착합니다.`tool-call-delta` stream chunks before the final `tool-call` chunk. UIs can listen for the corresponding `tool_input_start`, `tool_input_delta`, and `tool_input_end` events to render tool arguments as they stream in, for example, showing a file path or command immediately rather than waiting for the complete tool call.
+
+누적된 부분 JSON 파서를 사용하여`argsTextDelta` fragments lets you extract usable argument values before the JSON is complete. It enables features like live diff previews for edit tools, streaming file content for write tools, and instant display of search patterns or file paths.
+
+## 제어 Tool 선택 {/* #control-tool-selection */}
+
+통과하다`toolChoice` or `activeTools` to `.generate()` or `.stream()` to control which tools the agent uses at runtime.
+
+```typescript
+await agent.generate('Check the forecast', {
+  toolChoice: 'required',
+  activeTools: ['weatherTool'],
+})
+```
+
+참조[`Agent.generate()` reference](/reference/agents/generate) for all runtime options including `toolsets`, `clientTools`, and `prepareStep`.
+
+## 제어`toolName` in stream responses {/* #control-toolname-in-stream-responses */}
+
+그만큼`toolName` in stream responses is determined by the **object key** you use, not the `id` property of the tool, agent, or workflow.
+
+```typescript prettier:false
+export const weatherTool = createTool({
+  id: 'weather-tool',
+})
+
+// Using the variable name as the key
+tools: { weatherTool }
+// Stream returns: toolName: "weatherTool"
+
+// Using the tool's id as the key
+tools: { [weatherTool.id]: weatherTool }
+// Stream returns: toolName: "weather-tool"
+
+// Using a custom key
+tools: { "my-custom-name": weatherTool }
+// Stream returns: toolName: "my-custom-name"
+```
+
+이를 통해 스트림에서 Tool를 식별하는 방법을 지정할 수 있습니다. 당신이 원하는 경우`toolName` to match the tool's `id`, use the tool's `id` as the object key.
+
+### Tool로서의 하위 Agent 및 Workflow {/* #subagents-and-workflows-as-tools */}
+
+하위 Agent와 Workflow는 동일한 패턴을 따릅니다. 접두어 뒤에 객체 키가 오는 Tool로 변환됩니다.
+
+| 부동산 | 접두사 | 예시 키 |`toolName` |
+| - | - | - | - |
+| `agents` | `agent-` | `weather` | `agent-weather` |
+| `workflows` | `workflow-` | `research` | `workflow-research` |
+
+```typescript
+const orchestrator = new Agent({
+  id: 'orchestrator',
+  agents: {
+    weather: weatherAgent, // toolName: "agent-weather"
+  },
+  workflows: {
+    research: researchWorkflow, // toolName: "workflow-research"
+  },
+})
+```
+
+하위 Agent의 경우 스트림 응답에 두 가지 다른 식별자가 표시됩니다.
+
+* `toolName: "agent-weather"`Tool 호출 이벤트: 생성된 Tool 래퍼 이름
+* `id: "weather-agent"`~에`data-tool-agent` chunks: the subagent's actual `id` property
+
+## 내장 Tool {/* #built-in-tools */}
+
+Mastra에는 Agent에 구애받지 않는 내장 Tool가 포함되어 있습니다.`@mastra/core/tools` that add interactive and organizational capabilities to any agent.
+
+| Tool | 목적 |
+| - | - |
+|`ask_user` | Ask the user a question and wait for their answer |
+| `submit_plan` | Submit a plan file for user approval |
+| `task_write` | Create or replace a structured task list |
+| `task_update` | Update one tracked task by ID |
+| `task_complete` | Mark one tracked task completed |
+| `task_check` | Check task list completion status |
+| `webSearchTool` | Run provider-native web search with the active model |
+| `webFetchTool` | Fetch a web page by URL and return its text content |
+
+### Provider 웹 검색 사용 {/* #use-provider-web-search */}
+
+수입`webSearchTool` from `@mastra/core/tools` when you want the model provider to run its native web search tool. Mastra resolves it at run time from the active model, then passes the provider-managed tool to the model.
+
+```typescript {2,10} title="src/mastra/agents/research-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { webSearchTool } from '@mastra/core/tools'
+
+export const researchAgent = new Agent({
+  id: 'research-agent',
+  name: 'Research Agent',
+  instructions: 'Use web search when you need current information.',
+  model: 'openai/gpt-5.6-sol',
+  tools: {
+    search: webSearchTool,
+  },
+})
+```
+
+`webSearchTool`OpenAI, Anthropic, Google Gemini 및 xAI Model을 지원합니다. Mastra가 활성 Model에서 해당 공급자 중 하나를 추론할 수 없는 경우 Agent 실행은 다음과 같이 실패합니다.`MastraError`.
+
+그만큼`search` key is only the agent-local tool name. Use any key. The `webSearchTool` value tells Mastra to use provider web search.
+
+### 웹페이지 가져오기 {/* #fetch-a-web-page */}
+
+수입`webFetchTool` from `@mastra/core/tools` when the agent needs to read a specific URL. The tool requests the page over HTTP or HTTPS and returns its text content plus response metadata.
+
+```typescript {2,10} title="src/mastra/agents/reader-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { webFetchTool } from '@mastra/core/tools'
+
+export const readerAgent = new Agent({
+  id: 'reader-agent',
+  name: 'Reader Agent',
+  instructions: 'Fetch the page the user links to before answering.',
+  model: 'openai/gpt-5.6-sol',
+  tools: {
+    fetch: webFetchTool,
+  },
+})
+```
+
+이 Tool는 단일`url` input and returns `content`, `truncated`, `status`, `statusText`, `contentType`, `url`, and `ok`. It applies these limits:
+
+* 오직`http:` and `https:` URLs are allowed.
+* 요청사항`localhost` and to private or reserved IP addresses are blocked, including addresses returned by DNS resolution.
+* 응답은 100,000자에서 잘립니다.`truncated: true` in the result.
+* 요청은 최대 5개의 리디렉션을 따르며 15초 후에 시간 초과됩니다.
+
+실패는 던지지 않습니다. Tool가 반환됩니다.`isError: true` with the reason in `content`, so the agent can retry or explain the problem.
+
+### 사용자에게 질문하기 {/* #ask-the-user-a-question */}
+
+수입[`askUserTool`](/reference/tools/ask-user-tool) and add it to the agent's toolset.
+
+Tool는 실행을 일시 중단하고`tool-call-suspended` event with the question. It resumes when you call `resumeStream()` with the user's answer.
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { askUserTool } from '@mastra/core/tools'
+
+const agent = new Agent({
+  id: 'assistant',
+  name: 'Assistant',
+  instructions: 'Ask the user for clarification when the request is ambiguous.',
+  model,
+  tools: { askUserTool },
+})
+```
+
+Agent를 스트리밍하고 시청하세요.`tool-call-suspended` chunks. The `suspendPayload` contains the question and optional structured choices:
+
+```typescript title="src/run.ts"
+const stream = await agent.stream('Summarize my project')
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'tool-call-suspended') {
+    const { question, options } = chunk.payload.suspendPayload
+    console.log(question)
+    const answer = await getUserAnswer() // your UI logic
+    const resumed = await agent.resumeStream(answer, { runId: stream.runId })
+    for await (const c of resumed.textStream) process.stdout.write(c)
+  }
+}
+```
+
+`askUserTool`자유 텍스트, 단일 선택 지원(`options` array), and multi-select (`selectionMode: 'multi_select'`) prompts. Pair it with `autoResumeSuspendedTools` so the agent resumes automatically from the user's next chat message. See [Automatic tool resumption](/docs/agents/agent-approval#automatic-tool-resumption) for details.
+
+### 검토를 위해 계획 제출 {/* #submit-a-plan-for-review */}
+
+수입[`submitPlanTool`](/reference/tools/submit-plan-tool) to let the agent write a plan to a file and submit it for user review. The tool suspends the run until the user approves or rejects:
+
+```typescript title="src/run.ts"
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'tool-call-suspended' && chunk.payload.toolName === 'submit_plan') {
+    const { path } = chunk.payload.suspendPayload
+    // Read and display the plan file, then resume:
+    const resumed = await agent.resumeStream({ action: 'approved' }, { runId: stream.runId })
+    for await (const c of resumed.textStream) process.stdout.write(c)
+  }
+}
+```
+
+### 작업 추적 {/* #task-tracking */}
+
+작업 Tool는 Agent 실행을 위한 체계적이고 지속적인 작업 목록을 관리합니다. 그들은 요구한다[Memory](/docs/memory/overview) so the list is persisted in a thread-scoped store.
+
+작업 추적 추가[`TaskSignalProvider`](/reference/signals/task-signal-provider), which bundles all four tools and the `TaskStateProcessor` in a single registration:
+
+```typescript title="src/mastra/agents/index.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { TaskSignalProvider } from '@mastra/core/signals'
+
+const agent = new Agent({
+  id: 'coder',
+  name: 'Coder',
+  instructions: 'Track your progress with the task tools.',
+  model,
+  memory: new Memory(),
+  signals: [new TaskSignalProvider()],
+})
+```
+
+작업은 하나만 가능합니다.`in_progress` at a time. The list is stored in the thread-scoped `threadState` storage domain and projected onto the agent's [state-signal](/docs/long-running-agents/signals) lane, so it survives observational-memory truncation. See the [Task tools reference](/reference/tools/task-tools) for full schemas.
+
+그만큼[AgentController](/docs/harness/agent-controller) automatically includes all built-in tools in every mode, you don't need to add them manually. See [Tool approvals](/docs/harness/agent-controller#approve-tools-and-resume-suspensions) for AgentController-specific behavior.
+
+## 관련된 {/* #related */}
+
+* [`createTool`참조](/reference/tools/create-tool)
+* [`Agent.generate()`참조](/reference/agents/generate): Tool 선택, 단계 및 콜백을 위한 런타임 옵션
+* [백그라운드 작업](/docs/long-running-agents/background-tasks): Agent 루프를 차단하지 않고 장기 실행 Tool를 실행합니다.
+* [MCP 개요](/docs/mcp/overview)
+* [동적 Tool 검색](/reference/processors/tool-search-processor): 대규모 Tool 라이브러리가 있는 Agent를 위해 필요에 따라 Tool 로드
+* [구조화된 출력이 포함된 Tool](/docs/agents/structured-output#combine-tools-and-structured-output): Tool와 구조화된 출력 결합 시 Model 호환성
+* [대리인 승인](/docs/agents/agent-approval)
+* [`askUserTool`참조](/reference/tools/ask-user-tool)
+* [`submitPlanTool`참조](/reference/tools/submit-plan-tool)
+* [작업 Tool 참조](/reference/tools/task-tools)
+* [TaskSignalProvider 참조](/reference/signals/task-signal-provider)
+* [요청 컨텍스트](/docs/server/request-context)

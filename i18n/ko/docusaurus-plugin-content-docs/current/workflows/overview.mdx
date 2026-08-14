@@ -1,0 +1,574 @@
+---
+title: "Workflow우 개요"
+description: "Mastra의 Workflow는 분기, 병렬 실행, 리소스 일시 중지 등과 같은 기능을 사용하여 복잡한 작업 순서를 조율하는 데 도움이 됩니다."
+packages:
+  - "@mastra/core"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Workflow우 개요
+
+Workflow를 사용하면 단일 Agent의 추론에 의존하지 않고 명확하고 구조화된 단계를 사용하여 복잡한 작업 순서를 정의할 수 있습니다. 작업이 분할되는 방식, 작업 간에 데이터가 이동하는 방식, 그리고 언제 실행될 것인지에 대한 완전한 제어권을 제공합니다. Workflow는 기본적으로 내장된 실행 엔진을 사용하여 실행되거나 다음 위치에 배포될 수 있습니다.[workflow runners](/docs/deployment/workflow-runners)관리형 인프라를 위한 Ingest와 같습니다.
+
+<Inject>
+  **AI Agent의 경우:**&#xB2EC;리다`npx mastra api workflow run start test-workflow '{"inputData":{"message":"Hello, world!"}}'` to start this workflow directly instead of writing a temporary script. The command requires a running Mastra server; start the local server with `npx mastra dev`, 또는 연결 가능한 서버의 기본 URL을 다음과 함께 전달합니다.`--url`. 달리다`npx mastra api workflow run start --schema`다른 입력을 구성하기 전에. 마스트라의 스킬을 설치하세요.`npx skills add mastra-ai/skills --skill mastra`완전한 API CLI 검색, 타겟팅, 스키마, 인증 및 오류 처리 지침을 제공합니다.
+</Inject>
+
+## Workflow를 사용해야 하는 경우 {/* #when-to-use-workflows */}
+
+명확하게 정의되어 있고 특정 실행 순서가 있는 여러 단계가 포함된 작업에 대해 Workflow를 사용하세요. 이를 통해 단계 간 데이터 흐름 및 변환 방식과 각 단계에서 호출되는 기본 요소를 세밀하게 제어할 수 있습니다.
+
+## 핵심 원칙 {/* #core-principles */}
+
+Mastra Workflow우는 다음 원칙을 사용하여 작동합니다.
+
+* 정의**steps** with [`createStep`](/reference/workflows/step), specifying input/output schemas and business logic.
+* 식자**steps** with [`createWorkflow`](/reference/workflows/workflow) to define the execution flow.
+* 달리기**workflows** to execute the entire sequence, with built-in support for suspension, resumption, and streaming results.
+
+## Workflow 단계 만들기 {/* #creating-a-workflow-step */}
+
+단계는 Workflow의 구성 요소입니다. 다음을 사용하여 단계를 만듭니다.`createStep()` with `inputSchema` and `outputSchema` to define the data it accepts and returns. You can define both schemas using [Standard JSON Schema](https://standardschema.dev/json-schema) ([Zod](https://zod.dev/), [Valibot](https://valibot.dev/), [ArkType](https://arktype.io/), etc.).
+
+그만큼`execute` function defines what the step does. Use it to call functions in your codebase, external APIs, agents, or tools.
+
+<Tabs>
+  <TabItem value="zod" label="Zod">
+    ```typescript {7,10,16} title="src/mastra/workflows/test-workflow.ts"
+    import { createStep } from '@mastra/core/workflows'
+    import { z } from 'zod'
+
+    const step1 = createStep({
+      id: 'step-1',
+      inputSchema: z.object({
+        message: z.string(),
+      }),
+      outputSchema: z.object({
+        formatted: z.string(),
+      }),
+      execute: async ({ inputData }) => {
+        const { message } = inputData
+
+        return {
+          formatted: message.toUpperCase(),
+        }
+      },
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="valibot" label="Valibot">
+    ```typescript {9,14,21} title="src/mastra/workflows/test-workflow.ts"
+    import { createStep } from '@mastra/core/workflows'
+    import * as v from 'valibot'
+    import { toStandardJsonSchema } from '@valibot/to-json-schema'
+
+    const step1 = createStep({
+      id: 'step-1',
+      inputSchema: toStandardJsonSchema(
+        v.object({
+          message: v.string(),
+        }),
+      ),
+      outputSchema: toStandardJsonSchema(
+        v.object({
+          formatted: v.string(),
+        }),
+      ),
+      execute: async ({ inputData }) => {
+        const { message } = inputData
+
+        return {
+          formatted: message.toUpperCase(),
+        }
+      },
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="arktype" label="ArkType">
+    ```typescript {7,10,16} title="src/mastra/workflows/test-workflow.ts"
+    import { createStep } from '@mastra/core/workflows'
+    import { type } from 'arktype'
+
+    const step1 = createStep({
+      id: 'step-1',
+      inputSchema: type({
+        message: 'string',
+      }),
+      outputSchema: type({
+        formatted: 'string',
+      }),
+      execute: async ({ inputData }) => {
+        const { message } = inputData
+
+        return {
+          formatted: message.toUpperCase(),
+        }
+      },
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+방문하다[`Step`](/reference/workflows/step) for a full list of configuration options.
+
+### Agent 및 Tool 사용 {/* #using-agents-and-tools */}
+
+Workflow 단계에서는 등록된 Agent를 호출하거나 Tool를 직접 가져오고 실행할 수도 있습니다.[Using Tools](/docs/agents/using-tools) page for more information.
+
+## Workflow 만들기 {/* #creating-a-workflow */}
+
+다음을 사용하여 Workflow를 만듭니다.`createWorkflow()` with `inputSchema` and `outputSchema` to define the data it accepts and returns. You can define both schemas using [Standard JSON Schema](https://standardschema.dev/json-schema) ([Zod](https://zod.dev/), [Valibot](https://valibot.dev/), [ArkType](https://arktype.io/), etc.). Add steps using `.then()` and complete the workflow with `.commit()`.
+
+<Tabs>
+  <TabItem value="zod" label="Zod">
+    ```typescript {9,12,15,16} title="src/mastra/workflows/test-workflow.ts" prettier:false
+    import { createWorkflow, createStep } from "@mastra/core/workflows";
+    import { z } from "zod";
+
+    const step1 = createStep({...});
+
+    export const testWorkflow = createWorkflow({
+      id: "test-workflow",
+      inputSchema: z.object({
+        message: z.string()
+      }),
+      outputSchema: z.object({
+        output: z.string()
+      })
+    })
+      .then(step1)
+      .commit();
+    ```
+  </TabItem>
+
+  <TabItem value="valibot" label="Valibot">
+    ```typescript {10,13,16,17} title="src/mastra/workflows/test-workflow.ts" prettier:false
+    import { createWorkflow, createStep } from "@mastra/core/workflows";
+    import * as v from "valibot";
+    import { toStandardJsonSchema } from "@valibot/to-json-schema";
+
+    const step1 = createStep({...});
+
+    export const testWorkflow = createWorkflow({
+      id: "test-workflow",
+      inputSchema: toStandardJsonSchema(v.object({
+        message: v.string()
+      })),
+      outputSchema: toStandardJsonSchema(v.object({
+        output: v.string()
+      }))
+    })
+      .then(step1)
+      .commit();
+    ```
+  </TabItem>
+
+  <TabItem value="arktype" label="ArkType">
+    ```typescript {9,12,15,16} title="src/mastra/workflows/test-workflow.ts" prettier:false
+    import { createWorkflow, createStep } from "@mastra/core/workflows";
+    import { type } from "arktype";
+
+    const step1 = createStep({...});
+
+    export const testWorkflow = createWorkflow({
+      id: "test-workflow",
+      inputSchema: type({
+        message: "string"
+      }),
+      outputSchema: type({
+        output: "string"
+      })
+    })
+      .then(step1)
+      .commit();
+    ```
+  </TabItem>
+</Tabs>
+
+방문하다[Workflow Class](/reference/workflows/workflow) for a full list of configuration options.
+
+### 제어 흐름 이해 {/* #understanding-control-flow */}
+
+Workflow는 다양한 방법을 사용하여 구성할 수 있습니다. 선택한 방법에 따라 각 단계의 스키마 구성 방식이 결정됩니다. 방문[Control Flow](/docs/workflows/control-flow) page for more information.
+
+## 사진관 {/* #studio */}
+
+열려 있는[Studio](/docs/studio/overview) and select a workflow from the **Workflows** tab.
+
+* **그래프 보기**: 중앙 패널에서는 Workflow의 단계와 실행 흐름을 시각화합니다.
+* **입력 양식**: 오른쪽 사이드바는 Workflow의 양식을 생성합니다.`inputSchema`. Fill it in and start the run.
+* **실시간 상태**: 실행 중에 그래프는 각 단계의 상태를 실시간으로 업데이트합니다. 사이드바에는 Workflow의 입력, 출력, 상태 및 로그가 표시됩니다.
+* [**시간여행**](/docs/workflows/time-travel): 실행이 완료된 후 개별 단계를 재생하여 검사하거나 다시 시도합니다.
+
+## Workflow 상태 {/* #workflow-state */}
+
+Workflow 상태를 사용하면 모든 단계의 inputSchema 및 OutputSchema를 통과하지 않고도 여러 단계에서 값을 공유할 수 있습니다. 상태를 사용하여 진행 상황을 추적하거나 결과를 누적하거나 전체 Workflow에서 구성을 공유할 수 있습니다.
+
+```typescript title="src/mastra/workflows/test-workflow.ts"
+const step1 = createStep({
+  id: 'step-1',
+  inputSchema: z.object({ message: z.string() }),
+  outputSchema: z.object({ formatted: z.string() }),
+  stateSchema: z.object({ counter: z.number() }),
+  execute: async ({ inputData, state, setState }) => {
+    // Read from state
+    console.log(state.counter)
+
+    // Update state for subsequent steps
+    setState({ ...state, counter: state.counter + 1 })
+
+    return { formatted: inputData.message.toUpperCase() }
+  },
+})
+```
+
+방문하다[Workflow State](/docs/workflows/workflow-state) for complete documentation on state schemas, initial state, persistence across suspend/resume, and nested workflows.
+
+## 단계로서의 Workflow {/* #workflows-as-steps */}
+
+Workflow를 단계로 사용하여 더 큰 컴포지션 내에서 해당 논리를 재사용합니다. 입력과 출력은 다음에 설명된 것과 동일한 스키마 규칙을 따릅니다.[Core principles](/docs/workflows/control-flow).
+
+```typescript {26} title="src/mastra/workflows/test-workflow.ts" prettier:false
+const step1 = createStep({...});
+const step2 = createStep({...});
+
+const childWorkflow = createWorkflow({
+  id: "child-workflow",
+  inputSchema: z.object({
+    message: z.string()
+  }),
+  outputSchema: z.object({
+    emphasized: z.string()
+  })
+})
+  .then(step1)
+  .then(step2)
+  .commit();
+
+export const testWorkflow = createWorkflow({
+  id: "test-workflow",
+  inputSchema: z.object({
+    message: z.string()
+  }),
+  outputSchema: z.object({
+    emphasized: z.string()
+  })
+})
+  .then(childWorkflow)
+  .commit();
+```
+
+### Workflow 복제 {/* #cloning-a-workflow */}
+
+다음을 사용하여 Workflow 복제`cloneWorkflow()` when you want to reuse its logic but track it separately under a new ID. Each clone runs independently and shows up as a distinct workflow in logs and observability tools.
+
+```typescript prettier:false {6} title="src/mastra/workflows/test-workflow.ts"
+import { cloneWorkflow } from "@mastra/core/workflows";
+
+const step1 = createStep({...});
+
+const parentWorkflow = createWorkflow({...})
+const clonedWorkflow = cloneWorkflow(parentWorkflow, { id: "cloned-workflow" });
+
+export const testWorkflow = createWorkflow({...})
+  .then(step1)
+  .then(clonedWorkflow)
+  .commit();
+```
+
+## Workflow 등록 {/* #registering-a-workflow */}
+
+애플리케이션 전체에서 사용할 수 있도록 Mastra 인스턴스에 Workflow를 등록하세요. 등록되면 Agent나 Tool에서 호출할 수 있으며 로깅 및 관찰 기능과 같은 공유 리소스에 액세스할 수 있습니다.
+
+```typescript {5} title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { testWorkflow } from './workflows/test-workflow'
+
+export const mastra = new Mastra({
+  workflows: { testWorkflow },
+})
+```
+
+## Workflow 참조 {/* #referencing-a-workflow */}
+
+Agent, Tool, Mastra Client 또는 명령줄에서 Workflow를 실행할 수 있습니다. 전화로 참조를 얻으십시오`.getWorkflow()` on your `mastra` or `mastraClient` instance, depending on your setup:
+
+```typescript
+const testWorkflow = mastra.getWorkflow('testWorkflow')
+```
+
+:::정보`mastra.getWorkflow()` is preferred over a direct import for two reasons:
+
+1. Mastra 인스턴스 구성(로거, 원격 측정, 스토리지, 등록된 Agent 및 벡터 저장소)에 대한 액세스를 제공합니다.
+2. Workflow 입력 및 출력 스키마에 대한 전체 TypeScript 유형 추론을 제공합니다.
+
+사용`getWorkflow()` with the workflow's **registration key** (the key used when adding it to Mastra). While `getWorkflowById()` is available for retrieving workflows by their `id` property, it doesn't provide the same level of type inference.
+:::
+
+## Workflow 실행 {/* #running-workflows */}
+
+Workflow는 두 가지 모드로 실행될 수 있습니다. 시작은 반환하기 전에 모든 단계가 완료될 때까지 기다리는 반면, 스트림은 실행 중에 이벤트를 내보냅니다. 사용 사례에 맞는 접근 방식을 선택하세요. 최종 결과만 필요할 때 시작하고 진행 상황을 모니터링하거나 단계가 완료될 때 작업을 트리거하려는 경우 스트리밍하세요.
+
+<Tabs>
+  <TabItem value="start" label=".start()">
+    다음을 사용하여 Workflow 실행 인스턴스를 만듭니다.`createRun()`, then call `.start()` with `inputData` matching the workflow's `inputSchema`. The workflow executes all steps and returns the final result.
+
+    ```typescript
+    const run = await testWorkflow.createRun()
+
+    const result = await run.start({
+      inputData: {
+        message: 'Hello world',
+      },
+    })
+
+    if (result.status === 'success') {
+      console.log(result.result)
+    }
+    ```
+  </TabItem>
+
+  <TabItem value="stream" label=".stream()">
+    다음을 사용하여 Workflow 실행 인스턴스를 만듭니다.`.createRun()`, then call `.stream()` with `inputData` matching the workflow's `inputSchema`. Iterate over `fullStream` to track progress, then await `result` to get the final workflow result.
+
+    ```typescript
+    const run = await testWorkflow.createRun()
+
+    const stream = run.stream({
+      inputData: {
+        message: 'Hello world',
+      },
+    })
+
+    for await (const chunk of stream.fullStream) {
+      console.log(chunk)
+    }
+
+    // Get the final result (same type as run.start())
+    const result = await stream.result
+
+    if (result.status === 'success') {
+      console.log(result.result)
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+### Workflow 결과 유형 {/* #workflow-result-type */}
+
+둘 다`run.start()` and `stream.result` return a discriminated union based on the `status` property, which can be `success`, `failed`, `suspended`, `tripwire`, or `paused`. You can always safely access `result.status`, `result.input`, `result.steps`, and optionally `result.state` regardless of the status.
+
+또한 상태에 따라 다양한 속성을 사용할 수 있습니다.
+
+| 상태 | 고유한 속성 | 설명 |
+| - | - | - |
+|`success` | `result` | The workflow's output data |
+| `failed` | `error` | The error that caused the failure |
+| `tripwire` | `tripwire` | Contains `reason`, `retry?`, `metadata?`, `processorId?` |
+| `suspended` | `suspendPayload`, `suspended` | Suspension data and array of suspended step paths |
+| `paused` | *(none)* | Only common properties available |
+
+상태별 속성에 액세스하려면`status` first:
+
+```typescript
+const result = await run.start({ inputData: { message: 'Hello world' } })
+
+if (result.status === 'success') {
+  console.log(result.result) // Only available when status is "success"
+} else if (result.status === 'failed') {
+  console.log(result.error.message)
+} else if (result.status === 'suspended') {
+  console.log(result.suspendPayload)
+}
+```
+
+### Workflow 출력 {/* #workflow-output */}
+
+다음은 성공적인 Workflow 결과의 예입니다.`input`, `steps`, and `result` properties:
+
+```json
+{
+  "status": "success",
+  "steps": {
+    "step-1": {
+      "status": "success",
+      "payload": {
+        "message": "Hello world"
+      },
+      "output": {
+        "formatted": "HELLO WORLD"
+      }
+    },
+    "step-2": {
+      "status": "success",
+      "payload": {
+        "formatted": "HELLO WORLD"
+      },
+      "output": {
+        "emphasized": "HELLO WORLD!!!"
+      }
+    }
+  },
+  "input": {
+    "message": "Hello world"
+  },
+  "result": {
+    "emphasized": "HELLO WORLD!!!"
+  }
+}
+```
+
+## 스트리밍 {/* #streaming */}
+
+일반용`writer` API usage, see [Streaming](/guides/concepts/streaming#writer-api).
+
+### Workflow 스트림 페이로드 검사 {/* #inspecting-workflow-stream-payloads */}
+
+스트림에 기록된 이벤트는 방출된 청크에 포함됩니다. 이벤트 유형, 중간 값 또는 단계별 데이터와 같은 사용자 정의 필드에 액세스하려면 이러한 청크를 검사하세요.
+
+```typescript
+const testWorkflow = mastra.getWorkflow('testWorkflow')
+
+const run = await testWorkflow.createRun()
+
+const stream = await run.stream({
+  inputData: {
+    value: 'initial data',
+  },
+})
+
+for await (const chunk of stream) {
+  console.log(chunk)
+}
+
+if (result!.status === 'suspended') {
+  // if the workflow is suspended, we can resume it with the resumeStream method
+  const resumedStream = await run.resumeStream({
+    resumeData: { value: 'resume data' },
+  })
+
+  for await (const chunk of resumedStream) {
+    console.log(chunk)
+  }
+}
+```
+
+### 중단된 Workflow 스트림 재개 {/* #resuming-an-interrupted-workflow-stream */}
+
+어떤 이유로든 Workflow 스트림이 닫히거나 중단된 경우 다음을 사용하여 재개할 수 있습니다.`resumeStream` method. This will return a new `ReadableStream` that you can use to observe the workflow events.
+
+```typescript
+const newStream = await run.resumeStream()
+
+for await (const chunk of newStream) {
+  console.log(chunk)
+}
+```
+
+### Agent를 사용하는 Workflow {/* #workflow-using-an-agent */}
+
+Agent의 파이프`textStream` to the workflow step's `writer`. This streams partial output, and Mastra automatically aggregates the agent's usage into the workflow run.
+
+```typescript
+import { createStep } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+export const testStep = createStep({
+  execute: async ({ inputData, mastra, writer }) => {
+    const { city } = inputData
+
+    const testAgent = mastra?.getAgent('testAgent')
+    const stream = await testAgent?.stream(`What is the weather in ${city}?`)
+
+    await stream!.textStream.pipeTo(writer!)
+
+    return {
+      value: await stream!.text,
+    }
+  },
+})
+```
+
+## 활성 Workflow 실행을 다시 시작하는 중 {/* #restarting-active-workflow-runs */}
+
+Workflow 실행에서 서버와의 연결이 끊어지면 마지막 활성 단계에서 다시 시작할 수 있습니다. 이는 서버 연결이 끊어졌을 때 계속 실행될 수 있는 장기 실행 Workflow에 유용합니다. Workflow 실행을 다시 시작하면 마지막 활성 단계에서 실행이 다시 시작되고 Workflow도 거기에서 계속됩니다.
+
+### 다음을 사용하여 Workflow의 모든 활성 Workflow 실행을 다시 시작합니다.`restartAllActiveWorkflowRuns()` {/* #restarting-all-active-workflow-runs-of-a-workflow-with-restartallactiveworkflowruns */}
+
+사용`restartAllActiveWorkflowRuns()` to restart all active workflow runs of a workflow. This helps restart all active workflow runs of a workflow, without having to manually loop through each run and restart.
+
+```typescript
+workflow.restartAllActiveWorkflowRuns()
+```
+
+### 다음을 사용하여 활성 Workflow 실행을 다시 시작합니다.`restart()` {/* #restarting-an-active-workflow-run-with-restart */}
+
+사용`restart()` to restart an active workflow run from the last active step. This will resume execution from the last active step, and the workflow will continue from there.
+
+```typescript
+const run = await workflow.createRun()
+
+const result = await run.start({ inputData: { value: 'initial data' } })
+
+const restartedResult = await run.restart()
+```
+
+### 활성 Workflow 실행 식별 {/* #identifying-active-workflow-runs */}
+
+Workflow 실행이 활성화되면`status` of `running` or `waiting`. You can check the workflow's `status` to confirm it's active, and use `active` to identify the active workflow run.
+
+```typescript
+const activeRuns = await workflow.listActiveWorkflowRuns()
+if (activeRuns.runs.length > 0) {
+  console.log(activeRuns.runs)
+}
+```
+
+:::메모
+
+로컬 마스터 서버를 실행하는 경우 서버가 시작되면 모든 활성 Workflow 실행이 자동으로 다시 시작됩니다.
+
+:::
+
+## 사용`RequestContext` {/* #using-requestcontext */}
+
+사용[RequestContext](/docs/server/request-context) to access request-specific values. This lets you conditionally adjust behavior based on the context of the request.
+
+```typescript title="src/mastra/workflows/test-workflow.ts"
+export type UserTier = {
+  'user-tier': 'enterprise' | 'pro'
+}
+
+const step1 = createStep({
+  execute: async ({ requestContext }) => {
+    const userTier = requestContext.get('user-tier') as UserTier['user-tier']
+
+    const maxResults = userTier === 'enterprise' ? 1000 : 50
+
+    return { maxResults }
+  },
+})
+```
+
+방문하다[Request Context](/docs/server/request-context) for more information.
+
+:::팁
+
+유형이 안전한 요청 컨텍스트 스키마 유효성 검사에 대해서는 다음을 참조하세요.[Schema Validation](/docs/server/request-context#schema-validation).
+
+:::
+
+## 관련된 {/* #related */}
+
+Workflow를 자세히 살펴보려면 다음을 참조하세요.[Workflow Guide](/guides/guide/ai-recruiter), which walks through the core concepts with a practical example.
+
+* [Workflow 상태](/docs/workflows/workflow-state)
+* [제어 흐름](/docs/workflows/control-flow)
+* [일시중단 및 재개](/docs/workflows/suspend-and-resume)
+* [오류 처리](/docs/workflows/error-handling)
+* [노동자](/docs/deployment/workers): 전용 백그라운드 프로세스에서 Workflow 실행 실행
+* 📹 [Agentic workflows with Mastra workshop](https://www.youtube.com/watch?v=HGt8pVPpX9g)

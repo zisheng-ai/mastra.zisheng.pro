@@ -1,0 +1,219 @@
+---
+title: "다중 사용자 스레드 | Memory"
+description: "메시지 본문에 화자 ID를 전달하여 여러 사용자 간에 하나의 Mastra 스레드를 공유합니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/memory"
+---
+
+# 다중 사용자 스레드
+
+단일 Mastra 스레드는 각각 고유한 이름과 기능적 역할을 가진 여러 사용자가 공유할 수 있습니다. Agent가 단일 공유 스레드를 읽는 동안 사용자를 구분할 수 있도록 메시지 본문에 화자 ID가 포함되어 있습니다.
+
+## 다중 사용자 스레드를 사용하는 경우 {/* #when-to-use-multi-user-threads */}
+
+여러 사람이 하나의 Agent를 통해 동일한 주제에 대해 공동 작업하는 경우 다중 사용자 스레드를 사용하십시오.
+
+* 편집자, 검토자, 승인자가 포함된 공동 문서
+* 한 명의 보조자가 여러 참가자에게 서비스를 제공하는 그룹 채팅
+* 다양한 역할이 다양한 권한을 갖는 다중 이해관계자 검토
+
+## 하나 공유`resourceId` across all participants {/* #share-one-resourceid-across-all-participants */}
+
+스레드는 정확히 하나의 스레드에 속합니다.`resourceId`, so all participants on a shared thread need to pass the same value. Instead of using a user id (the default for single-user apps), key `resourceId` on the conversation itself, for example `doc_${docId}` for a shared document, or `room_${roomId}` for a group chat. With everyone pointing at the same `resourceId`, 그들은 동일한 역사를 읽고 씁니다.
+
+## 각 사용자 메시지에 화자의 신원을 태그로 지정하세요. {/* #tag-each-user-message-with-the-speakers-identity */}
+
+Model은 매 턴마다 누가 말하고 있는지 알아야 합니다. 메시지 본문은 기록에 남고 컨텍스트로 다시 돌아가는 유일한 장소이므로 각 사용자 메시지를 작은`<turn>` tag with the speaker's id, name, and role. The tag stays attached to the message, so when prior turns are recalled the model still sees who said what.
+
+작은 도우미를 사용하여 태그를 만듭니다. 아래 예는 이를 수행하는 한 가지 방법으로, 이를 프로젝트에 복사하고 사용자 데이터 형태에 맞게 조정합니다.
+
+```typescript title="src/mastra/identity.ts"
+export type Speaker = {
+  id: string
+  name: string
+  role: string
+}
+
+function escapeAttr(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+export function asUserTurn(speaker: Speaker, text: string) {
+  const id = escapeAttr(speaker.id)
+  const name = escapeAttr(speaker.name)
+  const role = escapeAttr(speaker.role)
+  return {
+    role: 'user' as const,
+    content: `<turn author_id="${id}" author_name="${name}" functional_role="${role}">
+${text}
+</turn>`,
+  }
+}
+```
+
+Agent에게 읽는 방법을 가르쳐 주세요.`<turn>` tag in its instructions. The agent must have `memory` configured so it can be called with a `thread` and `resource`:
+
+```typescript title="src/mastra/agents/collab.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'collab-storage', url: 'file:./collab.db' }),
+  options: {
+    lastMessages: 20,
+  },
+})
+
+export const collabAgent = new Agent({
+  id: 'collab',
+  name: 'CollabAgent',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  memory,
+  instructions: `
+You are a collaborative document assistant. Multiple users talk to you in the SAME thread.
+
+Every user message is wrapped in a <turn> tag carrying the user's identity:
+
+  <turn author_id="u_alice" author_name="Alice" functional_role="editor">
+  ...message text...
+  </turn>
+
+Rules:
+1. Address users by their author_name.
+2. Respect functional_role: editors propose changes, reviewers approve.
+3. When attributing past statements, read author_name from the surrounding <turn> tag.
+4. Do not echo the <turn> tags back at users.
+  `.trim(),
+})
+```
+
+래핑된 메시지로 Agent에게 전화하세요. 모든 참가자는 동일한 내용을 공유합니다.`thread` and `resource`:
+
+```typescript title="src/mastra/call.ts"
+import { asUserTurn } from './identity'
+
+const docResourceId = 'doc_42'
+const docThreadId = 'doc_42'
+
+const alice = { id: 'u_alice', name: 'Alice', role: 'editor' }
+const bob = { id: 'u_bob', name: 'Bob', role: 'reviewer' }
+
+await collabAgent.generate([asUserTurn(alice, 'My favorite color is teal.')], {
+  memory: { thread: docThreadId, resource: docResourceId },
+})
+
+await collabAgent.generate([asUserTurn(bob, 'I want QA sign-off before publish.')], {
+  memory: { thread: docThreadId, resource: docResourceId },
+})
+```
+
+그만큼`<turn>` tag persists in the message body, so when history is recalled on later turns the model still sees who said what.
+
+## Memory 레이어와 결합 {/* #combining-with-memory-layers */}
+
+사용자 태깅 패턴은 모든 Memory 계층으로 구성됩니다. 대화에서 사용자별 사실을 기억해야 하는 기간을 기준으로 레이어를 선택하세요.
+
+* **짧은 대화**(단일 세션 또는 들어갈 수 있을 만큼 작은 스레드`lastMessages`), or when you need a verbatim record of who said what: use [message history alone](#message-history-alone). The user tags in history are enough. No extra memory layer needed.
+* **장기 실행 스레드**(커져가는 대화`lastMessages`, where you need per-user facts to survive history eviction): use [observational memory](#with-observational-memory-recommended).
+* **구조화된 참가자 목록이 필요하거나 스토리지 어댑터가 OM을 지원하지 않습니다.**(OM에는 LibSQL, PG 또는 MongoDB가 필요함): 사용[working memory](#with-working-memory).
+
+관찰 기억이나 작업 기억은 중복되는 요구 사항을 충족하므로 사용하는 것이 좋습니다. 둘 다 실행하면 큰 이점 없이 대기 시간과 토큰 비용이 추가됩니다.
+
+### 메시지 기록만 {/* #message-history-alone */}
+
+짧은 대화의 경우 또는 누가 무엇을 말했는지에 대한 축어적 기록이 필요한 경우 기록에 있는 사용자 태그로 충분합니다.`lastMessages` brings prior turns back into context with their attribution intact:
+
+```typescript title="src/mastra/agents/collab-basic.ts"
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'collab-storage', url: 'file:./collab.db' }),
+  options: {
+    lastMessages: 20,
+  },
+})
+```
+
+Model은 다음으로부터 정체성을 읽습니다.`<turn>` tag on the current message and from prior tagged messages brought back through `lastMessages`.
+
+### 관찰 기억 포함(권장) {/* #with-observational-memory-recommended */}
+
+[관찰 기억](../memory/observational-memory)(OM)은 Agent의 Tool 예산을 소모하지 않고 사용자별 정보를 백그라운드 로그로 추출합니다. 기본 관찰자 Model은 다음을 읽습니다.`<turn>` tags natively and produces attribution like `Alice stated her favorite color is teal.` and `Bob asked for QA sign-off before publish.`
+
+스토리지에서 지원하는 경우 다중 사용자 스레드의 경우 작업 Memory보다 OM을 선호합니다. OM은 자동으로 사실을 추출하고 참가자 수에 맞게 확장하며 템플릿 유지가 필요하지 않습니다. 재정의 없이 활성화합니다.
+
+```typescript title="src/mastra/agents/collab-om.ts"
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'collab-storage', url: 'file:./collab.db' }),
+  options: {
+    lastMessages: 20,
+    observationalMemory: true,
+  },
+})
+```
+
+OM에는 이를 지원하는 스토리지 어댑터가 필요합니다.`@mastra/libsql`, `@mastra/pg`, `@mastra/mongodb`, or `@mastra/oracledb`.
+
+:::메모
+
+관찰자를 더 약한 Model로 전환하고 사실이 일반 Model로 축소되는 경우`User`, use [`observation.instruction`](/reference/memory/observational-memory) to teach the Observer how to read the `<turn>` tag.
+
+:::
+
+### 작업기억으로 {/* #with-working-memory */}
+
+OM이 옵션이 아닌 경우(예: 스토리지 어댑터가 OM을 지원하지 않는 경우 또는 Agent가 매번 읽고 쓸 수 있는 체계적이고 결정적인 참가자 목록이 필요한 경우) 작업 Memory를 사용하십시오.
+
+기본값[working memory](../memory/working-memory) template assumes one user per thread ("First Name", "Last Name", etc.). For multi-user threads, provide a template with a participants list:
+
+```typescript title="src/mastra/agents/collab-wm.ts"
+import { Memory } from '@mastra/memory'
+import { LibSQLStore } from '@mastra/libsql'
+
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'collab-storage', url: 'file:./collab.db' }),
+  options: {
+    lastMessages: 20,
+    workingMemory: {
+      enabled: true,
+      scope: 'thread',
+      template: `# Document Collaboration State
+
+## Participants
+<!-- One entry per known collaborator. Use author_id as the stable key. -->
+<!-- - **<author_name>** (<author_id>, <functional_role>): <their position> -->
+
+## Open Questions
+
+## Decisions
+`,
+    },
+  },
+})
+```
+
+세트`scope: 'thread'` so the participants list belongs to the document, not to any individual user. Add one instruction telling the agent to append new participants to the list whenever a new `author_id` shows up in a `<turn>`.
+
+템플릿에 대한 자세한 내용은 다음을 참조하세요.[Custom templates](../memory/working-memory#custom-templates).
+
+## 보안 {/* #security */}
+
+설정`speaker` from your authenticated request context, never from the request body. If a client can choose its own `author_id`, one user can impersonate another. Use [Request Context](/docs/server/request-context) to read the verified user from your auth layer and build the `<turn>` tag on the server before calling the agent.
+
+## 관련된 {/* #related */}
+
+* [작업기억](../memory/working-memory)
+* [관찰 기억](../memory/observational-memory)
+* [Agent 간 Memory 공유](../memory/overview#share-memory-between-agents)
+* [`Memory`참조](/reference/memory/memory-class)

@@ -1,0 +1,137 @@
+---
+title: "참조: 버전 관리 | 편집자"
+description: "Editor 버전 수명 주기, 선택, 하위 Agent 전파, 소스 동작, REST 엔드포인트 및 SDK 메서드에 대한 참조입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/editor"
+  - "@mastra/client-js"
+---
+
+# 버전 관리
+
+편집기 버전에는 Agent와 Prompt 블록이 저장되어 있습니다. 데이터베이스 지원 리소스는 초안 및 게시 작업을 사용합니다. 코드 지원 Agent 재정의에서는 결정적 파일과 Git 기록을 사용합니다.
+
+보다[Editor versioning](/docs/editor/overview#versioning) for release and experimentation patterns.
+
+## 데이터베이스 수명주기 {/* #database-lifecycle */}
+
+리소스 레코드는`activeVersionId`. Individual snapshots don't store a lifecycle status.
+
+| 기간 | 의미 |
+| - | - |
+| 최신 | 가장 최근에 생성된 구성 스냅샷 |
+| 게시됨 | 선택한 스냅샷`activeVersionId` |
+| Draft | The latest snapshot when it differs from `activeVersionId`, or when no active version exists |
+| Historical | Any other retained snapshot |
+
+변경된 스냅샷 필드를 저장하면 새로운 최신 버전이 생성됩니다. 동일한 스냅샷 필드를 저장하거나 메타데이터를 변경하는 것만으로는 버전이 생성되지 않습니다.
+
+활성 버전이 있는 경우 초안을 생성해도 게시된 요청을 처리하는 버전은 변경되지 않습니다. 업데이트 게시`activeVersionId`. Restoring a historical version copies its configuration into a new inactive draft.
+
+직접 네임스페이스 메서드와 REST API는 한 가지 중요한 차이점이 있습니다.`editor.prompt.update()` creates an inactive draft. `editor.agent.update()` creates a version and immediately assigns it to `activeVersionId`. The stored-agent REST `PATCH` route creates an inactive draft unless `autoPublish`활성화되었습니다.
+
+일반 저장된 리소스에 활성 버전이 없으면 게시된 해상도가 최신 스냅샷으로 대체될 수 있습니다. 코드 정의 Agent 재정의의 경우 요청`status: 'published'` without an active override returns the original code agent.
+
+## 코드 소스 {/* #code-source */}
+
+와 함께`source: 'code'`, active agent overrides are serialized as deterministic JSON under `<codePath>/agents/<encodedAgentId>.json`. The default `codePath` is `./mastra/editor`.
+
+파일을 생성하기 위해 초기 Agent가 게시됩니다. 이후 서버 업데이트는 기본적으로 초안을 생성하고 해당 버전이 활성화되면 파일을 작성합니다. Git 버전은 Studio에서 읽기 전용이며 커밋 메시지를 변경 메시지로 사용합니다. 기본 기록 스캔은 최대 50개의 최근 커밋을 읽고 구문 분석된 JSON 스냅샷이 변경되지 않은 연속 커밋을 건너뜁니다.
+
+보다[`MastraEditor`](/reference/editor/mastra-editor#source) for source options.
+
+## Agent 버전 선택 {/* #select-an-agent-version */}
+
+부름[`mastra.getAgentById()`](/reference/core/getAgentById) without a selector returns the registered code-defined agent. Pass `status` or `versionId` to apply a stored override. See [Select a version](/docs/editor/overview#select-a-version) for a TypeScript example.
+
+기본 서버 접두사를 사용하여 선택기를 쿼리 매개변수로 전달합니다.`/api`:
+
+```bash title="Version selection through the API"
+# Published version
+curl http://localhost:4111/api/agents/support-agent
+
+# Latest draft
+curl http://localhost:4111/api/agents/support-agent?status=draft
+
+# Exact version
+curl http://localhost:4111/api/agents/support-agent?versionId=abc-123
+```
+
+참조[Client SDK agents reference](/reference/client-js/agents#version-management) for Client SDK and React SDK selectors.
+
+## 하위 Agent 버전 관리 {/* #sub-agent-versioning */}
+
+버전 재정의는 다음을 통해 전파됩니다.[supervisor-agent delegation](/docs/capabilities/subagents) in request context. Define selectors at three levels:
+
+1. `Mastra`사례`versions`: Defaults for every invocation
+2. 서버 요청 본문`versions`: Per-request values added to request context
+3. 직접`generate()` or `stream()` `versions`: Per-invocation values
+
+항목은 Agent ID별로 병합됩니다. 동일한 ID의 경우 우선순위는 다음과 같습니다.**direct invocation > request body or existing request context > Mastra instance default**.
+
+Mastra 인스턴스에 기본값을 설정합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraEditor } from '@mastra/editor'
+
+export const mastra = new Mastra({
+  agents: { supervisor, researchAgent, writerAgent },
+  editor: new MastraEditor(),
+  versions: {
+    agents: {
+      'research-agent': { status: 'published' },
+      'writer-agent': { versionId: 'abc-123' },
+    },
+  },
+})
+```
+
+직접 호출을 위해 하나의 하위 Agent를 재정의합니다.
+
+```typescript title="src/routes/experiment.ts"
+const result = await supervisor.generate('Research and write about AI safety', {
+  versions: {
+    agents: {
+      'research-agent': { status: 'draft' },
+    },
+  },
+})
+```
+
+또는 서버 요청 본문에 선택기를 전달합니다.
+
+```bash title="Per-request sub-agent versions"
+curl -X POST http://localhost:4111/api/agents/supervisor/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{ "role": "user", "content": "Research AI safety" }],
+    "versions": {
+      "agents": {
+        "research-agent": { "status": "draft" }
+      }
+    }
+  }'
+```
+
+Editor가 구성되지 않았거나 버전을 확인할 수 없는 경우 Mastra는 경고를 기록하고 코드 정의 하위 Agent를 사용합니다.
+
+## 저장 Agent REST API {/* #stored-agent-rest-api */}
+
+기본 Mastra 서버 접두사는 다음과 같습니다.`/api`. A custom server prefix changes the paths below.
+
+| 방법 | 경로 | 설명 |
+| - | - | - |
+|`GET` | `/api/stored/agents` | List stored agents |
+| `POST` | `/api/stored/agents` | Create a stored agent |
+| `GET` | `/api/stored/agents/:storedAgentId` | Get a stored agent |
+| `PATCH` | `/api/stored/agents/:storedAgentId` | Update a stored agent |
+| `DELETE` | `/api/stored/agents/:storedAgentId` | Delete a stored agent |
+| `GET` | `/api/stored/agents/:storedAgentId/dependents` | List readable dependents and count hidden cross-workspace references |
+| `POST` | `/api/stored/agents/:storedAgentId/export` | Export the allowed override fields as deterministic JSON |
+
+종속 응답에는 호출자가 읽을 수 있는 Agent가 나열됩니다.`id` and `name`. Its `hiddenCount` field counts cross-workspace references that the caller can't read, but only when the target agent is public.
+
+버전 관리 경로는 아래에 중첩되어 있습니다.`/api/stored/agents/:storedAgentId/versions`. See [version management](/reference/client-js/agents#version-management) for operations and Client SDK methods.
+
+클라이언트 SDK는 다음을 노출합니다.`listStoredAgents()`, `createStoredAgent()`, and `getStoredAgent()`. The resource returned by `getStoredAgent(id)` includes methods for updates, deletion, dependents, export, and version management.

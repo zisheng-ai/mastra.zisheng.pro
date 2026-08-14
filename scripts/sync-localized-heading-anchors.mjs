@@ -22,6 +22,20 @@ const localeTargets = {
     models: 'i18n/zh-CN/docusaurus-plugin-content-docs-models/current',
     learn: 'src/learn/content/zh-CN',
   },
+  fr: {
+    docs: 'i18n/fr/docusaurus-plugin-content-docs/current',
+    guides: 'i18n/fr/docusaurus-plugin-content-docs-guides/current',
+    reference: 'i18n/fr/docusaurus-plugin-content-docs-reference/current',
+    models: 'i18n/fr/docusaurus-plugin-content-docs-models/current',
+    learn: 'src/learn/content/fr',
+  },
+  ko: {
+    docs: 'i18n/ko/docusaurus-plugin-content-docs/current',
+    guides: 'i18n/ko/docusaurus-plugin-content-docs-guides/current',
+    reference: 'i18n/ko/docusaurus-plugin-content-docs-reference/current',
+    models: 'i18n/ko/docusaurus-plugin-content-docs-models/current',
+    learn: 'src/learn/content/ko',
+  },
   'zh-TW': {
     docs: 'i18n/zh-TW/docusaurus-plugin-content-docs/current',
     guides: 'i18n/zh-TW/docusaurus-plugin-content-docs-guides/current',
@@ -55,7 +69,7 @@ const contentRoots = [
 
 if (unknownArguments.length > 0) {
   console.error(`Unknown argument(s): ${unknownArguments.join(', ')}`)
-  console.error('Usage: node scripts/sync-localized-heading-anchors.mjs [--check] [--locale=zh-CN]')
+  console.error('Usage: node scripts/sync-localized-heading-anchors.mjs [--check] [--locale=LOCALE]')
   process.exit(2)
 }
 

@@ -1,0 +1,165 @@
+---
+title: "참조: Agent.streamUntilIdle() | 스트리밍"
+description: "전달된 모든 백그라운드 작업이 완료될 때까지 Agent 스트림을 열어두는 Agent.streamUntilIdle()에 대한 API 참조입니다."
+packages:
+  - "@mastra/core"
+---
+
+# Agent.streamUntilIdle()
+
+**추가된 항목:** `@mastra/core@1.29.0`
+
+:::경고\[사용되지 않음]
+
+`streamUntilIdle()`더 이상 사용되지 않습니다. 사용`stream()` with the `untilIdle`대신 옵션:
+
+```ts
+const result = await agent.stream('Research solana for me', {
+  untilIdle: true,
+  memory: { thread: 't1', resource: 'u1' },
+})
+```
+
+통과하다`untilIdle: { maxIdleMs: 60_000 }` to configure the idle timeout.
+
+:::
+
+`streamUntilIdle()`Agent의 응답을 스트리밍하고 실행 중에 전달된 모든 백그라운드 작업이 완료될 때까지 스트림을 열어 둡니다. 작업이 완료되면 해당 결과가 Memory에 기록되고 LLM이 이에 반응할 수 있도록 Agent 루프가 자동으로 다시 시작됩니다. 실행 중인 작업이 없고 대기 중인 완료가 없으면 스트림이 닫힙니다.
+
+Agent가 백그라운드 작업(일반적으로 장기 실행 Tool 또는 하위 Agent)을 디스패치하고 초기 응답에 걸쳐 단일 스트림을 원할 때 사용합니다.**plus** every continuation triggered by a task completion. For foreground-only runs or if you prefer to manage the continuation manually (manually prompt agent to process the result), use [`Agent.stream()`](./stream).
+
+## 사용예 {/* #usage-example */}
+
+```ts
+const stream = await agent.streamUntilIdle('Research solana for me', {
+  memory: { thread: 't1', resource: 'u1' },
+})
+
+for await (const chunk of stream.fullStream) {
+  // chunks from the initial turn AND any continuation turns triggered by
+  // background task completions flow through here
+}
+```
+
+:::정보
+
+`streamUntilIdle()`둘 다 필요합니다[`BackgroundTaskManager`](/reference/configuration#backgroundtasks) and a [memory](/docs/memory/overview) backend. Without either, it uses a plain `agent.stream()` call.
+
+:::
+
+## 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'messages',
+  type: 'string | string[] | CoreMessage[] | AiMessageType[] | UIMessageWithMetadata[]',
+  description:
+    'The messages to send to the agent. Can be a single string, array of strings, or structured message objects.',
+},
+{
+  name: 'options',
+  type: 'AgentExecutionOptions<Output> & { maxIdleMs?: number }',
+  isOptional: true,
+  description:
+    'Accepts every option that Agent.stream() accepts, plus maxIdleMs. See the Agent.stream() reference for the full list.',
+  properties: [
+    {
+      parameters: [
+        {
+          name: 'maxIdleMs',
+          type: 'number',
+          isOptional: true,
+          defaultValue: '300000',
+          description:
+            'Closes the outer stream after this many ms of idleness between turns. The timer only runs while the wrapper is between turns, so a slow first token does not close the stream. Default: 5 minutes.',
+        },
+        {
+          name: 'memory',
+          type: '{ thread?: string | { id: string }; resource?: string }',
+          isOptional: true,
+          description:
+            'Memory thread and resource for the run. Required for continuations to write background task results back into the conversation.',
+        },
+        {
+          name: 'structuredOutput',
+          type: 'PublicStructuredOutputOptions<Output>',
+          isOptional: true,
+          description:
+            'Schema-based structured output. Same shape as Agent.stream(). Note that aggregate properties resolve against the first turn only.',
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+다른 모든 옵션의 경우(`maxSteps`, `modelSettings`, `toolChoice`, `outputProcessors`, `onFinish`, `onChunk`, etc.), see the [`Agent.stream()` parameters](./stream#parameters). `streamUntilIdle()`초기 턴으로 전달합니다.
+
+## 보고 {/* #returns */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'stream',
+  type: 'MastraModelOutput<Output>',
+  description:
+    'A MastraModelOutput where fullStream spans the initial turn plus every auto-continuation. Aggregate properties (text, toolCalls, toolResults, finishReason, messageList, getFullOutput()) resolve against the first turn only.',
+},
+]}
+/>
+
+### 집계 속성에 대한 주의 사항 {/* #aggregate-properties-caveat */}
+
+`streamUntilIdle()`첫 번째 턴에 걸쳐 프록시를 반환합니다.`MastraModelOutput`. Only `fullStream` is replaced with a combined stream that spans every continuation. Every other property (`text`, `toolCalls`, `toolResults`, `finishReason`, `messageList`, and `getFullOutput()`) resolves against the **first turn's** internal buffer.
+
+모든 연속에 대한 집계 보기가 필요한 경우`fullStream` yourself and accumulate.
+
+## 계속 행동 {/* #continuation-behavior */}
+
+내부적으로는`streamUntilIdle()`:
+
+1. 다음을 통해 초기 회전을 실행합니다.`agent.stream(...)` and pipes its `fullStream` into the outer stream.
+2. 확인된 Memory 범위에 대한 백그라운드 작업 완료 이벤트를 구독합니다.
+3. 각 터미널 이벤트를 큐에 넣습니다(`background-task-completed`, `background-task-failed`, `background-task-cancelled`) and, when the outer wrapper is idle between turns, re-invokes `agent.stream([], ...)` with a directive listing the completed `toolCallId`s. The continuation turn flows into the same outer stream.
+4. 실행 중인 작업이 없고 대기 중인 완료가 없으면 외부 스트림을 닫습니다.
+
+## 확장된 사용 예 {/* #extended-usage-example */}
+
+### 턴 사이의 유휴 시간 제한 {/* #cap-idle-time-between-turns */}
+
+```ts title="index.ts"
+const stream = await agent.streamUntilIdle('Kick off the long jobs', {
+  memory: { thread: 't1', resource: 'u1' },
+  maxIdleMs: 60_000, // close the stream after 1 minute of idleness between turns
+})
+
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'background-task-completed') {
+    console.log('Task complete:', chunk.payload.taskId)
+  }
+}
+```
+
+### 연속된 내용 전체에서 텍스트 집계 {/* #aggregate-text-across-continuations */}
+
+```ts title="index.ts"
+const stream = await agent.streamUntilIdle('Research and summarize', {
+  memory: { thread: 't1', resource: 'u1' },
+})
+
+let fullText = ''
+for await (const chunk of stream.fullStream) {
+  if (chunk.type === 'text-delta') {
+    fullText += chunk.payload.text
+  }
+}
+```
+
+## 관련된 {/* #related */}
+
+* [백그라운드 작업](/docs/long-running-agents/background-tasks)
+* [`Agent.stream()`참조](./stream)
+* [backgroundTasks 구성 참조](/reference/configuration#backgroundtasks)
+* [스트림 청크 유형](/reference/streaming/ChunkType)

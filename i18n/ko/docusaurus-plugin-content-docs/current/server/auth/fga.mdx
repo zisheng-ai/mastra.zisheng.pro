@@ -1,0 +1,314 @@
+---
+title: "FGA(세밀한 권한 부여)"
+description: "FGA 공급자를 사용하여 Mastra 애플리케이션에 리소스 수준 인증을 추가합니다."
+packages:
+  - "@mastra/auth-workos"
+  - "@mastra/core"
+  - "@mastra/mcp"
+---
+
+# FGA(세밀한 권한 부여)
+
+:::참고
+세분화된 인증은 Mastra Enterprise Edition의 일부입니다. 프로덕션 배포에는 유효한 EE 라이선스가 필요합니다.[Contact sales](https://mastra.ai/contact)자세한 내용은
+:::
+
+FGA(Fine-Grained Authorization)는 Mastra 애플리케이션에 리소스 수준 권한 확인을 추가합니다. RBAC는 "이 역할이 이 작업을 수행할 수 있습니까?"라고 대답하는 반면 FGA는 대답합니다.**"can this user do this action on this specific resource?"**
+
+## FGA를 사용하는 경우 {/* #when-to-use-fga */}
+
+FGA는 권한이 상황에 맞는 다중 테넌트 B2B 제품을 위해 설계되었습니다.
+
+* 사용자는**admin** of Team A but only a **member** of Team B
+* 스레드 액세스는 사용자 자신의 조직으로 제한되어야 합니다.
+* Workflow 실행 범위는 특정 팀 또는 프로젝트로 제한되어야 합니다.
+* Tool 액세스는 사용자와 리소스의 관계에 따라 달라집니다.
+
+## 구성 {/* #configuration */}
+
+인증 및 RBAC와 함께 Mastra 서버 구성에서 FGA를 구성합니다.
+
+```typescript prettier: false
+import { Mastra } from '@mastra/core/mastra';
+import { MastraFGAPermissions } from '@mastra/core/auth/ee';
+import { MastraAuthWorkos, MastraFGAWorkos } from '@mastra/auth-workos';
+
+const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthWorkos({
+      /* ... */
+      fetchMemberships: true,
+      mapUserToResourceId: user => user.teamId,
+    }),
+    fga: new MastraFGAWorkos({
+      resourceMapping: {
+        agent: { fgaResourceType: 'team', deriveId: (ctx) => ctx.user.teamId },
+        workflow: { fgaResourceType: 'team', deriveId: (ctx) => ctx.user.teamId },
+        thread: { fgaResourceType: 'workspace-thread', deriveId: ({ resourceId }) => resourceId },
+      },
+      permissionMapping: {
+        [MastraFGAPermissions.AGENTS_EXECUTE]: 'manage-workflows',
+        [MastraFGAPermissions.WORKFLOWS_EXECUTE]: 'manage-workflows',
+        [MastraFGAPermissions.MEMORY_READ]: 'read',
+        [MastraFGAPermissions.MEMORY_WRITE]: 'update',
+      },
+    }),
+    storedResources: {
+      scope: true,
+    },
+  },
+});
+```
+
+사용시`MastraFGAWorkos`, set `fetchMemberships: true` on `MastraAuthWorkos`. WorkOS FGA checks need the user's organization memberships to resolve the correct membership ID for authorization.
+
+사용`thread` as the resource-mapping key for memory authorization. `MastraFGAWorkos` still accepts the legacy alias `memory`, but new configs should prefer `thread`.
+
+언제`server.fga` is configured, Mastra enforces FGA on protected actions. If a protected action has no authenticated user, Mastra denies it. If `server.fga` isn't configured, these FGA checks are skipped and Mastra keeps the previous behavior.
+
+### 리소스 매핑 {/* #resource-mapping */}
+
+그만큼`resourceMapping` tells Mastra how to resolve FGA resource types and IDs from request context. Keys are Mastra resource types, values define the FGA resource type and how to derive the ID:
+
+```typescript prettier: false
+resourceMapping: {
+  // When checking "can user execute agent X?", resolve the FGA resource
+  // as the user's team (type: 'team', id: user.teamId)
+  agent: {
+    fgaResourceType: 'team',
+    deriveId: (ctx) => ctx.user.teamId,
+  },
+}
+```
+
+`deriveId()`다음을 수신합니다:
+
+* `user`: 인증된 사용자
+* `resourceId`: 사용 가능한 경우 소유 Mastra 리소스 ID(예: 스레드의`resourceId`)
+* `requestContext`: 고급 테넌트 확인을 위한 현재 요청 컨텍스트
+* `metadata`: 시도한 작업에 대한 공급자별 메타데이터
+
+반품`undefined` from `deriveId()` to fall back to the original Mastra resource ID.
+
+스레드 및 Memory 검사의 경우 Mastra는 여전히 원시를 전달합니다.`threadId` as the resource being checked, but it also forwards the thread's owning `resourceId` into `deriveId()`. This lets you map thread permissions to composite tenant IDs such as `userId-teamId-orgId`.
+
+### 권한 매핑 {/* #permission-mapping */}
+
+그만큼`permissionMapping` translates Mastra's internal permission strings to your FGA provider's permission slugs:
+
+```typescript prettier: false
+import { MastraFGAPermissions } from '@mastra/core/auth/ee';
+
+permissionMapping: {
+  [MastraFGAPermissions.AGENTS_EXECUTE]: 'manage-workflows', // Mastra permission -> WorkOS permission slug
+  [MastraFGAPermissions.MEMORY_READ]: 'read',
+}
+```
+
+권한에 대한 매핑이 없으면 원래 문자열이 전달됩니다.
+
+사용`validatePermissions()` to validate the full set of permissions Mastra may emit at startup. Use this when a provider requires every Mastra permission to have an explicit provider permission slug.
+
+### 저장된 리소스 범위 지정 {/* #stored-resource-scoping */}
+
+FGA는 리소스에 대한 액세스를 승인합니다. 공유 저장소에 있는 저장된 기록은 자동으로 필터링되지 않습니다. 내장된 저장 리소스 API가 다중 테넌트 앱에서 사용되는 경우 저장 리소스 범위 지정을 활성화합니다.
+
+```typescript prettier: false
+const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthWorkos({
+      /* ... */
+      mapUserToResourceId: user => user.teamId,
+    }),
+    storedResources: {
+      scope: true,
+    },
+  },
+});
+```
+
+와 함께`scope: true`, Mastra reads `MASTRA_RESOURCE_ID_KEY` from the request context. `mapUserToResourceId()` sets this value after authentication. Stored resource handlers persist the scope in record metadata and filter list, read, update, publish, and delete operations by that scope.
+
+범위에 사용자 정의 요청 논리가 필요한 경우 객체를 사용하십시오.
+
+```typescript prettier: false
+storedResources: {
+  scope: {
+    metadataKey: 'teamId',
+    resolve: ({ user }) => user.teamId,
+    requireScope: true,
+  },
+},
+```
+
+만약에`requireScope` is `true` or omitted, scoped stored resource routes fail when no scope can be resolved.
+
+### 경로 정책 적용 범위 {/* #route-policy-coverage */}
+
+Mastra에는 Agent, Workflow, Tool, MCP Tool, Memory 스레드, 응답, 대화 및 저장된 리소스를 포함한 내장 리소스 경로에 대한 경로 수준 FGA 메타데이터가 포함되어 있습니다. 저장된 리소스 경로 범위에는 다음이 포함됩니다.`/stored/agents`, `/stored/mcp-clients`, `/stored/prompt-blocks`, `/stored/scorers`, `/stored/skills`, and `/stored/workspaces`. A route is checked when it has route-level `fga` metadata, when Mastra can derive built-in metadata for that route, or when the provider supplies metadata with `resolveRouteFGA()`.
+
+FGA 메타데이터를 확인하지 않는 보호된 경로를 거부하려면 FGA 공급자에서 경로 정책 적용 범위를 구성합니다.
+
+```typescript prettier: false
+const fga = new MastraFGAWorkos({
+  resourceMapping: {
+    project: { fgaResourceType: 'project' },
+  },
+  permissionMapping: {
+    'projects:read': 'read',
+  },
+  requireForProtectedRoutes: true,
+  auditProtectedRoutes: 'warn',
+  validatePermissions: async permissions => {
+    // Throw if a Mastra permission is missing from permissionMapping.
+  },
+});
+```
+
+세트`auditProtectedRoutes: 'error'` to fail startup when protected routes are missing built-in FGA metadata. If `requireForProtectedRoutes` is enabled, Mastra logs this audit as a warning by default.
+
+커스텀 경로의 경우 경로 수준을 선호합니다.`fga` metadata. This keeps authorization policy next to the route:
+
+```typescript prettier: false
+import { createRoute } from '@mastra/server/server-adapter';
+
+export const getProjectRoute = createRoute({
+  method: 'GET',
+  path: '/projects/:projectId',
+  responseType: 'json',
+  requiresAuth: true,
+  fga: {
+    resourceType: 'project',
+    resourceIdParam: 'projectId',
+    permission: 'projects:read',
+  },
+  handler: async () => {
+    return { project: null };
+  },
+});
+```
+
+사용`resolveRouteFGA()` only when route metadata must be derived centrally from route, params, or request context. A route map scales better than string-prefix checks:
+
+```typescript prettier: false
+import type { FGARouteConfig, FGARouteResolver } from '@mastra/core/auth/ee';
+
+const routeFGA = {
+  'GET /billing/:accountId': {
+    resourceType: 'account',
+    resourceIdParam: 'accountId',
+    permission: 'billing:read',
+  },
+} satisfies Record<string, FGARouteConfig>;
+
+const resolveRouteFGA: FGARouteResolver = ({ route }) => routeFGA[`${route.method} ${route.path}`];
+
+const fga = new MastraFGAWorkos({
+  /* ... */
+  resolveRouteFGA,
+});
+```
+
+## 시행 포인트 {/* #enforcement-points */}
+
+FGA 공급자가 구성되면 Mastra는 다음 수명 주기 지점에서 자동으로 인증을 확인합니다.
+
+| 수명주기 지점 | 권한 확인됨 | 리소스 유형 | 리소스 ID |
+| - | - | - | - |
+| Agent 실행(`generate`, `stream`) | `agents:execute` | `agent` | `agentId` |
+| Built-in workflow HTTP execution routes and `Workflow.execute()` | `workflows:execute` | `workflow` | `workflowId` |
+| Standalone tool execution | `tools:execute` | `tool` | `toolName` |
+| Agent tool execution | `tools:execute` | `tool` | `${agentId}:${toolName}` |
+| MCP tool execution | `tools:execute` | `tool` by default, or the server-level `fga.resourceMapping` override | `JSON.stringify([serverName, toolName])` by default, or the server-level derived ID |
+| Thread and memory access | `memory:read`, `memory:write`, `memory:delete` | `thread` | `threadId`|
+| 저장된 리소스 경로 | 라우팅 작업에 대한 저장된 리소스 권한 | 저장된 리소스 유형 | 경로 레코드 ID 또는 수집 경로의 저장된 리소스 범위 |
+| HTTP 리소스 경로 | 경로별로 구성됨 | 경로별로 구성됨 | 경로별로 구성됨 |
+
+OAuth로 보호되는 MCP 서버의 경우 HTTP MCP 전송은 인증된 데이터를 다음과 같이 전달합니다.`extra.authInfo`. If an `MCPServer` is registered on an FGA-enabled Mastra instance, configure `mapAuthInfoToUser` so Mastra can set `requestContext.get('user')` before checking `tools/list` and `tools/call`. Use the server-level `fga` option when MCP tool checks need different resource or permission mapping than internal agent and workflow tool checks. See [MCPServer authentication context](/reference/tools/mcp-server#map-auth-data-for-fga).
+
+직접 SDK 호출`createRun().start()`, `resume()`, or `restart()` aren't independently checked by core FGA in this release. Make those calls from a protected route or guard them in application code. Pass a `requestContext` with an authenticated user when invoking protected entry points directly.
+
+핵심 Agent, 내부 Workflow, Tool 및 Memory 검사도 통과합니다.`requestContext` and action metadata to the FGA provider. Route checks pass `requestContext`. Thread checks pass the owning `resourceId` when available.
+
+## 맞춤형 FGA 공급자 {/* #custom-fga-provider */}
+
+구현하다`IFGAProvider` to use any FGA backend:
+
+```typescript
+import { FGADeniedError } from '@mastra/core/auth/ee'
+import type { FGACheckParams, IFGAProvider, MastraFGAPermissionInput } from '@mastra/core/auth/ee'
+
+class MyFGAProvider implements IFGAProvider {
+  async check(user: any, params: FGACheckParams): Promise<boolean> {
+    // Your authorization logic
+    return true
+  }
+
+  async require(user: any, params: FGACheckParams): Promise<void> {
+    const allowed = await this.check(user, params)
+    if (!allowed) {
+      throw new FGADeniedError(user, params.resource, params.permission)
+    }
+  }
+
+  async filterAccessible<T extends { id: string }>(
+    user: any,
+    resources: T[],
+    resourceType: string,
+    permission: MastraFGAPermissionInput,
+  ): Promise<T[]> {
+    // Filter resources the user can access
+    return resources
+  }
+}
+```
+
+:::참고
+참조[`IFGAProvider` reference](/reference/auth/fga) for every method, parameter, and the `ActorSignal` type.
+:::
+
+## 시스템 액터 {/* #system-actors */}
+
+자율 및 예약 Agent는 최종 사용자 없이 실행됩니다. FGA가 사용자 요청과 구별할 수 있도록 이러한 호출을 행위자 신호로 표시합니다.
+
+* `true`또는`{ actorKind: 'system' }` identifies an anonymous system actor.
+* 객체 형태는 다음을 수행할 수도 있습니다.`agentId`, `permissions`, and `scope` to identify and constrain the acting agent.
+
+기본적으로 신뢰할 수 있는 행위자는 사용자 중심을 건너뜁니다.`require()` check after a tenant-scope check. To enforce per-agent least privilege, implement the optional `requireActor` method on your provider. It receives the actor and the same `FGACheckParams` as `require`, and throws `FGADeniedError` to deny. When your provider doesn't implement `requireActor`, the trusted-actor bypass is preserved, so adding it's backward compatible.
+
+```typescript
+import { FGADeniedError } from '@mastra/core/auth/ee'
+import type { ActorSignal, FGACheckParams, IFGAProvider } from '@mastra/core/auth/ee'
+
+class MyFGAProvider implements IFGAProvider {
+  // ...check, require, filterAccessible...
+
+  async requireActor(actor: ActorSignal, params: FGACheckParams): Promise<void> {
+    const agentId = actor === true ? undefined : actor.agentId
+    // Resolve the agent's real grants from a trusted source keyed by agentId.
+    const granted = await this.grantsForAgent(agentId)
+    const required = Array.isArray(params.permission) ? params.permission : [params.permission]
+    if (!required.some(permission => granted.includes(permission))) {
+      throw new FGADeniedError(null, params.resource, params.permission)
+    }
+  }
+}
+```
+
+### 신뢰 요구 사항 {/* #trust-requirements */}
+
+행위자 신호는 신뢰할 수 있는 입력이므로 서버측에서 구성합니다.
+
+* 대하다`actor` as a per-call signal. Durable workflows forward it when a run starts, but don't restore the initial actor on resume. Pass it explicitly on every trusted resume, or resolve a fresh actor through agent `defaultOptions`. Without a current actor, user authorization applies and a missing user fails closed.
+* 마스트라 스트립`actor` from execution options handled by its built-in agent HTTP routes. Set it in server-side code, for example a scheduled job or a workflow, never from client input.
+* 테넌트 범위 서버 측을 설정합니다. 내장된 Agent HTTP 경로는 클라이언트 제공을 무시합니다.`organizationId` in the request context, and the trusted-actor path requires an `organizationId` to be set.
+* 내구성 있는 재개는 기존 요청 컨텍스트 복구 및 병합 동작을 유지합니다. 이는 이후 Workflow 세그먼트에 대해 지속형 행위자를 신뢰할 수 있게 만들지 않습니다.
+* 테넌트 범위 확인을 통해 신뢰할 수 있는`organizationId` exists. It doesn't verify that `actor.agentId` belongs to that organization. When that relationship matters, verify it in `requireActor` using authoritative provider data.
+* 대하다`actor.permissions` as an unverified claim. Resolve authoritative grants from a trusted source. A provider that enforces least privilege resolves the agent's authoritative permissions from a trusted source, for example a manifest or your FGA backend keyed by `agentId`, rather than trusting the inline values.
+* 공급자가 구현하면`requireActor`, errors from that method stop execution. Mastra doesn't fall back to organization-only authorization.
+
+## 관련된 {/* #related */}
+
+* [`IFGAProvider`참조](/reference/auth/fga)
+* [인증 개요](/docs/server/auth)
+* [WorkOS 인증](/docs/server/auth/workos)

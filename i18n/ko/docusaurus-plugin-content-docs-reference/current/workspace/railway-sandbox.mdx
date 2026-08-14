@@ -1,0 +1,353 @@
+---
+title: "참조: RailwaySandbox | 작업공간"
+description: "격리된 클라우드 코드 실행을 위한 RailwaySandbox Provider에 대한 문서입니다."
+packages:
+  - "@mastra/railway"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# 철도샌드박스
+
+일시적이고 격리된 명령을 실행합니다.[Railway](https://docs.railway.com/sandboxes)샌드박스. 각 샌드박스는 Railway TypeScript SDK를 통해 요청 시 프로비저닝되는 격리된 Debian Linux VM입니다. 스트리밍 출력, 명령 시간 제한, 구성 가능한 유휴 시간 제한을 통해 명령 실행을 지원합니다.`ISOLATED`/`PRIVATE`네트워크 격리, 철도 템플릿 빌더를 통한 사용자 정의 기본 이미지, 체크포인트 지원 복구, 실행 중인 샌드박스 포크, ID로 기존 샌드박스에 다시 연결 등이 있습니다. 인터페이스에 대한 자세한 내용은 다음을 참조하세요.[WorkspaceSandbox 인터페이스](/reference/workspace/sandbox).
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/railway
+```
+
+세 가지 방법 중 하나로 철도 자격 증명을 설정하세요.
+
+<Tabs>
+  <TabItem value="shell-export" label="Shell export">
+    ```bash
+    export RAILWAY_API_TOKEN=your-api-token
+    export RAILWAY_ENVIRONMENT_ID=your-environment-id
+    ```
+  </TabItem>
+
+  <TabItem value="env-file" label=".env file">
+    ```bash
+    RAILWAY_API_TOKEN=your-api-token
+    RAILWAY_ENVIRONMENT_ID=your-environment-id
+    ```
+  </TabItem>
+
+  <TabItem value="constructor" label="Constructor">
+    ```typescript
+    new RailwaySandbox({
+      token: 'your-api-token',
+      environmentId: 'your-environment-id',
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+## 용법 {/* #usage */}
+
+추가`RailwaySandbox` to a workspace and assign it to an agent:
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Workspace } from '@mastra/core/workspace'
+import { RailwaySandbox } from '@mastra/railway'
+
+const workspace = new Workspace({
+  sandbox: new RailwaySandbox({
+    // token + environmentId read from RAILWAY_API_TOKEN / RAILWAY_ENVIRONMENT_ID
+    idleTimeoutMinutes: 30,
+  }),
+})
+
+const agent = new Agent({
+  id: 'code-agent',
+  name: 'Code Agent',
+  instructions: 'You are a coding assistant working in this workspace.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+  workspace,
+})
+
+const response = await agent.generate(
+  'Print "Hello, world!" and show the current working directory.',
+)
+
+console.log(response.text)
+```
+
+### 비공개 네트워킹 {/* #private-networking */}
+
+다른 철도 서비스에 연결하려면 해당 환경의 개인 네트워크에 가입하세요(예:`postgres.railway.internal`):
+
+```typescript
+const workspace = new Workspace({
+  sandbox: new RailwaySandbox({
+    networkIsolation: 'PRIVATE',
+    env: { NODE_ENV: 'production' },
+  }),
+})
+```
+
+기본값`ISOLATED` mode allows outbound internet access only, with no private network connectivity.
+
+### 사용자 정의 기본 이미지(템플릿) {/* #custom-base-image-templates */}
+
+모든 샌드박스가 준비될 수 있도록 패키지를 사전 설치하고 설정 단계를 실행하세요. 철도 템플릿 빌더를 통해 빌더 콜백을 전달합니다. 템플릿은 첫 번째 템플릿에서 한 번 생성됩니다.`start()`:
+
+```typescript
+const workspace = new Workspace({
+  sandbox: new RailwaySandbox({
+    template: t => t.withPackages('git', 'curl').run('npm i -g pnpm').workdir('/app'),
+  }),
+})
+```
+
+사전 빌드된`SandboxTemplate` to reuse it across sandboxes without rebuilding. Templates are ignored when `sandboxId` is set, since reattaching uses the existing sandbox's filesystem.
+
+### 실행 중인 샌드박스 포크 {/* #forking-a-running-sandbox */}
+
+실행 중인 샌드박스의 파일 시스템을 새로운 독립 샌드박스(라이브 프로세스가 아닌 새로 부팅)로 복제합니다. 반환된`RailwaySandbox` is already started:
+
+```typescript
+const child = await sandbox.fork({ idleTimeoutMinutes: 15 })
+
+const result = await child.executeCommand('cat', ['/app/state.json'])
+console.log(result.stdout)
+```
+
+분기된 샌드박스는 다음을 통해 재정의되지 않는 한 상위의 자격 증명과 기본값을 상속합니다.`fork()` options.
+
+### 체크포인트 복구 {/* #checkpoint-recovery */}
+
+세트`checkpointName` to preserve a sandbox filesystem across Railway sandbox replacement. On `start()`, `RailwaySandbox` first tries to create the sandbox from the checkpoint. If the checkpoint is missing, it creates a sandbox from the configured template or default image, then captures the checkpoint.
+
+```typescript
+const sandbox = new RailwaySandbox({
+  checkpointName: 'project-session-42',
+  idleTimeoutMinutes: 30,
+})
+```
+
+`RailwaySandbox`유휴 시간 초과 직전에 체크포인트를 새로 고칩니다. 복구는 최근에 성공한 체크포인트를 복원합니다. 마지막 체크포인트 이후 실행 중인 프로세스나 파일 시스템 쓰기는 복원하지 않습니다.
+
+각 독립 파일 시스템에 대해 하나의 안정적인 체크포인트 이름을 사용합니다. 관련되지 않은 세션이나 프로젝트 간에 체크포인트 이름을 공유하지 마세요.
+
+### 복제된 샌드박스 체크포인트 {/* #cloned-sandbox-checkpoints */}
+
+사용`clone({ checkpointName })` when a configured `RailwaySandbox` acts as the template for a sandbox fleet:
+
+```typescript
+const template = new RailwaySandbox({ idleTimeoutMinutes: 30 })
+
+const sessionSandbox = template.clone({
+  id: 'session-42',
+  checkpointName: 'project-session-42',
+})
+
+await sessionSandbox.start()
+```
+
+복제된 샌드박스는 전달된 체크포인트를 사용합니다.`clone()`. If no override is passed, it inherits the template sandbox's `checkpointName`.
+
+### 스트리밍 출력 {/* #streaming-output */}
+
+다음을 통해 실시간으로 명령 출력 스트리밍`onStdout` and `onStderr` callbacks:
+
+```typescript
+await sandbox.executeCommand('bash', ['-c', 'for i in 1 2 3; do echo "line $i"; sleep 1; done'], {
+  onStdout: chunk => process.stdout.write(chunk),
+  onStderr: chunk => process.stderr.write(chunk),
+})
+```
+
+두 콜백 모두 선택 사항이며 독립적으로 사용할 수 있습니다.
+
+### 기존 샌드박스에 다시 연결 {/* #reattaching-to-an-existing-sandbox */}
+
+철도 샌드박스는 이를 생성한 프로세스보다 오래 지속됩니다. 새 ID를 프로비저닝하는 대신 철도 ID로 다시 연결하세요.
+
+```typescript
+const sandbox = new RailwaySandbox({ sandboxId: 'existing-railway-sandbox-id' })
+await sandbox._start()
+
+const result = await sandbox.executeCommand('cat', ['/tmp/state.txt'])
+```
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for this sandbox instance.',
+  isOptional: true,
+  defaultValue: 'Auto-generated',
+},
+{
+  name: 'token',
+  type: 'string',
+  description: 'Railway API token for authentication. Falls back to the RAILWAY_API_TOKEN environment variable.',
+  isOptional: true,
+},
+{
+  name: 'environmentId',
+  type: 'string',
+  description: 'Railway environment ID. Falls back to the RAILWAY_ENVIRONMENT_ID environment variable.',
+  isOptional: true,
+},
+{
+  name: 'sandboxId',
+  type: 'string',
+  description:
+    'Reattach to an existing Railway sandbox by its Railway ID instead of creating a new one. When set, start() calls Sandbox.connect().',
+  isOptional: true,
+},
+{
+  name: 'checkpointName',
+  type: 'string',
+  description:
+    'Named Railway checkpoint used to seed new sandboxes and preserve the filesystem before idle teardown. Use a unique stable name for each independent filesystem.',
+  isOptional: true,
+},
+{
+  name: 'idleTimeoutMinutes',
+  type: 'number',
+  description:
+    'How long the sandbox can sit idle (no exec interaction) before Railway destroys it automatically. The valid range and default depend on your Railway plan.',
+  isOptional: true,
+},
+{
+  name: 'networkIsolation',
+  type: "'ISOLATED' | 'PRIVATE'",
+  description:
+    "Network access mode. 'ISOLATED' allows outbound internet only; 'PRIVATE' joins the environment's private network.",
+  isOptional: true,
+  defaultValue: "'ISOLATED'",
+},
+{
+  name: 'env',
+  type: 'Record<string, string>',
+  description: 'Environment variables baked into the sandbox, available to every command.',
+  isOptional: true,
+  defaultValue: '{}',
+},
+{
+  name: 'template',
+  type: 'SandboxTemplate | (base: SandboxTemplate) => SandboxTemplate',
+  description:
+    'Provision the sandbox from a custom base image built with the Railway template builder. Accepts a builder callback or a pre-built template. Ignored when sandboxId is set.',
+  isOptional: true,
+},
+{
+  name: 'timeout',
+  type: 'number',
+  description:
+    'Default execution timeout in milliseconds applied to commands that do not specify their own timeout. Commands run until they exit when omitted.',
+  isOptional: true,
+},
+{
+  name: 'instructions',
+  type: 'string | (opts) => string',
+  description:
+    'Override the default agent instructions. A string replaces them entirely; a function receives the default instructions and returns the final text.',
+  isOptional: true,
+},
+]}
+/>
+
+## 속성 {/* #properties */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Sandbox instance identifier.',
+},
+{
+  name: 'name',
+  type: 'string',
+  description: "Provider name ('RailwaySandbox').",
+},
+{
+  name: 'provider',
+  type: 'string',
+  description: "Provider identifier ('railway').",
+},
+{
+  name: 'status',
+  type: 'ProviderStatus',
+  description: "'pending' | 'initializing' | 'ready' | 'stopped' | 'destroyed' | 'error'",
+},
+{
+  name: 'railway',
+  type: 'Sandbox',
+  description:
+    'The underlying Railway Sandbox instance for direct SDK access. Throws SandboxNotReadyError if the sandbox has not been started.',
+},
+{
+  name: 'processes',
+  type: 'RailwayProcessManager',
+  description:
+    'Background process manager. See [SandboxProcessManager reference](/reference/workspace/process-manager).',
+},
+]}
+/>
+
+## 행동 양식 {/* #methods */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'fork',
+  type: '(options?) => Promise<RailwaySandbox>',
+  description:
+    'Clone this running sandbox into a new, independent RailwaySandbox. The returned sandbox is already started and reattached to the forked Railway sandbox. Accepts optional id, idleTimeoutMinutes, networkIsolation, and env overrides. Throws SandboxNotReadyError if this sandbox has not been started.',
+},
+{
+  name: 'clone',
+  type: '(options?) => RailwaySandbox',
+  description:
+    'Construct an unstarted sibling sandbox that inherits credentials and defaults. Accepts optional id, sandboxId, env, idleTimeoutMinutes, and checkpointName overrides. The cloned sandbox uses options.checkpointName when set, otherwise it inherits the template checkpointName.',
+},
+]}
+/>
+
+## 백그라운드 프로세스 {/* #background-processes */}
+
+`RailwaySandbox`백그라운드 프로세스 생성 및 관리를 위한 내장 프로세스 관리자가 포함되어 있습니다. 생성된 각 프로세스는 철도로 실행됩니다.`exec` session.
+
+```typescript
+const sandbox = new RailwaySandbox()
+await sandbox.start()
+
+// Spawn a background process
+const handle = await sandbox.processes.spawn('node server.js', {
+  env: { PORT: '3000' },
+  onStdout: data => console.log(data),
+})
+
+// Interact with the process
+console.log(handle.stdout)
+await handle.kill()
+```
+
+철도의`exec` API doesn't stream stdin, so `sendStdin()` isn't supported.
+
+보다[`SandboxProcessManager` reference](/reference/workspace/process-manager) for the full API.
+
+## 편집자 Provider {/* #editor-provider */}
+
+공급자를 등록하세요.`MastraEditor` to hydrate stored sandbox configs into runtime instances:
+
+```typescript
+import { railwaySandboxProvider } from '@mastra/railway'
+
+const editor = new MastraEditor({
+  sandboxes: { [railwaySandboxProvider.id]: railwaySandboxProvider },
+})
+```
+
+참조[Sandbox provider reference](/reference/editor/sandbox-provider) for details on registering custom sandbox providers.

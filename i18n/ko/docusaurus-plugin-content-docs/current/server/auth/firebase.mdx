@@ -1,0 +1,302 @@
+---
+title: "파이어베이스 | 인증"
+description: "Firebase 인증을 사용하여 Mastra 애플리케이션을 인증하는 `@mastra/auth-firebase` 패키지에 대한 문서입니다."
+packages:
+  - "@mastra/auth-firebase"
+  - "@mastra/client-js"
+  - "@mastra/core"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# 중포 기지
+
+그만큼`@mastra/auth-firebase`패키지는 Firebase 인증을 사용하여 Mastra에 대한 인증을 제공합니다. Firebase ID 토큰을 사용하여 들어오는 요청을 확인하고 다음을 사용하여 Mastra 서버와 통합합니다.`auth`옵션.
+
+## 전제조건 {/* #prerequisites */}
+
+이 예에서는 Firebase 인증을 사용합니다. 다음을 확인하세요.
+
+1. 다음에서 Firebase 프로젝트를 만듭니다.[Firebase Console](https://console.firebase.google.com/)
+2. 인증을 활성화하고 선호하는 로그인 방법(Google, 이메일/비밀번호 등)을 구성하세요.
+3. 프로젝트 설정 > 서비스 계정에서 서비스 계정 키 생성
+4. 서비스 계정 JSON 파일 다운로드
+
+```env title=".env"
+FIREBASE_SERVICE_ACCOUNT=/path/to/your/service-account-key.json
+FIRESTORE_DATABASE_ID=(default)
+# Alternative environment variable names:
+# FIREBASE_DATABASE_ID=(default)
+```
+
+:::메모
+
+서비스 계정 JSON 파일을 안전하게 저장하고 버전 제어에 커밋하지 마세요.
+
+:::
+
+## 설치 {/* #installation */}
+
+사용하기 전에`MastraAuthFirebase` class you have to install the `@mastra/auth-firebase` package.
+
+```bash npm2yarn
+npm install @mastra/auth-firebase@latest
+```
+
+## 사용 예 {/* #usage-examples */}
+
+### 환경 변수를 사용한 기본 사용법 {/* #basic-usage-with-environment-variables */}
+
+필수 환경 변수(`FIREBASE_SERVICE_ACCOUNT` and `FIRESTORE_DATABASE_ID`), you can initialize `MastraAuthFirebase` without any constructor arguments. The class will automatically read these environment variables as configuration:
+
+```typescript {2,7} title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthFirebase } from '@mastra/auth-firebase'
+
+// Automatically uses FIREBASE_SERVICE_ACCOUNT and FIRESTORE_DATABASE_ID env vars
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthFirebase(),
+  },
+})
+```
+
+### 맞춤 구성 {/* #custom-configuration */}
+
+```typescript {2,6-9} title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraAuthFirebase } from '@mastra/auth-firebase'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MastraAuthFirebase({
+      serviceAccount: '/path/to/service-account.json',
+      databaseId: 'your-database-id',
+    }),
+  },
+})
+```
+
+## 구성 {/* #configuration */}
+
+그만큼`MastraAuthFirebase` class can be configured through constructor options or environment variables.
+
+### 환경변수 {/* #environment-variables */}
+
+* `FIREBASE_SERVICE_ACCOUNT`: Firebase 서비스 계정 JSON 파일의 경로
+* `FIRESTORE_DATABASE_ID`또는`FIREBASE_DATABASE_ID`: Firestore database ID
+
+:::메모
+
+생성자 옵션이 제공되지 않으면 클래스는 자동으로 이러한 환경 변수를 읽습니다. 결과적으로 다음과 같이 전화할 수 있습니다.`new MastraAuthFirebase()` without any arguments if your environment variables are properly configured.
+
+:::
+
+### 사용자 인증 {/* #user-authorization */}
+
+기본적으로`MastraAuthFirebase` uses Firestore to manage user access. It expects a `user_access` collection with documents keyed by user UIDs. The presence of a document in this collection determines whether a user is authorized.
+
+```text title="firestore-structure.txt"
+user_access/
+  {user_uid_1}/     // Document exists = user authorized
+  {user_uid_2}/     // Document exists = user authorized
+```
+
+사용자 인증을 맞춤설정하려면 맞춤 설정을 제공하세요.`authorizeUser` function:
+
+```typescript title="src/mastra/auth.ts"
+import { MastraAuthFirebase } from '@mastra/auth-firebase'
+
+const firebaseAuth = new MastraAuthFirebase({
+  authorizeUser: async user => {
+    // Custom authorization logic
+    return user.email?.endsWith('@yourcompany.com') || false
+  },
+})
+```
+
+방문하다[MastraAuthFirebase](/reference/auth/firebase) for all available configuration options.
+
+## 클라이언트 측 설정 {/* #client-side-setup */}
+
+Firebase 인증을 사용하는 경우 클라이언트 측에서 Firebase를 초기화하고, 사용자를 인증하고, ID 토큰을 검색하여 Mastra 요청에 전달해야 합니다.
+
+### 클라이언트에서 Firebase 설정 {/* #setting-up-firebase-on-the-client */}
+
+먼저 클라이언트 애플리케이션에서 Firebase를 초기화합니다.
+
+```typescript title="lib/firebase.ts"
+import { initializeApp } from 'firebase/app'
+import { getAuth, GoogleAuthProvider } from 'firebase/auth'
+
+const firebaseConfig = {
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+}
+
+const app = initializeApp(firebaseConfig)
+export const auth = getAuth(app)
+export const googleProvider = new GoogleAuthProvider()
+```
+
+### 사용자 인증 및 토큰 검색 {/* #authenticating-users-and-retrieving-tokens */}
+
+Firebase 인증을 사용하여 사용자를 로그인하고 ID 토큰을 검색합니다.
+
+```typescript title="lib/auth.ts"
+import { signInWithPopup, signOut, User } from 'firebase/auth'
+import { auth, googleProvider } from './firebase'
+
+export const signInWithGoogle = async () => {
+  try {
+    const result = await signInWithPopup(auth, googleProvider)
+    return result.user
+  } catch (error) {
+    console.error('Error signing in:', error)
+    throw error
+  }
+}
+
+export const getIdToken = async (user: User) => {
+  try {
+    const idToken = await user.getIdToken()
+    return idToken
+  } catch (error) {
+    console.error('Error getting ID token:', error)
+    throw error
+  }
+}
+
+export const signOutUser = async () => {
+  try {
+    await signOut(auth)
+  } catch (error) {
+    console.error('Error signing out:', error)
+    throw error
+  }
+}
+```
+
+:::메모
+
+다음을 참조하세요.[Firebase documentation](https://firebase.google.com/docs/auth) for other authentication methods like email/password, phone authentication, and more.
+
+:::
+
+## 구성`MastraClient` {/* #configuring-mastraclient */}
+
+언제`auth` is enabled, all requests made with `MastraClient` must include a valid Firebase ID token in the `Authorization` header:
+
+```typescript {6} title="lib/mastra/mastra-client.ts"
+import { MastraClient } from '@mastra/client-js'
+
+export const createMastraClient = (idToken: string) => {
+  return new MastraClient({
+    baseUrl: 'https://<mastra-api-url>',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+    },
+  })
+}
+```
+
+:::정보
+
+ID 토큰 앞에는 다음이 붙어야 합니다.`Bearer` in the Authorization header.
+
+방문하다[Mastra Client SDK](/docs/server/mastra-client) for more configuration options.
+
+:::
+
+### 인증된 요청 만들기 {/* #making-authenticated-requests */}
+
+한 번`MastraClient` is configured with the Firebase ID token, you can send authenticated requests:
+
+<Tabs>
+  <TabItem value="react" label="React">
+    ```tsx title="src/components/test-agent.tsx"
+    'use client'
+
+    import { useAuthState } from 'react-firebase-hooks/auth'
+    import { MastraClient } from '@mastra/client-js'
+    import { auth } from '../lib/firebase'
+    import { getIdToken } from '../lib/auth'
+
+    export const TestAgent = () => {
+      const [user] = useAuthState(auth)
+
+      async function handleClick() {
+        if (!user) return
+
+        const token = await getIdToken(user)
+        const client = createMastraClient(token)
+
+        const weatherAgent = client.getAgent('weatherAgent')
+        const response = await weatherAgent.generate("What's the weather like in New York")
+
+        console.log({ response })
+      }
+
+      return (
+        <button onClick={handleClick} disabled={!user}>
+          Test Agent
+        </button>
+      )
+    }
+    ```
+  </TabItem>
+
+  <TabItem value="nodejs" label="Node.js">
+    ```typescript title="server.js"
+    const express = require('express')
+    const admin = require('firebase-admin')
+    const { MastraClient } = require('@mastra/client-js')
+
+    // Initialize Firebase Admin
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        // Your service account credentials
+      }),
+    })
+
+    const app = express()
+    app.use(express.json())
+
+    app.post('/generate', async (req, res) => {
+      try {
+        const { idToken } = req.body
+
+        // Verify the token
+        await admin.auth().verifyIdToken(idToken)
+
+        const mastra = new MastraClient({
+          baseUrl: 'http://localhost:4111',
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+          },
+        })
+
+        const weatherAgent = mastra.getAgent('weatherAgent')
+        const response = await weatherAgent.generate("What's the weather like in Nairobi")
+
+        res.json({ response: response.text })
+      } catch (error) {
+        res.status(401).json({ error: 'Unauthorized' })
+      }
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="curl" label="cURL">
+    ```bash
+    curl -X POST http://localhost:4111/api/agents/weatherAgent/generate \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer <your-firebase-id-token>" \
+      -d '{
+        "messages": "Weather in London"
+      }'
+    ```
+  </TabItem>
+</Tabs>

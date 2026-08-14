@@ -1,0 +1,242 @@
+---
+title: "가이드: GitHub Actions에서 다국어 PR 설명 자동화"
+description: "Mastra를 사용하여 차이점을 읽고 간결한 PR 설명을 생성하는 GitHub Actions Workflow를 통해 다국어 풀 요청 설명을 자동화합니다."
+---
+
+# GitHub Actions용 ​​PR 설명 Agent 구축
+
+이 가이드에서는[GitHub Action](https://docs.github.com/en/actions)이는 Mastra Agent를 사용하여 풀 요청 차이점을 읽고, 다국어 요약을 생성하고, 이를 GitHub UI의 PR 설명에 직접 작성합니다. 풀 요청이 생성되거나 업데이트될 때마다 작업이 실행되고 차이점이 변경되면 설명이 다시 생성됩니다.
+
+이 접근 방식은 다음과 같은 AI 기반 PR Tool와 유사합니다.[CodeRabbit](https://coderabbit.ai/) and [Greptile](https://www.greptile.com/)이지만 기본 GitHub Actions Workflow 및 Mastra Agent를 사용하여 구축되었습니다.
+
+설정은 세 부분으로 구성됩니다.
+
+* 설명을 생성하는 Mastra Agent
+* 풀 요청 시 트리거되는 GitHub Actions Workflow
+* Workflow를 Agent에 연결하는 Node.js 스크립트
+
+완료된 작업은 영어, 스페인어, 일본어로 요약된 설명을 작성하며 각 항목에는 빠른 스캔을 위해 깃발 이모티콘이 표시됩니다. 예를 들어:
+
+```text
+🇬🇧 English
+This PR integrates Astro into the project, adding configuration files and updating scripts to support Astro development.
+
+🇪🇸 Español
+Este PR integra Astro en el proyecto, añadiendo archivos de configuración y actualizando scripts para soportar el desarrollo con Astro.
+
+🇯🇵 日本語
+このPRは、Astroをプロジェクトに統合し、Astro開発をサポートするための設定ファイルを追加し、スクリプトを更新します。
+```
+
+## 시작하기 전에 {/* #before-you-begin */}
+
+* Mastra 프로젝트(참조[Quickstart](/guides/getting-started/quickstart))
+* 지원되는 API 키[model provider](/models). If you don't have a preference, use [OpenAI](/models/providers/openai)
+* Node.js`v22.13.0` or later
+
+### 저장소 비밀 설정 {/* #set-up-repository-secrets */}
+
+Workflow는 Model 공급자 API 키에 액세스해야 합니다. GitHub에 저장소 비밀로 추가하세요.
+
+1. GitHub의 저장소로 이동
+2. 다음으로 이동**Settings** > **Secrets and variables** > **Actions**
+3. 딸깍 하는 소리**New repository secret**
+4. 이름으로 API 키를 추가하세요.`OPENAI_API_KEY` (or the appropriate key for your provider)
+
+   ![Screenshot of repository secrets in GitHub UI](/img/guides/github-action-repository-secrets.jpg)
+
+Workflow는 이 비밀을 다음과 같이 참조합니다.`${{ secrets.OPENAI_API_KEY }}` and makes it available to the Mastra agent at runtime.
+
+## 설명 Agent 만들기 {/* #create-the-description-agent */}
+
+PR 설명 Agent는 git diff를 리뷰어에게 친숙한 풀 요청 설명으로 명확하게 바꾸는 역할을 담당합니다.
+
+이 Agent는 풀 요청에서 원시 차이점을 수신합니다. 구성된 언어로 설명을 생성하고 이모티콘 플래그를 사용하여 출력 형식을 지정하므로 PR에서 각 언어 섹션을 빠르게 검색할 수 있습니다.
+
+```ts title="src/mastra/agents/description-agent.ts"
+import { Agent } from '@mastra/core/agent'
+
+export const descriptionAgent = new Agent({
+  id: 'description-agent',
+  name: 'PR Description Agent',
+  instructions: `You are a helpful assistant that creates clear, concise PR descriptions.
+
+When given a git diff of changed files, you will:
+1. Analyze the changes to understand what was modified
+2. Write a brief summary and list of changes
+3. Output the same content in English, Spanish, and Japanese
+
+Guidelines:
+- Be concise but informative
+- Focus on the "what" and "why" of changes
+- Use technical terms appropriately
+- Keep bullet points short and scannable
+- Each language section should contain the same information, naturally translated
+
+Output format:
+
+### 🇬🇧 English
+
+[1-2 sentence summary]
+
+- [Change 1]
+- [Change 2]
+- [Change 3]
+
+---
+
+### 🇪🇸 Español
+
+[Same summary in Spanish]
+
+- [Same changes in Spanish]
+
+---
+
+### 🇯🇵 日本語
+
+[Same summary in Japanese]
+
+- [Same changes in Japanese]
+`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+```
+
+### 로컬에서 Agent 테스트 {/* #test-the-agent-locally */}
+
+Workflow를 배포하기 전에 다음에서 Agent를 테스트할 수 있습니다.[Studio](/docs/studio/overview) to verify it generates descriptions correctly.
+
+1. 추가하여 공개 GitHub PR에서 차이점을 얻으세요.`.diff` to the PR URL:
+
+   ```
+   https://github.com/owner/repo/pull/123.diff
+   ```
+
+2. Studio에서 PR 설명 Agent를 열고 다음 Prompt와 함께 차이점 콘텐츠를 붙여넣습니다.
+
+"다음 변경 사항에 대한 PR 설명을 작성해 주세요.`<paste the diff content here>`"
+
+Agent는 영어, 스페인어, 일본어 섹션이 포함된 형식화된 설명을 반환합니다.
+
+## GitHub 작업 {/* #github-actions */}
+
+GitHub Actions는 GitHub 인프라의 단기 환경에서 Workflow를 실행합니다. 각 실행은 깨끗한 가상 머신으로 시작되고 코드를 체크아웃합니다. Workflow 단계를 실행하기 전에 종속성을 설치합니다. 실행이 완료되면 환경이 종료됩니다. 아티팩트나 캐시로 명시적으로 저장하지 않는 한 실행 간에는 아무것도 지속되지 않습니다.
+
+### Workflow 만들기 {/* #create-the-workflow */}
+
+GitHub Actions Workflow는`.github/workflows` directory. Create a `.github` directory at the root of your project, then create a `workflows` directory inside it. Add `pr-description.yml`.
+
+이 Workflow는 끌어오기 요청이 열리거나 업데이트될 때마다 실행됩니다. PR에 대한 diff를 생성하고, Mastra Agent를 호출하여 변경 사항을 설명하고, GitHub UI의 PR에 직접 설명을 씁니다.
+
+```yaml title=".github/workflows/pr-description.yml"
+name: PR Description Generator
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  PR_DIFF_FILE: /tmp/pr_diff.txt
+  PR_DESCRIPTION_FILE: /tmp/pr_description.md
+
+jobs:
+  generate-description:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - id: pr
+        run: |
+          BASE_REF=$(gh pr view ${{ github.event.pull_request.number }} --json baseRefName -q '.baseRefName')
+          git fetch origin $BASE_REF
+          git diff origin/$BASE_REF...HEAD -- . ':!package-lock.json' > $PR_DIFF_FILE
+
+      - run: npx tsx .github/scripts/generate-description.ts
+
+      - run: gh pr edit ${{ github.event.pull_request.number }} --body-file $PR_DESCRIPTION_FILE
+```
+
+#### Workflow우 설명 {/* #the-workflow-explained */}
+
+* **`on: pull_request`**: 풀 요청이 열리거나 업데이트될 때 실행됩니다.
+* **`permissions: pull-requests: write`**: Workflow에서 PR 설명을 업데이트할 수 있습니다.
+* **`env`**: 단계 전체에서 사용되는 공유 파일 경로를 정의하고 Mastra Agent에서 사용하는 Model API 키를 포함하여 리포지토리 비밀에서 필요한 값을 읽습니다.
+* **`actions/checkout@v4`+ 자식 명령**: 전체 저장소 내역을 확인하고, PR 기본 분기를 가져오고, PR diff를 다음에 씁니다.`/tmp/pr_diff.txt`.
+* **`actions/setup-node@v4`**: Workflow에서 사용되는 Node.js 런타임을 설정합니다.
+* **`npm ci`**: 잠금 파일에서 저장소의 Node.js 종속성을 설치합니다.
+* **`generate-description.ts`**: 읽다`/tmp/pr_diff.txt`, calls the Mastra agent, and writes the generated description to `/tmp/pr_description.md`.
+* **`gh pr edit`**: 다음의 내용을 사용하여 풀 요청 설명을 업데이트합니다.`/tmp/pr_description.md`.
+
+:::메모
+
+Workflow에서는 제외됩니다.`package-lock.json` when generating the diff. Lockfiles are often large and noisy, and including them can overwhelm the agent's context window and make the resulting description harder to reason about.
+
+:::
+
+### Workflow 스크립트 만들기 {/* #create-the-workflow-script */}
+
+만들기`scripts` directory inside `.github` and add `generate-description.ts`.
+
+이 스크립트는 PR 차이점을 읽습니다.`PR_DIFF_FILE`, generates a description using the Mastra agent, and writes the result to `PR_DESCRIPTION_FILE` for the workflow to publish to the pull request.
+
+```typescript title=".github/scripts/generate-description.ts"
+import { readFileSync, writeFileSync } from 'fs'
+import { mastra } from '../../src/mastra'
+
+const agent = mastra.getAgent('descriptionAgent')
+
+await agent.generate(
+  `Please create a PR description for the following changes.
+
+Git diff:
+\`\`\`diff
+${readFileSync(process.env.PR_DIFF_FILE!, 'utf-8')}
+\`\`\``,
+  {
+    onError: () => {
+      writeFileSync(
+        process.env.PR_DESCRIPTION_FILE!,
+        'This PR diff is too large to generate a description automatically.',
+      )
+    },
+    onFinish: result => {
+      writeFileSync(process.env.PR_DESCRIPTION_FILE!, result.text)
+    },
+  },
+)
+```
+
+#### Workflow 스크립트 설명 {/* #the-workflow-script-explained */}
+
+* **`mastra.getAgent("descriptionAgent")`**: PR 설명을 생성하는 Mastra Agent를 가져옵니다.
+* **`agent.generate(...)`**: 풀 요청의 차이점을 읽습니다.`PR_DIFF_FILE` and asks the agent to write a PR description.
+* **`onError`콜백**: 대체 메시지를 작성합니다.`PR_DESCRIPTION_FILE` when the diff is too large to process.
+* **`onFinish`콜백**: 생성된 PR 설명을 다음에 씁니다.`PR_DESCRIPTION_FILE`.
+
+## 다음 단계 {/* #next-steps */}
+
+이제 Mastra Agent를 사용하여 다국어 PR 설명을 생성하는 GitHub Action이 생겼습니다. Workflow와 지원 파일이 기본 분기에 병합되면 다음에 풀 요청이 생성되거나 업데이트될 때 Agent가 자동으로 실행됩니다. 다음에서 실행을 모니터링할 수 있습니다.**Actions** tab of your repository.
+
+여기에서 Agent 지침을 맞춤설정하거나 출력 언어를 변경하세요. Workflow를 확장하여 다른 이벤트를 처리할 수도 있습니다.
+
+자세히 알아보려면:
+
+* 읽기[agents](/docs/agents/overview) documentation
+* Agent에게 주세요[tools](/docs/agents/using-tools) to fetch additional context
+* 다른 탐색[GitHub Actions triggers](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows) like issue comments or releases

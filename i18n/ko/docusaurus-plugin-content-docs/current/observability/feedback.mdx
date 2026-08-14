@@ -1,0 +1,162 @@
+---
+title: "피드백 | Observability"
+description: "Mastra 관측 가능성에서 인간 피드백 기록을 수집, 나열 및 쿼리합니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+---
+
+# 피드백
+
+피드백 기록은 엄지손가락, 평점, 댓글, 수정 사항과 같은 인간 참여 신호를 캡처합니다. 사용자, QA, Studio 또는 시스템 검토 데이터를 추적 또는 범위에 연결하고 다른 Observability 신호와 함께 해당 데이터를 쿼리해야 할 때 피드백을 사용하세요.
+
+메트릭 및 점수와 달리 피드백은 일반적으로 사람이나 검토 작업 흐름에 의해 제공됩니다. 숫자 피드백 값은 시간에 따라 집계, 그룹화, 차트 작성 및 백분위수 쿼리가 가능합니다.
+
+## 피드백을 사용해야 하는 경우 {/* #when-to-use-feedback */}
+
+* Agent 응답에 대한 사용자 만족도 평점을 수집하세요.
+* 검토한 추적 옆에 QA 의견이나 수정 사항을 저장하세요.
+* Agent, 환경 또는 실험별로 평가할 수 있는 대시보드를 구축하세요.
+
+## 피드백 추가 {/* #add-feedback */}
+
+사용`mastra.observability.addFeedback()` when you want to annotate a persisted trace or span from app code. The helper is optional on the observability entrypoint, so check that the active observability implementation supports it. See the [client SDK observability reference](/reference/client-js/observability) for all client methods.
+
+```typescript title="src/mastra/feedback.ts"
+if (!mastra.observability.addFeedback) {
+  throw new Error('Feedback is not supported by the active observability implementation')
+}
+
+await mastra.observability.addFeedback({
+  traceId: 'trace-123',
+  spanId: 'span-456',
+  feedback: {
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'The answer solved my issue.',
+  },
+})
+```
+
+## 메시지에 대한 추적 찾기 {/* #find-the-trace-for-a-message */}
+
+피드백은 일반적으로 사용자가 이미 읽은 메시지에 대해 수집되므로`traceId` for that message. Assistant messages carry it in `content.metadata`, both in the stream result and when the message is recalled later from memory:
+
+```typescript title="src/mastra/message-trace.ts"
+const agent = mastra.getAgent('weatherAgent')
+const memory = await agent.getMemory()
+
+const { messages } = await memory!.recall({ threadId, perPage: false })
+
+const message = messages.find(m => m.id === messageId)
+const traceId = message?.content.metadata?.traceId
+```
+
+값은 실행이 보고하는 추적과 동일합니다.`traceId` on its result, so feedback collected at generation time and feedback collected later against a stored message anchor to the same trace. Messages produced while tracing is disabled have no `traceId`.
+
+## 피드백 만들기 {/* #create-feedback */}
+
+모든`createFeedback()` requires `feedbackType` and `value`. Add `traceId` or `spanId` when the feedback should be anchored to a trace or a specific span. Use `feedbackSource` as optional string metadata, such as `user`, `qa`, `studio`, 또는`system`.
+
+스토리지 수준 쓰기의 경우 다음을 포함합니다.`timestamp` because the method writes directly to the store.
+
+```typescript
+const observability = await mastra.getStorage()!.getStore('observability')
+
+await observability!.createFeedback({
+  feedback: {
+    feedbackId: 'feedback-rating-1',
+    timestamp: new Date(),
+    traceId: 'trace-123',
+    spanId: 'span-456',
+    feedbackSource: 'user',
+    feedbackType: 'rating',
+    value: 1,
+    comment: 'The answer solved my issue.',
+    tags: ['production'],
+  },
+})
+
+await observability!.createFeedback({
+  feedback: {
+    feedbackId: 'feedback-comment-1',
+    timestamp: new Date(),
+    feedbackSource: 'qa',
+    feedbackType: 'comment',
+    value: 'Needs a citation before shipping.',
+    experimentId: 'support-agent-eval',
+  },
+})
+```
+
+## 피드백 나열 {/* #list-feedback */}
+
+사용`listFeedback()` to page through raw records or poll with delta mode.
+
+```typescript
+const result = await observability!.listFeedback({
+  filters: {
+    feedbackType: 'rating',
+    feedbackSource: 'user',
+    timestamp: { start: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+  },
+  pagination: { page: 0, perPage: 20 },
+  orderBy: { field: 'timestamp', direction: 'DESC' },
+})
+
+console.log(result.feedback, result.pagination?.hasMore)
+```
+
+필터에는 다음과 같은 대상 필드가 포함됩니다.`traceId` and `spanId`, feedback fields such as `feedbackType`, `feedbackSource`, and `feedbackUserId`, and shared context fields such as `entityName`, `environment`, `experimentId`, and `tags`.
+
+```typescript
+await observability!.listFeedback({
+  filters: {
+    traceId: 'trace-123',
+    feedbackType: ['rating', 'thumbs'],
+    tags: ['production'],
+  },
+})
+```
+
+## 쿼리 피드백 분석 {/* #query-feedback-analytics */}
+
+OLAP 피드백 쿼리는 숫자로 작동합니다.`value` fields. Use them for ratings, thumbs encoded as `1` and `-1`, numeric QA scores, or other numeric feedback types.
+
+```typescript
+const rating = await observability!.getFeedbackAggregate({
+  feedbackType: 'rating',
+  feedbackSource: 'user',
+  aggregation: 'avg',
+  comparePeriod: 'previous_day',
+})
+
+const byAgent = await observability!.getFeedbackBreakdown({
+  feedbackType: 'rating',
+  groupBy: ['entityName'],
+  aggregation: 'avg',
+  filters: { environment: 'production' },
+})
+
+const ratingsOverTime = await observability!.getFeedbackTimeSeries({
+  feedbackType: 'rating',
+  aggregation: 'avg',
+  interval: '1h',
+  groupBy: ['feedbackSource'],
+})
+```
+
+참조[feedback reference](/reference/observability/feedback) for all fields, filters, return types, and percentile query parameters.
+
+## 피드백을 외부 플랫폼으로 내보내기 {/* #export-feedback-to-external-platforms */}
+
+피드백은 Observability 이벤트 버스를 통해 흐르므로 피드백을 지원하는 내보내기가 이를 자동으로 전달합니다. 그만큼[PostHog exporter](/reference/observability/tracing/exporters/posthog#feedback-export) sends feedback as native `$ai_feedback` events that appear on the linked trace in PostHog.
+
+## 관련된 {/* #related */}
+
+* [Observability 개요](/docs/observability/overview)
+* [추적 개요](/docs/observability/tracing/overview)
+* [측정항목 개요](/docs/observability/metrics/overview)
+* [클라이언트 SDK 관측 가능성 참조](/reference/client-js/observability)
+* [피드백 참조](/reference/observability/feedback)

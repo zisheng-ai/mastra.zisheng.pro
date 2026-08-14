@@ -1,0 +1,617 @@
+---
+title: "참조: createScorer | 평가"
+description: "사용자가 JavaScript 함수 또는 LLM 기반 Prompt를 사용하여 자체 평가 논리를 정의할 수 있도록 Mastra에서 사용자 정의 채점자를 생성하기 위한 문서입니다."
+packages:
+  - "@mastra/core"
+---
+
+# createScorer
+
+Mastra는 통합된`createScorer`입력/출력 쌍을 평가하기 위해 사용자 정의 채점자를 정의할 수 있는 팩토리입니다. 각 평가 단계에 기본 JavaScript 함수 또는 LLM 기반 Prompt 개체를 사용할 수 있습니다. 사용자 정의 채점자를 Agent 및 Workflow 단계에 추가할 수 있습니다.
+
+## 맞춤 채점자를 만드는 방법 {/* #how-to-create-a-custom-scorer */}
+
+사용`createScorer` factory to define your scorer with a name, description, and optional judge configuration. Then chain step methods to build your evaluation pipeline. You must provide at least a `generateScore` step.
+
+**Prompt 개체 단계**객체로 표현되는 단계 구성입니다.`description` + `createPrompt` (and `outputSchema`~을 위한`preprocess`/`analyze`). 이 단계에서는 판사 LLM을 호출합니다.**기능 단계**단순한 기능이며 판사에게 전화하지 마십시오.
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+
+const scorer = createScorer({
+  id: 'my-custom-scorer',
+  name: 'My Custom Scorer', // Optional, defaults to id
+  description: 'Evaluates responses based on custom criteria',
+  type: 'agent', // Optional: for agent evaluation with automatic typing
+  judge: {
+    model: myModel,
+    instructions: 'You are an expert evaluator...',
+  },
+})
+  .preprocess({/* step config */})
+  .analyze({/* step config */})
+  .generateScore(({ run, results }) => {
+    // Return a number
+  })
+  .generateReason({/* step config */})
+```
+
+## `createScorer`옵션 {/* #createscorer-options */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  isOptional: false,
+  description: 'Unique identifier for the scorer. Used as the name if `name` is not provided.',
+},
+{
+  name: 'name',
+  type: 'string',
+  isOptional: true,
+  description: 'Name of the scorer. Defaults to `id` if not provided.',
+},
+{
+  name: 'description',
+  type: 'string',
+  isOptional: false,
+  description: 'Description of what the scorer does.',
+},
+{
+  name: 'judge',
+  type: 'object',
+  isOptional: true,
+  description: 'Optional judge configuration for LLM-based steps.',
+  properties: [
+    {
+      type: 'object',
+      parameters: [
+        {
+          name: 'model',
+          type: 'LanguageModel',
+          isOptional: false,
+          description: 'The LLM model instance to use for evaluation.',
+        },
+        {
+          name: 'instructions',
+          type: 'string',
+          isOptional: false,
+          description: 'System prompt/instructions for the LLM.',
+        },
+        {
+          name: 'jsonPromptInjection',
+          type: "boolean | 'system' | 'inline' | 'auto'",
+          isOptional: true,
+          description:
+            "Controls how the judge's structured output schema reaches the model. Defaults to 'auto', which uses native structured output when supported and inline prompt injection otherwise. Explicit values override automatic routing.",
+        },
+        {
+          name: 'inputProcessors',
+          type: 'Processor[]',
+          isOptional: true,
+          description:
+            'Input processors applied to the internal judge agent before its messages reach the model (e.g. redaction, validation).',
+        },
+        {
+          name: 'outputProcessors',
+          type: 'Processor[]',
+          isOptional: true,
+          description:
+            "Output processors applied to the internal judge agent's output before it is returned (e.g. moderation, transformation).",
+        },
+        {
+          name: 'errorProcessors',
+          type: 'Processor[]',
+          isOptional: true,
+          description:
+            'Error processors for judge models that use Mastra’s current generation API. These implement `processAPIError` and can inspect LLM API rejections and signal a retry, e.g. `StreamErrorRetryProcessor`. Legacy model adapters use `generateLegacy()` and do not run error processors.',
+        },
+        {
+          name: 'maxProcessorRetries',
+          type: 'number',
+          isOptional: true,
+          description:
+            'Maximum number of times error processors can retry one judge generation. The runtime defaults to 10 when errorProcessors are configured without this value. Set it explicitly to bound the retry budget.',
+        },
+      ],
+    },
+  ],
+},
+{
+  name: 'type',
+  type: 'string',
+  isOptional: true,
+  description:
+    "Type specification for input/output. Use 'agent' for automatic agent types. For custom types, use the generic approach instead.",
+},
+{
+  name: 'prepareRun',
+  type: '(run: ScorerRun) => ScorerRun | Promise<ScorerRun>',
+  isOptional: true,
+  description:
+    "Transform the scorer run data before the pipeline executes. Use this to filter messages, limit context size, or drop fields the scorer doesn't need. The [`filterRun()`](/reference/evals/filter-run) utility creates this function from declarative options. Can be async.",
+},
+]}
+/>
+
+이 함수는 단계 메서드를 연결할 수 있는 득점자 빌더를 반환합니다. 참조[MastraScorer reference](./mastra-scorer) for details on the `.run()` method and its input/output.
+
+심판은 다음과 같이 정의된 단계에만 실행됩니다.**prompt objects** (`preprocess`, `analyze`, `generateScore`, `generateReason` in prompt mode). If you use function steps only, the judge is never called and there is no LLM output to inspect. In that case, any score/reason must be produced by your functions.
+
+Prompt 개체 단계가 실행되면 구조화된 LLM 출력이 해당 결과 필드(`preprocessStepResult`, `analyzeStepResult`, or the value consumed by `calculateScore` in `generateScore`).
+
+## 심사위원 요청 재시도 {/* #retry-judge-requests */}
+
+기존 판사를 활용하라`errorProcessors` configuration to retry transient failures inside a failed judge request. This doesn't retry the scorer workflow, trace target, batch item, score write, or a completed scorer step.
+
+`@mastra/core` `1.49.0` doesn't include scorer error-processor configuration. Upgrade to a version with scorer processor support, or backport that focused change, before using this configuration.
+
+다음 예에서는 하나의 제한된 재시도 예산을 사용합니다. 프로세서 설정`maxRetries` and `judge.maxProcessorRetries` to the same value. Keep the internal judge agent's model retries at the default of `0` so model retries don't multiply processor attempts.
+
+```typescript title="src/mastra/scorers/response-quality.ts"
+import { createScorer } from '@mastra/core/evals'
+import { StreamErrorRetryProcessor } from '@mastra/core/processors'
+
+const isTransientNetworkError = (error: unknown) =>
+  error instanceof Error && /ECONNRESET|ETIMEDOUT|socket hang up/i.test(error.message)
+
+const retryProcessor = new StreamErrorRetryProcessor({
+  maxRetries: 2,
+  maxRetryAfterMs: 30_000,
+  delayMs: ({ retryCount }) => Math.min(1_000 * 2 ** retryCount, 30_000),
+  matchers: [isTransientNetworkError],
+  retryUnknownErrors: false,
+})
+
+export const responseQuality = createScorer({
+  id: 'response-quality',
+  description: 'Scores response quality',
+  judge: {
+    model: myModel,
+    instructions: 'Return a score and concise reason.',
+    errorProcessors: [retryProcessor],
+    maxProcessorRetries: 2,
+  },
+})
+  .generateScore({
+    description: 'Score the response quality.',
+    createPrompt: ({ run }) => `Score: ${run.output}`,
+  })
+  .generateReason({
+    description: 'Explain the score.',
+    createPrompt: () => 'Explain the score.',
+  })
+```
+
+이 구성을 사용하면 실패한 요청에는 최대 3번의 공급자 시도(초기 요청과 2번의 프로세서 재시도)가 있습니다. 만약에`generateScore` completes and `generateReason` receives a retryable failure, only `generateReason` retries.
+
+`StreamErrorRetryProcessor`재시도 가능한 공급자 메타데이터와 좁은 사용자 정의 매처를 존중합니다. 그것은 유지`retryUnknownErrors` disabled by default, so authentication, invalid-request, and context-length errors fail immediately unless you explicitly match them. It bounds `Retry-After` values to `30_000` milliseconds by default. Use `maxRetryAfterMs` to change that cap.
+
+외부 채점자나 Workflow 재시도를 추가하지 마세요. 의도적으로 추가 시도를 허용하지 않는 한 0이 아닌 Model 재시도 설정을 이 프로세서와 결합하지 마십시오.
+
+### 한 단계에 대한 재시도 재정의 {/* #override-retries-for-one-step */}
+
+한 걸음`judge` configuration overrides scorer-level judge fields. Processor arrays replace the scorer-level arrays. Omit `maxProcessorRetries` in the step configuration to inherit the scorer-level numeric cap.
+
+조정된 프로세서 재시도에는 Mastra의 현재 세대 API를 사용하는 판단 Model이 필요합니다. 레거시 Model 어댑터 호출[`generateLegacy()`](/reference/agents/generateLegacy), bypass error processors, and use that API's separate AI SDK `maxRetries` default of `2`.
+
+## 유형 안전 {/* #type-safety */}
+
+더 나은 유형 추론 및 IntelliSense 지원을 위해 채점자를 만들 때 입력/출력 유형을 지정할 수 있습니다.
+
+### Agent 유형 바로가기 {/* #agent-type-shortcut */}
+
+Agent를 평가하려면 다음을 사용하세요.`type: 'agent'` to automatically get the correct types for agent input/output:
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+
+// Agent scorer with automatic typing
+const agentScorer = createScorer({
+  id: 'agent-response-quality',
+  description: 'Evaluates agent responses',
+  type: 'agent', // Automatically provides ScorerRunInputForAgent/ScorerRunOutputForAgent
+})
+  .preprocess(({ run }) => {
+    // run.input is automatically typed as ScorerRunInputForAgent
+    const userMessage = run.inputData.inputMessages[0]?.content
+    return { userMessage }
+  })
+  .generateScore(({ run, results }) => {
+    // run.output is automatically typed as ScorerRunOutputForAgent
+    const response = run.output[0]?.content
+    return response.length > 10 ? 1.0 : 0.5
+  })
+```
+
+### 제네릭을 사용한 사용자 정의 유형 {/* #custom-types-with-generics */}
+
+사용자 정의 입력/출력 유형의 경우 일반적인 접근 방식을 사용하십시오.
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+
+type CustomInput = { query: string; context: string[] }
+type CustomOutput = { answer: string; confidence: number }
+
+const customScorer = createScorer<CustomInput, CustomOutput>({
+  id: 'custom-scorer',
+  description: 'Evaluates custom data',
+}).generateScore(({ run }) => {
+  // run.input is typed as CustomInput
+  // run.output is typed as CustomOutput
+  return run.output.confidence
+})
+```
+
+### 내장 Agent 유형 {/* #built-in-agent-types */}
+
+* **`ScorerRunInputForAgent`**- 포함`inputMessages`, `rememberedMessages`, `systemMessages`, and `taggedSystemMessages` for agent evaluation
+* **`ScorerRunOutputForAgent`**- Agent 응답 메시지 배열
+
+이러한 유형을 사용하면 자동 완성, 컴파일 시간 유효성 검사 및 채점 논리에 대한 더 나은 문서가 제공됩니다.
+
+## Agent 유형을 통한 추적 점수 매기기 {/* #trace-scoring-with-agent-types */}
+
+당신이 사용할 때`type: 'agent'`, your scorer is compatible for both adding directly to agents and scoring traces from agent interactions. The scorer automatically transforms trace data into the proper agent input/output format:
+
+```typescript
+const agentTraceScorer = createScorer({
+  id: 'agent-trace-length',
+  description: 'Evaluates agent response length',
+  type: 'agent',
+}).generateScore(({ run }) => {
+  // Trace data is automatically transformed to agent format
+  const userMessages = run.inputData.inputMessages
+  const agentResponse = run.output[0]?.content
+
+  // Score based on response length
+  return agentResponse?.length > 50 ? 0 : 1
+})
+
+// Register with Mastra for trace scoring
+const mastra = new Mastra({
+  scorers: {
+    agentTraceScorer,
+  },
+})
+```
+
+## 단계 메서드 서명 {/* #step-method-signatures */}
+
+### 전처리 {/* #preprocess */}
+
+분석 전에 데이터를 추출하거나 변환할 수 있는 선택적 전처리 단계입니다.
+
+**기능 모드:**&#xAE30;능:`({ run, results }) => any`
+
+<PropertiesTable
+  content={[
+{
+  name: 'run.input',
+  type: 'any',
+  isOptional: false,
+  description:
+    "Input records provided to the scorer. If the scorer is added to an agent, this will be an array of user messages, e.g. `[{ role: 'user', content: 'hello world' }]`. If the scorer is used in a workflow, this will be the input of the workflow.",
+},
+{
+  name: 'run.output',
+  type: 'any',
+  isOptional: false,
+  description:
+    "Output record provided to the scorer. For agents, this is usually the agent's response. For workflows, this is the workflow's output.",
+},
+{
+  name: 'run.runId',
+  type: 'string',
+  isOptional: false,
+  description: 'Unique identifier for this scoring run.',
+},
+{
+  name: 'run.requestContext',
+  type: 'object',
+  isOptional: true,
+  description: 'Request Context from the agent or workflow step being evaluated (optional).',
+},
+{
+  name: 'results',
+  type: 'object',
+  isOptional: false,
+  description: 'Empty object (no previous steps).',
+},
+]}
+/>
+
+보고:`any`\
+The method can return any value. The returned value will be available to subsequent steps as `preprocessStepResult`.
+
+**Prompt 개체 모드:**
+
+<PropertiesTable
+  content={[
+{
+  name: 'description',
+  type: 'string',
+  isOptional: false,
+  description: 'Description of what this preprocessing step does.',
+},
+{
+  name: 'outputSchema',
+  type: 'StandardJSONSchemaV1',
+  isOptional: false,
+  description: 'Standard JSON Schema for the expected output of the preprocess step.',
+},
+{
+  name: 'createPrompt',
+  type: 'function',
+  isOptional: false,
+  description: 'Function: ({ run, results }) => string. Returns the prompt for the LLM.',
+},
+{
+  name: 'judge',
+  type: 'object',
+  isOptional: true,
+  description: '(Optional) LLM judge for this step (can override main judge). See Judge Object section.',
+},
+]}
+/>
+
+### 분석하다 {/* #analyze */}
+
+입력/출력 및 전처리된 데이터를 처리하는 선택적 분석 단계입니다.
+
+**기능 모드:**&#xAE30;능:`({ run, results }) => any`
+
+<PropertiesTable
+  content={[
+{
+  name: 'run.input',
+  type: 'any',
+  isOptional: false,
+  description:
+    "Input records provided to the scorer. If the scorer is added to an agent, this will be an array of user messages, e.g. `[{ role: 'user', content: 'hello world' }]`. If the scorer is used in a workflow, this will be the input of the workflow.",
+},
+{
+  name: 'run.output',
+  type: 'any',
+  isOptional: false,
+  description:
+    "Output record provided to the scorer. For agents, this is usually the agent's response. For workflows, this is the workflow's output.",
+},
+{
+  name: 'run.runId',
+  type: 'string',
+  isOptional: false,
+  description: 'Unique identifier for this scoring run.',
+},
+{
+  name: 'run.requestContext',
+  type: 'object',
+  isOptional: true,
+  description: 'Request Context from the agent or workflow step being evaluated (optional).',
+},
+{
+  name: 'results.preprocessStepResult',
+  type: 'any',
+  isOptional: true,
+  description: 'Result from preprocess step, if defined (optional).',
+},
+]}
+/>
+
+보고:`any`\
+The method can return any value. The returned value will be available to subsequent steps as `analyzeStepResult`.
+
+**Prompt 개체 모드:**
+
+<PropertiesTable
+  content={[
+{
+  name: 'description',
+  type: 'string',
+  isOptional: false,
+  description: 'Description of what this analysis step does.',
+},
+{
+  name: 'outputSchema',
+  type: 'StandardJSONSchemaV1',
+  isOptional: false,
+  description: 'Standard JSON Schema for the expected output of the analyze step.',
+},
+{
+  name: 'createPrompt',
+  type: 'function',
+  isOptional: false,
+  description: 'Function: ({ run, results }) => string. Returns the prompt for the LLM.',
+},
+{
+  name: 'judge',
+  type: 'object',
+  isOptional: true,
+  description: '(Optional) LLM judge for this step (can override main judge). See Judge Object section.',
+},
+]}
+/>
+
+### `generateScore` {/* #generatescore */}
+
+**필수의**최종 수치 점수를 계산하는 단계입니다.
+
+**기능 모드:**&#xAE30;능:`({ run, results }) => number`
+
+<PropertiesTable
+  content={[
+{
+  name: 'run.input',
+  type: 'any',
+  isOptional: false,
+  description:
+    "Input records provided to the scorer. If the scorer is added to an agent, this will be an array of user messages, e.g. `[{ role: 'user', content: 'hello world' }]`. If the scorer is used in a workflow, this will be the input of the workflow.",
+},
+{
+  name: 'run.output',
+  type: 'any',
+  isOptional: false,
+  description:
+    "Output record provided to the scorer. For agents, this is usually the agent's response. For workflows, this is the workflow's output.",
+},
+{
+  name: 'run.runId',
+  type: 'string',
+  isOptional: false,
+  description: 'Unique identifier for this scoring run.',
+},
+{
+  name: 'run.requestContext',
+  type: 'object',
+  isOptional: true,
+  description: 'Request Context from the agent or workflow step being evaluated (optional).',
+},
+{
+  name: 'results.preprocessStepResult',
+  type: 'any',
+  isOptional: true,
+  description: 'Result from preprocess step, if defined (optional).',
+},
+{
+  name: 'results.analyzeStepResult',
+  type: 'any',
+  isOptional: true,
+  description: 'Result from analyze step, if defined (optional).',
+},
+]}
+/>
+
+보고:`number`\
+The method must return a numerical score.
+
+**Prompt 개체 모드:**
+
+<PropertiesTable
+  content={[
+{
+  name: 'description',
+  type: 'string',
+  isOptional: false,
+  description: 'Description of what this scoring step does.',
+},
+{
+  name: 'outputSchema',
+  type: 'StandardJSONSchemaV1',
+  isOptional: false,
+  description: 'Standard JSON Schema for the expected output of the generateScore step.',
+},
+{
+  name: 'createPrompt',
+  type: 'function',
+  isOptional: false,
+  description: 'Function: ({ run, results }) => string. Returns the prompt for the LLM.',
+},
+{
+  name: 'judge',
+  type: 'object',
+  isOptional: true,
+  description: '(Optional) LLM judge for this step (can override main judge). See Judge Object section.',
+},
+]}
+/>
+
+Prompt 개체 모드를 사용하는 경우 다음도 제공해야 합니다.`calculateScore` function to convert the LLM output to a numerical score:
+
+<PropertiesTable
+  content={[
+{
+  name: 'calculateScore',
+  type: 'function',
+  isOptional: false,
+  description:
+    "Function: ({ run, results, analyzeStepResult }) => number. Converts the LLM's structured output into a numerical score.",
+},
+]}
+/>
+
+### `generateReason` {/* #generatereason */}
+
+점수에 대한 설명을 제공하는 선택적 단계입니다.
+
+**기능 모드:**&#xAE30;능:`({ run, results, score }) => string`
+
+<PropertiesTable
+  content={[
+{
+  name: 'run.input',
+  type: 'any',
+  isOptional: false,
+  description:
+    "Input records provided to the scorer. If the scorer is added to an agent, this will be an array of user messages, e.g. `[{ role: 'user', content: 'hello world' }]`. If the scorer is used in a workflow, this will be the input of the workflow.",
+},
+{
+  name: 'run.output',
+  type: 'any',
+  isOptional: false,
+  description:
+    "Output record provided to the scorer. For agents, this is usually the agent's response. For workflows, this is the workflow's output.",
+},
+{
+  name: 'run.runId',
+  type: 'string',
+  isOptional: false,
+  description: 'Unique identifier for this scoring run.',
+},
+{
+  name: 'run.requestContext',
+  type: 'object',
+  isOptional: true,
+  description: 'Request Context from the agent or workflow step being evaluated (optional).',
+},
+{
+  name: 'results.preprocessStepResult',
+  type: 'any',
+  isOptional: true,
+  description: 'Result from preprocess step, if defined (optional).',
+},
+{
+  name: 'results.analyzeStepResult',
+  type: 'any',
+  isOptional: true,
+  description: 'Result from analyze step, if defined (optional).',
+},
+{
+  name: 'score',
+  type: 'number',
+  isOptional: false,
+  description: 'Score computed by the generateScore step.',
+},
+]}
+/>
+
+보고:`string`\
+The method must return a string explaining the score.
+
+**Prompt 개체 모드:**
+
+<PropertiesTable
+  content={[
+{
+  name: 'description',
+  type: 'string',
+  isOptional: false,
+  description: 'Description of what this reasoning step does.',
+},
+{
+  name: 'createPrompt',
+  type: 'function',
+  isOptional: false,
+  description: 'Function: ({ run, results, score }) => string. Returns the prompt for the LLM.',
+},
+{
+  name: 'judge',
+  type: 'object',
+  isOptional: true,
+  description: '(Optional) LLM judge for this step (can override main judge). See Judge Object section.',
+},
+]}
+/>
+
+모든 단계 기능은 비동기식일 수 있습니다.

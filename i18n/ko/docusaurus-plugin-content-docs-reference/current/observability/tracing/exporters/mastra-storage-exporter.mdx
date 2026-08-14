@@ -1,0 +1,240 @@
+---
+title: "참조: MastraStorageExporter | Observability"
+description: "MastraStorageExporter(이전의 DefaultExporter)에 대한 API 참조"
+packages:
+  - "@mastra/observability"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# MastraStorage수출업체
+
+자동 일괄 처리 및 재시도 논리를 사용하여 Mastra의 구성된 스토리지에 대한 추적을 유지합니다.
+
+:::메모
+
+`MastraStorageExporter`이전에 호출되었습니다`DefaultExporter`. The original `DefaultExporter`클래스는 여전히 다음에서 내보내집니다.`@mastra/observability`따라서 기존 가져오기는 계속 작동하지만 더 이상 사용되지 않으며 향후 주요 버전에서는 제거될 예정입니다. 새로운 코드는 다음을 사용해야 합니다.`MastraStorageExporter`.
+
+:::
+
+## 건설자 {/* #constructor */}
+
+```typescript prettier:false
+new MastraStorageExporter(config?: MastraStorageExporterConfig)
+```
+
+<PropertiesTable
+  props={[
+{
+  name: 'config',
+  type: 'MastraStorageExporterConfig',
+  description: 'Batching and configuration options',
+  required: false,
+},
+]}
+/>
+
+## `MastraStorageExporterConfig` {/* #mastrastorageexporterconfig */}
+
+```typescript
+interface MastraStorageExporterConfig extends BaseExporterConfig {
+  /** Maximum number of spans per batch. Default: 1000 */
+  maxBatchSize?: number
+
+  /** Maximum total buffer size before emergency flush. Default: 10000 */
+  maxBufferSize?: number
+
+  /** Maximum time to wait before flushing batch in milliseconds. Default: 5000 */
+  maxBatchWaitMs?: number
+
+  /** Maximum number of retry attempts. Default: 4 */
+  maxRetries?: number
+
+  /** Base retry delay in milliseconds (uses exponential backoff). Default: 500 */
+  retryDelayMs?: number
+
+  /** Tracing storage strategy or 'auto' for automatic selection. Default: 'auto' */
+  strategy?: TracingStorageStrategy | 'auto'
+}
+```
+
+확장`BaseExporterConfig`, which includes:
+
+* `logger?: IMastraLogger`- 로거 인스턴스
+* `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'`- 로그 수준(기본값: INFO)
+
+## `TracingStorageStrategy` {/* #tracingstoragestrategy */}
+
+```typescript
+type TracingStorageStrategy = 'realtime' | 'batch-with-updates' | 'insert-only'
+```
+
+### 전략 행동 {/* #strategy-behaviors */}
+
+* **실시간**: 각 이벤트를 즉시 스토리지에 지속시킵니다.
+* **일괄 업데이트**: 일괄 생성 및 업데이트가 별도로 이루어지며, 순서대로 적용됩니다.
+* **삽입 전용**: SPAN\_ENDED 이벤트만 처리하고 업데이트는 무시합니다.
+
+## 속성 {/* #properties */}
+
+```typescript prettier:false
+readonly name = 'mastra-storage-exporter';
+```
+
+더 이상 사용되지 않는`DefaultExporter` class continues to use `'mastra-default-observability-exporter'` as its `name` for backward compatibility.
+
+## 행동 양식 {/* #methods */}
+
+### 초기화 {/* #init */}
+
+```typescript prettier:false
+init(options: InitExporterOptions): void
+```
+
+종속성이 준비된 후 내보내기를 초기화합니다. 스토리지 기능을 기반으로 추적 전략을 해결합니다.
+
+<PropertiesTable
+  props={[
+{
+  name: 'options',
+  type: 'InitExporterOptions',
+  description: 'Initialization options containing Mastra instance and config',
+  required: true,
+},
+]}
+/>
+
+### `exportTracingEvent` {/* #exporttracingevent */}
+
+```typescript prettier:false
+async exportTracingEvent(event: TracingEvent): Promise<void>
+```
+
+해결된 전략에 따라 추적 이벤트를 처리합니다.
+
+<PropertiesTable
+  props={[
+{
+  name: 'event',
+  type: 'TracingEvent',
+  description: 'The tracing event to export',
+  required: true,
+},
+]}
+/>
+
+### 플러시 {/* #flush */}
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+Force는 내보내기를 종료하지 않고 버퍼링된 모든 이벤트를 스토리지로 플러시합니다. 런타임이 종료되기 전에 범위를 내보내야 하는 서버리스 환경에 유용합니다.
+
+### 일시 휴업 {/* #shutdown */}
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+버퍼링된 남은 이벤트를 플러시하고 정리를 수행합니다.
+
+## 자동 전략 선택 {/* #automatic-strategy-selection */}
+
+언제`strategy: 'auto'` (default), the exporter queries the storage adapter for its capabilities:
+
+```typescript
+interface TracingStrategy {
+  /** Strategies supported by this adapter */
+  supported: TracingStorageStrategy[]
+
+  /** Preferred strategy for optimal performance */
+  preferred: TracingStorageStrategy
+}
+```
+
+수출자는 다음을 수행합니다.
+
+1. 가능한 경우 스토리지 어댑터가 선호하는 전략을 사용하세요.
+2. 선호하는 전략을 사용할 수 없는 경우 지원되는 첫 번째 전략으로 대체
+3. 사용자가 지정한 전략이 지원되지 않는 경우 경고 기록
+
+## 일괄 처리 동작 {/* #batching-behavior */}
+
+### 플러시 트리거 {/* #flush-triggers */}
+
+다음 조건 중 하나라도 충족되면 버퍼가 플러시됩니다.
+
+* 버퍼 크기 도달`maxBatchSize`
+* 첫 번째 버퍼링된 이벤트 이후 경과된 시간이 초과되었습니다.`maxBatchWaitMs`
+* 버퍼 크기 도달`maxBufferSize` (emergency flush)
+* `shutdown()`라고
+
+### 재시도 로직 {/* #retry-logic */}
+
+실패한 플러시는 지수 백오프로 재시도됩니다.
+
+* 재시도 지연:`retryDelayMs * 2^attempt`
+* 최대 시도 횟수:`maxRetries`
+* 모든 재시도가 실패하면 배치가 삭제됩니다.
+
+### 비순차적 처리 {/* #out-of-order-handling */}
+
+을 위한`batch-with-updates` strategy:
+
+* 스팬이 생성된 트랙
+* 아직 생성되지 않은 범위에 대한 업데이트/종료를 거부합니다.
+* 잘못된 순서의 이벤트에 대한 경고를 기록합니다.
+* 주문된 업데이트에 대한 일련 번호를 유지합니다.
+
+## 용법 {/* #usage */}
+
+```typescript
+import { MastraStorageExporter } from '@mastra/observability'
+
+// Default configuration
+const exporter = new MastraStorageExporter()
+
+// Custom batching configuration
+const customExporter = new MastraStorageExporter({
+  maxBatchSize: 500,
+  maxBatchWaitMs: 2000,
+  strategy: 'batch-with-updates',
+  logLevel: 'debug',
+})
+```
+
+## 다음에서 마이그레이션 중`DefaultExporter` {/* #migrating-from-defaultexporter */}
+
+두 클래스 모두 동일한 생성자 서명과 동작을 공유합니다. 마이그레이션하려면 가져오기 및 생성자를 바꾸세요.
+
+```typescript
+// Before
+import { DefaultExporter } from '@mastra/observability'
+const exporter = new DefaultExporter()
+
+// After
+import { MastraStorageExporter } from '@mastra/observability'
+const exporter = new MastraStorageExporter()
+```
+
+원본`DefaultExporter` is preserved unchanged so dashboards or alert rules that match the previous `mastra-default-observability-exporter` exporter name keep working until you migrate.
+
+## 또한보십시오 {/* #see-also */}
+
+### 선적 서류 비치 {/* #documentation */}
+
+* [추적 개요](/docs/observability/tracing/overview): 전체 가이드
+* [수출업체](/docs/observability/integrations/overview#exporters): 수출업체 개념
+
+### 기타 수출업체 {/* #other-exporters */}
+
+* [MastraPlatform수출자](/reference/observability/tracing/exporters/mastra-platform-exporter): 마스트라 플랫폼
+* [콘솔 내보내기](/reference/observability/tracing/exporters/console-exporter): 디버그 출력
+* [랭퓨즈](/reference/observability/tracing/exporters/langfuse): Langfuse 통합
+* [브레인트러스트](/reference/observability/tracing/exporters/braintrust): Braintrust 통합
+
+### 참조 {/* #reference */}
+
+* [구성](/reference/observability/tracing/configuration): 구성 옵션
+* [인터페이스](/reference/observability/tracing/interfaces): 유형 정의

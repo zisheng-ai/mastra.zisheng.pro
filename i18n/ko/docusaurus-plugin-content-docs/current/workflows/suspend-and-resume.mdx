@@ -1,0 +1,239 @@
+---
+title: "일시중단 및 재개 | Workflow"
+description: "Mastra Workflow의 일시 중지 및 재개를 사용하면 외부 입력이나 리소스를 기다리는 동안 실행을 일시 중지할 수 있습니다."
+packages:
+  - "@mastra/core"
+---
+
+# 일시중단 및 재개
+
+추가 데이터 수집, API 콜백 대기, 비용이 많이 드는 작업 제한 또는 요청을 위해 모든 단계에서 Workflow를 일시 중지할 수 있습니다.[human-in-the-loop](/docs/workflows/human-in-the-loop)입력. Workflow가 일시 중단되면 현재 실행 상태가 스냅샷으로 저장됩니다. 나중에 다음에서 Workflow를 재개할 수 있습니다.[특정 단계 ID](/docs/workflows/snapshots#retrieving-snapshots), 해당 스냅샷에 캡처된 정확한 상태를 복원합니다.[스냅샷](/docs/workflows/snapshots)구성된 스토리지 제공자에 저장되며 배포 및 애플리케이션 재시작 시에도 지속됩니다.
+
+## 다음을 사용하여 Workflow 일시 중지`suspend()` {/* #pausing-a-workflow-with-suspend */}
+
+사용`suspend()` to pause workflow execution at a specific step. You can define a suspend condition in the step’s `execute` block using values from `resumeData`.
+
+* 조건이 충족되지 않으면 Workflow가 일시 중지되고 반환됩니다.`suspend()`.
+* 조건이 충족되면 Workflow는 단계의 나머지 논리로 계속됩니다.
+
+![Pausing a workflow with suspend()](/img/workflows/workflows-suspend.jpg)
+
+```typescript {9-11,16-18} title="src/mastra/workflows/test-workflow.ts"
+const step1 = createStep({
+  id: 'step-1',
+  inputSchema: z.object({
+    userEmail: z.string(),
+  }),
+  outputSchema: z.object({
+    output: z.string(),
+  }),
+  resumeSchema: z.object({
+    approved: z.boolean(),
+  }),
+  execute: async ({ inputData, resumeData, suspend }) => {
+    const { userEmail } = inputData
+    const { approved } = resumeData ?? {}
+
+    if (!approved) {
+      return await suspend({})
+    }
+
+    return {
+      output: `Email sent to ${userEmail}`,
+    }
+  },
+})
+
+export const testWorkflow = createWorkflow({
+  id: 'test-workflow',
+  inputSchema: z.object({
+    userEmail: z.string(),
+  }),
+  outputSchema: z.object({
+    output: z.string(),
+  }),
+})
+  .then(step1)
+  .commit()
+```
+
+## 다음을 사용하여 Workflow 다시 시작`resume()` {/* #restarting-a-workflow-with-resume */}
+
+사용`resume()` to restart a suspended workflow from the step where it paused. Pass `resumeData` matching the step's `resumeSchema` to satisfy the suspend condition and continue execution.
+
+![Restarting a workflow with resume()](/img/workflows/workflows-resume.jpg)
+
+```typescript
+import { step1 } from './workflows/test-workflow'
+
+const workflow = mastra.getWorkflow('testWorkflow')
+const run = await workflow.createRun()
+
+await run.start({
+  inputData: {
+    userEmail: 'alex@example.com',
+  },
+})
+
+const handleResume = async () => {
+  const result = await run.resume({
+    step: step1,
+    resumeData: { approved: true },
+  })
+}
+```
+
+통과`step` object provides full type-safety for `resumeData`. Alternatively, you can pass a step ID for more flexibility when the ID comes from user input or a database.
+
+```typescript
+const result = await run.resume({
+  step: 'step-1',
+  resumeData: { approved: true },
+})
+```
+
+한 단계만 일시 중지된 경우 단계 인수를 완전히 생략할 수 있으며 Mastra는 Workflow에서 마지막 일시 중지된 단계를 재개합니다.
+
+하나만으로 재개하는 경우`runId`, create a run instance first using `createRun()`.
+
+```typescript
+const workflow = mastra.getWorkflow('testWorkflow')
+const run = await workflow.createRun({ runId: '123' })
+
+const stream = run.resume({
+  resumeData: { approved: true },
+})
+```
+
+당신은 전화할 수 있습니다`resume()` from anywhere in your application, including HTTP endpoints, event handlers, in response to [human input](/docs/workflows/human-in-the-loop), or timers.
+
+```typescript
+const midnight = new Date()
+midnight.setUTCHours(24, 0, 0, 0)
+
+setTimeout(async () => {
+  await run.resume({
+    step: 'step-1',
+    resumeData: { approved: true },
+  })
+}, midnight.getTime() - Date.now())
+```
+
+## 다음을 사용하여 일시중단 데이터에 액세스`suspendData` {/* #accessing-suspend-data-with-suspenddata */}
+
+단계가 일시중단되면 다음에 제공된 데이터에 액세스할 수 있습니다.`suspend()` when the step is later resumed. Use the `suspendData` parameter in your step's execute function to access this data.
+
+```typescript {22-25,29-30} title="src/mastra/workflows/user-approval.ts"
+const approvalStep = createStep({
+  id: 'user-approval',
+  inputSchema: z.object({
+    requestId: z.string(),
+  }),
+  resumeSchema: z.object({
+    approved: z.boolean(),
+  }),
+  suspendSchema: z.object({
+    reason: z.string(),
+    requestDetails: z.string(),
+  }),
+  outputSchema: z.object({
+    result: z.string(),
+  }),
+  execute: async ({ inputData, resumeData, suspend, suspendData }) => {
+    const { requestId } = inputData
+    const { approved } = resumeData ?? {}
+
+    // On first execution, suspend with context
+    if (!approved) {
+      return await suspend({
+        reason: 'User approval required',
+        requestDetails: `Request ${requestId} pending review`,
+      })
+    }
+
+    // On resume, access the original suspend data
+    const suspendReason = suspendData?.reason || 'Unknown'
+    const details = suspendData?.requestDetails || 'No details'
+
+    return {
+      result: `${details} - ${suspendReason} - Decision: ${approved ? 'Approved' : 'Rejected'}`,
+    }
+  },
+})
+```
+
+그만큼`suspendData` parameter is automatically populated when a step is resumed and contains the exact data that was passed to the `suspend()` function during the original suspension. You can maintain context about why the workflow was suspended and use that information during the resume process.
+
+## 일시 중지된 실행 식별 {/* #identifying-suspended-executions */}
+
+Workflow가 일시 중지되면 일시 중지된 단계부터 다시 시작됩니다. Workflow를 확인할 수 있습니다.`status` to confirm it's suspended, and use `suspended` to identify the paused step or [nested workflow](/docs/workflows/overview#workflows-as-steps).
+
+```typescript {11}
+const workflow = mastra.getWorkflow('testWorkflow')
+const run = await workflow.createRun()
+
+const result = await run.start({
+  inputData: {
+    userEmail: 'alex@example.com',
+  },
+})
+
+if (result.status === 'suspended') {
+  console.log(result.suspended[0])
+  await run.resume({
+    step: result.suspended[0],
+    resumeData: { approved: true },
+  })
+}
+```
+
+### 예제 출력 {/* #example-output */}
+
+그만큼`suspended` array contains the IDs of any suspended workflows and steps from the run. These can be passed to the `step` parameter when calling `resume()` to target and resume the suspended execution path.
+
+```typescript
+['nested-workflow', 'step-1']
+```
+
+## 일시 중단된 실행 복구 {/* #recovering-suspended-runs */}
+
+사용`workflow.getWorkflowRunById()` with `createWorkflowStateReader()` when your application needs to recover a suspended run from storage. The reader exposes suspended steps, resume labels, step payloads, and step outputs without reading the raw snapshot shape.
+
+```typescript title="src/mastra/workflows/recover-run.ts"
+import { createWorkflowStateReader } from '@mastra/core/workflows'
+
+const workflow = mastra.getWorkflow('testWorkflow')
+const state = await workflow.getWorkflowRunById('run-123')
+
+if (state?.status === 'suspended') {
+  const reader = createWorkflowStateReader(state)
+  const suspendedStep = reader.getSuspendedStep()
+  const approvalLabel = reader.getResumeLabel('approve')
+  const run = await workflow.createRun({ runId: state.runId })
+
+  await run.resume({
+    step: approvalLabel?.stepId ?? suspendedStep?.path,
+    resumeData: { approved: true },
+    forEachIndex: approvalLabel?.foreachIndex,
+  })
+}
+```
+
+중첩된 Workflow의 경우`suspendedStep.path` contains the resume path. For `foreach` suspensions, matching resume labels include `foreachIndex` when the label points to a specific iteration.
+
+## 잠 {/* #sleep */}
+
+절전 메서드를 사용하면 Workflow 수준에서 실행을 일시 중지하여 상태를 다음으로 설정할 수 있습니다.`waiting`. By comparison, `suspend()` pauses execution within a specific step and sets the status to `suspended`.
+
+**사용 가능한 방법:**
+
+* [`.sleep()`](/reference/workflows/workflow-methods/sleep): 지정된 밀리초 동안 일시 중지합니다.
+* [`.sleepUntil()`](/reference/workflows/workflow-methods/sleepUntil): 특정 날짜까지 일시 중지
+
+## 관련된 {/* #related */}
+
+* [제어 흐름](/docs/workflows/control-flow)
+* [인간 참여형](/docs/workflows/human-in-the-loop)
+* [스냅샷](/docs/workflows/snapshots)
+* [시간여행](/docs/workflows/time-travel)
+* [Workflow 상태 리더](/reference/workflows/workflow-state-reader)

@@ -1,0 +1,515 @@
+---
+title: "참조: OracleDB 벡터 저장소 | 벡터"
+description: "Mastra의 Oracle 데이터베이스 벡터 공급자에 대한 설명서입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/fastembed"
+  - "@mastra/memory"
+  - "@mastra/oracledb"
+  - "@mastra/rag"
+---
+
+# OracleDB 벡터 저장소
+
+`OracleVector`Oracle 데이터베이스에 임베딩을 저장합니다.`VECTOR`열을 생성하고 Mastra의 벡터 인터페이스를 통해 노출합니다. 각 논리적 Mastra 벡터 인덱스는 레지스트리 테이블을 통해 Oracle 벡터 테이블에 매핑되는 반면, 메타데이터는 구조적 필터링을 위해 Oracle JSON으로 저장됩니다.
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/oracledb@latest
+```
+
+## 용법 {/* #usage */}
+
+```ts
+import { OracleVector } from '@mastra/oracledb'
+
+const vector = new OracleVector({
+  id: 'oracle-vector',
+  user: process.env.ORACLE_DATABASE_USER,
+  password: process.env.ORACLE_DATABASE_PASSWORD,
+  connectString: process.env.ORACLE_DATABASE_CONNECT_STRING,
+})
+
+await vector.createIndex({
+  indexName: 'memory_messages',
+  dimension: 1536,
+  metric: 'cosine',
+})
+
+await vector.upsert({
+  indexName: 'memory_messages',
+  vectors: [embedding],
+  metadata: [{ resource_id: 'user-1', thread_id: 'thread-1' }],
+})
+
+const results = await vector.query({
+  indexName: 'memory_messages',
+  queryVector,
+  topK: 5,
+  filter: { resource_id: 'user-1' },
+})
+```
+
+기본적으로`OracleVector` uses exact search with no approximate vector index. Configure IVF or HNSW when your dataset and latency requirements need approximate search.
+
+## 생성자 옵션 {/* #constructor-options */}
+
+Oracle 연결 옵션 전달(`user`, `password`, `connectString`, `pool`, wallet options, or `externalAuth`) 직접 또는 전달`poolManager`사용하는 풀을 공유하려면`OracleStore`. 벡터별 옵션은 다음과 같습니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for this vector store instance.',
+},
+{
+  name: 'poolManager',
+  type: 'OraclePoolManager',
+  description: 'Shared Oracle pool manager. Use this to share one Oracle pool with `OracleStore`.',
+  isOptional: true,
+},
+{
+  name: 'schemaName',
+  type: 'string',
+  description: 'Oracle schema name used to qualify the vector registry and vector tables.',
+  isOptional: true,
+},
+{
+  name: 'tablePrefix',
+  type: 'string',
+  description: 'Prefix used for physical Oracle vector tables.',
+  isOptional: true,
+  defaultValue: "'MASTRA_VEC'",
+},
+{
+  name: 'registryTableName',
+  type: 'string',
+  description: 'Oracle table used to map Mastra logical index names to physical vector tables.',
+  isOptional: true,
+  defaultValue: "'MASTRA_VECTOR_INDEXES'",
+},
+{
+  name: 'defaultIndexConfig',
+  type: 'OracleVectorIndexConfig',
+  description: 'Default Oracle vector index configuration.',
+  isOptional: true,
+  defaultValue: "{ type: 'none', accuracy: 95 }",
+},
+{
+  name: 'defaultMetadataIndexes',
+  type: 'string[]',
+  description: 'Metadata fields to index automatically when vector tables are created.',
+  isOptional: true,
+  defaultValue: "['thread_id', 'resource_id', 'message_id', 'source_id']",
+},
+{
+  name: 'defaultVectorFormat',
+  type: "'vector' | 'bit' | 'int8'",
+  description: 'Default Oracle vector format for dense, binary, and int8 embeddings.',
+  isOptional: true,
+  defaultValue: "'vector'",
+},
+{
+  name: 'upsertBatchSize',
+  type: 'number',
+  description:
+    'Number of vectors sent per Oracle `executeMany` call. The full upsert commits once after all batches succeed.',
+  isOptional: true,
+  defaultValue: '200',
+},
+]}
+/>
+
+## 생성자 예 {/* #constructor-examples */}
+
+### OracleStore와 공유 풀 {/* #shared-pool-with-oraclestore */}
+
+```ts
+import { OracleStore, OracleVector } from '@mastra/oracledb'
+
+const storage = new OracleStore({ id: 'oracle-storage', user, password, connectString })
+
+const vector = new OracleVector({
+  id: 'oracle-vector',
+  poolManager: storage.getPoolManager(),
+})
+```
+
+Autonomous Database 및 mTLS 연결의 경우 통과`walletLocation`, `walletPassword`, and `configDir` in the same constructor.
+
+## 행동 양식 {/* #methods */}
+
+### `createIndex()` {/* #createindex */}
+
+레지스트리 행, 물리적 Oracle 벡터 테이블, 메타데이터 인덱스 및 선택적으로 Oracle 벡터 인덱스를 생성합니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Logical Mastra index name. The provider maps this to a valid Oracle table name internally.',
+},
+{
+  name: 'dimension',
+  type: 'number',
+  description: 'Vector dimension. This must match the embedding model output size.',
+},
+{
+  name: 'metric',
+  type: "'cosine' | 'euclidean' | 'dotproduct' | 'hamming' | 'jaccard'",
+  isOptional: true,
+  defaultValue: 'cosine',
+  description: 'Distance metric for similarity search. Binary vectors support `hamming` and `jaccard`.',
+},
+{
+  name: 'vectorFormat',
+  type: "'vector' | 'bit' | 'int8'",
+  isOptional: true,
+  defaultValue: 'vector',
+  description: 'Oracle vector storage format.',
+},
+{
+  name: 'indexConfig',
+  type: 'OracleVectorIndexConfig',
+  isOptional: true,
+  defaultValue: "{ type: 'none', accuracy: 95 }",
+  description: 'Oracle vector index configuration. `none` means exact search with no approximate vector index.',
+},
+{
+  name: 'buildIndex',
+  type: 'boolean',
+  isOptional: true,
+  defaultValue: 'true',
+  description: 'Whether to build the Oracle vector index when `indexConfig.type` is `ivf` or `hnsw`.',
+},
+{
+  name: 'metadataIndexes',
+  type: 'string[]',
+  isOptional: true,
+  description: 'Metadata field names to index for faster JSON metadata filtering.',
+},
+]}
+/>
+
+#### `OracleVectorIndexConfig` {/* #oraclevectorindexconfig */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'type',
+  type: "'none' | 'ivf' | 'hnsw'",
+  description: 'Oracle vector index type.',
+  isOptional: true,
+  defaultValue: "'none'",
+},
+{
+  name: 'accuracy',
+  type: 'number',
+  description: 'Target accuracy for approximate vector search.',
+  isOptional: true,
+  defaultValue: '95',
+},
+{
+  name: 'ivf.neighborPartitions',
+  type: 'number',
+  description: 'Oracle IVF neighbor partitions setting.',
+  isOptional: true,
+},
+{
+  name: 'hnsw.neighbors',
+  type: 'number',
+  description: 'Oracle HNSW neighbor setting.',
+  isOptional: true,
+},
+{
+  name: 'hnsw.efConstruction',
+  type: 'number',
+  description: 'Oracle HNSW build-time construction setting.',
+  isOptional: true,
+},
+]}
+/>
+
+#### 인덱스 구성 {/* #index-configuration */}
+
+```ts
+await vector.createIndex({
+  indexName: 'support_articles',
+  dimension: 1536,
+  metric: 'cosine',
+  indexConfig: {
+    type: 'ivf',
+    accuracy: 95,
+    ivf: {
+      neighborPartitions: 32,
+    },
+  },
+})
+```
+
+기본값은`indexConfig: { type: 'none' }`, which uses exact search and requires no approximate index tuning. Use IVF or HNSW only when your data volume and latency requirements justify approximate search. HNSW is configured with `indexConfig: { type: 'hnsw', hnsw: { neighbors, efConstruction } }` and requires Oracle Vector Pool memory, which `configureVectorMemory()` can allocate for local or self-managed databases.
+
+### `upsert()` {/* #upsert */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Name of the index to upsert vectors into.',
+},
+{
+  name: 'vectors',
+  type: 'number[][]',
+  description: 'Array of embedding vectors.',
+},
+{
+  name: 'metadata',
+  type: 'Record<string, any>[]',
+  isOptional: true,
+  description: 'Metadata stored as Oracle JSON. Must align by position with `vectors`.',
+},
+{
+  name: 'ids',
+  type: 'string[]',
+  isOptional: true,
+  description: 'Optional vector IDs. IDs are generated when omitted.',
+},
+]}
+/>
+
+### `query()` {/* #query */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Name of the index to query.',
+},
+{
+  name: 'queryVector',
+  type: 'number[]',
+  description: 'Query vector.',
+},
+{
+  name: 'topK',
+  type: 'number',
+  isOptional: true,
+  defaultValue: '10',
+  description: 'Number of results to return.',
+},
+{
+  name: 'filter',
+  type: 'Record<string, any>',
+  isOptional: true,
+  description: 'Mastra metadata filter translated to Oracle JSON predicates.',
+},
+{
+  name: 'includeVector',
+  type: 'boolean',
+  isOptional: true,
+  defaultValue: 'false',
+  description: 'Whether to include the vector in each result.',
+},
+{
+  name: 'minScore',
+  type: 'number',
+  isOptional: true,
+  defaultValue: '-1',
+  description: 'Minimum similarity score threshold.',
+},
+{
+  name: 'queryMode',
+  type: "'exact' | 'approx'",
+  isOptional: true,
+  description: 'Oracle query mode. Exact search is used by default when no approximate vector index is configured.',
+},
+{
+  name: 'targetAccuracy',
+  type: 'number',
+  isOptional: true,
+  description: 'Target accuracy for approximate Oracle vector queries.',
+},
+]}
+/>
+
+### `listIndexes()` {/* #listindexes */}
+
+Oracle 벡터 레지스트리 테이블에 기록된 논리적 Mastra 인덱스 이름을 반환합니다.
+
+### `describeIndex()` {/* #describeindex */}
+
+물리적 테이블 이름, 차원, 벡터 수, 지표, 인덱스 유형, 벡터 형식 및 구성된 정확도를 포함한 Oracle 인덱스 메타데이터를 반환합니다.
+
+### `deleteIndex()` {/* #deleteindex */}
+
+Oracle 벡터 테이블을 삭제하고 논리 인덱스에 대한 레지스트리 항목을 제거합니다.
+
+### `updateVector()` {/* #updatevector */}
+
+ID 또는 메타데이터 필터로 벡터를 업데이트합니다. 어느 하나`id` or `filter` must be provided, but not both. The `update` object may include `vector`, `metadata`, or both.
+
+```ts
+await vector.updateVector({
+  indexName: 'support_articles',
+  id: 'doc-1',
+  update: { metadata: { status: 'reviewed' } },
+})
+```
+
+### `deleteVector()` {/* #deletevector */}
+
+ID별로 단일 벡터를 삭제합니다.
+
+### `deleteVectors()` {/* #deletevectors */}
+
+ID 또는 메타데이터 필터를 기준으로 여러 벡터를 삭제합니다. 어느 하나`ids` or `filter` must be provided, but not both.
+
+### `buildIndex()` {/* #buildindex */}
+
+기존 논리 인덱스에 대한 Oracle 벡터 인덱스를 구축합니다. 확인된 인덱스 유형이 다음과 같은 경우`none`, this method is a no-op.
+
+### `rebuildIndex()` {/* #rebuildindex */}
+
+일반적으로 대략적인 인덱스 조정을 변경한 후 기존 논리 인덱스에 대한 Oracle 벡터 인덱스를 삭제하고 다시 생성합니다.
+
+### 인덱스 진단 {/* #index-diagnostics */}
+
+사용`getIndexStatus({ indexName })` to inspect Oracle catalog status, and `indexAccuracyQuery({ indexName, queryVector, topK, targetAccuracy })` to run `DBMS_VECTOR.INDEX_ACCURACY_QUERY` for approximate indexes.
+
+### `configureVectorMemory()` {/* #configurevectormemory */}
+
+HNSW 인덱스에 필요한 Oracle 벡터 풀 Memory를 할당합니다. 이 호출`ALTER SYSTEM SET VECTOR_MEMORY_SIZE`, so it requires a privileged connection such as `SYSDBA` or `SYSTEM`.
+
+<PropertiesTable
+  content={[
+{
+  name: 'size',
+  type: 'string',
+  description: 'Vector pool size, as an integer optionally followed by `K`, `M`, or `G` (for example `"512M"`).',
+},
+{
+  name: 'scope',
+  type: "'MEMORY' | 'SPFILE' | 'BOTH'",
+  isOptional: true,
+  defaultValue: "'MEMORY'",
+  description: "Oracle ALTER SYSTEM scope. Use 'SPFILE' or 'BOTH' so the setting survives a database restart.",
+},
+]}
+/>
+
+### `disconnect()` {/* #disconnect */}
+
+다음 경우 Oracle 풀을 닫습니다.`OracleVector` created the pool manager. If you provide `pool` or `poolManager`, you own that lifecycle.
+
+## 메타데이터 필터 {/* #metadata-filters */}
+
+`OracleVector`Mastra의 표준 메타데이터 필터 구문을 허용합니다. 필터는 바인딩된 값을 사용하여 Oracle JSON 조건자로 변환됩니다.
+
+* 스칼라 비교 사용`JSON_VALUE`
+* 배열, 존재 및 요소 일치 검사 사용`JSON_EXISTS`
+* 정규식 필터 사용`REGEXP_LIKE`
+* 문자열에는 대소문자를 구분하지 않는 필터가 포함되어 있습니다.`LIKE`
+
+```ts
+const results = await vector.query({
+  indexName: 'memory_messages',
+  queryVector,
+  topK: 5,
+  filter: {
+    resource_id: 'user-1',
+    tags: { $contains: 'support' },
+    score: { $gte: 0.8 },
+    $or: [{ source: 'docs' }, { source: 'tickets' }],
+  },
+})
+```
+
+메타데이터는 기본 Oracle JSON으로 저장되므로 DBeaver 및 SQL Developer와 같은 표준 Oracle JDBC Tool를 사용하여 행을 직접 읽을 수도 있습니다.
+
+사용`ORACLEDB_PROMPT` when an agent should generate Oracle-compatible metadata filters for `createVectorQueryTool()`:
+
+```ts
+import { Agent } from '@mastra/core/agent'
+import { createVectorQueryTool } from '@mastra/rag'
+import { fastembed } from '@mastra/fastembed'
+import { ORACLEDB_PROMPT } from '@mastra/oracledb'
+
+const vectorQueryTool = createVectorQueryTool({
+  vectorStoreName: 'oracle',
+  indexName: 'support_articles',
+  model: fastembed,
+  enableFilter: true,
+})
+
+export const ragAgent = new Agent({
+  id: 'oracle-rag-agent',
+  name: 'Oracle RAG Agent',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  instructions: `
+Use the retrieval tool when you need source context.
+Available metadata fields: resource_id, thread_id, source, category, tags.
+${ORACLEDB_PROMPT}
+`,
+  tools: { vectorQueryTool },
+})
+```
+
+## 응답 유형 {/* #response-types */}
+
+쿼리 결과는 다음 형식으로 반환됩니다.
+
+```ts
+interface QueryResult {
+  id: string
+  score: number
+  metadata: Record<string, any>
+  vector?: number[]
+}
+```
+
+## 사용예 {/* #usage-example */}
+
+```ts title="src/mastra/agents/oracle-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+import { fastembed } from '@mastra/fastembed'
+import { OracleStore, OracleVector } from '@mastra/oracledb'
+
+const storage = new OracleStore({
+  id: 'oracle-storage',
+  user: process.env.ORACLE_DATABASE_USER,
+  password: process.env.ORACLE_DATABASE_PASSWORD,
+  connectString: process.env.ORACLE_DATABASE_CONNECT_STRING,
+})
+
+const vector = new OracleVector({
+  id: 'oracle-vector',
+  poolManager: storage.getPoolManager(),
+})
+
+export const oracleAgent = new Agent({
+  id: 'oracle-agent',
+  name: 'Oracle Agent',
+  instructions: 'You are an assistant with OracleDB-backed memory and semantic recall.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage,
+    vector,
+    embedder: fastembed,
+    options: {
+      semanticRecall: { topK: 3, messageRange: 2 },
+    },
+  }),
+})
+```
+
+## 관련된 {/* #related */}
+
+* [OracleDB 스토리지](/reference/storage/oracledb)
+* [메타데이터 필터](/reference/rag/metadata-filters)
+* [벡터 데이터베이스](/guides/rag/vector-databases)

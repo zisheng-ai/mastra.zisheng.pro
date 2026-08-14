@@ -1,0 +1,282 @@
+---
+title: "서버 | 마스트라 플랫폼"
+description: "Mastra 플랫폼에서 프로덕션 API 서버로 Mastra 애플리케이션을 배포하고 호스팅하세요."
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+
+# Mastra 플랫폼의 서버
+
+Mastra 플랫폼의 서버는 Mastra 애플리케이션을 API 서버로 실행하는 프로덕션 배포 대상입니다. 플랫폼에서 Mastra 서버를 구축, 배포, 호스팅 및 관리하려는 경우 이를 사용하세요.
+
+안정적인 API 엔드포인트, 환경 변수 관리, 사용자 정의 도메인 지원, 배포 기록을 즉시 사용할 수 있습니다.
+
+:::메모`mastra server deploy` is the earlier split deploy path. New projects should use the unified [`mastra deploy`](/docs/mastra-platform/deploy)실행 전 검증, 환경 및 CLI 관리 데이터베이스를 추가하는 명령입니다.
+:::
+
+:::메모
+
+서버 배포에서는 호스팅된 스토리지를 자동으로 프로비저닝합니다. 다음으로 저장용량을 재정의하는 경우[LibSQLStore](/reference/storage/libsql) and a file URL, switch to a remotely hosted database because Mastra platform uses an ephemeral filesystem.
+
+:::
+
+## 빠른 시작 {/* #quickstart */}
+
+<Steps>
+  <StepItem>
+    따라가다[get started guide](/docs) to create your first Mastra project.
+  </StepItem>
+
+  <StepItem>
+    설치하다`mastra` CLI globally:
+
+    ```bash npm2yarn
+    npm install -g mastra
+    ```
+  </StepItem>
+
+  <StepItem>
+    프로젝트를 배포합니다.
+
+    ```bash
+    mastra server deploy
+    ```
+
+    아직 인증되지 않은 경우 CLI에서 로그인하라는 메시지를 표시합니다. 자격 증명을 로컬에 저장하고 이후의 CLI 명령에서는 이러한 자격 증명을 사용합니다.
+
+    명령이 실행됩니다.`mastra build`, uploads the artifact, builds a Docker image, and deploys it. On first deploy, the CLI creates a `.mastra-project.json` file linking your local project to the platform. Commit this file so subsequent deploys and CI/CD target the same project.
+
+    :::참고
+    환경 변수`.env`, `.env.local`, and `.env.production` are included automatically. On the first deploy, these seed the project if no env vars are set yet. After that, manage env vars through the web dashboard.
+    Review and sanitize these files before first deploy to avoid uploading development-only or personal secrets.
+    :::
+
+    참조[CLI reference](/reference/cli/mastra#mastra-server-deploy) for the full list of flags.
+  </StepItem>
+
+  <StepItem>
+    CLI에서 인쇄된 URL에서 배포를 확인하세요. 추가`/api/agents` to confirm it returns a JSON list of your agents.
+
+    :::경고
+    설정[authentication](/docs/server/auth) before exposing your endpoints publicly.
+    :::
+  </StepItem>
+</Steps>
+
+## 수명주기 배포 {/* #deploy-lifecycle */}
+
+배포는 다음을 통해 전환됩니다.**queued → uploading → building → deploying → running** (or **failed**, **cancelled**, **crashed**, or **stopped**). Only one build runs per project at a time. If multiple deploys queue up, only the latest proceeds and the rest are cancelled. Builds running longer than 15 minutes are automatically failed. The first deploy provisions infrastructure and seeds environment variables from your local `.env`. Your server URL remains stable across deploys.
+
+## 유휴 동작 {/* #idle-behavior */}
+
+Mastra 플랫폼의 서버는 리소스를 절약하기 위해 일정 기간 동안 활동이 없으면 서비스를 잠자기 상태로 만들 수 있습니다. 비활성은 아웃바운드 네트워크 트래픽으로 측정됩니다. 서비스는 아웃바운드 패킷 없이 약 10분 후에만 유휴 상태로 간주됩니다. 반복되는 아웃바운드 트래픽은 이 타이머를 재설정하고 서비스를 활성 상태로 유지합니다.
+
+절대로 잠들지 않는 서버에는 일반적으로 백그라운드 작업이 있거나 타이머에 따라 트래픽을 보내는 장기간 연결이 있습니다. 다음과 같은 일반적인 원인을 확인하세요.
+
+### 지속적인 데이터베이스 연결 {/* #persistent-database-connections */}
+
+열려 있는 데이터베이스 클라이언트는 서버가 유휴 상태일 때에도 연결을 유지합니다. 또한 많은 드라이버는 아웃바운드 트래픽으로 계산되는 일정 간격으로 데이터베이스를 ping하는 백그라운드 상태 검사를 실행합니다. 예를 들어, 절대 닫히지 않는 MongoDB 클라이언트는 모니터링 소켓을 열어두고 약 10초마다 하트비트를 보냅니다.
+
+유휴 연결을 소모하는 연결 풀 설정만으로는 드라이버의 모니터링 연결이 열려 있고 계속 핑을 보내기 때문에 충분하지 않습니다. 서버를 절전 모드로 전환하려면 일정 기간 동안 활동이 없으면 클라이언트를 닫고 다음 요청 시 다시 연결하세요.
+
+:::참고
+클라이언트를 닫으면 서버가 깨어난 후 첫 번째 요청에 짧은 재연결 지연이 추가됩니다. 워크로드가 이러한 지연을 견딜 수 없는 경우 연결을 열어두고 유휴 절전 모드에 의존하지 마십시오.
+:::
+
+### 예약된 작업 및 타이머 {/* #scheduled-tasks-and-timers */}
+
+에이`setInterval`, cron job, or polling loop that makes network calls keeps the server awake. If you need scheduled work, run it as a separate service or use an external scheduler that wakes the server with a request.
+
+### 외부 핑 및 연결 유지 확인 {/* #external-pings-and-keep-alive-checks */}
+
+일정한 간격으로 서버에 도달하는 가동 시간 모니터, 상태 확인 또는 연결 유지 핑은 유휴 타이머를 재설정합니다. 서버를 절전 모드로 전환하려면 이러한 검사를 제거하거나 유휴 창 이상으로 간격을 늘리십시오.
+
+### 관측 가능성 내보내기 {/* #observability-exporters */}
+
+추적, 로그 또는 메트릭을 원격 엔드포인트로 스트리밍하는 내보내기는 아웃바운드 트래픽을 보냅니다. 고정된 간격으로 플러시하는 대신 서버가 유휴 상태일 때 내보내기 프로그램이 일괄 처리하고 전송을 중지하는지 확인합니다.
+
+### 수명이 긴 스트림 {/* #long-lived-streams */}
+
+개방형 서버 전송 이벤트(SSE) 스트림, WebSocket 또는 기타 장기 연결은 닫힐 때까지 트래픽을 열어 둡니다. 백그라운드에서 구독 상태를 유지하는 스트리밍 응답은 연결을 활성 상태로 유지합니다. 클라이언트 연결이 끊어지면 스트림이 닫히고 서버가 유휴 상태인 동안에는 스트림이 열려 있지 않은지 확인합니다.
+
+### 채팅 통합 {/* #chat-integrations */}
+
+일부 채팅 통합은 지속적인 연결을 유지하고 정기적인 하트비트를 보내 서버를 활성화시킵니다. 예를 들어 소켓 모드의 Slack 앱은 WebSocket을 열고 약 30초마다 핑을 보내고, Discord 봇은 타이머의 하트비트와 함께 게이트웨이 WebSocket을 열어 둡니다. 오픈 소켓과 하트비트 모두 유휴 상태를 방지합니다.
+
+서버를 절전 모드로 전환하려면 통합이 지원하는 영구 연결 대신 HTTP 웹후크를 통해 이벤트를 수신하세요. 예를 들어 Slack 앱은 소켓 모드 대신 요청 URL과 함께 이벤트 API를 사용할 수 있습니다. 앱에 지속적인 연결이 필요한 경우 다음을 사용하여 서비스를 계속 실행하세요.**Persistent Server add-on** described below.
+
+### 활성 연결 검사 {/* #inspect-active-connections */}
+
+서버를 깨운 상태로 유지하는 요소를 찾으려면 유휴 기간 동안 프로세스의 활성 핸들을 검사하십시오. 모든 요청이 완료된 후에도 남아 있는 핸들이 조사의 원인입니다. 열린 소켓은 닫아야 하는 영구 연결을 가리키고 활성 타이머는`setInterval` or self-rescheduling `setTimeout`.
+
+다음 도우미를 앱에 추가한 후 트래픽이 중지된 후 로그를 살펴보세요. 서버가 유휴 상태일 때에도 계속 나열되는 항목은 서버를 깨어 있게 유지하는 것입니다.
+
+```typescript title="src/mastra/diagnose-idle.ts"
+export function logActiveHandles() {
+  // process._getActiveHandles is undocumented but useful for diagnosis.
+  const handles = (process as any)._getActiveHandles() as Array<any>
+
+  const summary = handles.map(handle => {
+    const type = handle?.constructor?.name ?? typeof handle
+    if (type === 'Socket') {
+      return `Socket -> ${handle.remoteAddress}:${handle.remotePort}`
+    }
+    return type
+  })
+
+  console.log(`[idle] ${handles.length} active handles:`, summary)
+}
+
+// Log every 30 seconds so you can see what persists while the server is idle.
+setInterval(logActiveHandles, 30_000).unref()
+```
+
+부르다`unref()` on the diagnostic interval so the helper itself doesn't keep the server awake.
+
+### 서비스를 계속 실행하세요 {/* #keep-a-service-running */}
+
+일부 애플리케이션에는 실제로 낮은 첫 번째 요청 대기 시간을 위한 영구 데이터베이스 연결, 백그라운드 스케줄러 또는 수명이 긴 스트림과 같이 위에 설명된 연결이나 작업이 필요합니다. 앱에 이러한 항목이 필요한 경우 서비스를 강제로 절전 모드로 전환하지 마세요. 사용**Persistent Server add-on** to keep the service running continuously instead.
+
+와 함께**Persistent Server add-on** enabled, the service stays awake even with no traffic, so persistent connections, scheduled tasks, and open streams keep working without being interrupted by idle sleep.
+
+## CI/CD {/* #cicd */}
+
+GitHub Actions, GitLab CI 또는 모든 CI 공급자의 배포를 자동화합니다. 첫 번째 대화형 배포 후 CI/CD에는 API 토큰과 API 토큰이라는 두 가지가 필요합니다.`.mastra-project.json` file committed to your repository.
+
+:::팁
+코드가 GitHub에 있는 경우[GitHub integration](/docs/mastra-platform/github) gives you push-to-deploy without writing a workflow file. Use the CLI-based CI/CD flow below when you need GitLab, another CI provider, or custom build steps before deploy.
+:::
+
+### API 토큰 만들기 {/* #create-an-api-token */}
+
+<Steps>
+  <StepItem>
+    다음 명령을 로컬로 실행합니다.
+
+    ```bash
+    mastra auth tokens create ci-deploy
+    ```
+
+    CLI는 토큰을 한 번 인쇄합니다. 즉시 복사하세요. 다시 검색할 수 없습니다.
+  </StepItem>
+
+  <StepItem>
+    CI 제공자에 토큰을 비밀로 추가하세요. GitHub Actions에서 다음으로 이동합니다.**Settings → Secrets and variables → Actions** and create a secret named `MASTRA_API_TOKEN`.
+  </StepItem>
+
+  <StepItem>
+    귀하의`.mastra-project.json` file is committed to the repository. The CLI reads the `organizationId` and `projectId` from this file to target the correct project during CI deploys.
+  </StepItem>
+</Steps>
+
+### 그만큼`--yes` flag {/* #the---yes-flag */}
+
+통과하다`--yes` (or `-y`) to skip all confirmation prompts. Without it, the CLI waits for interactive input and your CI job hangs.
+
+```bash
+mastra server deploy --yes
+```
+
+### GitHub 작업 {/* #github-actions */}
+
+다음 Workflow는 푸시할 때마다 배포됩니다.`main`:
+
+```yaml title=".github/workflows/deploy-mastra.yml"
+name: Deploy to Mastra platform
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/mastra/**']
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm install
+      - name: Deploy to Mastra platform
+        run: npx mastra server deploy --yes
+        env:
+          MASTRA_API_TOKEN: ${{ secrets.MASTRA_API_TOKEN }}
+```
+
+조정하다`paths` filter and `working-directory` if your Mastra project is in a subdirectory (e.g. a monorepo).
+
+:::메모
+
+Studio 배포의 경우 교체`mastra server deploy` with `mastra studio deploy`. The flags and environment variables are the same.
+
+:::
+
+### GitLab CI {/* #gitlab-ci */}
+
+다음 파이프라인은 푸시 시 배포됩니다.`main`:
+
+```yaml title=".gitlab-ci.yml"
+deploy:
+  image: node:22
+  stage: deploy
+  only:
+    - main
+  before_script:
+    - npm install
+  script:
+    - npx mastra server deploy --yes
+```
+
+추가하다`MASTRA_API_TOKEN` as a CI/CD variable in **Settings → CI/CD → Variables**.
+
+### 기타 CI Provider {/* #other-ci-providers */}
+
+Node.js 및 셸 명령을 실행하는 모든 CI 시스템은 Mastra와 함께 작동합니다.
+
+1. 종속성을 설치합니다.
+2. 세트`MASTRA_API_TOKEN` as an environment variable.
+3. 달리다`mastra server deploy --yes` (or `mastra studio deploy --yes`).
+
+### 배포 확인 {/* #verify-the-deploy */}
+
+Workflow가 완료된 후 상태 엔드포인트를 눌러 배포를 확인합니다.
+
+```bash
+curl -f https://<your-project>.server.mastra.cloud/health
+```
+
+또는 Agent의 JSON 목록을 반환하는 Agent 엔드포인트를 확인하세요.
+
+```bash
+curl -f https://<your-project>.server.mastra.cloud/api/agents
+```
+
+다음 예에서는 GitHub Actions Workflow에 확인 단계를 추가합니다.
+
+```yaml
+- name: Verify deployment
+  run: |
+    sleep 30
+    curl -f https://<your-project>.server.mastra.cloud/health
+```
+
+### 환경 변수로 프로젝트 구성 재정의 {/* #override-project-config-with-environment-variables */}
+
+CLI는 다음을 읽습니다.`organizationId` and `projectId` from `.mastra-project.json` by default. To override these values (e.g. deploying to a different project from the same repository), set the following environment variables:
+
+| 변수 | 설명 |
+| - | - |
+|`MASTRA_ORG_ID` | Overrides the organization ID from `.mastra-project.json`. |
+| `MASTRA_PROJECT_ID` | Overrides the project ID from `.mastra-project.json`. |
+
+## 관련된 {/* #related */}
+
+* [`mastra server deploy`](/reference/cli/mastra#mastra-server-deploy)
+* [`mastra server pause`](/reference/cli/mastra#mastra-server-pause)
+* [`mastra server restart`](/reference/cli/mastra#mastra-server-restart)
+* [`mastra studio deploy`](/reference/cli/mastra#mastra-studio-deploy)
+* [`mastra auth tokens`](/reference/cli/mastra#mastra-auth-tokens)

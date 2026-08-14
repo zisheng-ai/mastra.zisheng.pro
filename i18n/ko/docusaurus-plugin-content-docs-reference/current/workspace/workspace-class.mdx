@@ -1,0 +1,798 @@
+---
+title: "참조: 작업공간 클래스 | 작업공간"
+description: "파일 시스템 액세스, 샌드박스 실행 및 Mastra 검색을 위한 중앙 API인 Workspace 클래스에 대한 문서입니다."
+packages:
+  - "@mastra/core"
+---
+
+# 작업실 수업
+
+**추가된 항목:** `@mastra/core@1.1.0`
+
+그만큼`Workspace` class combines a filesystem and sandbox to provide agents with file storage and command execution capabilities. It also supports BM25 and vector search for indexed content.
+
+## 사용예 {/* #usage-example */}
+
+```typescript
+import { Workspace, LocalFilesystem, LocalSandbox } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  id: 'my-workspace',
+  name: 'My Workspace',
+  filesystem: new LocalFilesystem({
+    basePath: './workspace',
+  }),
+  sandbox: new LocalSandbox({
+    workingDirectory: './workspace',
+  }),
+  bm25: true,
+  autoIndexPaths: ['docs'],
+})
+```
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for the workspace',
+  isOptional: true,
+  defaultValue: 'Auto-generated',
+},
+{
+  name: 'name',
+  type: 'string',
+  description: 'Human-readable name',
+  isOptional: true,
+  defaultValue: 'workspace-{id}',
+},
+{
+  name: 'filesystem',
+  type: 'WorkspaceFilesystem | WorkspaceFilesystemResolver',
+  description:
+    'Filesystem provider instance, or a resolver function that receives `requestContext` and returns a filesystem per request. See [dynamic filesystem](/docs/workspace/filesystem#dynamic-filesystem).',
+  isOptional: true,
+},
+{
+  name: 'sandbox',
+  type: 'WorkspaceSandbox | WorkspaceSandboxResolver',
+  description:
+    'Sandbox provider instance, or a resolver function that receives `requestContext` and returns a sandbox per request. See [dynamic sandbox](/docs/workspace/sandbox#dynamic-sandbox).',
+  isOptional: true,
+},
+{
+  name: 'instructions.dynamicSandbox',
+  type: "'placeholder' | 'resolve' | (({ requestContext }) => string)",
+  description:
+    "Controls how a resolver-backed `sandbox` contributes to workspace instructions. `'placeholder'` (default) emits stable text without calling the resolver. `'resolve'` calls the resolver and uses the sandbox's own instructions. A function returns custom text without resolving. Has no effect on a static sandbox.",
+  isOptional: true,
+  defaultValue: "'placeholder'",
+},
+{
+  name: 'sandboxCacheKey',
+  type: '({ requestContext }) => string | undefined',
+  description:
+    'Stable cache key for a resolver-backed `sandbox`. When set, resolved sandboxes are memoized per key instead of per `RequestContext` instance, so background-process tools reach the same sandbox across follow-up requests. Has no effect on a static sandbox.',
+  isOptional: true,
+},
+{
+  name: 'bm25',
+  type: 'boolean | BM25Config',
+  description: 'Enable BM25 keyword search. Pass true for defaults or a config object.',
+  isOptional: true,
+  defaultValue: 'undefined',
+},
+{
+  name: 'vectorStore',
+  type: 'MastraVector',
+  description: 'Vector store for semantic search',
+  isOptional: true,
+},
+{
+  name: 'embedder',
+  type: 'Embedder',
+  description:
+    'Function that turns text into vectors. Required when `vectorStore` is set. Accepts either a single-text function `(text: string) => Promise<number[]>` or a batch-capable function `(texts: string[]) => Promise<number[][]>` that has a `batch: true` property and an optional `maxBatchSize`. See [Batch embedding](/docs/workspace/search#batch-embedding).',
+  isOptional: true,
+},
+{
+  name: 'autoIndexPaths',
+  type: 'string[]',
+  description:
+    "Paths or glob patterns to auto-index on init(). Supports glob patterns like '**/*.md' for selective indexing.",
+  isOptional: true,
+},
+{
+  name: 'skills',
+  type: 'string[] | ((context: SkillsContext) => string[] | Promise<string[]>)',
+  description:
+    "Paths where SKILL.md files are located. This can be a static array or an async function that resolves paths dynamically. Supports glob patterns like './**/skills' for discovery.",
+  isOptional: true,
+},
+{
+  name: 'skillSource',
+  type: 'SkillSource',
+  description:
+    'Custom skill source for skill discovery. When provided, this source is used instead of the workspace filesystem. Use VersionedSkillSource to serve published skill versions from a content-addressable blob store.',
+  isOptional: true,
+},
+{
+  name: 'onMount',
+  type: 'OnMountHook',
+  description:
+    'Pre-mount hook called for each filesystem before mounting into a sandbox. Return false to skip mounting, or return { success: true } if the hook handled the mount. Return undefined to use the default mount behavior.',
+  isOptional: true,
+},
+{
+  name: 'searchIndexName',
+  type: 'string',
+  description:
+    "Custom index name for the vector store. Must be a valid SQL identifier (start with a letter or underscore, contain only letters, numbers, or underscores, max 63 characters). Defaults to a sanitized version of '{id}_search'.",
+  isOptional: true,
+},
+{
+  name: 'tools',
+  type: 'WorkspaceToolsConfig',
+  description: 'Per-tool configuration for enabling tools and setting safety options',
+  isOptional: true,
+  properties: [
+    {
+      type: 'WorkspaceToolsConfig',
+      parameters: [
+        {
+          name: 'enabled',
+          type: 'boolean',
+          description: 'Whether the tool is available to agents',
+          isOptional: true,
+          defaultValue: 'true',
+        },
+        {
+          name: 'requireApproval',
+          type: 'boolean',
+          description: 'Whether the tool requires user approval before execution',
+          isOptional: true,
+          defaultValue: 'false',
+        },
+        {
+          name: 'name',
+          type: 'string',
+          description:
+            'Custom name to expose this tool as. Replaces the default `mastra_workspace_*` name. The config key must still use the original `WORKSPACE_TOOLS` constant.',
+          isOptional: true,
+        },
+        {
+          name: 'requireReadBeforeWrite',
+          type: 'boolean',
+          description: 'For write tools: require reading the file first to prevent overwrites',
+          isOptional: true,
+          defaultValue: 'false',
+        },
+        {
+          name: 'maxOutputTokens',
+          type: 'number',
+          description: 'Maximum tokens for tool output. Output exceeding this limit is truncated using tiktoken.',
+          isOptional: true,
+          defaultValue: '2000',
+        },
+        {
+          name: 'writeLockTimeoutMs',
+          type: 'number',
+          description:
+            'Maximum time in milliseconds a write tool waits to acquire the per-file write lock before failing. Raise this for slow or cold-starting filesystems (e.g. remote sandboxes).',
+          isOptional: true,
+          defaultValue: '30000',
+        },
+        {
+          name: 'hooks',
+          type: 'WorkspaceToolHooks',
+          description: 'Hooks that run before and after every enabled workspace tool call. See Tool hooks below.',
+          isOptional: true,
+        },
+      ],
+    },
+  ],
+},
+{
+  name: 'operationTimeout',
+  type: 'number',
+  description: 'Timeout for operations in milliseconds',
+  isOptional: true,
+},
+]}
+/>
+
+## Tool 구성 {/* #tool-configuration */}
+
+그만큼`tools` option accepts a `WorkspaceToolsConfig` object that controls which workspace tools are enabled and their safety settings.
+
+```typescript {2,7-16}
+import { Workspace } from '@mastra/core/workspace'
+import { WORKSPACE_TOOLS } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  id: 'my-workspace',
+  name: 'My Workspace',
+  tools: {
+    // Global defaults (apply to all tools)
+    enabled: true,
+    requireApproval: false,
+
+    // Per-tool overrides using WORKSPACE_TOOLS constants
+    [WORKSPACE_TOOLS.FILESYSTEM.WRITE_FILE]: {
+      requireApproval: true,
+    },
+  },
+})
+```
+
+구성 개체는 두 부분으로 구성됩니다.
+
+* **전역 기본값** (`enabled`, `requireApproval`): Apply to all tools unless overridden
+* **Tool별 재정의**- 사용`WORKSPACE_TOOLS` constants as keys to configure individual tools
+
+보다[workspace overview](/docs/workspace/overview#tool-configuration) for more examples.
+
+### Tool 이름 다시 매핑 {/* #tool-name-remapping */}
+
+다음을 설정하여 작업공간 Tool의 이름을 바꿉니다.`name` property on individual tool configs. The config key remains the original constant: only the name exposed to the agent changes.
+
+```typescript {8,9}
+import { Workspace } from '@mastra/core/workspace'
+import { WORKSPACE_TOOLS } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  id: 'my-workspace',
+  name: 'My Workspace',
+  tools: {
+    [WORKSPACE_TOOLS.FILESYSTEM.READ_FILE]: { name: 'view' },
+    [WORKSPACE_TOOLS.FILESYSTEM.GREP]: { name: 'search_content' },
+  },
+})
+```
+
+Tool 이름은 모든 작업공간 Tool에서 고유해야 합니다. 다른 Tool의 기본 또는 사용자 정의 이름과 충돌하는 사용자 정의 이름을 설정하면 오류가 발생합니다.
+
+### Tool 후크 {/* #tool-hooks */}
+
+세트`tools.hooks` to run logic before and after every enabled workspace tool call. Hooks run after name remapping, so the context includes both the exposed `toolName` and the original `workspaceToolName`.
+
+```typescript {6-14}
+import { Workspace } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  id: 'my-workspace',
+  tools: {
+    hooks: {
+      beforeToolCall: ({ toolName, workspaceToolName, input }) => {
+        console.log(`Running ${toolName} (${workspaceToolName})`, input)
+      },
+      afterToolCall: ({ toolName, output, error }) => {
+        console.log(`Finished ${toolName}`, { output, error })
+      },
+    },
+  },
+})
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'beforeToolCall',
+  type: '(context: WorkspaceToolHookContext) => void | WorkspaceToolBeforeHookResult | Promise<void | WorkspaceToolBeforeHookResult>',
+  isOptional: true,
+  description:
+    'Runs before a workspace tool executes. Receives `{ toolName, workspaceToolName, input, context }`. Return `{ proceed: false, output }` to skip the tool call and use `output` as its result.',
+},
+{
+  name: 'afterToolCall',
+  type: '(context: WorkspaceToolAfterHookContext) => void | Promise<void>',
+  isOptional: true,
+  description:
+    'Runs after a workspace tool executes. Receives `{ toolName, workspaceToolName, input, context, output, error }`. `output` is undefined when the tool throws, and `error` is set instead.',
+},
+]}
+/>
+
+소유 대리인도 정의한 경우[tool hooks](/reference/agents/agent#tool-hooks), workspace hooks run inside the agent hook wrapper. The order is agent `beforeToolCall` → workspace `beforeToolCall` → tool → workspace `afterToolCall` → agent `afterToolCall`.
+
+## 속성 {/* #properties */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Workspace identifier',
+},
+{
+  name: 'name',
+  type: 'string',
+  description: 'Workspace name',
+},
+{
+  name: 'status',
+  type: 'WorkspaceStatus',
+  description: "'pending' | 'initializing' | 'ready' | 'paused' | 'error' | 'destroying' | 'destroyed'",
+},
+{
+  name: 'filesystem',
+  type: 'WorkspaceFilesystem | undefined',
+  description:
+    'The static filesystem provider. Returns `undefined` when a resolver function is configured — use `hasFilesystemConfig()` to check availability.',
+},
+{
+  name: 'sandbox',
+  type: 'WorkspaceSandbox | undefined',
+  description:
+    'The static sandbox provider. Returns `undefined` when a resolver function is configured — use `hasSandboxConfig()` to check availability.',
+},
+{
+  name: 'skills',
+  type: 'WorkspaceSkills | undefined',
+  description: 'Skills interface for accessing SKILL.md files',
+},
+{
+  name: 'canBM25',
+  type: 'boolean',
+  description: 'Whether BM25 search is available',
+},
+{
+  name: 'canVector',
+  type: 'boolean',
+  description: 'Whether vector search is available',
+},
+{
+  name: 'canHybrid',
+  type: 'boolean',
+  description: 'Whether hybrid search is available',
+},
+]}
+/>
+
+## 행동 양식 {/* #methods */}
+
+### 수명주기 {/* #lifecycle */}
+
+#### `init()` {/* #init */}
+
+작업공간을 초기화하고 리소스를 준비합니다.
+
+```typescript
+await workspace.init()
+```
+
+부름`init()` is optional in most cases:
+
+* **모래 상자**: 처음부터 자동 시작`executeCommand()` call. Use `init()` to avoid first-command latency.
+* **파일 시스템**: 기본 디렉터리를 생성하고 공급자별 설정을 실행합니다. 일부 공급자는 첫 번째 작업 시 디렉터리를 자동 생성합니다.
+* **찾다**: 사용하는 경우에만 필수`autoIndexPaths` for auto-indexing.
+
+초기화는 다음을 수행합니다.
+
+* 파일 시스템 공급자를 시작합니다(필요한 경우 기본 디렉터리 생성).
+* 샌드박스 공급자 시작(작업 디렉터리 생성, 구성된 경우 격리 설정)
+* 다음에서 파일 색인을 생성합니다.`autoIndexPaths` for search
+
+#### `destroy()` {/* #destroy */}
+
+작업공간을 삭제하고 리소스를 정리합니다.
+
+```typescript
+await workspace.destroy()
+```
+
+`destroy()`언어 서버, 브라우저, 샌드박스 공급자, 파일 시스템 공급자 순서로 작업 영역 소유 리소스를 닫습니다. 또한 캐시된 샌드박스 참조도 삭제됩니다.
+
+부르다`destroy()` when your application is done with a workspace. `mastra.shutdown()` calls it for registered workspaces during shutdown. To remove a workspace from the Mastra registry, use [`mastra.removeWorkspace()`](/reference/core/removeWorkspace).
+
+`LocalFilesystem.destroy()`디스크의 파일을 삭제하지 않습니다. 확인자 지원 파일 시스템 및 샌드박스 공급자는 애플리케이션이 소유하며 애플리케이션에서 정리해야 합니다.
+
+### 검색 작업 {/* #search-operations */}
+
+#### `index(path, content, options?)` {/* #indexpath-content-options */}
+
+검색을 위해 콘텐츠를 색인화합니다.
+
+```typescript
+await workspace.index('/docs/guide.md', 'Guide content...')
+```
+
+#### `search(query, options?)` {/* #searchquery-options */}
+
+색인화된 콘텐츠를 검색합니다.
+
+```typescript
+const results = await workspace.search('password reset', {
+  topK: 10,
+  mode: 'hybrid',
+})
+```
+
+### 공익사업 {/* #utility */}
+
+#### `getInfo()` {/* #getinfo */}
+
+작업공간 정보를 얻으세요.
+
+```typescript
+const info = await workspace.getInfo()
+// { id, name, status, createdAt, lastAccessedAt, filesystem?, sandbox? }
+```
+
+통과하다`resolveDynamicProviders: false` to report resolver-backed providers as runtime-defined without invoking their resolver.
+
+```typescript
+const info = await workspace.getInfo({ resolveDynamicProviders: false })
+```
+
+**매개변수:**
+
+<PropertiesTable
+  content={[
+{
+  name: 'options.includeFileCount',
+  type: 'boolean',
+  description: 'Whether to count total files. This can be slow for large workspaces.',
+  isOptional: true,
+},
+{
+  name: 'options.requestContext',
+  type: 'RequestContext',
+  description: 'Passed to dynamic provider resolvers when `resolveDynamicProviders` is enabled.',
+  isOptional: true,
+},
+{
+  name: 'options.resolveDynamicProviders',
+  type: 'boolean',
+  description:
+    'Whether to invoke dynamic provider resolvers. Set to `false` when you only need metadata and want resolver-backed providers reported as `dynamic`.',
+  isOptional: true,
+  defaultValue: 'true',
+},
+]}
+/>
+
+#### `getInstructions(opts?)` {/* #getinstructionsopts */}
+
+파일 시스템 및 샌드박스 공급자의 결합된 명령을 반환합니다. 실행 컨텍스트를 이해하는 데 도움이 되도록 Agent의 시스템 메시지에 삽입됩니다.
+
+```typescript
+const instructions = workspace.getInstructions()
+```
+
+통과하다`requestContext` to enable per-request customization when a provider's `instructions` option is a function:
+
+```typescript
+const instructions = workspace.getInstructions({ requestContext })
+```
+
+**매개변수:**
+
+<PropertiesTable
+  content={[
+{
+  name: 'opts.requestContext',
+  type: 'RequestContext',
+  description:
+    'Forwarded to the `instructions` function on the filesystem or sandbox provider, if one is configured.',
+  isOptional: true,
+},
+]}
+/>
+
+**보고:** `string`
+
+#### `getInstructionsAsync(opts?)` {/* #getinstructionsasyncopts */}
+
+결합된 작업 공간 지침을 반환합니다. 작업 영역이 확인자 지원 공급자를 사용하는 경우 이를 사용합니다. 런타임 정의 파일 시스템은 요청별로 확인됩니다. 런타임 정의 샌드박스는 다음과 같은 경우를 제외하고 안정적인 자리 표시자 텍스트를 제공합니다.`instructions.dynamicSandbox` is set to `'resolve'`.
+
+```typescript
+const instructions = await workspace.getInstructionsAsync({ requestContext })
+```
+
+**매개변수:**
+
+<PropertiesTable
+  content={[
+{
+  name: 'opts.requestContext',
+  type: 'RequestContext',
+  description:
+    "Passed to the dynamic filesystem resolver, and to the dynamic sandbox resolver when `instructions.dynamicSandbox` is `'resolve'`.",
+  isOptional: true,
+},
+]}
+/>
+
+**보고:** `Promise<string>`
+
+기본 출력을 재정의하려면`instructions` option to [LocalFilesystem](/reference/workspace/local-filesystem#constructor-parameters) or [LocalSandbox](/reference/workspace/local-sandbox#constructor-parameters).
+
+#### `getToolsConfig()` {/* #gettoolsconfig */}
+
+현재 Tool 구성을 가져옵니다.
+
+```typescript
+const config = workspace.getToolsConfig()
+```
+
+**보고:** `WorkspaceToolsConfig | undefined`
+
+#### `setToolsConfig(config?)` {/* #settoolsconfigconfig */}
+
+런타임 시 Tool별 구성을 교체합니다. 이는 전체 교체를 수행하며 이전 구성과 병합되지 않습니다. 통과하다`undefined` to reset to defaults. Changes take effect on the next agent interaction (the next `createWorkspaceTools()` call).
+
+```typescript
+import { WORKSPACE_TOOLS } from '@mastra/core/workspace'
+
+// Disable write tools for read-only mode
+workspace.setToolsConfig({
+  [WORKSPACE_TOOLS.FILESYSTEM.WRITE_FILE]: { enabled: false },
+  [WORKSPACE_TOOLS.FILESYSTEM.EDIT_FILE]: { enabled: false },
+})
+
+// Reset to defaults
+workspace.setToolsConfig(undefined)
+```
+
+**매개변수:**
+
+<PropertiesTable
+  content={[
+{
+  name: 'config',
+  type: 'WorkspaceToolsConfig | undefined',
+  isOptional: true,
+  description: 'New tool configuration to apply. Pass undefined to reset to defaults.',
+},
+]}
+/>
+
+### 동적 파일 시스템 {/* #dynamic-filesystem */}
+
+#### `hasFilesystemConfig()` {/* #hasfilesystemconfig */}
+
+파일 시스템이 정적 인스턴스 또는 확인자 기능으로 구성되어 있는지 확인하세요. 확인하는 대신 이것을 사용하십시오`workspace.filesystem` directly, because a resolver-based workspace returns `undefined` from the `filesystem` property.
+
+```typescript
+if (workspace.hasFilesystemConfig()) {
+  // Filesystem tools are available
+}
+```
+
+**보고:** `boolean`
+
+#### `resolveFilesystem({ requestContext })` {/* #resolvefilesystem-requestcontext- */}
+
+요청 컨텍스트에 대한 파일 시스템을 확인합니다. 리졸버 기능이 구성되면 제공된`requestContext`. When a static filesystem is configured, returns it directly. Returns `undefined` if no filesystem is configured.
+
+```typescript
+import { RequestContext } from '@mastra/core/request-context'
+
+const ctx = new RequestContext([['agent-role', 'admin']])
+const fs = await workspace.resolveFilesystem({ requestContext: ctx })
+```
+
+**매개변수:**
+
+<PropertiesTable
+  content={[
+{
+  name: 'requestContext',
+  type: 'RequestContext',
+  description: 'The request context to pass to the resolver function.',
+},
+]}
+/>
+
+**보고:** `Promise<WorkspaceFilesystem | undefined>`
+
+### 동적 샌드박스 {/* #dynamic-sandbox */}
+
+#### `hasSandboxConfig()` {/* #hassandboxconfig */}
+
+샌드박스가 정적 인스턴스 또는 확인자 기능으로 구성되어 있는지 확인하세요. 확인하는 대신 이것을 사용하십시오`workspace.sandbox` directly, because a resolver-based workspace returns `undefined` from the `sandbox` property.
+
+```typescript
+if (workspace.hasSandboxConfig()) {
+  // Sandbox tools are available
+}
+```
+
+**보고:** `boolean`
+
+#### `resolveSandbox({ requestContext })` {/* #resolvesandbox-requestcontext- */}
+
+요청 컨텍스트에 대한 샌드박스를 해결합니다. 리졸버 기능이 구성되면 제공된`requestContext`. When a static sandbox is configured, returns it directly. Returns `undefined` if no sandbox is configured.
+
+```typescript
+import { RequestContext } from '@mastra/core/request-context'
+
+const ctx = new RequestContext([['user-id', 'alice']])
+const sandbox = await workspace.resolveSandbox({ requestContext: ctx })
+```
+
+**매개변수:**
+
+<PropertiesTable
+  content={[
+{
+  name: 'requestContext',
+  type: 'RequestContext',
+  description: 'The request context to pass to the resolver function.',
+},
+]}
+/>
+
+**보고:** `Promise<WorkspaceSandbox | undefined>`
+
+#### `clearSandboxCache(cacheKey?)` {/* #clearsandboxcachecachekey */}
+
+캐시된 리졸버 지원 샌드박스 지우기`sandboxCacheKey`. Pass a cache key to clear one entry, or omit it to clear all keyed sandbox entries.
+
+이 방법은 당을 지우지 않습니다.`RequestContext` weak cache. Those entries are garbage-collection managed.
+
+작업 영역에는 확인자가 반환한 샌드박스가 없습니다. 이 방법은 작업공간 참조만 삭제합니다. 자신의 라이프사이클 코드에서 샌드박스를 삭제하세요.
+
+```typescript
+workspace.clearSandboxCache('thread-123')
+workspace.clearSandboxCache()
+```
+
+**매개변수:**
+
+<PropertiesTable
+  content={[
+{
+  name: 'cacheKey',
+  type: 'string',
+  description: 'The cache key to clear. Omit this value to clear all keyed sandbox entries.',
+  isOptional: true,
+},
+]}
+/>
+
+**보고:** `void`
+
+## Agent Tool {/* #agent-tools */}
+
+작업 영역은 구성된 내용에 따라 Agent에 Tool를 제공합니다.
+
+### 파일 시스템 Tool {/* #filesystem-tools */}
+
+파일 시스템이 구성되면 추가됩니다.
+
+| Tool | 설명 |
+| - | - |
+|`mastra_workspace_read_file` | Read file contents. Text files return as text (with optional line range). Images and PDFs return as native media parts the model can view directly. Other binaries return metadata only unless an explicit `encoding` is passed. |
+| `mastra_workspace_write_file` | Create or overwrite a file with new content. Creates parent directories automatically. |
+| `mastra_workspace_edit_file` | Edit an existing file by finding and replacing text. Useful for targeted changes without rewriting the entire file. |
+| `mastra_workspace_list_files` | List directory contents as a tree structure. Supports recursive listing with depth limits, glob patterns, and `.gitignore` filtering (enabled by default). |
+| `mastra_workspace_delete` | Delete a file or directory. Supports recursive deletion for directories. |
+| `mastra_workspace_file_stat` | Get metadata about a file or directory including size, type, and modification time. |
+| `mastra_workspace_mkdir` | Create a directory. Creates parent directories automatically if they don't exist. |
+| `mastra_workspace_grep` | Search file contents using regex patterns. Supports glob filtering, context lines, and case-insensitive search. |
+
+정적 파일 시스템을 사용하면 Tool 작성(`write_file`, `edit_file`, `delete`, `mkdir`) are excluded when the filesystem is in read-only mode. With a [runtime-defined filesystem](/docs/workspace/filesystem#dynamic-filesystem), write tools are always included and read-only is enforced at runtime.
+
+그만큼`read_file` tool accepts `mediaTypes` and `maxMediaBytes` options to control which mime types are surfaced to the model as native media parts and how large those files can be:
+
+<PropertiesTable
+  content={[
+{
+  name: 'mediaTypes',
+  type: 'string[] | ((mimeType: string) => boolean) | false',
+  description:
+    "Which mime types to surface to the model as media parts (file/image parts) rather than as text. Accepts an array of globs (e.g. `['image/*']`), a custom predicate function, or `false` to disable media detection. Defaults to the cross-provider-safe intersection of image formats plus PDF. Only applies when the caller doesn't pass an explicit `encoding`.",
+  isOptional: true,
+  defaultValue: "['image/png', 'image/jpeg', 'image/webp', 'application/pdf']",
+},
+{
+  name: 'maxMediaBytes',
+  type: 'number',
+  description:
+    'Maximum file size (in bytes) to inline as a media part. Files larger than this fall back to metadata-only output rather than being fully base64-encoded into context and persisted in storage on rehydration.',
+  isOptional: true,
+  defaultValue: '10 * 1024 * 1024 (10 MiB)',
+},
+]}
+/>
+
+```typescript
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  tools: {
+    [WORKSPACE_TOOLS.FILESYSTEM.READ_FILE]: {
+      // Broaden to any image (including SVG, BMP, HEIC) — may fail on some providers
+      mediaTypes: ['image/*'],
+      // Raise the inline-media cap to 25 MiB
+      maxMediaBytes: 25 * 1024 * 1024,
+    },
+  },
+})
+```
+
+### 샌드박스 Tool {/* #sandbox-tools */}
+
+샌드박스가 구성되면 추가됩니다.
+
+| Tool | 설명 |
+| - | - |
+|`mastra_workspace_execute_command` | Execute a shell command. Returns stdout, stderr, and exit code. When the sandbox has a process manager, accepts `background: true` to spawn a long-running process and return a PID. |
+| `mastra_workspace_get_process_output` | Get stdout, stderr, and status of a background process by PID. Accepts `tail` to limit output lines and `wait: true` to block until exit. Only available when the sandbox has a process manager. |
+| `mastra_workspace_kill_process` | Kill a background process by PID. Returns the last 50 lines of output. Only available when the sandbox has a process manager. |
+
+정적 샌드박스를 사용하면 기능 확인(`executeCommand`, `processes`) decide which tool variants are exposed. With a [runtime-defined sandbox](/docs/workspace/sandbox#dynamic-sandbox), all sandbox tools are registered and the runtime throws a clear error if the resolved sandbox doesn't implement a requested capability.
+
+그만큼`execute_command` tool accepts a `backgroundProcesses` option for lifecycle callbacks on background processes:
+
+<PropertiesTable
+  content={[
+{
+  name: 'backgroundProcesses',
+  type: 'BackgroundProcessesConfig',
+  description:
+    'Configuration for handling background processes. Only applicable if the sandbox supports background execution.',
+  isOptional: true,
+  properties: [
+    {
+      type: 'BackgroundProcessesConfig',
+      parameters: [
+        {
+          name: 'onStdout',
+          type: '(data: string, meta: BackgroundProcessMeta) => void',
+          description: 'Callback for stdout chunks from background processes.',
+          isOptional: true,
+        },
+        {
+          name: 'onStderr',
+          type: '(data: string, meta: BackgroundProcessMeta) => void',
+          description: 'Callback for stderr chunks from background processes.',
+          isOptional: true,
+        },
+        {
+          name: 'onExit',
+          type: '(meta: BackgroundProcessExitMeta) => void',
+          description: 'Callback when a background process exits. Meta includes pid, exitCode, stdout, and stderr.',
+          isOptional: true,
+        },
+        {
+          name: 'abortSignal',
+          type: 'AbortSignal | null | false',
+          description:
+            "Abort signal for background processes. undefined (default) uses the agent's signal. null or false disables abort — processes persist after agent shutdown.",
+          isOptional: true,
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+보다[Background process callbacks](/docs/workspace/sandbox#background-process-callbacks) for usage examples.
+
+### 검색 Tool {/* #search-tools */}
+
+BM25 또는 벡터 검색이 구성된 경우 추가됨:
+
+| Tool | 설명 |
+| - | - |
+|`mastra_workspace_search` | Search indexed content using keyword (BM25), semantic (vector), or hybrid search. Returns ranked results with scores. |
+| `mastra_workspace_index` | Index content for search. Associates content with a path for later retrieval. |
+
+그만큼`index` tool is excluded when the filesystem is in read-only mode.
+
+### 스킬 Tool {/* #skill-tools */}
+
+스킬 구성 시 추가됨:
+
+| Tool | 설명 |
+| - | - |
+|`skill` | Activate a skill by name or path. Returns the skill's full instructions, references, scripts, and assets. |
+| `skill_search` | Search across skill content. Accepts an optional list of skill names to filter and a `topK` parameter. |
+| `skill_read` | Read a specific file (reference, script, or asset) from a skill directory. |
+
+여러 스킬이 동일한 이름을 공유하는 경우`list()` returns all of them. `get()` with a name applies tie-breaking (local > managed > external). If two skills share the same name and source type, `get()` throws an error. Pass a skill's full path to `get()` to bypass tie-breaking. See [Skills with the same name](/docs/workspace/skills#same-named-skills) for details.

@@ -1,0 +1,143 @@
+---
+title: "참조: Prompt 블록 | 편집자"
+description: "편집기 Prompt 블록 유형, 템플릿 값, 표시 조건, 버전 및 API에 대한 참조입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/editor"
+---
+
+# Prompt 블록
+
+Prompt 블록은 편집기에서 관리하는 재사용 가능한 지침 템플릿입니다. Agent의 지침은 인라인 텍스트, 포함된 Prompt 블록 및 독립적으로 버전이 지정된 Prompt 블록에 대한 참조를 결합할 수 있습니다.
+
+보다[Prompt blocks](/docs/editor/overview#prompt-blocks) for the Studio workflow and common uses.
+
+## 블록 유형 {/* #block-types */}
+
+| 유형 | 설명 |
+| - | - |
+|`text` | Free-form text stored only in the agent version |
+| `prompt_block` | A prompt block embedded in the agent version |
+| `prompt_block_ref`| 독립적으로 저장되고 버전이 지정된 Prompt 블록에 대한 참조 |
+
+참조된 블록은 런타임에 확인됩니다. 누락되거나 게시되지 않은 참조는 최종 지침에서 생략됩니다. 해결된 비어 있지 않은 블록은 두 개의 개행 문자로 결합됩니다.
+
+다음 예에서는 저장된 블록과 인라인 텍스트를 Agent에 연결합니다.
+
+```typescript title="src/scripts/attach-prompt.ts"
+import { mastra } from '../mastra'
+
+const editor = mastra.getEditor()!
+
+await editor.agent.update({
+  id: 'support-agent',
+  instructions: [
+    { type: 'prompt_block_ref', id: 'brand-voice' },
+    { type: 'text', content: 'Answer only questions about Acme products.' },
+  ],
+})
+```
+
+## 템플릿 값 {/* #template-values */}
+
+템플릿은 런타임 시 요청 컨텍스트의 값을 확인합니다.
+
+| 구문 | 요청 컨텍스트 | 출력 |
+| - | - | - |
+|<code>{'{{userName}}'}</code> | `{ userName: 'Maya' }` | `Maya` |
+| <code>{'{{user.name}}'}</code> | `{ user: { name: 'Maya' } }` | `Maya` |
+| <code>{"{{task \u007c\u007c 'request'}}"}</code> | `{}` | `request` |
+| <code>{'{{missingValue}}'}</code> | `{}` | `{{missingValue}}` |
+
+변수 이름은 문자나 밑줄로 시작해야 합니다. 대체는 작은따옴표 또는 큰따옴표 문자열이어야 합니다. 대체가 없는 해결되지 않은 자리 표시자는 변경되지 않은 상태로 유지됩니다. 객체와 배열은 JSON으로 직렬화됩니다. 다른 값은 문자열로 변환됩니다.
+
+다음을 통해 값 전달[request context](/docs/server/request-context). Editor doesn't read a separate agent `variables` field.
+
+## 표시 조건 {/* #display-conditions */}
+
+Prompt 블록에는 최종 지침에 포함되는지 여부를 제어하는 ​​표시 조건이 포함될 수 있습니다. 각 조건은 세 부분으로 구성됩니다.
+
+* **열쇠**: 확인할 요청 컨텍스트 필드입니다.`user.role` or `account.plan`.
+* **연산자**: 다음과 같은 비교 작업을 수행합니다.`equals`, `contains`, or `exists`.
+* **값**: 비교할 값입니다. 그만큼`exists` and `not_exists` operators don't need one.
+
+예를 들어, 조건`user.role` `equals` `admin` includes the block only when request context contains `{ user: { role: 'admin' } }`.
+
+| 운영자 | 예 | 블록은 다음과 같은 경우에 포함됩니다.
+| - | - | - |
+|`equals` / `not_equals` | `user.role` equals `admin` | The field strictly equals, or doesn't equal, the value |
+| `contains` / `not_contains` | `user.tags` contains `beta` | A string contains the value or an array contains the item |
+| `greater_than` / `less_than` | `order.total` greater than `100` | The numeric field is above or below the value |
+| `greater_than_or_equal` / `less_than_or_equal` | `account.seats` greater than or equal to `10` | The numeric field is at or beyond the value |
+| `in` / `not_in` | `user.region`~에`['US', 'CA']`| 필드가 제공된 배열에 있거나 없습니다 |
+|`exists` / `not_exists` | `account.plan`존재합니다 | 필드에 null이 아닌 값이 있거나 없습니다 |
+
+그룹은 조건을 다음과 결합합니다.`AND` or `OR`. For example, this group includes a block for admins on a paid plan:
+
+```typescript
+const rules = {
+  operator: 'AND',
+  conditions: [
+    {
+      field: 'user.role',
+      operator: 'equals',
+      value: 'admin',
+    },
+    {
+      field: 'account.plan',
+      operator: 'in',
+      value: ['pro', 'enterprise'],
+    },
+  ],
+}
+```
+
+도트 경로가 지원됩니다. 빈 그룹은 다음과 같이 평가됩니다.`true`, and an unknown operator evaluates to `false`. The storage type supports up to three nested group levels.
+
+조건이 없는 블록은 항상 포함됩니다.
+
+## 프로그래밍 방식 API {/* #programmatic-api */}
+
+다음을 통해 Prompt 블록에 액세스하세요.`mastra.getEditor().prompt`. See the [`prompt` namespace](/reference/editor/mastra-editor#namespaces) for complete method signatures.
+
+Prompt 블록을 생성합니다:
+
+```typescript title="src/scripts/seed-prompts.ts"
+import { mastra } from '../mastra'
+
+const editor = mastra.getEditor()!
+
+await editor.prompt.create({
+  id: 'brand-voice',
+  name: 'Brand voice',
+  description: 'Acme tone and style guidelines',
+  content: 'Write in a friendly, concise tone. Address the user as {{userName || "there"}}.',
+})
+```
+
+기존 블록 업데이트:
+
+```typescript title="src/scripts/update-prompt.ts"
+await editor.prompt.update({
+  id: 'brand-voice',
+  content: 'Write in a friendly, concise tone. Greet the user by name when available.',
+})
+```
+
+`update()`콘텐츠가 변경되면 새 초안을 만듭니다. 사용`list()` to paginate through stored blocks, `getById()` to fetch one block, and `preview(blocks, context)` to resolve templates and conditions with draft references.
+
+## REST API {/* #rest-api */}
+
+기본 Mastra 서버 접두사는 다음과 같습니다.`/api`. A custom server prefix changes the paths below.
+
+| 방법 | 경로 | 설명 |
+| - | - | - |
+|`GET` | `/api/stored/prompt-blocks` | List stored prompt blocks |
+| `POST` | `/api/stored/prompt-blocks` | Create a stored prompt block |
+| `GET` | `/api/stored/prompt-blocks/:storedPromptBlockId` | Get a stored prompt block |
+| `PATCH` | `/api/stored/prompt-blocks/:storedPromptBlockId` | Update a stored prompt block |
+| `DELETE` | `/api/stored/prompt-blocks/:storedPromptBlockId` | Delete a stored prompt block |
+
+## 버전 확인 {/* #version-resolution */}
+
+런타임 참조는 활성 게시 블록을 해결합니다. 편집기 미리보기는 최신 초안을 해결합니다. 보다[Editor versioning](/docs/editor/overview#versioning) for the shared draft, publish, and restore lifecycle.

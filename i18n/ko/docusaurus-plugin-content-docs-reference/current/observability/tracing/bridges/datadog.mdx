@@ -1,0 +1,320 @@
+---
+title: "참조: DatadogBridge | Observability"
+description: "추적용 Datadog 브리지"
+packages:
+  - "@mastra/core"
+  - "@mastra/observability"
+  - "@mastra/datadog"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# DatadogBridge
+
+:::경고
+
+Datadog Bridge는 현재**experimental**. APIs and configuration options may change in future releases.
+
+:::
+
+Mastra 추적과 Datadog 간의 양방향 통합을 활성화합니다. 네이티브 생성`dd-trace` APM spans in real time so that auto-instrumented operations inside tools and processors are correctly nested under their parent Mastra span. Emits LLM Observability data through `dd-trace`'s pipeline when spans end.
+
+## 건설자 {/* #constructor */}
+
+```typescript prettier:false
+new DatadogBridge(config?: DatadogBridgeConfig)
+```
+
+## `DatadogBridgeConfig` {/* #datadogbridgeconfig */}
+
+```typescript
+interface DatadogBridgeConfig extends BaseExporterConfig {
+  apiKey?: string
+  mlApp?: string
+  site?: string
+  service?: string
+  env?: string
+  agentless?: boolean
+  integrationsEnabled?: boolean
+  requestContextKeys?: string[]
+}
+```
+
+확장`BaseExporterConfig`, which includes:
+
+* `logger?: IMastraLogger`- 로거 인스턴스
+* `logLevel?: LogLevel | 'debug' | 'info' | 'warn' | 'error'`- 로그 수준(기본값: INFO)
+
+<PropertiesTable
+  props={[
+{
+  name: 'mlApp',
+  type: 'string',
+  description:
+    'ML application name for grouping LLM Observability traces. Required if DD_LLMOBS_ML_APP is not set; otherwise falls back to the env var.',
+  required: false,
+},
+{
+  name: 'apiKey',
+  type: 'string',
+  description: 'Datadog API key. Required only when agentless mode is enabled. Falls back to DD_API_KEY env var.',
+  required: false,
+},
+{
+  name: 'site',
+  type: 'string',
+  description:
+    "Datadog site (e.g., 'datadoghq.com', 'datadoghq.eu', 'us3.datadoghq.com'). Falls back to DD_SITE env var. Default: 'datadoghq.com'.",
+  required: false,
+},
+{
+  name: 'service',
+  type: 'string',
+  description: 'Service name for the application. Defaults to mlApp value.',
+  required: false,
+},
+{
+  name: 'env',
+  type: 'string',
+  description: "Environment name (e.g., 'production', 'staging'). Falls back to DD_ENV env var.",
+  required: false,
+},
+{
+  name: 'agentless',
+  type: 'boolean',
+  description:
+    'Use direct HTTPS intake (true) or local Datadog Agent (false). Default: false. Most bridge users should leave this as false because dd-trace APM data always routes through the agent.',
+  required: false,
+},
+{
+  name: 'integrationsEnabled',
+  type: 'boolean',
+  description:
+    'Enable dd-trace automatic integrations (HTTP, database, etc.). Default: true. The bridge enables this by default because APM context propagation depends on auto-instrumentation.',
+  required: false,
+},
+{
+  name: 'requestContextKeys',
+  type: 'string[]',
+  description:
+    'Keys from request context or span attributes to promote into flat, searchable LLM Observability tags (e.g., tenantId, agentId). Promoted keys are removed from annotations.metadata.',
+  required: false,
+},
+]}
+/>
+
+## 행동 양식 {/* #methods */}
+
+### `createSpan` {/* #createspan */}
+
+```typescript prettier:false
+createSpan(options: CreateSpanOptions<SpanType>): SpanIds | undefined
+```
+
+범위 구성 중에 Mastra 관측 가능성 인스턴스에 의해 호출됩니다. 다음을 통해 dd-trace APM 범위를 적극적으로 생성합니다.`tracer.startSpan()` and returns Mastra-compatible identifiers. The returned IDs are used by Mastra throughout the span's lifetime. The dd-trace span object is stored internally and used for scope activation.
+
+**보고:** `SpanIds | undefined` - `{ spanId, traceId, parentSpanId }`, or `undefined` if the bridge is disabled.
+
+### `executeInContext` {/* #executeincontext */}
+
+```typescript prettier:false
+executeInContext<T>(spanId: string, fn: () => Promise<T>): Promise<T>
+```
+
+Mastra 범위의 dd-trace 컨텍스트 내에서 비동기 기능을 실행합니다. 함수(HTTP, 데이터베이스 등) 내에서 실행되는 dd-trace 자동 계측 작업은 이 범위의 상위 항목이 됩니다.
+
+<PropertiesTable
+  props={[
+{
+  name: 'spanId',
+  type: 'string',
+  description: 'The ID of the Mastra span to use as context',
+  required: true,
+},
+{
+  name: 'fn',
+  type: '() => Promise<T>',
+  description: 'The async function to execute within the span context',
+  required: true,
+},
+]}
+/>
+
+**보고:** `Promise<T>` - The result of the function execution.
+
+### `executeInContextSync` {/* #executeincontextsync */}
+
+```typescript prettier:false
+executeInContextSync<T>(spanId: string, fn: () => T): T
+```
+
+Mastra 범위의 dd-trace 컨텍스트 내에서 동기 기능을 실행합니다.
+
+<PropertiesTable
+  props={[
+{
+  name: 'spanId',
+  type: 'string',
+  description: 'The ID of the Mastra span to use as context',
+  required: true,
+},
+{
+  name: 'fn',
+  type: '() => T',
+  description: 'The synchronous function to execute within the span context',
+  required: true,
+},
+]}
+/>
+
+**보고:** `T` - The result of the function execution.
+
+### `flush` {/* #flush */}
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+브리지를 종료하지 않고 버퍼링된 모든 LLM Observability 데이터를 Datadog에 강제 플러시합니다. 런타임이 종료되기 전에 데이터를 내보내야 하는 서버리스 환경에 유용합니다.
+
+### `shutdown` {/* #shutdown */}
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+제대로 닫히지 않은 APM 범위를 강제로 종료하고, 보류 중인 LLM 관찰 데이터를 플러시하고, LLM Observability 통합을 비활성화하고, 모든 내부 상태를 지웁니다.
+
+## 사용 예 {/* #usage-examples */}
+
+### 기본 사용법 {/* #basic-usage */}
+
+```typescript
+import tracer from 'dd-trace'
+
+tracer.init({
+  service: process.env.DD_SERVICE || 'my-mastra-app',
+  env: process.env.DD_ENV || 'production',
+})
+
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { DatadogBridge } from '@mastra/datadog'
+
+const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-mastra-app',
+        bridge: new DatadogBridge({
+          mlApp: process.env.DD_LLMOBS_ML_APP!,
+        }),
+      },
+    },
+  }),
+  agents: { myAgent },
+})
+```
+
+### Agent 없는 모드(LLM 관찰만 가능, 로컬 Agent 없음) {/* #agentless-mode-llm-observability-only-no-local-agent */}
+
+로컬 Datadog Agent가 없고 LLM 관찰 데이터만 원하는 경우 Agent 없는 모드를 활성화합니다.
+
+```typescript
+new DatadogBridge({
+  mlApp: process.env.DD_LLMOBS_ML_APP!,
+  apiKey: process.env.DD_API_KEY!,
+  agentless: true,
+})
+```
+
+참고: APM 데이터는 Agent 없는 모드에서 전송할 수 없습니다. 없이 LLM 관찰성 데이터만 필요한 경우`dd-trace` APM, the [Datadog Exporter](/reference/observability/tracing/exporters/datadog) is a simpler choice.
+
+### 추가 수출업체 포함 {/* #with-additional-exporters */}
+
+브리지는 Datadog이 아닌 내보내기 프로그램과 결합하여 추적을 추가 대상으로 보낼 수 있습니다.
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+import { DatadogBridge } from '@mastra/datadog'
+
+const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-mastra-app',
+        bridge: new DatadogBridge({
+          mlApp: process.env.DD_LLMOBS_ML_APP!,
+        }),
+        exporters: [
+          new MastraStorageExporter(), // Studio access
+        ],
+      },
+    },
+  }),
+})
+```
+
+:::참고
+결합하지 마십시오`DatadogBridge` with `DatadogExporter` in the same configuration. Both emit to LLM Observability and would double-write the same data.
+:::
+
+## 설정 요구 사항 {/* #setup-requirements */}
+
+DatadogBridge에는 다음이 필요합니다.`dd-trace` to be initialized before any other imports so its auto-instrumentation can patch HTTP, database, and framework libraries at load time.
+
+참조[DatadogBridge Guide](/docs/observability/integrations/bridges/datadog#configuration) for complete setup instructions, including dd-trace initialization, bundler externals, and agent configuration.
+
+## 스팬 매핑 {/* #span-mapping */}
+
+Mastra 범위 유형은 Datadog LLM Observability 범위 종류에 매핑됩니다.
+
+| 마스트라 스팬타입 | 데이터독 종류 |
+| - | - |
+|`AGENT_RUN` | `agent` |
+| `MODEL_GENERATION` | `workflow` |
+| `MODEL_STEP` | `llm` |
+| `TOOL_CALL` | `tool` |
+| `MCP_TOOL_CALL` | `tool` |
+| `WORKFLOW_RUN` | `workflow` |
+| All other types | `task` |
+
+## 태그 지원 {/* #tags-support */}
+
+`tracingOptions.tags`값은 구조화된 LLM Observability 주석 태그가 됩니다.`key:value` entries are split into key/value pairs, and tags without a colon are set to `true`.
+
+```typescript
+const result = await agent.generate('Hello', {
+  tracingOptions: {
+    tags: ['production', 'instance_name:career-scout-api'],
+  },
+})
+```
+
+이는 다음을 생성합니다.
+
+```json
+{
+  "production": true,
+  "instance_name": "career-scout-api"
+}
+```
+
+## 환경변수 {/* #environment-variables */}
+
+브리지는 다음 환경 변수에서 구성을 읽습니다.
+
+| 변수 | 설명 |
+| - | - |
+|`DD_API_KEY` | Datadog API key (only required for agentless mode) |
+| `DD_LLMOBS_ML_APP` | ML application name |
+| `DD_SITE` | Datadog site |
+| `DD_ENV` | Environment name |
+| `DD_LLMOBS_AGENTLESS_ENABLED` | Set to `'true'` or `'1'` to enable agentless mode |
+
+## 관련된 {/* #related */}
+
+* [DatadogBridge 가이드](/docs/observability/integrations/bridges/datadog)- 예시가 포함된 설정 가이드
+* [추적 개요](/docs/observability/tracing/overview)- 일반적인 추적 개념
+* [DatadogExporter 참조](/reference/observability/tracing/exporters/datadog)- LLM 관찰만 해당, 아니요`dd-trace` APM

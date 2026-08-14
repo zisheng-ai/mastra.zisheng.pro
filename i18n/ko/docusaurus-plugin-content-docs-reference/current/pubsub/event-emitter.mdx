@@ -1,0 +1,148 @@
+---
+title: "참조: EventEmitterPubSub | PubSub"
+description: "Mastra의 기본 프로세스 내 게시/구독 구현인 EventEmitterPubSub에 대한 API 참조입니다."
+packages:
+  - "@mastra/core"
+---
+
+# EventEmitterPubSub
+
+`EventEmitterPubSub`기본값입니다[`PubSub`](/reference/pubsub/base)구현. Node.js를 사용하여 진행 중인 이벤트를 전달합니다.[`EventEmitter`](https://nodejs.org/api/events.html#class-eventemitter), 따라서 외부 서비스 없이 작동합니다.
+
+단일 프로세스 애플리케이션에 사용하세요. 한 호스트의 프로세스 전체에 전달하려면 다음을 참조하세요.[`UnixSocketPubSub`](/reference/pubsub/unix-socket-pubsub). For distributed delivery, see [`RedisStreamsPubSub`](/reference/pubsub/redis-streams) or [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub).
+
+in-process이기 때문에 이벤트는 지속되지 않으며 다른 프로세스와 공유되지 않습니다. 포장해 보세요[`CachingPubSub`](/reference/pubsub/caching-pubsub) when you need replay for resumable streams.
+
+## 사용예 {/* #usage-example */}
+
+`EventEmitterPubSub`구성하지 않으면 자동으로 사용됩니다.`pubsub` option, so most applications never construct it directly. Create one explicitly only when you want to configure or share it.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { EventEmitterPubSub } from '@mastra/core/events'
+
+export const mastra = new Mastra({
+  pubsub: new EventEmitterPubSub(),
+})
+```
+
+애플리케이션의 다른 부분과 이미터를 공유하려면 기존`EventEmitter`:
+
+```typescript
+import EventEmitter from 'node:events'
+import { EventEmitterPubSub } from '@mastra/core/events'
+
+const emitter = new EventEmitter()
+const pubsub = new EventEmitterPubSub(emitter)
+```
+
+일괄 전송 오류를 표시하려면 로거를 전달하세요.
+
+```typescript
+import { EventEmitterPubSub } from '@mastra/core/events'
+
+const pubsub = new EventEmitterPubSub(undefined, { logger })
+```
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'existingEmitter',
+  type: 'EventEmitter',
+  description: 'An existing Node.js EventEmitter to use for delivery. When omitted, a new EventEmitter is created.',
+  isOptional: true,
+},
+{
+  name: 'options',
+  type: 'EventEmitterPubSubOptions',
+  description: 'Optional configuration.',
+  isOptional: true,
+  properties: [
+    {
+      name: 'logger',
+      type: 'IMastraLogger',
+      description:
+        'Logger used to surface errors from batched delivery, such as a throwing `coalesce`. Falls back to `console.error` when omitted.',
+      isOptional: true,
+    },
+  ],
+},
+]}
+/>
+
+## 속성 {/* #properties */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'supportedModes',
+  type: 'ReadonlyArray<"pull" | "push">',
+  description:
+    'Returns `["pull", "push"]`. The emitter can serve a pull-style worker or push events directly to listeners.',
+},
+{
+  name: 'supportsNativeBatching',
+  type: 'boolean',
+  description: 'Returns `true`. Subscribers can opt in to batched delivery with `options.batch`.',
+},
+]}
+/>
+
+## 행동 양식 {/* #methods */}
+
+`EventEmitterPubSub`구현[`PubSub`](/reference/pubsub/base) contract. The methods below have behavior specific to this implementation.
+
+### `subscribe(topic, cb, options?)` {/* #subscribetopic-cb-options */}
+
+주제에 대한 콜백을 등록합니다. 없이`options.group`, every subscriber receives every event. With a group, events are distributed round-robin across members of that group.
+
+통과하다`options.batch` to opt in to batched delivery. See [Batching](#batching) below.
+
+```typescript
+await pubsub.subscribe('workflow.events', (event, ack, nack) => {
+  console.log(event)
+})
+```
+
+### `flush()` {/* #flush */}
+
+보류 중인 재전송을 기다립니다.`nack` to fire before resolving.
+
+```typescript
+await pubsub.flush()
+```
+
+### `close()` {/* #close */}
+
+모든 리스너를 제거하고 보류 중인 재전송을 취소합니다. 정상적인 종료 중에 이를 호출하십시오.
+
+```typescript
+await pubsub.close()
+```
+
+## 재배송 {/* #redelivery */}
+
+그룹 가입자가 전화할 때`nack`, the event is redelivered to the group after a short delay, and its `deliveryAttempt` count increases. Calling `ack` clears the tracking for that event. Fan-out subscribers receive no-op `ack` and `nack` functions, since each event reaches every subscriber once.
+
+## 일괄 처리 {/* #batching */}
+
+`EventEmitterPubSub`명예`options.batch` natively. When a subscriber opts in, events are held in a per-subscriber in-memory buffer and delivered as consecutive callback invocations once a flush condition is met. Both fan-out and group subscribers can batch. See [`SubscribeBatchOptions`](/reference/pubsub/base#subscribebatchoptions) for the full policy.
+
+```typescript
+await pubsub.subscribe(
+  'workflow.events',
+  event => {
+    console.log(event)
+  },
+  {
+    batch: {
+      maxSize: 10, // flush once 10 events have queued
+      maxWaitMs: 500, // ...or after 500ms, whichever comes first
+    },
+  },
+)
+```
+
+버퍼는 Memory 내 및 프로세스별이므로 일괄 처리된 상태는 지속되지 않으며 다시 시작해도 유지되지 않습니다. 플러시는 다음에 의해 트리거됩니다.`maxWaitMs` is best-effort: if a step such as a throwing `coalesce` fails, the error is surfaced through the configured `logger` rather than thrown. `flush()` drains every batched subscriber buffer before resolving.

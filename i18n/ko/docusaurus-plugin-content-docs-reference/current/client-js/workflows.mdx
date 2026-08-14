@@ -1,0 +1,429 @@
+---
+title: "참조: Workflow API | 클라이언트 SDK"
+description: "client-js SDK를 사용하여 Mastra에서 자동화된 Workflow와 상호 작용하고 실행하는 방법을 알아보세요."
+packages:
+  - "@mastra/client-js"
+---
+
+# Workflow API
+
+Workflows API는 Mastra에서 자동화된 Workflow와 상호 작용하고 실행하는 방법을 제공합니다.
+
+## 모든 Workflow 가져오기 {/* #getting-all-workflows */}
+
+사용 가능한 모든 Workflow 목록을 검색합니다.
+
+```typescript
+const workflows = await mastraClient.listWorkflows()
+```
+
+## Workflow 실행 횟수 가져오기 {/* #getting-workflow-run-counts */}
+
+Workflow별 개수 검색`running` and [`suspended`](/docs/workflows/suspend-and-resume) runs in a single request. The counts are computed on the server and keyed by the workflow's registry key — the key used when registering the workflow in the Mastra config, which can differ from the workflow's own `id`:
+
+```typescript
+const runCounts = await mastraClient.listWorkflowRunCounts()
+// { "cityWorkflow": { running: 2, suspended: 1 }, ... }
+```
+
+보고:`Record<string, { running: number; suspended: number }>`
+
+서버는 요청 사이에 몇 초 동안 개수를 캐시할 수 있습니다. 이 끝점 이전의 서버는 다음으로 응답합니다.`404 Not Found` — handle the error when the client can talk to older deployments.
+
+## 특정 Workflow 작업 {/* #working-with-a-specific-workflow */}
+
+해당 ID로 특정 Workflow의 인스턴스를 가져옵니다.
+
+```typescript title="src/mastra/workflows/test-workflow.ts"
+export const testWorkflow = createWorkflow({
+  id: 'city-workflow',
+})
+```
+
+```typescript
+const workflow = mastraClient.getWorkflow('city-workflow')
+```
+
+## Workflow 방법 {/* #workflow-methods */}
+
+### `details()` {/* #details */}
+
+Workflow에 대한 자세한 정보를 검색합니다.
+
+```typescript
+const details = await workflow.details()
+```
+
+### `createRun()` {/* #createrun */}
+
+새 Workflow 실행 인스턴스를 만듭니다.
+
+```typescript
+const run = await workflow.createRun()
+
+// Or with an existing runId
+const run = await workflow.createRun({ runId: 'existing-run-id' })
+
+// Or with a resourceId to associate the run with a specific resource
+const run = await workflow.createRun({
+  runId: 'my-run-id',
+  resourceId: 'user-123',
+})
+```
+
+그만큼`resourceId` parameter associates the workflow run with a specific resource (e.g., user ID, tenant ID). This value is persisted with the run and can be used for filtering and querying runs later.
+
+### `startAsync()` {/* #startasync */}
+
+Workflow 실행을 시작하고 완료될 때까지 기다린 후 전체 결과를 Workflow 출력으로 반환합니다.
+
+```typescript
+const run = await workflow.createRun()
+
+const result = await run.startAsync({
+  inputData: {
+    city: 'New York',
+  },
+})
+```
+
+합격하실 수도 있습니다`initialState` to set the starting values for the workflow's state:
+
+```typescript
+const result = await run.startAsync({
+  inputData: {
+    city: 'New York',
+  },
+  initialState: {
+    count: 0,
+    items: [],
+  },
+})
+```
+
+그만큼`initialState` object should match the structure defined in the workflow's `stateSchema`. See [Workflow State](/docs/workflows/workflow-state) for more details.
+
+실행을 특정 리소스와 연결하려면 다음을 전달하세요.`resourceId` to `createRun()`:
+
+```typescript
+const run = await workflow.createRun({ resourceId: 'user-123' })
+
+const result = await run.startAsync({
+  inputData: {
+    city: 'New York',
+  },
+})
+```
+
+### `start()` {/* #start */}
+
+완료를 기다리지 않고 Workflow 실행을 시작합니다(Fire-and-forget). 성공 메시지와 함께 즉시 반환됩니다. 사용`runById()` on the workflow instance to check results later:
+
+```typescript
+const run = await workflow.createRun()
+
+await run.start({
+  inputData: {
+    city: 'New York',
+  },
+})
+
+// Poll for results later
+const result = await workflow.runById(run.runId)
+```
+
+이는 실행을 시작하고 나중에 결과를 확인하려는 장기 실행 Workflow에 유용합니다.
+
+### `resumeAsync()` {/* #resumeasync */}
+
+일시중단된 Workflow 단계를 재개하고 전체 결과를 기다립니다.
+
+```typescript
+const run = await workflow.createRun({ runId: prevRunId })
+
+const result = await run.resumeAsync({
+  step: 'step-id',
+  resumeData: { key: 'value' },
+})
+```
+
+### `resume()` {/* #resume */}
+
+완료될 때까지 기다리지 않고 일시 중단된 Workflow 단계를 재개합니다.
+
+```typescript
+const run = await workflow.createRun({ runId: prevRunId })
+
+await run.resume({
+  step: 'step-id',
+  resumeData: { key: 'value' },
+})
+```
+
+언제[`.foreach()`](/reference/workflows/workflow-methods/foreach) step suspends across multiple iterations, pass `forEachIndex` (zero-based. `0` targets the first iteration) to resume one iteration at a time. Iterations you don't target remain suspended.
+
+```typescript
+await run.resume({
+  step: 'approve',
+  resumeData: { ok: true },
+  forEachIndex: 1, // resumes the second iteration
+})
+```
+
+`forEachIndex`에서도 지원됩니다`resumeAsync()` and `resumeStream()`.
+
+### `cancel()` {/* #cancel */}
+
+실행 중인 Workflow를 취소합니다.
+
+```typescript
+const run = await workflow.createRun({ runId: existingRunId })
+
+const result = await run.cancel()
+// Returns: { message: 'Workflow run canceled' }
+```
+
+이 메서드는 실행 중인 모든 단계를 중지하고 후속 단계가 실행되지 않도록 합니다. 확인하는 단계`abortSignal` parameter can respond to cancellation by cleaning up resources (timeouts, network requests, etc.).
+
+참조[Run.cancel()](/reference/workflows/run-methods/cancel) reference for detailed information about how cancellation works and how to write steps that respond to cancellation.
+
+### `stream()` {/* #stream */}
+
+실시간 업데이트를 위한 스트림 Workflow 실행:
+
+```typescript
+const run = await workflow.createRun()
+
+const stream = await run.stream({
+  inputData: {
+    city: 'New York',
+  },
+})
+
+for await (const chunk of stream) {
+  console.log(JSON.stringify(chunk, null, 2))
+}
+```
+
+### `runById()` {/* #runbyid */}
+
+Workflow 실행에 대한 실행 결과를 가져옵니다.
+
+```typescript
+const result = await workflow.runById(runId)
+
+// Or with options for performance optimization:
+const result = await workflow.runById(runId, {
+  fields: ['status', 'result'], // Only fetch specific fields
+  withNestedWorkflows: false, // Skip expensive nested workflow data
+  requestContext: { userId: 'user-123' }, // Optional request context
+})
+```
+
+<h3>실행 결과 형식</h3>
+
+Workflow 실행 결과는 다음과 같습니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'runId',
+  type: 'string',
+  description: 'Unique identifier for this workflow run instance',
+},
+{
+  name: 'eventTimestamp',
+  type: 'Date',
+  description: 'The timestamp of the event',
+},
+{
+  name: 'payload',
+  type: 'object',
+  description: 'Contains currentStep (id, status, output, payload) and workflowState (status, steps record)',
+},
+]}
+/>
+
+## 동적 Workflow우 {/* #dynamic-workflows */}
+
+:::실험적
+
+동적 Workflow는 베타 버전입니다. API가 안정될 때까지 주요 버전 변경 없이 주요 변경 사항이 발생할 수 있습니다.
+
+:::
+
+동적 Workflow는 JSON으로 표현된 Workflow 정의입니다. 서버는 각 정의를 유지하고 이를 실행 가능한 Workflow로 등록합니다. 보다[Dynamic workflows](/docs/workflows/dynamic-workflows) for the definition format.
+
+### `listDynamicWorkflows()` {/* #listdynamicworkflows */}
+
+선택적으로 다음을 기준으로 필터링하여 동적 Workflow 정의를 나열합니다.`status` (`'active' | 'archived'`) and `authorId`:
+
+```typescript
+const { definitions, total } = await mastraClient.listDynamicWorkflows({
+  status: 'active',
+})
+```
+
+### `upsertDynamicWorkflow()` {/* #upsertdynamicworkflow */}
+
+동적 Workflow 정의를 만들거나 바꿉니다. 서버는 정의를 검증하고 유지하며 실행을 위해 실시간 등록합니다.
+
+```typescript
+const stored = await mastraClient.upsertDynamicWorkflow({
+  id: 'greeting-workflow',
+  description: 'Returns a greeting for the supplied name',
+  inputSchema: {
+    type: 'object',
+    properties: { name: { type: 'string' } },
+    required: ['name'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: { message: { type: 'string' } },
+    required: ['message'],
+  },
+  graph: [
+    {
+      type: 'mapping',
+      id: 'create-greeting',
+      mapConfig: JSON.stringify({
+        message: { template: 'Hello, ${initData.name}!' },
+      }),
+    },
+  ],
+})
+```
+
+루트 정의가 아직 존재하지 않는 도우미 Workflow를 중첩하는 경우 이를 통해 동일한 요청으로 전달합니다.`dependencies`. The server validates and registers the bundle as a unit and echoes the helper ids back as `dependencyIds`:
+
+```typescript
+const stored = await mastraClient.upsertDynamicWorkflow({
+  id: 'root-workflow',
+  // ...schemas and graph referencing 'helper-workflow'...
+  dependencies: [helperDefinition],
+})
+
+console.log(stored.dependencyIds) // ['helper-workflow']
+```
+
+### `getDynamicWorkflow()` {/* #getdynamicworkflow */}
+
+정의 관리를 위한 동적 Workflow 인스턴스를 가져옵니다. 동적 Workflow를 실행하려면 다음을 사용하세요.`getWorkflow(id).createRun()` like any other workflow:
+
+```typescript
+const dynamicWorkflow = mastraClient.getDynamicWorkflow('greeting-workflow')
+```
+
+### `dynamicWorkflow.details()` {/* #dynamicworkflowdetails */}
+
+스키마, 그래프, 상태, 타임스탬프를 포함하여 지속형 정의를 검색합니다.
+
+```typescript
+const definition = await dynamicWorkflow.details()
+```
+
+### `dynamicWorkflow.delete()` {/* #dynamicworkflowdelete */}
+
+저장된 정의를 삭제하고 라이브 Workflow 등록을 취소합니다.
+
+```typescript
+await dynamicWorkflow.delete()
+```
+
+### 동적 Workflow 실행 {/* #executing-a-dynamic-workflow */}
+
+등록되면 동적 Workflow가 일반 Workflow API를 통해 실행됩니다.
+
+```typescript
+const workflow = mastraClient.getWorkflow('greeting-workflow')
+const run = await workflow.createRun()
+const result = await run.startAsync({ inputData: { name: 'Ada' } })
+```
+
+## 일정 {/* #schedules */}
+
+일정은 다음을 통해 코드로 선언됩니다.`schedule` field on `createWorkflow`. The client SDK exposes read and operational methods for managing workflow schedules at runtime. See [Scheduled workflows](/docs/workflows/scheduled-workflows).
+
+### `createSchedule()` {/* #createschedule */}
+
+전달하여 Workflow 일정 만들기`workflowId`.
+
+```typescript
+const schedule = await mastraClient.createSchedule({
+  workflowId: 'daily-report',
+  cron: '0 9 * * *',
+  inputData: { reportType: 'summary' },
+})
+```
+
+### `listSchedules()` {/* #listschedules */}
+
+선택적으로 Workflow ID 또는 상태별로 필터링하여 Workflow 일정을 나열합니다.
+
+```typescript
+const schedules = await mastraClient.listSchedules({
+  workflowId: 'daily-report',
+  status: 'active',
+})
+```
+
+### `getSchedule()` {/* #getschedule */}
+
+ID별로 단일 Workflow 일정을 가져옵니다.
+
+```typescript
+const schedule = await mastraClient.getSchedule('daily-report')
+```
+
+### `updateSchedule()` {/* #updateschedule */}
+
+Workflow 일정을 업데이트합니다.
+
+```typescript
+const updated = await mastraClient.updateSchedule('daily-report', {
+  cron: '0 10 * * *',
+  inputData: { reportType: 'summary' },
+})
+```
+
+### `deleteSchedule()` {/* #deleteschedule */}
+
+Workflow 일정을 삭제합니다.
+
+```typescript
+await mastraClient.deleteSchedule('daily-report')
+```
+
+### `runSchedule()` {/* #runschedule */}
+
+크론 주기를 변경하지 않고 즉시 Workflow 일정을 한 번 실행합니다.
+
+```typescript
+const run = await mastraClient.runSchedule('daily-report')
+```
+
+### `pauseSchedule()` {/* #pauseschedule */}
+
+스케줄러가 실행을 중지하도록 일정을 일시 중지합니다. 업데이트된 일정을 반환합니다.
+
+```typescript
+await mastraClient.pauseSchedule('daily-report')
+```
+
+### `resumeSchedule()` {/* #resumeschedule */}
+
+일시 중지된 일정을 재개합니다. 다음 실행 시간은 지금부터 다시 계산되므로 오랫동안 일시 중지된 일정은 백로그를 실행하지 않습니다. 업데이트된 일정을 반환합니다.
+
+```typescript
+await mastraClient.resumeSchedule('daily-report')
+```
+
+### `listScheduleTriggers()` {/* #listscheduletriggers */}
+
+각 실행에 대한 결합된 실행 요약을 포함하여 Workflow 일정에 대한 트리거 기록을 나열합니다.
+
+```typescript
+const { triggers } = await mastraClient.listScheduleTriggers('daily-report', {
+  limit: 50,
+})
+```

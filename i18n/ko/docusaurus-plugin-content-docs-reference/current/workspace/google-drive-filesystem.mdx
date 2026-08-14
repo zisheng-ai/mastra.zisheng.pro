@@ -1,0 +1,226 @@
+---
+title: "참조: GoogleDrive파일 시스템 | 작업공간"
+description: "Google Drive 폴더에 파일을 저장하는 GoogleDriveFilesystem 공급자에 대한 문서입니다."
+packages:
+  - "@mastra/google-drive"
+---
+
+# Google드라이브파일 시스템
+
+단일 Google 드라이브 폴더에 파일을 저장합니다. 각 디렉터리는 구성된 루트 아래의 Drive 폴더에 매핑되며 경로는 POSIX 의미 체계를 사용합니다(예:`/notes/todo.txt`). 인터페이스에 대한 자세한 내용은 다음을 참조하세요.[Workspace파일 시스템 인터페이스](/reference/workspace/filesystem).
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/google-drive
+```
+
+## 용법 {/* #usage */}
+
+추가`GoogleDriveFilesystem` to a workspace and assign it to an agent:
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Workspace } from '@mastra/core/workspace'
+import { GoogleDriveFilesystem } from '@mastra/google-drive'
+
+const workspace = new Workspace({
+  filesystem: new GoogleDriveFilesystem({
+    folderId: process.env.GOOGLE_DRIVE_FOLDER_ID!,
+    accessToken: process.env.GOOGLE_DRIVE_ACCESS_TOKEN!,
+  }),
+})
+
+const agent = new Agent({
+  id: 'drive-agent',
+  name: 'Drive Agent',
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  workspace,
+})
+```
+
+### 입증 {/* #authentication */}
+
+다음 인증 옵션 중 하나를 제공하십시오.
+
+* **`accessToken`**: 미리 획득한 OAuth 액세스 토큰입니다. 사용`https://www.googleapis.com/auth/drive` scope so the token can see folders shared with the authenticated identity.
+* **`getAccessToken`**: 토큰을 반환하는 콜백입니다. 토큰을 외부에서 새로 고칠 때 유용합니다.
+* **`serviceAccount`**: Google 서비스 계정입니다. 서비스 계정 이메일과 대상 폴더를 공유합니다.
+
+#### 서비스 계정 {/* #service-account */}
+
+서비스 계정 인증은 백엔드 Agent에 권장되는 옵션입니다. 사용자 동의 흐름과 토큰 새로 고침 처리가 필요하지 않습니다. 당신은 단지**two values** from the service account JSON key file: `client_email` and `private_key`.
+
+##### 서비스 계정 설정 {/* #set-up-the-service-account */}
+
+1. 열기[Google Cloud Console](https://console.cloud.google.com/) and select or create a project.
+2. 이동**APIs & Services > Library**, search for **Google Drive API**, and select **Enable**.
+3. 이동**APIs & Services > Credentials**, select **Create credentials > Service account**, and complete the form. The role can be left blank: Drive permissions are granted by sharing folders, not by IAM roles.
+4. 새 서비스 계정을 열고**Keys** tab, and select **Add key > Create new key > JSON**. The browser downloads a JSON key file.
+5. 복사`client_email` value from the JSON file. This is the address you share Drive folders with.
+
+##### 서비스 계정과 드라이브 폴더 공유 {/* #share-the-drive-folder-with-the-service-account */}
+
+서비스 계정은 자체 Google ID입니다. 명시적으로 공유하기 전까지는 드라이브에서 아무 것도 볼 수 없습니다.
+
+1. 대상 폴더를 엽니다.[Google Drive](https://drive.google.com/).
+2. 선택하다**Share**.
+3. 서비스 계정을 붙여넣으세요.`client_email` address.
+4. 역할을 다음으로 설정합니다.**Editor** (for read and write) or **Viewer** (for read-only access). Select **Send**.
+5. URL에서 폴더 ID를 복사합니다. 그 다음 부분이에요`/folders/` in `https://drive.google.com/drive/folders/<folderId>`.
+
+:::경고
+
+서비스 계정은 표준 '내 드라이브' 폴더에 파일을 만들 수 없습니다. 서비스 계정에는 개인 드라이브 스토리지 할당량이 없으므로 서비스 계정이 생성하는 모든 파일은 할당량 보유 주체가 소유해야 합니다. 개인 드라이브 폴더만 공유하는 경우 읽기 작업은 작동하지만 할당량 오류로 인해 쓰기가 실패합니다.
+
+쓰기 액세스를 위해 폴더를**shared drive** (formerly Team Drive) and add the service account as a member of that shared drive. Shared drives provide the storage quota that service-account-created files need.
+
+개인 드라이브 폴더에 대한 읽기 전용 작업에는 이러한 제한이 없습니다.
+
+:::
+
+##### 파일 시스템 구성 {/* #configure-the-filesystem */}
+
+복사`client_email` and `private_key` from the JSON file into your environment:
+
+```bash filename=".env"
+GOOGLE_DRIVE_FOLDER_ID=1AbCdEfGhIjKlMnOpQrStUvWxYz
+GOOGLE_DRIVE_CLIENT_EMAIL=my-bot@my-project.iam.gserviceaccount.com
+# Wrap the value in quotes — the key contains newlines that must be preserved.
+GOOGLE_DRIVE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq...\n-----END PRIVATE KEY-----\n"
+```
+
+```typescript
+import { GoogleDriveFilesystem } from '@mastra/google-drive'
+
+const filesystem = new GoogleDriveFilesystem({
+  folderId: process.env.GOOGLE_DRIVE_FOLDER_ID!,
+  serviceAccount: {
+    clientEmail: process.env.GOOGLE_DRIVE_CLIENT_EMAIL!,
+    privateKey: process.env.GOOGLE_DRIVE_PRIVATE_KEY!,
+  },
+})
+```
+
+너**don't** need to copy the entire JSON file or pass other fields like `project_id`, `client_id`, `private_key_id`, or `token_uri`. They're not used. Only `clientEmail` and `privateKey` are required. `privateKeyId`, `scopes`, and `subject` are optional. `scopes` defaults to `['https://www.googleapis.com/auth/drive']`, which is the scope required for the service account to see folders shared with it. The narrower `drive.file` scope only grants access to files the application created itself, so a folder shared with the service account would return `404 Not Found`.
+
+`GoogleDriveFilesystem`자동으로 정규화`privateKey` string before signing. It strips surrounding quotes, including escaped quotes from JSON-wrapped values, and converts literal `\n` sequences to real newlines. It also normalizes `\r\n` line endings, and removes a trailing comma. The key works regardless of how your `.env` loader handles the value.
+
+##### 문제 해결 {/* #troubleshoot */}
+
+* **`404 File not found: <folderId>`**: 서비스 계정에는 폴더에 대한 액세스 권한이 없습니다. 폴더가 정확한 사용자와 공유되었는지 확인하세요.`client_email` address and that the folder ID matches the URL.
+* **`storageQuotaExceeded`쓰기에**: 해당 폴더는 개인 "내 드라이브"에 있습니다. 폴더를 공유 드라이브로 이동하고 서비스 계정을 구성원으로 추가하세요.
+* **`error:1E08010C:DECODER routines::unsupported`**:`privateKey` value is malformed. Confirm the value contains the full PEM block and that newlines are preserved (literal `\n` is fine).
+
+### 읽기 전용 모드 {/* #read-only-mode */}
+
+통과하다`readOnly: true` to block write operations (`writeFile`, `appendFile`, `deleteFile`, `copyFile`, `moveFile`, `mkdir`, `rmdir`).
+
+```typescript
+const filesystem = new GoogleDriveFilesystem({
+  folderId,
+  accessToken,
+  readOnly: true,
+})
+```
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'folderId',
+  type: 'string',
+  description:
+    'ID of the Google Drive folder that acts as the workspace root. All paths are resolved inside this folder.',
+},
+{
+  name: 'accessToken',
+  type: 'string',
+  description: 'OAuth access token with access to the folder.',
+  isOptional: true,
+},
+{
+  name: 'getAccessToken',
+  type: '() => string | Promise<string>',
+  description: 'Callback that returns a fresh OAuth access token. Called on every request that needs authorization.',
+  isOptional: true,
+},
+{
+  name: 'serviceAccount',
+  type: '{ clientEmail: string; privateKey: string; privateKeyId?: string; scopes?: string[]; subject?: string }',
+  description: 'Service account credentials used to mint access tokens via the OAuth 2.0 JWT flow.',
+  isOptional: true,
+},
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for this filesystem instance',
+  isOptional: true,
+  defaultValue: '`google-drive:${folderId}`',
+},
+{
+  name: 'readOnly',
+  type: 'boolean',
+  description: 'When true, all write operations are blocked.',
+  isOptional: true,
+  defaultValue: 'false',
+},
+{
+  name: 'instructions',
+  type: 'InstructionsOption',
+  description: 'Override the default instructions returned to tool descriptions.',
+  isOptional: true,
+},
+]}
+/>
+
+## 속성 {/* #properties */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Filesystem instance identifier',
+},
+{
+  name: 'name',
+  type: 'string',
+  description: "Provider name ('GoogleDriveFilesystem')",
+},
+{
+  name: 'provider',
+  type: 'string',
+  description: "Provider identifier ('google-drive')",
+},
+{
+  name: 'readOnly',
+  type: 'boolean | undefined',
+  description: 'Whether the filesystem is in read-only mode',
+},
+]}
+/>
+
+## 행동 양식 {/* #methods */}
+
+GoogleDriveFilesystem은 다음을 구현합니다.[WorkspaceFilesystem interface](/reference/workspace/filesystem), providing all standard filesystem methods:
+
+* `readFile(path, options?)`- 파일 콘텐츠 다운로드
+* `writeFile(path, content, options?)`- 파일 업로드 또는 덮어쓰기
+* `appendFile(path, content)`- 파일을 읽고 다시 업로드하여 내용을 추가합니다.
+* `deleteFile(path, options?)`- 파일 삭제
+* `copyFile(src, dest, options?)`- 드라이브를 사용하여 파일 복사`files.copy` API
+* `moveFile(src, dest, options?)`- 상위 폴더를 교환하여 폴더 간에 파일 이동
+* `mkdir(path, options?)`- 폴더 생성
+* `rmdir(path, options?)`- 폴더 제거
+* `readdir(path, options?)`- 폴더 내용 목록(지원`recursive` and `extension` filtering)
+* `stat(path)`- 파일 또는 폴더에 대한 드라이브 메타데이터 반환
+* `exists(path)`- 파일이나 폴더가 존재하는지 확인하세요.
+
+## 메모 {/* #notes */}
+
+* Google 드라이브에서는 폴더에 이름이 같은 여러 파일이 허용됩니다.`GoogleDriveFilesystem` resolves paths by picking the first match, so keep names unique within each folder when you rely on path-based lookup.
+* `writeFile`다음과 같은 경우 상위 폴더가 자동으로 생성됩니다.`recursive` is unset (the default) or `true`. Set `recursive: false` to require the parent folder to already exist.
+* `expectedMtime`~에`WriteOptions` is honored. When the stored `modifiedTime` differs, the write is rejected with `StaleFileError` to support optimistic concurrency.
+* 공급자는 Drive REST 엔드포인트(`https://www.googleapis.com/drive/v3` and `https://www.googleapis.com/upload/drive/v3`) through the built-in `fetch`. No additional dependencies are required.

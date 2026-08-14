@@ -1,0 +1,553 @@
+---
+title: "참조: 볼록 벡터 저장소 | 벡터"
+description: "Convex를 사용하여 벡터 검색을 제공하는 Mastra의 ConvexVector 클래스에 대한 문서입니다."
+packages:
+  - "@mastra/convex"
+---
+
+# 볼록 벡터 저장소
+
+그만큼`ConvexVector`클래스는 다음을 사용하여 벡터 저장 및 유사성 검색을 제공합니다.[볼록한](https://convex.dev). Convex 내부에 임베딩을 저장하고 Mastra 어댑터에서 코사인 유사성 검색을 수행합니다.
+
+:::경고\[개발 규모 검색]
+
+`ConvexVector`Mastra 스토리지 핸들러를 통해 일치하는 벡터를 읽고, JavaScript로 필터링하고, 코사인 유사성을 계산하고, 결과를 정렬하고, 가장 일치하는 항목을 반환합니다. 로컬 개발, 테스트 및 소규모 데이터 세트에 사용하세요.
+
+Convex에서 생산 벡터를 검색하려면 다음을 사용하세요.`ConvexNativeVector`. It uses the Convex native `vectorSearch` API, which requires a deployed Convex vector index and a Convex action.
+
+:::
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/convex@latest
+```
+
+## 볼록한 설정 {/* #convex-setup */}
+
+사용하기 전에`ConvexVector`, you need to set up the Convex schema and storage handler. See [Convex Storage Setup](../storage/convex#convex-setup) for setup instructions.
+
+## 생성자 옵션 {/* #constructor-options */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'deploymentUrl',
+  type: 'string',
+  description: 'Convex deployment URL (e.g., https://your-project.convex.cloud)',
+  isOptional: false,
+},
+{
+  name: 'adminAuthToken',
+  type: 'string',
+  description: 'Convex admin authentication token',
+  isOptional: false,
+},
+{
+  name: 'storageFunction',
+  type: 'string',
+  description: 'Path to the storage mutation function',
+  isOptional: true,
+  defaultValue: 'mastra/storage:handle',
+},
+]}
+/>
+
+## 생성자 예 {/* #constructor-examples */}
+
+### 기본 구성 {/* #basic-configuration */}
+
+```ts
+import { ConvexVector } from '@mastra/convex'
+
+const vectorStore = new ConvexVector({
+  id: 'convex-vectors',
+  deploymentUrl: 'https://your-project.convex.cloud',
+  adminAuthToken: 'your-admin-token',
+})
+```
+
+### 기본 볼록 벡터 검색 {/* #native-convex-vector-search */}
+
+사용`ConvexNativeVector` for production vector workloads. It stores vectors in a dedicated Convex table and queries a schema-defined Convex vector index.
+
+\~ 안에`convex/schema.ts`, define a dedicated table for each Mastra vector index:
+
+```typescript title="convex/schema.ts"
+import { defineSchema } from 'convex/server'
+import { defineMastraNativeVectorTable } from '@mastra/convex/schema'
+
+export default defineSchema({
+  docs_vectors: defineMastraNativeVectorTable({
+    dimensions: 1536,
+  }),
+})
+```
+
+\~ 안에`convex/mastra/nativeVector.ts`, export the native vector handlers:
+
+```typescript title="convex/mastra/nativeVector.ts"
+import {
+  mastraNativeVectorAction,
+  mastraNativeVectorMutation,
+  mastraNativeVectorQuery,
+} from '@mastra/convex/server'
+
+export const query = mastraNativeVectorAction
+export const read = mastraNativeVectorQuery
+export const write = mastraNativeVectorMutation
+```
+
+Mastra 앱에서 다음을 구성하세요.`ConvexNativeVector` with the deployed table and vector index:
+
+```typescript title="src/mastra/index.ts"
+import { ConvexNativeVector } from '@mastra/convex'
+
+const vectorStore = new ConvexNativeVector({
+  id: 'convex-native-vectors',
+  deploymentUrl: process.env.CONVEX_URL!,
+  adminAuthToken: process.env.CONVEX_ADMIN_KEY!,
+  indexes: {
+    docs: {
+      tableName: 'docs_vectors',
+      vectorIndexName: 'by_embedding',
+      dimension: 1536,
+    },
+  },
+})
+
+const results = await vectorStore.query({
+  indexName: 'docs',
+  queryVector: embedding,
+  topK: 10,
+})
+```
+
+기본 필터 지원을 위해 Convex 스키마에서 필터 필드를 선언하세요. 기본 벡터 핸들러는 벡터가 작성될 때 일치하는 메타데이터 필드를 최상위 문서 필드에 복사합니다.
+
+```typescript title="convex/schema.ts"
+import { defineSchema, defineTable } from 'convex/server'
+import { v } from 'convex/values'
+
+export default defineSchema({
+  docs_vectors: defineTable({
+    id: v.string(),
+    embedding: v.array(v.float64()),
+    metadata: v.optional(v.any()),
+    tenantId: v.string(),
+  })
+    .index('by_record_id', ['id'])
+    .vectorIndex('by_embedding', {
+      vectorField: 'embedding',
+      dimensions: 1536,
+      filterFields: ['tenantId'],
+    }),
+})
+```
+
+```typescript title="src/mastra/index.ts"
+const vectorStore = new ConvexNativeVector({
+  id: 'convex-native-vectors',
+  deploymentUrl: process.env.CONVEX_URL!,
+  adminAuthToken: process.env.CONVEX_ADMIN_KEY!,
+  indexes: {
+    docs: {
+      tableName: 'docs_vectors',
+      dimension: 1536,
+      filterFields: ['tenantId'],
+    },
+  },
+})
+
+await vectorStore.upsert({
+  indexName: 'docs',
+  ids: ['chunk-1'],
+  vectors: [embedding],
+  metadata: [{ tenantId: 'acme', text: 'Account setup guide' }],
+})
+
+const results = await vectorStore.query({
+  indexName: 'docs',
+  queryVector: embedding,
+  filter: { tenantId: 'acme' },
+})
+```
+
+`ConvexNativeVector`Convex 기본 벡터 필터 모양 지원: 하나의 동등 필드 또는`$or` of equality fields. It doesn't support metadata-only queries, filter-based updates, or filter-based deletes. Use vector IDs for updates and deletes.
+
+### 맞춤형 저장 기능 {/* #custom-storage-function */}
+
+```ts
+const vectorStore = new ConvexVector({
+  id: 'convex-vectors',
+  deploymentUrl: 'https://your-project.convex.cloud',
+  adminAuthToken: 'your-admin-token',
+  storageFunction: 'custom/path:handler',
+})
+```
+
+## 행동 양식 {/* #methods */}
+
+### `createIndex()` {/* #createindex */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Name of the index to create',
+},
+{
+  name: 'dimension',
+  type: 'number',
+  description: 'Vector dimension (must match your embedding model)',
+},
+{
+  name: 'metric',
+  type: "'cosine' | 'euclidean' | 'dotproduct'",
+  isOptional: true,
+  defaultValue: 'cosine',
+  description: 'Distance metric for similarity search (only cosine is currently supported)',
+},
+]}
+/>
+
+```typescript
+await vectorStore.createIndex({
+  indexName: 'my_vectors',
+  dimension: 1536,
+})
+```
+
+### `upsert()` {/* #upsert */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Name of the index to upsert vectors into',
+},
+{
+  name: 'vectors',
+  type: 'number[][]',
+  description: 'Array of embedding vectors',
+},
+{
+  name: 'metadata',
+  type: 'Record<string, any>[]',
+  isOptional: true,
+  description: 'Metadata for each vector',
+},
+{
+  name: 'ids',
+  type: 'string[]',
+  isOptional: true,
+  description: 'Optional vector IDs (auto-generated if not provided)',
+},
+]}
+/>
+
+```typescript prettier:false
+await vectorStore.upsert({
+  indexName: "my_vectors",
+  vectors: [[0.1, 0.2, 0.3, ...]],
+  metadata: [{ label: "example" }],
+  ids: ["vec-1"],
+});
+```
+
+### `query()` {/* #query */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Name of the index to query',
+},
+{
+  name: 'queryVector',
+  type: 'number[]',
+  description: 'Query vector',
+},
+{
+  name: 'topK',
+  type: 'number',
+  isOptional: true,
+  defaultValue: '10',
+  description: 'Number of results to return',
+},
+{
+  name: 'filter',
+  type: 'Record<string, any>',
+  isOptional: true,
+  description: 'Metadata filters',
+},
+{
+  name: 'includeVector',
+  type: 'boolean',
+  isOptional: true,
+  defaultValue: 'false',
+  description: 'Whether to include the vector in the result',
+},
+]}
+/>
+
+```typescript prettier:false
+const results = await vectorStore.query({
+  indexName: "my_vectors",
+  queryVector: [0.1, 0.2, 0.3, ...],
+  topK: 5,
+  filter: { category: "documents" },
+});
+```
+
+### `listIndexes()` {/* #listindexes */}
+
+인덱스 이름의 배열을 문자열로 반환합니다.
+
+```typescript
+const indexes = await vectorStore.listIndexes()
+// ["my_vectors", "embeddings", ...]
+```
+
+### `describeIndex()` {/* #describeindex */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Name of the index to describe',
+},
+]}
+/>
+
+보고:
+
+```typescript
+interface IndexStats {
+  dimension: number
+  count: number
+  metric: 'cosine' | 'euclidean' | 'dotproduct'
+}
+```
+
+### `deleteIndex()` {/* #deleteindex */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Name of the index to delete',
+},
+]}
+/>
+
+인덱스와 해당 벡터를 모두 삭제합니다.
+
+```typescript
+await vectorStore.deleteIndex({ indexName: 'my_vectors' })
+```
+
+### `updateVector()` {/* #updatevector */}
+
+ID 또는 메타데이터 필터를 기준으로 단일 벡터를 업데이트합니다. 어느 하나`id` or `filter` must be provided, but not both.
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Name of the index containing the vector',
+},
+{
+  name: 'id',
+  type: 'string',
+  isOptional: true,
+  description: 'ID of the vector to update (mutually exclusive with filter)',
+},
+{
+  name: 'filter',
+  type: 'Record<string, any>',
+  isOptional: true,
+  description: 'Metadata filter to identify vector(s) to update (mutually exclusive with id)',
+},
+{
+  name: 'update',
+  type: '{ vector?: number[]; metadata?: Record<string, any>; }',
+  description: 'Object containing the vector and/or metadata to update',
+},
+]}
+/>
+
+```typescript
+// Update by ID
+await vectorStore.updateVector({
+  indexName: 'my_vectors',
+  id: 'vector123',
+  update: {
+    vector: [0.1, 0.2, 0.3],
+    metadata: { label: 'updated' },
+  },
+})
+
+// Update by filter
+await vectorStore.updateVector({
+  indexName: 'my_vectors',
+  filter: { category: 'product' },
+  update: {
+    metadata: { status: 'reviewed' },
+  },
+})
+```
+
+### `deleteVector()` {/* #deletevector */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Name of the index containing the vector',
+},
+{
+  name: 'id',
+  type: 'string',
+  description: 'ID of the vector to delete',
+},
+]}
+/>
+
+```typescript
+await vectorStore.deleteVector({ indexName: 'my_vectors', id: 'vector123' })
+```
+
+### `deleteVectors()` {/* #deletevectors */}
+
+ID 또는 메타데이터 필터를 기준으로 여러 벡터를 삭제합니다. 어느 하나`ids` or `filter` must be provided, but not both.
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Name of the index containing the vectors to delete',
+},
+{
+  name: 'ids',
+  type: 'string[]',
+  isOptional: true,
+  description: 'Array of vector IDs to delete (mutually exclusive with filter)',
+},
+{
+  name: 'filter',
+  type: 'Record<string, any>',
+  isOptional: true,
+  description: 'Metadata filter to identify vectors to delete (mutually exclusive with ids)',
+},
+]}
+/>
+
+```typescript
+// Delete by IDs
+await vectorStore.deleteVectors({
+  indexName: 'my_vectors',
+  ids: ['vec1', 'vec2', 'vec3'],
+})
+
+// Delete by filter
+await vectorStore.deleteVectors({
+  indexName: 'my_vectors',
+  filter: { status: 'archived' },
+})
+```
+
+## 응답 유형 {/* #response-types */}
+
+쿼리 결과는 다음 형식으로 반환됩니다.
+
+```typescript
+interface QueryResult {
+  id: string
+  score: number
+  metadata: Record<string, any>
+  vector?: number[] // Only included if includeVector is true
+}
+```
+
+## 메타데이터 필터링 {/* #metadata-filtering */}
+
+`ConvexVector`연산자를 사용한 메타데이터 필터링을 지원합니다. 이러한 필터는 Convex에서 벡터가 로드된 후 어댑터에 의해 적용됩니다.
+
+```typescript
+// Simple equality
+const results = await vectorStore.query({
+  indexName: 'my_vectors',
+  queryVector: embedding,
+  filter: { category: 'documents' },
+})
+
+// Comparison operators
+const results = await vectorStore.query({
+  indexName: 'my_vectors',
+  queryVector: embedding,
+  filter: {
+    price: { $gt: 100 },
+    status: { $in: ['active', 'pending'] },
+  },
+})
+
+// Logical operators
+const results = await vectorStore.query({
+  indexName: 'my_vectors',
+  queryVector: embedding,
+  filter: {
+    $and: [{ category: 'electronics' }, { price: { $lte: 500 } }],
+  },
+})
+```
+
+### 지원되는 필터 연산자 {/* #supported-filter-operators */}
+
+| 운영자 | 설명 |
+| - | - |
+|`$eq` | Equal to |
+| `$ne` | Not equal to |
+| `$gt` | Greater than |
+| `$gte` | Greater than or equal |
+| `$lt` | Less than |
+| `$lte` | Less than or equal |
+| `$in` | In array |
+| `$nin` | Not in array |
+| `$and` | Logical AND |
+| `$or` | Logical OR |
+
+## 건축학 {/* #architecture */}
+
+`ConvexVector`벡터를 저장합니다.`mastra_vectors` table with the following structure:
+
+* `id`: 고유 벡터 식별자
+* `indexName`: 인덱스 이름
+* `embedding`: 벡터 데이터(수레 배열)
+* `metadata`: 선택적 JSON 메타데이터
+
+Mastra 어댑터에서는 코사인 유사성을 사용하여 벡터 유사성 검색이 수행됩니다. 이는 설정을 유연하게 유지하지만 대규모 생산 벡터 컬렉션용으로 설계되지 않았습니다.
+
+`ConvexNativeVector`각 Mastra 벡터 인덱스를 전용 Convex 테이블에 저장합니다. 해당 쿼리는 다음을 사용하는 Convex 작업을 호출합니다.`ctx.vectorSearch`, then load the matched documents through a Convex query. This follows the Convex native vector search model:
+
+* 벡터 인덱스는 다음에서 선언됩니다.`convex/schema.ts`.
+* 벡터 검색은 Convex 동작에서 실행됩니다.
+* `topK`사이에 있어야합니다`1` and `256`.
+* 필터는 볼록 벡터 인덱스에 나열된 필드를 대상으로 해야 합니다.`filterFields`.
+* 교차 인덱스 결과를 방지하려면 Mastra 벡터 인덱스당 하나의 전용 테이블을 사용하세요.
+
+런타임 시 런타임 정의 인덱스 생성, 메타데이터 전용 쿼리, 복잡한 필터 연산자, 필터 기반 대량 업데이트 또는 삭제, Convex의 기본 벡터 검색 한도를 초과하는 결과 제한이 필요한 경우 외부 벡터 데이터베이스를 사용하세요.
+
+## 관련된 {/* #related */}
+
+* [볼록한 저장](../storage/convex)
+* [메타데이터 필터](../rag/metadata-filters)
+* [볼록 문서](https://docs.convex.dev/)

@@ -1,0 +1,441 @@
+---
+title: "참조: 복합 스토리지 | 저장"
+description: "Mastra에서 여러 스토리지 백엔드를 결합하는 방법에 대한 문서입니다."
+packages:
+  - "@mastra/clickhouse"
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/mongodb"
+  - "@mastra/pg"
+---
+
+# 복합 스토리지
+
+`MastraCompositeStore`다양한 공급자로부터 스토리지 도메인을 구성할 수 있습니다. 다양한 목적을 위해 다양한 데이터베이스가 필요할 때 사용하세요. 예를 들어 Memory에는 LibSQL을 사용하고 Workflow에는 PostgreSQL을 사용합니다.
+
+## 설치 {/* #installation */}
+
+`MastraCompositeStore`에 포함되어 있습니다`@mastra/core`:
+
+```bash npm2yarn
+npm install @mastra/core@latest
+```
+
+구성하려는 스토리지 공급자도 설치해야 합니다.
+
+```bash npm2yarn
+npm install @mastra/pg@latest @mastra/libsql@latest @mastra/mongodb@latest
+```
+
+## 스토리지 도메인 {/* #storage-domains */}
+
+Mastra는 스토리지를 도메인으로 구성하고 각 도메인은 특정 유형의 데이터를 처리합니다. 각 도메인은 서로 다른 스토리지 어댑터로 지원될 수 있으며 도메인 클래스는 각 스토리지 패키지에서 내보내집니다.
+
+| 도메인 | 설명 |
+| - | - |
+|`memory` | Conversation persistence for agents. Stores threads (conversation sessions), messages, resources (user identities), and working memory (persistent context across conversations). |
+| `workflows` | Workflow execution state. When workflows suspend for human input, external events, or scheduled resumption, their state is persisted here to enable resumption after server restarts. |
+| `scores` | Evaluation results from Mastra's evals system. Scores and metrics are persisted here for analysis and comparison over time. |
+| `observability`| 추적 및 범위를 포함한 원격 분석 데이터입니다. Agent 상호 작용, Tool 호출 및 LLM 요청은 디버깅 및 성능 분석을 위해 추적으로 수집된 범위를 생성합니다. |
+|`agents`| 저장된 Agent에 대한 Agent 구성입니다. 코드 배포 없이 런타임 시 Agent를 정의하고 업데이트할 수 있습니다. |
+|`datasets`| 실험 실행에 사용되는 평가 데이터세트입니다. 데이터 세트 정의, 스키마 및 버전이 지정된 항목을 저장합니다. |
+|`experiments`| 실험 실행 및 항목별 실험 결과가 데이터세트 및 타겟에 연결됩니다. |
+
+:::메모
+
+`MastraCompositeStore`위의 모든 도메인 키를 허용하지만 스토리지 어댑터 지원은 패키지에 따라 다릅니다. 도메인당 어댑터를 혼합할 수 있지만 해당 어댑터에 의해 구현되고 내보낸 도메인에 대해서만 가능합니다. 예를 들어,`memory: new MemoryLibSQL(...)` and `workflows: new WorkflowsPG(...)` is valid because both packages export those domain classes.
+
+:::
+
+## 용법 {/* #usage */}
+
+### 기본구성 {/* #basic-composition */}
+
+각 스토어 패키지에서 직접 도메인 클래스를 가져와 구성합니다.
+
+```typescript title="src/mastra/index.ts"
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { WorkflowsPG, ScoresPG } from '@mastra/pg'
+import { MemoryLibSQL } from '@mastra/libsql'
+import { Mastra } from '@mastra/core'
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite',
+    domains: {
+      memory: new MemoryLibSQL({ url: 'file:./local.db' }),
+      workflows: new WorkflowsPG({ connectionString: process.env.DATABASE_URL }),
+      scores: new ScoresPG({ connectionString: process.env.DATABASE_URL }),
+    },
+  }),
+})
+```
+
+### 기본 저장소 사용 {/* #with-a-default-storage */}
+
+사용`default` to specify a fallback storage, then override specific domains:
+
+```typescript title="src/mastra/index.ts"
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { PostgresStore } from '@mastra/pg'
+import { MemoryLibSQL } from '@mastra/libsql'
+import { Mastra } from '@mastra/core'
+
+const pgStore = new PostgresStore({
+  id: 'pg',
+  connectionString: process.env.DATABASE_URL,
+})
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite',
+    default: pgStore,
+    domains: {
+      memory: new MemoryLibSQL({ url: 'file:./local.db' }),
+    },
+  }),
+})
+```
+
+### 혼합 백엔드 {/* #mixed-backends */}
+
+각 스토리지 패키지의 도메인 클래스를 사용하여 다양한 도메인을 다양한 백엔드로 라우팅합니다. 다음 예에서는 MongoDB에 Memory와 Workflow 상태를 저장한 다음 Observability을 ClickHouse로 라우팅합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { ObservabilityStorageClickhouse } from '@mastra/clickhouse'
+import { MemoryStorageMongoDB, WorkflowsStorageMongoDB } from '@mastra/mongodb'
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite',
+    domains: {
+      memory: new MemoryStorageMongoDB({
+        uri: process.env.MONGODB_URI,
+        dbName: 'mastra_memory',
+      }),
+      workflows: new WorkflowsStorageMongoDB({
+        uri: process.env.MONGODB_URI,
+        dbName: 'mastra_workflows',
+      }),
+      observability: new ObservabilityStorageClickhouse({
+        url: process.env.CLICKHOUSE_URL,
+        username: process.env.CLICKHOUSE_USERNAME,
+        password: process.env.CLICKHOUSE_PASSWORD,
+      }),
+    },
+  }),
+})
+```
+
+### 도메인 비활성화 {/* #disabling-a-domain */}
+
+도메인을 다음으로 설정하세요.`false` to disable it. A disabled domain doesn't fall back to `default`, so data for that domain isn't persisted:
+
+```typescript title="src/mastra/index.ts"
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { PostgresStore } from '@mastra/pg'
+import { Mastra } from '@mastra/core'
+
+const pgStore = new PostgresStore({
+  id: 'pg',
+  connectionString: process.env.DATABASE_URL,
+})
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite',
+    default: pgStore,
+    domains: {
+      // don't persist traces and spans
+      observability: false,
+    },
+  }),
+})
+```
+
+## 옵션 {/* #options */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: 'Unique identifier for this storage instance.',
+  isOptional: false,
+},
+{
+  name: 'default',
+  type: 'MastraCompositeStore',
+  description:
+    "Default storage adapter. Domains not explicitly specified in `domains` will use this storage's domains as fallbacks.",
+  isOptional: true,
+},
+{
+  name: 'editor',
+  type: 'MastraCompositeStore',
+  description:
+    'Storage adapter for Editor-owned domains, including agents, prompt blocks, scorers, MCP clients and servers, workspaces, and skills. Takes precedence over default storage but not explicit domain overrides.',
+  isOptional: true,
+},
+{
+  name: 'disableInit',
+  type: 'boolean',
+  description: 'When true, automatic initialization is disabled. You must call init() explicitly.',
+  isOptional: true,
+},
+{
+  name: 'domains',
+  type: 'object',
+  description:
+    'Individual domain overrides. Each domain can come from a different storage adapter. These take precedence over both `editor` and `default` storage. Set a domain to `false` to disable it entirely; a disabled domain does not fall back to `editor` or `default`.',
+  isOptional: true,
+  properties: [
+    {
+      type: 'object',
+      parameters: [
+        {
+          name: 'memory',
+          type: 'MemoryStorage',
+          description: 'Storage for threads, messages, and resources.',
+          isOptional: true,
+        },
+        {
+          name: 'workflows',
+          type: 'WorkflowsStorage',
+          description: 'Storage for workflow snapshots.',
+          isOptional: true,
+        },
+        {
+          name: 'scores',
+          type: 'ScoresStorage',
+          description: 'Storage for evaluation scores.',
+          isOptional: true,
+        },
+        {
+          name: 'observability',
+          type: 'ObservabilityStorage',
+          description: 'Storage for traces and spans.',
+          isOptional: true,
+        },
+        {
+          name: 'agents',
+          type: 'AgentsStorage',
+          description: 'Storage for stored agent configurations.',
+          isOptional: true,
+        },
+        {
+          name: 'datasets',
+          type: 'DatasetsStorage',
+          description: 'Storage for dataset metadata, dataset items, and dataset versions.',
+          isOptional: true,
+        },
+        {
+          name: 'experiments',
+          type: 'ExperimentsStorage',
+          description: 'Storage for experiment runs and per-item experiment results.',
+          isOptional: true,
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+## 초기화 {/* #initialization */}
+
+`MastraCompositeStore`구성된 각 도메인을 독립적으로 초기화합니다. Mastra 클래스로 넘어갔을 때,`init()` is called automatically:
+
+```typescript title="src/mastra/index.ts"
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { MemoryPG, WorkflowsPG, ScoresPG } from '@mastra/pg'
+import { Mastra } from '@mastra/core'
+
+const storage = new MastraCompositeStore({
+  id: 'composite',
+  domains: {
+    memory: new MemoryPG({ connectionString: process.env.DATABASE_URL }),
+    workflows: new WorkflowsPG({ connectionString: process.env.DATABASE_URL }),
+    scores: new ScoresPG({ connectionString: process.env.DATABASE_URL }),
+  },
+})
+
+export const mastra = new Mastra({
+  storage, // init() called automatically
+})
+```
+
+저장소를 직접 사용하는 경우`init()` explicitly:
+
+```typescript
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { MemoryPG } from '@mastra/pg'
+
+const storage = new MastraCompositeStore({
+  id: 'composite',
+  domains: {
+    memory: new MemoryPG({ connectionString: process.env.DATABASE_URL }),
+  },
+})
+
+await storage.init()
+
+// Access domain-specific stores via getStore()
+const memoryStore = await storage.getStore('memory')
+const thread = await memoryStore?.getThreadById({ threadId: '...' })
+```
+
+## 연결 종료 {/* #closing-connections */}
+
+`close()`복합이 만들어진 저장소의 연결을 해제합니다.`default` and `editor` stores, plus any domain that owns its own client. Each store is closed once, even when it backs several domains. When passed to the Mastra class, `close()` is called by `shutdown()`:
+
+```typescript title="src/mastra/index.ts"
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { PostgresStore } from '@mastra/pg'
+import { Mastra } from '@mastra/core'
+
+const pgStore = new PostgresStore({
+  id: 'pg-storage',
+  connectionString: process.env.DATABASE_URL,
+})
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({ id: 'composite', default: pgStore }),
+})
+
+process.on('SIGTERM', async () => {
+  // Releases the Postgres pool, so the process can exit
+  await mastra.shutdown()
+})
+```
+
+도메인을 제공하기 위해서만 구성한 저장소는 복합을 통해 연결할 수 없습니다. 이에 대한 참조를 유지하고 직접 닫으십시오.
+
+```typescript title="src/mastra/index.ts"
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { ClickhouseStore } from '@mastra/clickhouse'
+import { PostgresStore } from '@mastra/pg'
+import { Mastra } from '@mastra/core'
+
+const pgStore = new PostgresStore({
+  id: 'pg-storage',
+  connectionString: process.env.DATABASE_URL,
+})
+
+const clickhouseStore = new ClickhouseStore({
+  id: 'clickhouse-storage',
+  url: process.env.CLICKHOUSE_URL,
+  username: process.env.CLICKHOUSE_USERNAME,
+  password: process.env.CLICKHOUSE_PASSWORD,
+})
+
+export const mastra = new Mastra({
+  storage: new MastraCompositeStore({
+    id: 'composite',
+    default: pgStore,
+    domains: { observability: clickhouseStore.stores?.observability },
+  }),
+})
+
+process.on('SIGTERM', async () => {
+  await mastra.shutdown()
+  await clickhouseStore.close()
+})
+```
+
+## 사용 사례 {/* #use-cases */}
+
+### 다양한 워크로드를 위한 별도의 데이터베이스 {/* #separate-databases-for-different-workloads */}
+
+관리형 서비스에 프로덕션 데이터를 유지하면서 개발을 위해 로컬 데이터베이스를 사용합니다.
+
+```typescript
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { MemoryPG, WorkflowsPG, ScoresPG } from '@mastra/pg'
+import { MemoryLibSQL } from '@mastra/libsql'
+
+const storage = new MastraCompositeStore({
+  id: 'composite',
+  domains: {
+    // Use local SQLite for development, PostgreSQL for production
+    memory:
+      process.env.NODE_ENV === 'development'
+        ? new MemoryLibSQL({ url: 'file:./dev.db' })
+        : new MemoryPG({ connectionString: process.env.DATABASE_URL }),
+    workflows: new WorkflowsPG({ connectionString: process.env.DATABASE_URL }),
+    scores: new ScoresPG({ connectionString: process.env.DATABASE_URL }),
+  },
+})
+```
+
+### Observability을 위한 특수 스토리지 {/* #specialized-storage-for-observability */}
+
+Observability 데이터는 프로덕션 환경에서 범용 데이터베이스를 빠르게 압도할 수 있습니다. 단일 Agent 상호 작용으로 수백 개의 범위가 생성될 수 있으며 트래픽이 많은 애플리케이션은 하루에 수천 개의 추적을 생성할 수 있습니다.
+
+**[클릭하우스](/reference/storage/clickhouse)**&#xB300;용량, 쓰기 집약적 분석 워크로드에 최적화되어 있으므로 프로덕션 Observability에 권장됩니다. 기본 데이터베이스에 다른 데이터를 유지하면서 복합 스토리지를 사용하여 Observability을 ClickHouse로 라우팅합니다.
+
+```typescript
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { MemoryPG, WorkflowsPG, ScoresPG } from '@mastra/pg'
+import { ObservabilityStorageClickhouseVNext } from '@mastra/clickhouse'
+
+const storage = new MastraCompositeStore({
+  id: 'composite',
+  domains: {
+    memory: new MemoryPG({ connectionString: process.env.DATABASE_URL }),
+    workflows: new WorkflowsPG({ connectionString: process.env.DATABASE_URL }),
+    scores: new ScoresPG({ connectionString: process.env.DATABASE_URL }),
+    observability: new ObservabilityStorageClickhouseVNext({
+      url: process.env.CLICKHOUSE_URL,
+      username: process.env.CLICKHOUSE_USERNAME,
+      password: process.env.CLICKHOUSE_PASSWORD,
+    }),
+  },
+})
+```
+
+:::메모
+
+`ObservabilityStorageClickhouseVNext`현재 Observability 도메인 구현입니다. 유산`ObservabilityStorageClickhouse` class is also exported and remains supported for projects that haven't migrated. See the [ClickHouse storage reference](/reference/storage/clickhouse) for details.
+
+:::
+
+### 다중 복제본 클러스터를 위한 복제된 ClickHouse {/* #replicated-clickhouse-for-multi-replica-clusters */}
+
+여러 복제본이 있는 자체 관리형 ClickHouse 클러스터의 경우 다음을 설정합니다.`replication` so Mastra emits `ReplicatedMergeTree` engines and applies `ON CLUSTER` to its DDL:
+
+```typescript
+import { MastraCompositeStore } from '@mastra/core/storage'
+import { MemoryPG, WorkflowsPG, ScoresPG } from '@mastra/pg'
+import { ObservabilityStorageClickhouseVNext } from '@mastra/clickhouse'
+
+const storage = new MastraCompositeStore({
+  id: 'composite',
+  domains: {
+    memory: new MemoryPG({ connectionString: process.env.DATABASE_URL }),
+    workflows: new WorkflowsPG({ connectionString: process.env.DATABASE_URL }),
+    scores: new ScoresPG({ connectionString: process.env.DATABASE_URL }),
+    observability: new ObservabilityStorageClickhouseVNext({
+      url: process.env.CLICKHOUSE_URL,
+      username: process.env.CLICKHOUSE_USERNAME,
+      password: process.env.CLICKHOUSE_PASSWORD,
+      replication: {
+        cluster: 'production_cluster',
+        // Optional (defaults shown):
+        // zookeeperPath: '/clickhouse/tables/{shard}/{database}/{table}',
+        // replicaName: '{replica}',
+      },
+    }),
+  },
+})
+```
+
+설정하지 않음`replication` on ClickHouse Cloud. Cloud rewrites `MergeTree` to `SharedMergeTree` server-side. See the [ClickHouse storage reference](/reference/storage/clickhouse) for the full config shape and operator notes.
+
+:::정보
+
+이 접근 방식은 관측 가능성을 지원하지 않는 스토리지 공급자(예: Convex, DynamoDB 또는 Cloudflare)를 사용할 때도 필요합니다. 참조[MastraStorageExporter documentation](/docs/observability/integrations/exporters/mastra-storage#storage-provider-support) for the full list of supported providers.
+
+:::

@@ -1,0 +1,352 @@
+---
+title: "메시지 기록 | Memory"
+description: "현재 대화의 최근 메시지를 저장하기 위해 Mastra에서 메시지 기록을 구성하는 방법을 알아보세요."
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+  - "@mastra/libsql"
+  - "@mastra/ai-sdk"
+---
+
+# 메시지 기록
+
+메시지 기록은 가장 기본적이고 중요한 기억의 형태입니다. 이는 LLM에게 컨텍스트 창에서 최근 메시지 보기를 제공하여 Agent가 이전 교환을 참조하고 일관되게 응답할 수 있도록 합니다.
+
+메시지 기록을 검색하여 UI에 과거 대화를 표시할 수도 있습니다.
+
+:::정보
+각 메시지는 스레드(대화) 및 리소스(연결된 사용자 또는 엔터티)에 속합니다. 보다[Threads and resources](#threads-and-resources) for more detail.
+:::
+
+:::경고
+클라이언트 애플리케이션에서 Memory를 사용하는 경우**only the new message** from the client instead of the full conversation history.
+
+Mastra가 저장소에서 메시지를 로드하기 때문에 전체 기록을 보내는 것은 중복되며 클라이언트 측 타임스탬프가 저장된 타임스탬프와 충돌할 때 메시지 순서 버그가 발생할 수 있습니다.
+
+AI SDK 예시는 다음을 참조하세요.[Using Mastra Memory](/guides/build-your-ui/ai-sdk-ui#using-mastra-memory).
+:::
+
+## 스레드 및 리소스 {/* #threads-and-resources */}
+
+Mastra는 두 가지 식별자를 사용하여 대화를 구성합니다.
+
+* **실**: 일련의 메시지가 포함된 대화 세션입니다.
+* **의지**: 사용자, 조직, 프로젝트 또는 애플리케이션의 다른 도메인 엔터티와 같이 스레드를 소유하는 엔터티입니다.
+
+Studio는 자동으로 스레드 및 리소스 ID를 생성합니다. 전화할 때`stream()` or `generate()` yourself, provide these identifiers explicitly.
+
+## 시작하기 {/* #getting-started */}
+
+다음과 함께 Mastra Memory 모듈을 설치합니다.[storage adapter](/docs/storage/overview#supported-providers) for your database. The examples below use `@mastra/libsql`, which stores data locally in a `mastra.db` file.
+
+```bash npm2yarn
+npm install @mastra/memory@latest @mastra/libsql@latest
+```
+
+메시지 기록에는 대화를 유지하기 위한 스토리지 어댑터가 필요합니다. 아직 구성하지 않은 경우 Mastra 인스턴스에 스토리지를 구성합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { LibSQLStore } from '@mastra/libsql'
+
+export const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+})
+```
+
+인스턴스화[`Memory`](/reference/memory/memory-class) instance in your agent:
+
+```typescript title="src/mastra/agents/test-agent.ts"
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+
+export const agent = new Agent({
+  id: 'test-agent',
+  memory: new Memory({
+    options: {
+      lastMessages: 10,
+    },
+  }),
+})
+```
+
+Agent에게 전화하면 메시지가 자동으로 데이터베이스에 저장됩니다. 다음을 지정할 수 있습니다.`threadId`, `resourceId`, and optional `metadata`:
+
+<Tabs>
+  <TabItem value="generate" label=".generate()">
+    ```typescript
+    await agent.generate('Hello', {
+      memory: {
+        thread: {
+          id: 'thread-123',
+          title: 'Support conversation',
+          metadata: { category: 'billing' },
+        },
+        resource: 'user-456',
+      },
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="stream" label=".stream()">
+    ```typescript
+    await agent.stream('Hello', {
+      memory: {
+        thread: {
+          id: 'thread-123',
+          title: 'Support conversation',
+          metadata: { category: 'billing' },
+        },
+        resource: 'user-456',
+      },
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+:::정보
+
+전화를 걸면 스레드와 메시지가 자동으로 생성됩니다.`agent.generate()` or `agent.stream()`, but you can also create them manually with [`createThread()`](/reference/memory/createThread) and [`saveMessages()`](/reference/memory/memory-class).
+
+:::
+
+이 기록은 두 가지 방법으로 사용할 수 있습니다.
+
+* **자동 포함**: Mastra는 자동으로 최근 메시지를 가져와서 컨텍스트 창에 포함시킵니다. 기본적으로 마지막 10개의 메시지가 포함되어 Agent이 대화에 계속 참여할 수 있습니다. 이 숫자를 다음으로 조정할 수 있습니다.`lastMessages`, but in most cases you don't need to think about it.
+* [**수동 쿼리**](#querying): 더 세밀하게 제어하려면`recall()` function to query threads and messages directly. This lets you choose exactly which memories are included in the context window, or fetch messages to render conversation history in your UI.
+
+:::팁
+
+Memory가 활성화되면,[Studio](/docs/studio/overview) uses message history to display past conversations in the chat sidebar.
+
+:::
+
+## 스레드 제목 생성 {/* #thread-title-generation */}
+
+Mastra는 다음과 같은 경우 대화 내용에서 설명 스레드 제목을 자동으로 생성할 수 있습니다.`generateTitle` is enabled. Use this option when you build a chat interface that renders conversation titles in a thread list or sidebar.
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support agent',
+  instructions: 'Answer customer support questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    options: {
+      generateTitle: true,
+    },
+  }),
+})
+```
+
+제목 생성은 Agent가 응답한 후 비동기적으로 실행되며 응답 시간에는 영향을 주지 않습니다.
+
+비용이나 행동을 최적화하려면 더 작은 크기를 제공하세요.[`model`](/models) and custom `instructions`:
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { Memory } from '@mastra/memory'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support agent',
+  instructions: 'Answer customer support questions.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    options: {
+      generateTitle: {
+        model: '__GATEWAY_OPENAI_MODEL_MINI__',
+        instructions: 'Generate a one-word title.',
+      },
+    },
+  }),
+})
+```
+
+## Memory 액세스 {/* #accessing-memory */}
+
+스레드와 메시지를 쿼리, 복제 또는 삭제하기 위해 Memory 기능에 액세스하려면 다음을 호출하세요.`getMemory()` on an agent:
+
+```typescript
+const agent = mastra.getAgentById('test-agent')
+const memory = await agent.getMemory()
+```
+
+그만큼`Memory` instance gives you access to functions for listing threads and recalling messages, plus cloning conversations, and more.
+
+## 쿼리 중 {/* #querying */}
+
+UI에 대화 기록을 표시하거나 사용자 지정 Memory 검색 논리를 위해 스레드와 메시지를 가져오려면 이러한 메서드를 사용하세요.
+
+:::경고
+Memory 시스템은 액세스 제어를 시행하지 않습니다. 쿼리를 실행하기 전에 애플리케이션 로직에서 현재 사용자에게 액세스 권한이 있는지 확인하세요.`resourceId` being queried.
+:::
+
+### 스레드 {/* #threads */}
+
+사용[`listThreads()`](/reference/memory/listThreads) to retrieve threads for a resource:
+
+```typescript
+const result = await memory.listThreads({
+  filter: { resourceId: 'user-123' },
+  perPage: false,
+})
+```
+
+스레드를 통해 페이지를 매깁니다.
+
+```typescript
+const result = await memory.listThreads({
+  filter: { resourceId: 'user-123' },
+  page: 0,
+  perPage: 10,
+})
+
+console.log(result.threads) // thread objects
+console.log(result.hasMore) // more pages available?
+```
+
+메타데이터로 필터링하고 정렬 순서를 제어할 수도 있습니다.
+
+```typescript
+const result = await memory.listThreads({
+  filter: {
+    resourceId: 'user-123',
+    metadata: { status: 'active' },
+  },
+  orderBy: { field: 'createdAt', direction: 'DESC' },
+})
+```
+
+ID로 단일 스레드를 가져오려면 다음을 사용하세요.[`getThreadById()`](/reference/memory/getThreadById):
+
+```typescript
+const thread = await memory.getThreadById({ threadId: 'thread-123' })
+```
+
+### 메시지 {/* #messages */}
+
+스레드가 있으면 다음을 사용하십시오.[`recall()`](/reference/memory/recall) to retrieve its messages. It supports pagination, date filtering, and [semantic search](/docs/memory/semantic-recall).
+
+기본 회수는 스레드의 모든 메시지를 반환합니다.
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  perPage: false,
+})
+```
+
+메시지 페이지 매기기:
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  page: 0,
+  perPage: 50,
+})
+```
+
+날짜 범위별로 필터링:
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  filter: {
+    dateRange: {
+      start: new Date('2025-01-01'),
+      end: new Date('2025-06-01'),
+    },
+  },
+})
+```
+
+얕은 메시지 메타데이터로 필터링:
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  filter: {
+    metadata: {
+      category: 'billing',
+      escalated: true,
+      priority: 2,
+      archivedAt: null,
+    },
+  },
+})
+```
+
+메타데이터 필터는 얕은 스칼라 값만 일치합니다.`string`, finite `number`, `boolean`, and `null`.
+
+지정된 모든 메타데이터 키는 AND 의미 체계를 사용합니다. 에이`null` filter matches only an explicit `null` value. A missing metadata key doesn't match.
+
+메타데이터 키는 문자나 밑줄로 시작해야 하며 영숫자만 포함할 수 있습니다. 128자 이하여야 하며 다음과 같은 예약된 프로토타입 키를 사용할 수 없습니다.`__proto__`, `constructor`, or `prototype`.
+
+성능은 스토리지 백엔드에 따라 다릅니다. 일부 백엔드는 필터의 일부를 데이터베이스에 푸시할 수 있는 반면 다른 백엔드는 스레드, 리소스 및 날짜 제약 조건이 적용된 후 페이지 매기기 전에 후보 메시지를 검색합니다.
+
+ID별로 단일 메시지를 가져옵니다.
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  include: [{ id: 'msg-123' }],
+})
+```
+
+주변 컨텍스트와 함께 ID별로 여러 메시지를 가져옵니다.
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  include: [
+    { id: 'msg-123' },
+    {
+      id: 'msg-456',
+      withPreviousMessages: 3,
+      withNextMessages: 1,
+    },
+  ],
+})
+```
+
+의미로 검색(참조[Semantic recall](/docs/memory/semantic-recall) for setup):
+
+```typescript
+const { messages } = await memory.recall({
+  threadId: 'thread-123',
+  vectorSearchString: 'project deadline discussion',
+  threadConfig: {
+    semanticRecall: true,
+  },
+})
+```
+
+### UI 형식 {/* #ui-format */}
+
+메시지 쿼리 반환`MastraDBMessage[]` format. To display messages in a frontend, you may need to convert them to a format your UI library expects. For example, [`toAISdkV5Messages`](/reference/ai-sdk/to-ai-sdk-v5-messages) converts messages to AI SDK UI format.
+
+## 스레드 복제 {/* #thread-cloning */}
+
+스레드 복제는 해당 메시지와 함께 기존 스레드의 복사본을 만듭니다. 이는 잠재적으로 파괴적인 작업 전에 대화를 분기하거나 체크포인트를 생성하거나 대화의 변형을 테스트하는 데 유용합니다.
+
+```typescript
+const { thread, clonedMessages } = await memory.cloneThread({
+  sourceThreadId: 'thread-123',
+  title: 'Branched conversation',
+})
+```
+
+복제되는 메시지를 필터링(개수 또는 날짜 범위 기준)하고, 사용자 정의 스레드 ID를 지정하고, 유틸리티 방법을 사용하여 복제 관계를 검사할 수 있습니다.
+
+보다[`cloneThread()`](/reference/memory/cloneThread) and [clone utilities](/reference/memory/clone-utilities) for the full API.
+
+## 메시지 삭제 {/* #deleting-messages */}
+
+스레드에서 메시지를 제거하려면 다음을 사용하세요.[`deleteMessages()`](/reference/memory/deleteMessages). You can delete by message ID or clear all messages from a thread.

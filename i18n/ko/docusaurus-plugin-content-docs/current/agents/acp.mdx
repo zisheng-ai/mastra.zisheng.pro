@@ -1,0 +1,142 @@
+---
+title: "ACP(Agent 클라이언트 프로토콜) | Agent"
+description: "ACP 호환 코딩 Agent를 Mastra Tool 또는 하위 Agent로 래핑합니다."
+packages:
+  - "@mastra/acp"
+  - "@mastra/core"
+---
+
+# Agent 클라이언트 프로토콜
+
+마스트라는 다음을 지원합니다.[Agent Client Protocol (ACP)](https://agentclientprotocol.com/overview/introduction)Mastra Agent에서 ACP 호환 코딩 Agent를 실행하기 위한 것입니다. 사용`@mastra/acp`코딩 Agent 프로세스를 Mastra Tool 또는 하위 Agent로 래핑합니다.
+
+ACP는 Claude Code, Amp, Codex 또는 표준 입력 및 출력을 통해 ACP를 구현하는 기타 실행 파일과 같은 코딩 Agent에 유용합니다.
+
+## ACP를 사용해야 하는 경우 {/* #when-to-use-acp */}
+
+* Mastra Agent는 코드 검사, 편집 또는 저장소 작업을 외부 코딩 Agent에 위임해야 합니다.
+* ACP 호환 Agent 프로세스는 세션 컨텍스트를 유지할 수 있도록 호출 전반에 걸쳐 활성 상태를 유지해야 합니다.
+* 상위 Agent에는 작업이 실행되는 동안 코딩 Agent의 실시간 출력이 필요합니다.
+* ACP 호환 Agent는 파일을 읽거나 쓰거나 작업을 실행하기 전에 권한 Prompt가 필요합니다.
+* 파일 액세스는 직접적인 프로세스 전용 파일 액세스 대신 Mastra의 작업 공간 추상화를 거쳐야 합니다.
+
+## ACP 작동 방식 {/* #how-acp-works */}
+
+`@mastra/acp`구성된 ACP Agent 명령을 하위 프로세스로 시작하고 표준 입력 및 출력을 통해 줄 바꿈으로 구분된 JSON을 사용하여 통신합니다.
+
+흐름은 다음과 같습니다.
+
+1. 구성`command`, `args`, and optional connection settings.
+2. `@mastra/acp`처음 사용할 때 ACP Agent 프로세스를 생성합니다.
+3. 클라이언트가 ACP를 보냅니다.`initialize` and `session/new` requests.
+4. Mastra는 사용자 작업을 ACP Agent에 보냅니다.`session/prompt`.
+5. ACP Agent는 세션 업데이트 및 메시지 청크를 다시 Mastra로 스트리밍합니다.
+6. Mastra는 버퍼링된 출력을 반환하거나 스트리밍 청크를 내보내거나 권한 입력을 처리합니다.
+7. 다음과 같은 경우 Prompt가 표시된 후 ACP 연결이 프로세스를 중지합니다.`persistSession` is `false`. `AcpAgent` can keep a reusable process alive across calls by default.
+
+실행 중에 ACP 클라이언트는 권한 요청 및 파일 작업도 처리합니다. 파일 읽기 및 쓰기는 Mastra를 통해 이루어집니다.`Workspace`, so the ACP agent operates inside the workspace you provide.
+
+## 시작하기 {/* #getting-started */}
+
+설치하다`@mastra/acp` in a project that already uses `@mastra/core`. The package requires `@mastra/core` version `1.34.0` or later.
+
+```bash npm2yarn
+npm install @mastra/acp
+```
+
+`@mastra/acp`두 개의 API를 내보냅니다.
+
+* [`createACPTool()`](/reference/acp/create-acp-tool): 다음을 보내는 Mastra Tool를 만듭니다.`task` string to an ACP agent and returns an `output` string.
+* [`AcpAgent`](/reference/acp/acp-agent): ACP Agent를 다음을 사용하여 Mastra 하위 Agent로 래핑합니다.`generate()` and `stream()` support.
+
+## ACP를 하위 Agent로 사용 {/* #use-acp-as-a-subagent */}
+
+사용`AcpAgent` when a parent Mastra agent should delegate directly to an ACP-compatible coding agent as a subagent.
+
+```typescript title="src/mastra/agents/code-supervisor.ts"
+import { AcpAgent } from '@mastra/acp'
+import { Agent } from '@mastra/core/agent'
+
+const codeAgent = new AcpAgent({
+  id: 'code-agent',
+  name: 'Code Agent',
+  description: 'An ACP-compatible coding agent that can inspect and edit files',
+  command: 'acp-agent',
+  args: ['--stdio'],
+  cwd: process.cwd(),
+})
+
+export const codeSupervisor = new Agent({
+  id: 'code-supervisor',
+  name: 'Code Supervisor',
+  instructions: 'Delegate code editing tasks to the code-agent subagent.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  agents: {
+    codeAgent,
+  },
+})
+```
+
+참조[AcpAgent reference](/reference/acp/acp-agent) for all options, methods, and configuration.
+
+## ACP를 Tool로 사용 {/* #use-acp-as-a-tool */}
+
+사용`createACPTool()` when the parent Mastra agent should decide when to call the ACP agent as a tool.
+
+```typescript title="src/mastra/agents/code-supervisor.ts"
+import { createACPTool } from '@mastra/acp'
+import { Agent } from '@mastra/core/agent'
+
+const codeAgentTool = createACPTool({
+  id: 'code-agent',
+  description: 'Use an ACP-compatible coding agent to inspect and edit code',
+  command: 'acp-agent',
+  args: ['--stdio'],
+  cwd: process.cwd(),
+})
+
+export const codeSupervisor = new Agent({
+  id: 'code-supervisor',
+  name: 'Code Supervisor',
+  instructions: 'Use the code-agent tool when a task requires repository inspection or code edits.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  tools: {
+    codeAgentTool,
+  },
+})
+```
+
+참조[createACPTool() reference](/reference/acp/create-acp-tool) for all options and configuration.
+
+## Model 선택 {/* #model-selection */}
+
+ACP Agent는 선택 가능한 Model을 노출할 수 있습니다. 통과하다`model` in the ACP configuration to select a model after session creation, or use `AcpAgent.getAvailableModels()` and `AcpAgent.setModel()` to manage models at runtime.
+
+참조[AcpAgent model management methods](/reference/acp/acp-agent#model-management) for examples.
+
+## 세션 수명주기 {/* #session-lifecycle */}
+
+`AcpAgent`처음 사용할 때 구성된 명령을 시작하고 ACP 세션을 생성합니다. 기본적으로`persistSession` is `true`, so the child process stays alive across calls. Set `persistSession: false` when each prompt should run in an isolated process.
+
+참조[AcpAgent session lifecycle](/reference/acp/acp-agent#session-lifecycle) section for details.
+
+## 권한 처리 {/* #permission-handling */}
+
+ACP Agent는 계속하기 전에 클라이언트에게 권한 옵션을 선택하도록 요청할 수 있습니다. 기본적으로`@mastra/acp` selects the first option returned by the ACP agent. Pass `onPermissionRequest` when you need custom permission behavior.
+
+참조[createACPTool() permission handling](/reference/acp/create-acp-tool#permission-handling) section for a complete example.
+
+## 작업공간 통합 {/* #workspace-integration */}
+
+ACP 파일 작업은 Mastra의 작업 공간 추상화를 거칩니다.`AcpAgent` can use a `workspace` option, and `createACPTool()` uses the current Mastra workspace from the tool execution context when one is available. Without a workspace, `@mastra/acp` falls back to a `Workspace` backed by `LocalFilesystem` at `cwd` or `process.cwd()`.
+
+참조[AcpAgent workspace integration](/reference/acp/acp-agent#workspace-integration) section for custom workspace examples.
+
+## 관련된 {/* #related */}
+
+* [AcpAgent 참조](/reference/acp/acp-agent)
+* [createACPTool() 참조](/reference/acp/create-acp-tool)
+* [Agent 참조](/reference/agents/agent)
+* [하위 Agent](/docs/capabilities/subagents)
+* [Agent 클라이언트 프로토콜 소개](https://agentclientprotocol.com/overview/introduction)
+* [Agent 클라이언트 프로토콜 스키마](https://agentclientprotocol.com/protocol/schema)

@@ -1,0 +1,608 @@
+---
+title: "참조: 컨텍스트 관련성 점수 측정기 | 평가"
+description: "Mastra의 컨텍스트 관련성 점수 측정기에 대한 문서입니다. 가중치 관련성 점수를 사용하여 Agent 응답을 생성하기 위해 제공된 컨텍스트의 관련성과 유용성을 평가합니다."
+packages:
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# 컨텍스트 관련성 점수 측정기
+
+그만큼`createContextRelevanceScorerLLM()`함수는 Agent 응답을 생성하는 데 제공된 컨텍스트가 얼마나 적절하고 유용한지 평가하는 점수 측정기를 생성합니다. 가중치가 부여된 관련성 수준을 사용하고 사용되지 않은 관련성이 높은 컨텍스트 및 누락된 정보에 대해 페널티를 적용합니다.
+
+다음과 같은 사용 사례에 특히 유용합니다.
+
+## 콘텐츠 생성 평가 {/* #content-generation-evaluation */}
+
+다음에서 컨텍스트 품질을 평가하는 데 가장 적합합니다.
+
+* 컨텍스트 사용이 중요한 채팅 시스템
+* 상세한 관련성 평가가 필요한 RAG 파이프라인
+* 누락된 컨텍스트가 품질에 영향을 미치는 시스템
+
+## 컨텍스트 선택 최적화 {/* #context-selection-optimization */}
+
+다음을 최적화할 때 사용:
+
+* 포괄적인 상황 범위
+* 효과적인 컨텍스트 활용
+* 컨텍스트 격차 식별
+
+## 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'model',
+  type: 'MastraModelConfig',
+  description: 'The language model to use for evaluating context relevance',
+  required: true,
+},
+{
+  name: 'options',
+  type: 'ContextRelevanceOptions',
+  description: 'Configuration options for the scorer',
+  required: true,
+  children: [
+    {
+      name: 'context',
+      type: 'string[]',
+      description: 'Array of context pieces to evaluate for relevance',
+      required: false,
+    },
+    {
+      name: 'contextExtractor',
+      type: '(input, output) => string[]',
+      description: 'Function to dynamically extract context from the run input and output',
+      required: false,
+    },
+    {
+      name: 'scale',
+      type: 'number',
+      description: 'Scale factor to multiply the final score (default: 1)',
+      required: false,
+    },
+    {
+      name: 'penalties',
+      type: 'object',
+      description: 'Configurable penalty settings for scoring',
+      required: false,
+      children: [
+        {
+          name: 'unusedHighRelevanceContext',
+          type: 'number',
+          description: 'Penalty per unused high-relevance context (default: 0.1)',
+          required: false,
+        },
+        {
+          name: 'missingContextPerItem',
+          type: 'number',
+          description: 'Penalty per missing context item (default: 0.15)',
+          required: false,
+        },
+        {
+          name: 'maxMissingContextPenalty',
+          type: 'number',
+          description: 'Maximum total missing context penalty (default: 0.5)',
+          required: false,
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+참고: 둘 중 하나`context` or `contextExtractor` must be provided. If both are provided, `contextExtractor` takes precedence.
+
+## `.run()`보고 {/* #run-returns */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'score',
+  type: 'number',
+  description: 'Weighted relevance score between 0 and scale (default 0-1)',
+},
+{
+  name: 'reason',
+  type: 'string',
+  description: 'Human-readable explanation of the context relevance evaluation',
+},
+]}
+/>
+
+## 채점 세부정보 {/* #scoring-details */}
+
+### 가중 관련성 점수 {/* #weighted-relevance-scoring */}
+
+컨텍스트 관련성은 다음을 고려하는 고급 채점 알고리즘을 사용합니다.
+
+1. **관련성 수준**: 각 컨텍스트 조각은 가중치가 부여된 값으로 분류됩니다.
+   * `high`= 1.0(쿼리를 직접 해결)
+   * `medium`= 0.7 (지원 정보)
+   * `low`= 0.3(접선적으로 관련됨)
+   * `none`= 0.0 (완전히 관련 없음)
+
+2. **사용량 감지**: 해당 컨텍스트가 실제로 응답에 사용되었는지 추적합니다.
+
+3. **적용되는 페널티**(다음을 통해 구성 가능`penalties` options):
+   * **사용되지 않은 높은 관련성**: `unusedHighRelevanceContext` penalty per unused high-relevance context (default: 0.1)
+   * **누락된 컨텍스트**: 최대`maxMissingContextPenalty` for identified missing information (default: 0.5)
+
+### 채점 공식 {/* #scoring-formula */}
+
+```
+Base Score = Σ(relevance_weights) / (num_contexts × 1.0)
+Usage Penalty = count(unused_high_relevance) × unusedHighRelevanceContext
+Missing Penalty = min(count(missing_context) × missingContextPerItem, maxMissingContextPenalty)
+
+Final Score = max(0, Base Score - Usage Penalty - Missing Penalty) × scale
+```
+
+**기본값**:
+
+* `unusedHighRelevanceContext`= 0.1(사용되지 않은 관련성이 높은 컨텍스트당 10% 페널티)
+* `missingContextPerItem`= 0.15(누락된 컨텍스트 항목당 15% 페널티)
+* `maxMissingContextPenalty`= 0.5(컨텍스트 누락으로 인해 최대 50% 페널티)
+* `scale` = 1
+
+### 점수 해석 {/* #score-interpretation */}
+
+* **0.9-1.0**: 우수 - 모든 문맥과 관련성이 높고 사용됨
+* **0.7-0.8**: 양호 - 대부분 사소한 차이와 관련됨
+* **0.4-0.6**: 혼합 - 실질적으로 관련이 없거나 사용되지 않는 문맥
+* **0.2-0.3**: 나쁨 - 대부분 관련 없는 문맥
+* **0.0-0.1**: 매우 나쁨 - 관련 컨텍스트를 찾을 수 없음
+
+### 이유분석 {/* #reason-analysis */}
+
+이유 필드는 다음에 대한 통찰력을 제공합니다.
+
+* 각 컨텍스트 부분의 관련성 수준(높음/중간/낮음/없음)
+* 응답에 실제로 사용된 컨텍스트는 무엇입니까?
+* 사용되지 않은 관련성이 높은 컨텍스트에 적용되는 페널티(다음을 통해 구성 가능)`unusedHighRelevanceContext`)
+* 응답을 개선할 수 있는 컨텍스트 누락(다음을 통해 처벌됨)`missingContextPerItem` up to `maxMissingContextPenalty`)
+
+### 최적화 전략 {/* #optimization-strategies */}
+
+결과를 사용하여 시스템을 개선하십시오.
+
+* **관련 없는 컨텍스트 필터링**: 처리하기 전에 관련성이 낮은 부분이나 관련성이 없는 부분을 제거합니다.
+* **컨텍스트 사용 보장**: 관련성이 높은 컨텍스트가 통합되었는지 확인하세요.
+* **컨텍스트 공백 채우기**: 채점자가 확인한 누락정보 추가
+* **밸런스 컨텍스트 크기**: 최고의 관련성을 위한 최적의 컨텍스트 양을 찾습니다.
+* **페널티 감도 조정**: 조정하다`unusedHighRelevanceContext`, `missingContextPerItem`, and `maxMissingContextPenalty` based on your application's tolerance for unused or missing context
+
+### 상황 정밀도와의 차이점 {/* #difference-from-context-precision */}
+
+| 측면 | 맥락 관련성 | 상황 정밀도 |
+| - | - | - |
+|**Algorithm** | Weighted levels with penalties | Mean Average Precision (MAP) |
+| **Relevance** | Multiple levels (high/medium/low/none) | Binary (yes/no) |
+| **Position** | Not considered | Critical (rewards early placement) |
+| **Usage** | Tracks and penalizes unused context | Not considered |
+| **Missing** | Identifies and penalizes gaps | Not evaluated |
+
+## 득점자 구성 {/* #scorer-configuration */}
+
+### 사용자 정의 페널티 구성 {/* #custom-penalty-configuration */}
+
+사용되지 않거나 누락된 컨텍스트에 대해 페널티가 적용되는 방식을 제어합니다.
+
+```typescript
+import { createContextRelevanceScorerLLM } from '@mastra/evals'
+
+// Stricter penalty configuration
+const strictScorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Einstein won the Nobel Prize for photoelectric effect',
+      'He developed the theory of relativity',
+      'Einstein was born in Germany',
+    ],
+    penalties: {
+      unusedHighRelevanceContext: 0.2, // 20% penalty per unused high-relevance context
+      missingContextPerItem: 0.25, // 25% penalty per missing context item
+      maxMissingContextPenalty: 0.6, // Maximum 60% penalty for missing context
+    },
+    scale: 1,
+  },
+})
+
+// Lenient penalty configuration
+const lenientScorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Einstein won the Nobel Prize for photoelectric effect',
+      'He developed the theory of relativity',
+      'Einstein was born in Germany',
+    ],
+    penalties: {
+      unusedHighRelevanceContext: 0.05, // 5% penalty per unused high-relevance context
+      missingContextPerItem: 0.1, // 10% penalty per missing context item
+      maxMissingContextPenalty: 0.3, // Maximum 30% penalty for missing context
+    },
+    scale: 1,
+  },
+})
+
+const testRun = {
+  input: {
+    inputMessages: [
+      {
+        id: '1',
+        role: 'user',
+        content: 'What did Einstein achieve in physics?',
+      },
+    ],
+  },
+  output: [
+    {
+      id: '2',
+      role: 'assistant',
+      content: 'Einstein won the Nobel Prize for his work on the photoelectric effect.',
+    },
+  ],
+}
+
+const strictResult = await strictScorer.run(testRun)
+const lenientResult = await lenientScorer.run(testRun)
+
+console.log('Strict penalties:', strictResult.score) // Lower score due to unused context
+console.log('Lenient penalties:', lenientResult.score) // Higher score, less penalty
+```
+
+### 동적 컨텍스트 추출 {/* #dynamic-context-extraction */}
+
+```typescript
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract context based on the query
+      const userQuery = input?.inputMessages?.[0]?.content || ''
+      if (userQuery.includes('Einstein')) {
+        return [
+          'Einstein won the Nobel Prize for the photoelectric effect',
+          'He developed the theory of relativity',
+        ]
+      }
+      return ['General physics information']
+    },
+    penalties: {
+      unusedHighRelevanceContext: 0.15,
+    },
+  },
+})
+```
+
+### 사용자 정의 배율 {/* #custom-scale-factor */}
+
+```typescript
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: ['Relevant information...', 'Supporting details...'],
+    scale: 100, // Scale scores from 0-100 instead of 0-1
+  },
+})
+
+// Result will be scaled: score: 85 instead of 0.85
+```
+
+### 여러 컨텍스트 소스 결합 {/* #combining-multiple-context-sources */}
+
+```typescript
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      const query = input?.inputMessages?.[0]?.content || ''
+
+      // Combine from multiple sources
+      const kbContext = knowledgeBase.search(query)
+      const docContext = documentStore.retrieve(query)
+      const cacheContext = contextCache.get(query)
+
+      return [...kbContext, ...docContext, ...cacheContext]
+    },
+    scale: 1,
+  },
+})
+```
+
+## 예 {/* #examples */}
+
+### 관련성이 높은 예 {/* #high-relevance-example */}
+
+이 예는 모든 컨텍스트가 응답을 직접 지원하는 뛰어난 컨텍스트 관련성을 보여줍니다.
+
+```typescript
+import { createContextRelevanceScorerLLM } from '@mastra/evals'
+
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Einstein won the Nobel Prize for his discovery of the photoelectric effect in 1921.',
+      'He published his theory of special relativity in 1905.',
+      'His general relativity theory, published in 1915, revolutionized our understanding of gravity.',
+    ],
+    scale: 1,
+  },
+})
+
+const result = await scorer.run({
+  input: {
+    inputMessages: [
+      {
+        id: '1',
+        role: 'user',
+        content: "What were Einstein's major scientific achievements?",
+      },
+    ],
+  },
+  output: [
+    {
+      id: '2',
+      role: 'assistant',
+      content:
+        "Einstein's major achievements include the Nobel Prize for the photoelectric effect, special relativity in 1905, and general relativity in 1915.",
+    },
+  ],
+})
+
+console.log(result)
+// Output:
+// {
+//   score: 1.0,
+//   reason: "The score is 1.0 because all context pieces are highly relevant to Einstein's achievements and were effectively used in generating the comprehensive response."
+// }
+```
+
+### 혼합 관련성 예 {/* #mixed-relevance-example */}
+
+이 예는 일부 컨텍스트가 관련이 없거나 사용되지 않은 상태에서 중간 정도의 관련성을 보여줍니다.
+
+```typescript
+import { createContextRelevanceScorerLLM } from '@mastra/evals'
+
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Solar eclipses occur when the Moon blocks the Sun.',
+      'The Moon moves between the Earth and Sun during eclipses.',
+      'The Moon is visible at night.',
+      'Stars twinkle due to atmospheric interference.',
+      'Total eclipses can last up to 7.5 minutes.',
+    ],
+    scale: 1,
+  },
+})
+
+const result = await scorer.run({
+  input: {
+    inputMessages: [
+      {
+        id: '1',
+        role: 'user',
+        content: 'What causes solar eclipses?',
+      },
+    ],
+  },
+  output: [
+    {
+      id: '2',
+      role: 'assistant',
+      content:
+        'Solar eclipses happen when the Moon moves between Earth and the Sun, blocking sunlight.',
+    },
+  ],
+})
+
+console.log(result)
+// Output with default penalties:
+// {
+//   score: 0.64,
+//   reason: "The score is 0.64 because contexts 1 and 2 are highly relevant and used, context 5 is relevant but unused (10% penalty), while contexts 3 and 4 are irrelevant."
+// }
+
+// With custom penalty configuration
+const customScorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'Solar eclipses occur when the Moon blocks the Sun.',
+      'The Moon moves between the Earth and Sun during eclipses.',
+      'The Moon is visible at night.',
+      'Stars twinkle due to atmospheric interference.',
+      'Total eclipses can last up to 7.5 minutes.',
+    ],
+    penalties: {
+      unusedHighRelevanceContext: 0.05, // Lower penalty for unused context
+      missingContextPerItem: 0.1,
+      maxMissingContextPenalty: 0.3,
+    },
+  },
+})
+
+const customResult = await customScorer.run({
+  input: {
+    inputMessages: [{ id: '1', role: 'user', content: 'What causes solar eclipses?' }],
+  },
+  output: [
+    {
+      id: '2',
+      role: 'assistant',
+      content:
+        'Solar eclipses happen when the Moon moves between Earth and the Sun, blocking sunlight.',
+    },
+  ],
+})
+
+console.log(customResult)
+// Output with lenient penalties:
+// {
+//   score: 0.69, // Higher score due to reduced penalty for unused context
+//   reason: "The score is 0.69 because contexts 1 and 2 are highly relevant and used, context 5 is relevant but unused (5% penalty), while contexts 3 and 4 are irrelevant."
+// }
+```
+
+### 관련성이 낮은 예 {/* #low-relevance-example */}
+
+이 예는 대부분 관련이 없는 정보로 인해 컨텍스트 관련성이 낮음을 보여줍니다.
+
+```typescript
+import { createContextRelevanceScorerLLM } from '@mastra/evals'
+
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    context: [
+      'The Great Barrier Reef is located in Australia.',
+      'Coral reefs need warm water to survive.',
+      'Many fish species live in coral reefs.',
+      'Australia has six states and two territories.',
+      'The capital of Australia is Canberra.',
+    ],
+    scale: 1,
+  },
+})
+
+const result = await scorer.run({
+  input: {
+    inputMessages: [
+      {
+        id: '1',
+        role: 'user',
+        content: 'What is the capital of Australia?',
+      },
+    ],
+  },
+  output: [
+    {
+      id: '2',
+      role: 'assistant',
+      content: 'The capital of Australia is Canberra.',
+    },
+  ],
+})
+
+console.log(result)
+// Output:
+// {
+//   score: 0.26,
+//   reason: "The score is 0.26 because only context 5 is relevant to the query about Australia's capital, while the other contexts about reefs are completely irrelevant."
+// }
+```
+
+### 동적 컨텍스트 추출 {/* #dynamic-context-extraction-1 */}
+
+실행 입력을 기반으로 런타임 시 컨텍스트를 추출합니다.
+
+```typescript
+import { createContextRelevanceScorerLLM } from '@mastra/evals'
+
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract query from input
+      const query = input?.inputMessages?.[0]?.content || ''
+
+      // Dynamically retrieve context based on query
+      if (query.toLowerCase().includes('einstein')) {
+        return [
+          'Einstein developed E=mc²',
+          'He won the Nobel Prize in 1921',
+          'His theories revolutionized physics',
+        ]
+      }
+
+      if (query.toLowerCase().includes('climate')) {
+        return [
+          'Global temperatures are rising',
+          'CO2 levels affect climate',
+          'Renewable energy reduces emissions',
+        ]
+      }
+
+      return ['General knowledge base entry']
+    },
+    penalties: {
+      unusedHighRelevanceContext: 0.15, // 15% penalty for unused relevant context
+      missingContextPerItem: 0.2, // 20% penalty per missing context item
+      maxMissingContextPenalty: 0.4, // Cap at 40% total missing context penalty
+    },
+    scale: 1,
+  },
+})
+```
+
+### RAG 시스템 통합 {/* #rag-system-integration */}
+
+RAG 파이프라인과 통합하여 검색된 컨텍스트를 평가합니다.
+
+```typescript
+import { createContextRelevanceScorerLLM } from '@mastra/evals'
+
+const scorer = createContextRelevanceScorerLLM({
+  model: '__GATEWAY_OPENAI_MODEL__',
+  options: {
+    contextExtractor: (input, output) => {
+      // Extract from RAG retrieval results
+      const ragResults = inputData.metadata?.ragResults || []
+
+      // Return the text content of retrieved documents
+      return ragResults.filter(doc => doc.relevanceScore > 0.5).map(doc => doc.content)
+    },
+    penalties: {
+      unusedHighRelevanceContext: 0.12, // Moderate penalty for unused RAG context
+      missingContextPerItem: 0.18, // Higher penalty for missing information in RAG
+      maxMissingContextPenalty: 0.45, // Slightly higher cap for RAG systems
+    },
+    scale: 1,
+  },
+})
+
+// Evaluate RAG system performance
+const evaluateRAG = async testCases => {
+  const results = []
+
+  for (const testCase of testCases) {
+    const score = await scorer.run(testCase)
+    results.push({
+      query: testCase.inputData.inputMessages[0].content,
+      relevanceScore: score.score,
+      feedback: score.reason,
+      unusedContext: score.reason.includes('unused'),
+      missingContext: score.reason.includes('missing'),
+    })
+  }
+
+  return results
+}
+```
+
+## 컨텍스트 정밀도와의 비교 {/* #comparison-with-context-precision */}
+
+귀하의 필요에 맞는 채점자를 선택하십시오:
+
+| 사용 사례 | 맥락 관련성 | 상황 정밀도 |
+| - | - | - |
+|**RAG evaluation** | When usage matters | When ranking matters |
+| **Context quality** | Nuanced levels | Binary relevance |
+| **Missing detection** | ✓ Identifies gaps | ✗ Not evaluated |
+| **Usage tracking** | ✓ Tracks utilization | ✗ Not considered |
+| **Position sensitivity** | ✗ Position agnostic | ✓ Rewards early placement |
+
+## 관련된 {/* #related */}
+
+* [상황별 정밀 득점자](/reference/evals/context-precision): MAP을 사용하여 컨텍스트 순위를 평가합니다.
+* [성실성 득점자](/reference/evals/faithfulness): 문맥에 따른 답변 근거성을 측정합니다.
+* [맞춤 채점자](/docs/evals/custom-scorers): 나만의 평가 지표 만들기

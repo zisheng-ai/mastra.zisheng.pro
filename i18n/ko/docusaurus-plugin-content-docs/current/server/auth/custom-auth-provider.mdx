@@ -1,0 +1,519 @@
+---
+title: "사용자 정의 인증 제공자 | 인증"
+description: "특수 ID 시스템을 위한 사용자 정의 인증 공급자 만들기"
+packages:
+  - "@mastra/core"
+  - "@mastra/auth"
+---
+
+# 맞춤 인증 Provider
+
+사용자 정의 인증 공급자를 사용하면 기본 제공 공급자가 처리하지 않는 ID 시스템에 대한 인증을 구현할 수 있습니다. 확장`MastraAuthProvider`모든 인증 시스템과 통합할 수 있는 기본 클래스입니다.
+
+## 개요 {/* #overview */}
+
+인증 공급자는 들어오는 요청에 대한 인증 및 권한 부여를 처리합니다.
+
+* 토큰 검증 및 사용자 추출
+* 사용자 인증 로직
+* 경로 기반 액세스 제어(공개/보호 경로)
+
+다음을 지원하는 사용자 정의 인증 공급자를 만듭니다.
+
+* 자체 호스팅 ID 시스템
+* 사용자 정의 토큰 형식 또는 확인 논리
+* 특수 권한 부여 규칙
+* 엔터프라이즈 SSO 통합
+
+## 사용자 정의 인증 공급자 만들기 {/* #creating-a-custom-auth-provider */}
+
+확장`MastraAuthProvider` class and implement the required methods:
+
+```typescript
+import { MastraAuthProvider } from '@mastra/core/server'
+import type { MastraAuthProviderOptions } from '@mastra/core/server'
+import type { HonoRequest } from 'hono'
+
+// Define your user type
+type MyUser = {
+  id: string
+  email: string
+  roles: string[]
+}
+
+// Define options for your provider
+interface MyAuthOptions extends MastraAuthProviderOptions<MyUser> {
+  apiUrl?: string
+  apiKey?: string
+}
+
+export class MyAuthProvider extends MastraAuthProvider<MyUser> {
+  protected apiUrl: string
+  protected apiKey: string
+
+  constructor(options?: MyAuthOptions) {
+    // Call super with a name for logging/debugging
+    super({ name: options?.name ?? 'my-auth' })
+
+    const apiUrl = options?.apiUrl ?? process.env.MY_AUTH_API_URL
+    const apiKey = options?.apiKey ?? process.env.MY_AUTH_API_KEY
+
+    if (!apiUrl || !apiKey) {
+      throw new Error(
+        'Auth API URL and API key are required. Provide them in options or set MY_AUTH_API_URL and MY_AUTH_API_KEY environment variables.',
+      )
+    }
+
+    this.apiUrl = apiUrl
+    this.apiKey = apiKey
+
+    // Register any custom options (authorizeUser override, public/protected paths)
+    this.registerOptions(options)
+  }
+
+  /**
+   * Verify the token and return the user
+   * Return null if authentication fails
+   */
+  async authenticateToken(token: string, request: HonoRequest): Promise<MyUser | null> {
+    try {
+      const response = await fetch(`${this.apiUrl}/verify`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': this.apiKey,
+        },
+        body: JSON.stringify({ token }),
+      })
+
+      if (!response.ok) {
+        return null
+      }
+
+      const user = await response.json()
+      return user
+    } catch (error) {
+      console.error('Token verification failed:', error)
+      return null
+    }
+  }
+
+  /**
+   * Check if the authenticated user is authorized
+   * Return true to allow access, false to deny
+   */
+  async authorizeUser(user: MyUser, request: HonoRequest): Promise<boolean> {
+    // Basic authorization: user must exist and have an ID
+    return !!user?.id
+  }
+}
+```
+
+## 필수 방법 {/* #required-methods */}
+
+### `authenticateToken()` {/* #authenticatetoken */}
+
+들어오는 토큰을 확인하고 유효한 경우 사용자 개체를 반환합니다. 또는`null` if authentication fails.
+
+```typescript prettier:false
+async authenticateToken(token: string, request: HonoRequest): Promise<TUser | null>
+```
+
+| 매개변수 | 유형 | 설명 |
+| - | - | - |
+|`token` | `string` | The bearer token extracted from the `Authorization` header |
+| `request` | `HonoRequest` | The incoming request object (access headers, cookies, etc.) |
+
+**보고**: 인증이 성공한 경우 사용자 개체 또는`null` if it fails.
+
+토큰은 다음에서 자동으로 추출됩니다.`Authorization: Bearer <token>` header. If you need to access other headers or cookies, use the `request` parameter.
+
+### `authorizeUser()` {/* #authorizeuser */}
+
+인증된 사용자가 리소스에 액세스할 수 있는지 확인합니다.
+
+```typescript prettier:false
+async authorizeUser(user: TUser, request: HonoRequest): Promise<boolean> | boolean
+```
+
+| 매개변수 | 유형 | 설명 |
+| - | - | - |
+|`user` | `TUser` | The user object returned by `authenticateToken` |
+| `request` | `HonoRequest` | The incoming request object |
+
+**보고**: `true` to allow access, `false` to deny (returns 403 Forbidden).
+
+## 구성 옵션 {/* #configuration-options */}
+
+그만큼`MastraAuthProviderOptions` interface supports these options:
+
+| 옵션 | 유형 | 설명 |
+| - | - | - |
+|`name` | `string` | Provider name for logging/debugging |
+| `authorizeUser` | `(user, request) => Promise<boolean> \| boolean` | Custom authorization function |
+| `protected` | `(RegExp \| string \| [string, Methods \| Methods[]])[]` | Paths that require authentication |
+| `public` | `(RegExp \| string \| [string, Methods \| Methods[]])[]` | Paths that bypass authentication |
+
+### 경로 패턴 {/* #path-patterns */}
+
+패턴 일치를 사용하여 인증이 필요한 경로를 구성합니다.
+
+```typescript
+const auth = new MyAuthProvider({
+  // Paths that require authentication
+  protected: [
+    '/api/*', // Wildcard: all /api routes
+    '/admin/*', // Wildcard: all /admin routes
+    /^\/secure\/.*/, // Regex pattern
+  ],
+
+  // Paths that bypass authentication
+  public: [
+    '/health', // Exact match
+    '/api/status', // Exact match
+    ['/api/webhook', 'POST'], // Only POST requests to /api/webhook
+  ],
+})
+```
+
+## 인증 공급자 사용 {/* #using-your-auth-provider */}
+
+Mastra 인스턴스에 사용자 정의 인증 공급자를 등록합니다.
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { MyAuthProvider } from './my-auth-provider'
+
+export const mastra = new Mastra({
+  server: {
+    auth: new MyAuthProvider({
+      apiUrl: process.env.MY_AUTH_API_URL,
+      apiKey: process.env.MY_AUTH_API_KEY,
+    }),
+  },
+})
+```
+
+## 도우미 유틸리티 {/* #helper-utilities */}
+
+그만큼`@mastra/auth` package provides utilities for common token verification patterns:
+
+### JWT 검증 {/* #jwt-verification */}
+
+```typescript
+import { verifyHmac, verifyJwks, decodeToken, getTokenIssuer } from '@mastra/auth'
+
+// Verify HMAC-signed JWT
+const payload = await verifyHmac(token, 'your-secret-key')
+
+// Verify with JWKS (for OAuth providers)
+const payload = await verifyJwks(token, 'https://provider.com/.well-known/jwks.json')
+
+// Decode without verification (for inspection)
+const decoded = await decodeToken(token)
+
+// Get the issuer from a decoded token
+const issuer = getTokenIssuer(decoded)
+```
+
+### 예: JWKS 기반 제공자 {/* #example-jwks-based-provider */}
+
+```typescript
+import { MastraAuthProvider } from '@mastra/core/server'
+import type { MastraAuthProviderOptions } from '@mastra/core/server'
+import { verifyJwks } from '@mastra/auth'
+import type { JwtPayload } from '@mastra/auth'
+
+type MyUser = JwtPayload
+
+interface MyJwksAuthOptions extends MastraAuthProviderOptions<MyUser> {
+  jwksUri?: string
+  issuer?: string
+}
+
+export class MyJwksAuth extends MastraAuthProvider<MyUser> {
+  protected jwksUri: string
+  protected issuer: string
+
+  constructor(options?: MyJwksAuthOptions) {
+    super({ name: options?.name ?? 'my-jwks-auth' })
+
+    const jwksUri = options?.jwksUri ?? process.env.MY_JWKS_URI
+    const issuer = options?.issuer ?? process.env.MY_AUTH_ISSUER
+
+    if (!jwksUri) {
+      throw new Error('JWKS URI is required')
+    }
+
+    this.jwksUri = jwksUri
+    this.issuer = issuer ?? ''
+
+    this.registerOptions(options)
+  }
+
+  async authenticateToken(token: string): Promise<MyUser | null> {
+    try {
+      const payload = await verifyJwks(token, this.jwksUri)
+
+      // Optionally validate issuer
+      if (this.issuer && payload.iss !== this.issuer) {
+        return null
+      }
+
+      return payload
+    } catch {
+      return null
+    }
+  }
+
+  async authorizeUser(user: MyUser): Promise<boolean> {
+    // Check token hasn't expired
+    if (user.exp && user.exp * 1000 < Date.now()) {
+      return false
+    }
+    return !!user.sub
+  }
+}
+```
+
+## 맞춤 인증 논리 {/* #custom-authorization-logic */}
+
+사용자 정의를 제공하여 기본 인증을 재정의합니다.`authorizeUser` function:
+
+```typescript
+const auth = new MyAuthProvider({
+  apiUrl: process.env.MY_AUTH_API_URL,
+  apiKey: process.env.MY_AUTH_API_KEY,
+
+  // Custom authorization: require admin role for all requests
+  async authorizeUser(user, request) {
+    return user.roles.includes('admin')
+  },
+})
+```
+
+### 역할 기반 인증 {/* #role-based-authorization */}
+
+```typescript
+const auth = new MyAuthProvider({
+  async authorizeUser(user, request) {
+    const path = request.url
+    const method = request.method
+
+    // Admin routes require admin role
+    if (path.startsWith('/admin/')) {
+      return user.roles.includes('admin')
+    }
+
+    // Write operations require write role
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+      return user.roles.includes('write') || user.roles.includes('admin')
+    }
+
+    // Read operations allowed for all authenticated users
+    return true
+  },
+})
+```
+
+## 사용자 정의 인증 공급자 테스트 {/* #testing-custom-auth-providers */}
+
+Vitest를 사용한 테스트 구조 예시:
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { MyAuthProvider } from './my-auth-provider'
+
+// Mock fetch for API calls
+global.fetch = vi.fn()
+
+describe('MyAuthProvider', () => {
+  const mockOptions = {
+    apiUrl: 'https://auth.example.com',
+    apiKey: 'test-api-key',
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  describe('initialization', () => {
+    it('should initialize with provided options', () => {
+      const auth = new MyAuthProvider(mockOptions)
+      expect(auth).toBeInstanceOf(MyAuthProvider)
+    })
+
+    it('should throw error when required options are missing', () => {
+      expect(() => new MyAuthProvider({})).toThrow('Auth API URL and API key are required')
+    })
+  })
+
+  describe('authenticateToken', () => {
+    it('should return user when token is valid', async () => {
+      const mockUser = { id: 'user123', email: 'test@example.com', roles: ['read'] }
+      ;(fetch as any).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockUser),
+      })
+
+      const auth = new MyAuthProvider(mockOptions)
+      const result = await auth.authenticateToken('valid-token', {} as any)
+
+      expect(fetch).toHaveBeenCalledWith(
+        'https://auth.example.com/verify',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ token: 'valid-token' }),
+        }),
+      )
+      expect(result).toEqual(mockUser)
+    })
+
+    it('should return null when token is invalid', async () => {
+      ;(fetch as any).mockResolvedValue({ ok: false })
+
+      const auth = new MyAuthProvider(mockOptions)
+      const result = await auth.authenticateToken('invalid-token', {} as any)
+
+      expect(result).toBeNull()
+    })
+  })
+
+  describe('authorizeUser', () => {
+    it('should return true when user has valid id', async () => {
+      const auth = new MyAuthProvider(mockOptions)
+      const result = await auth.authorizeUser(
+        { id: 'user123', email: 'test@example.com', roles: [] },
+        {} as any,
+      )
+
+      expect(result).toBe(true)
+    })
+
+    it('should return false when user has no id', async () => {
+      const auth = new MyAuthProvider(mockOptions)
+      const result = await auth.authorizeUser(
+        { id: '', email: 'test@example.com', roles: [] },
+        {} as any,
+      )
+
+      expect(result).toBe(false)
+    })
+  })
+
+  describe('custom authorization', () => {
+    it('should use custom authorizeUser when provided', async () => {
+      const auth = new MyAuthProvider({
+        ...mockOptions,
+        authorizeUser: user => user.roles.includes('admin'),
+      })
+
+      const adminUser = { id: 'user123', email: 'admin@example.com', roles: ['admin'] }
+      const regularUser = { id: 'user456', email: 'user@example.com', roles: ['read'] }
+
+      expect(await auth.authorizeUser(adminUser, {} as any)).toBe(true)
+      expect(await auth.authorizeUser(regularUser, {} as any)).toBe(false)
+    })
+  })
+
+  describe('route configuration', () => {
+    it('should store public routes configuration', () => {
+      const publicRoutes = ['/health', '/api/status']
+      const auth = new MyAuthProvider({
+        ...mockOptions,
+        public: publicRoutes,
+      })
+
+      expect(auth.public).toEqual(publicRoutes)
+    })
+
+    it('should store protected routes configuration', () => {
+      const protectedRoutes = ['/api/*', '/admin/*']
+      const auth = new MyAuthProvider({
+        ...mockOptions,
+        protected: protectedRoutes,
+      })
+
+      expect(auth.protected).toEqual(protectedRoutes)
+    })
+  })
+})
+```
+
+## 오류 처리 {/* #error-handling */}
+
+일반적인 오류 시나리오에 대한 설명 오류를 제공합니다.
+
+```typescript
+export class MyAuthProvider extends MastraAuthProvider<MyUser> {
+  constructor(options?: MyAuthOptions) {
+    super({ name: options?.name ?? 'my-auth' })
+
+    const apiUrl = options?.apiUrl ?? process.env.MY_AUTH_API_URL
+    const apiKey = options?.apiKey ?? process.env.MY_AUTH_API_KEY
+
+    if (!apiUrl) {
+      throw new Error(
+        'Missing MY_AUTH_API_URL. Set the environment variable or pass apiUrl in options.',
+      )
+    }
+
+    if (!apiKey) {
+      throw new Error(
+        'Missing MY_AUTH_API_KEY. Set the environment variable or pass apiKey in options.',
+      )
+    }
+
+    this.apiUrl = apiUrl
+    this.apiKey = apiKey
+    this.registerOptions(options)
+  }
+
+  async authenticateToken(token: string): Promise<MyUser | null> {
+    if (!token || typeof token !== 'string') {
+      return null // Immediate safe fail
+    }
+
+    try {
+      const response = await fetch(`${this.apiUrl}/verify`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': this.apiKey,
+        },
+        body: JSON.stringify({ token }),
+      })
+
+      if (!response.ok) {
+        return null
+      }
+
+      return await response.json()
+    } catch (error) {
+      // Log error for debugging, but don't expose details to client
+      console.error('Auth verification error:', error)
+      return null
+    }
+  }
+}
+```
+
+## 내장 공급자 {/* #built-in-providers */}
+
+Mastra에는 다음 인증 공급자가 참조 구현으로 포함되어 있습니다.
+
+* **마스트라JwtAuth**: HMAC 비밀을 사용한 간단한 JWT 확인(`@mastra/auth`)
+* **MastraAuthClerk**: 사무원 인증 (`@mastra/auth-clerk`)
+* **MastraAuthAuth0**: 인증0 인증(`@mastra/auth-auth0`)
+* **MastraAuthSupabase**: Superbase 인증(`@mastra/auth-supabase`)
+* **MastraAuthFirebase**: Firebase 인증(`@mastra/auth-firebase`)
+* **MastraAuthWorkOS**: WorkOS 인증(`@mastra/auth-workos`)
+* **MastraAuthBetterAuth**: 더 나은 인증 통합(`@mastra/auth-better-auth`)
+* **단순 인증**: 개발을 위한 토큰-사용자 매핑(`@mastra/core/server`)
+
+참조[source code](https://github.com/mastra-ai/mastra/tree/main/auth) for implementation details.
+
+## 관련된 {/* #related */}
+
+* [인증 개요](/docs/server/auth): 인증 개념 및 구성
+* [사용자 정의 API 경로](/docs/server/custom-api-routes): 사용자 정의 엔드포인트에서 인증 제어

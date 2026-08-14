@@ -1,0 +1,367 @@
+---
+title: "참조: ToolSearchProcessor | 프로세서"
+description: "대규모 Tool 라이브러리가 있는 Agent에 대한 런타임 정의 Tool 검색 및 로딩을 가능하게 하는 Mastra의 ToolSearchProcessor에 대한 문서입니다."
+packages:
+  - "@mastra/core"
+---
+
+# Tool검색프로세서
+
+그만큼`ToolSearchProcessor`은**입력 프로세서**런타임 정의 Tool 검색 및 로드를 가능하게 합니다. Agent에게 모든 Tool를 미리 제공하는 대신 Agent에게 두 가지 메타 Tool(`search_tools`그리고`load_tool`) 필요에 따라 Tool를 찾고 로드할 수 있습니다. 이렇게 하면 대규모 Tool 라이브러리로 작업할 때 컨텍스트 토큰 사용량이 줄어듭니다.
+
+## 사용예 {/* #usage-example */}
+
+```typescript
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: {
+    createIssue: githubTools.createIssue,
+    sendEmail: emailTools.send,
+    getWeather: weatherTools.forecast,
+    // ... many more tools
+  },
+  search: {
+    topK: 5,
+    minScore: 0.1,
+  },
+})
+```
+
+## 생성자 매개변수 {/* #constructor-parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'options',
+  type: 'ToolSearchProcessorOptions',
+  description: 'Configuration options for the tool search processor',
+  isOptional: false,
+  properties: [
+    {
+      type: 'ToolSearchProcessorOptions',
+      parameters: [
+        {
+          name: 'tools',
+          type: 'Record<string, Tool>',
+          description:
+            'All tools that can be searched and loaded dynamically. These tools are not immediately available to the agent — they must be discovered via search and loaded on demand.',
+          isOptional: false,
+        },
+        {
+          name: 'includeResolvedTools',
+          type: 'boolean',
+          description:
+            "Also make the tools the agent resolved for this request (MCP tools requiring the caller's credentials, or anything returned by a dynamic tools function) searchable, and withhold them from the prompt until the agent loads them. The meta-tools are never withheld. Request-resolved tools are indexed per request, so each request searches and loads its own tool instances.",
+          isOptional: true,
+          default: 'false',
+        },
+        {
+          name: 'search',
+          type: '{ topK?: number; minScore?: number; autoLoad?: boolean }',
+          description: 'Configuration for the search behavior.',
+          isOptional: true,
+        },
+        {
+          name: 'search.topK',
+          type: 'number',
+          description: 'Maximum number of tools to return in search results.',
+          isOptional: true,
+          default: '5',
+        },
+        {
+          name: 'search.minScore',
+          type: 'number',
+          description: 'Minimum relevance score (0-1) for including a tool in search results.',
+          isOptional: true,
+          default: '0',
+        },
+        {
+          name: 'search.autoLoad',
+          type: 'boolean',
+          description:
+            'When true, tools returned by search_tools are activated immediately as part of the search. The load_tool meta-tool is not exposed, collapsing the two-step search then load flow into a single search step. Discovered tools become available on the next turn. Keep topK conservative since every match is activated.',
+          isOptional: true,
+          default: 'false',
+        },
+        {
+          name: 'storage',
+          type: "'in-memory' | 'context'",
+          description:
+            "Where loaded-tool state lives. 'in-memory' (default) tracks loaded tools in an in-memory map per thread with TTL cleanup (see ttl); state is lost on restart and anonymous requests share a 'default' entry. 'context' derives loaded state from the conversation messages — a tool is loaded while a search_tools/load_tool result naming it remains in the messages; it is restart-safe, requires no memory, and de-loads automatically once that result is no longer present in the messages. The 'context' store is opt-in.",
+          isOptional: true,
+          default: "'in-memory'",
+        },
+        {
+          name: 'ttl',
+          type: 'number',
+          description:
+            "Time-to-live for in-memory thread state, in milliseconds. Only applies to the default storage: 'in-memory' store; after this duration of inactivity thread state is cleaned up. Set to 0 to disable cleanup. Ignored by the 'context' store.",
+          isOptional: true,
+          default: '3600000',
+        },
+        {
+          name: 'filter',
+          type: '(args: ToolSearchFilterArgs) => boolean | Promise<boolean>',
+          description:
+            'Optional request-aware hook for hiding tools from search results, blocking tool loading, or hiding already-loaded tools for the current request.',
+          isOptional: true,
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+## 보고 {/* #returns */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'id',
+  type: 'string',
+  description: "Processor identifier set to 'tool-search'",
+  isOptional: false,
+},
+{
+  name: 'name',
+  type: 'string',
+  description: "Processor display name set to 'Tool Search Processor'",
+  isOptional: false,
+},
+{
+  name: 'processInputStep',
+  type: '(args: ProcessInputStepArgs) => Promise<ProcessInputStepResult>',
+  description:
+    "Processes each step to inject search/load meta-tools and any previously loaded tools into the agent's tool set.",
+  isOptional: false,
+},
+]}
+/>
+
+## 행동 양식 {/* #methods */}
+
+### 국정감사(유산`'in-memory'` store) {/* #state-inspection-legacy-in-memory-store */}
+
+이러한 방법은 기본적으로 작동합니다.`'in-memory'` store only. They're no-ops for the `'context'` store, whose state lives in the conversation messages rather than an in-process map.
+
+#### `clearState(threadId)` {/* #clearstatethreadid */}
+
+단일 스레드에 대한 로드된 Tool 상태를 지웁니다.
+
+```typescript
+processor.clearState('thread-123')
+```
+
+#### `clearAllState()` {/* #clearallstate */}
+
+모든 스레드에 대해 로드된 Tool 상태를 지웁니다.
+
+```typescript
+processor.clearAllState()
+```
+
+#### `getStateStats()` {/* #getstatestats */}
+
+Memory 내 증가를 디버깅하기 위해 추적된 스레드 수와 가장 오래된 액세스 시간을 반환합니다.
+
+```typescript
+const { threadCount, oldestAccessTime } = processor.getStateStats()
+```
+
+보고:`{ threadCount: number; oldestAccessTime: number | null }`
+
+#### `cleanupNow()` {/* #cleanupnow */}
+
+예약된 스윕을 기다리는 대신 즉시 TTL 정리를 실행합니다.
+
+```typescript
+const cleaned = processor.cleanupNow()
+```
+
+보고:`number`: the count of threads cleaned up.
+
+## 요청 인식 필터링 {/* #request-aware-filtering */}
+
+사용`filter` to apply request-specific policy to runtime-defined tools. The hook receives the resolved tool ID as `toolName`, the tool, request context, and phase. `toolName` is the ID returned by `search_tools`, which may differ from the key used in the `tools` object.
+
+```typescript
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: allTools,
+  filter: ({ toolName, requestContext, phase }) => {
+    const plan = requestContext?.get('plan')
+
+    if (phase === 'search') {
+      return true
+    }
+
+    return plan === 'pro' || !toolName.startsWith('premium_')
+  },
+})
+```
+
+그만큼`phase` value describes where the filter is being applied:
+
+* `search`: 다음에 의해 반환된 결과를 필터링합니다.`search_tools`.
+* `load`: 블록`load_tool` from loading disallowed tools.
+* `active`: 이미 로드된 Tool가 더 이상 허용되지 않는 경우 현재 요청에서 숨깁니다.
+
+후크가 던지거나 거부하는 경우`ToolSearchProcessor` treats the tool as disallowed for that request. The hook may run for every matching search candidate, so keep async policy checks cheap or cached. The `search_tools` meta-tool is always available. `load_tool` is available unless `search.autoLoad` is enabled. Tools passed directly through the agent or `processInputStep` remain available unless you filter them outside `ToolSearchProcessor`, or enable `includeResolvedTools`.
+
+## 요청 해결 Tool 검색 {/* #searching-request-resolved-tools */}
+
+그만큼`tools` option is fixed at construction, so you can't list tools that only exist per request (MCP tools that need the caller's credentials, or anything returned by a dynamic `tools` function). By default those tools bypass search and occupy prompt space on every turn.
+
+세트`includeResolvedTools: true` to index them for the request and withhold them from the prompt until the agent loads them:
+
+```typescript title="src/mastra/agents/mcp-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: staticTools,
+  includeResolvedTools: true,
+})
+
+const agent = new Agent({
+  id: 'mcp-agent',
+  name: 'mcp-agent',
+  instructions: 'Search for a tool when you need a capability you do not have.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  // Resolved per request, then searchable alongside staticTools
+  tools: async ({ requestContext }) => mcpClient.getTools(requestContext.get('userToken')),
+  inputProcessors: [toolSearch],
+})
+```
+
+각 요청은 자체적으로 색인화되므로 한 호출자가 로드한 Tool는 동일한 Tool 이름의 다른 호출자의 인스턴스로 확인되지 않습니다.
+
+이 옵션은 Memory, 작업 영역, 기술 및 브라우저 Tool를 포함하여 요청에 대해 해결된 모든 Tool에 적용됩니다. 오직`search_tools` and `load_tool` meta-tools stay in the prompt, so any tool the agent relies on implicitly must be found through search before it can be called.
+
+## 확장된 사용 예 {/* #extended-usage-example */}
+
+```typescript title="src/mastra/agents/dynamic-tools-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+// Tools from various integrations
+import { githubTools } from './tools/github'
+import { slackTools } from './tools/slack'
+import { dbTools } from './tools/database'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: {
+    ...githubTools, // createIssue, listPRs, mergePR, ...
+    ...slackTools, // sendMessage, createChannel, ...
+    ...dbTools, // query, insert, update, ...
+  },
+  search: {
+    topK: 5,
+    minScore: 0.1,
+  },
+})
+
+const agent = new Agent({
+  id: 'dynamic-tools-agent',
+  name: 'dynamic-tools-agent',
+  instructions:
+    'You are a helpful assistant with access to many tools. Use search_tools to find relevant tools, then load_tool to make them available.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [toolSearch],
+})
+```
+
+Agent Workflow는 다음과 같습니다.
+
+1. Agent가 사용자 메시지를 받습니다.
+2. Agent 통화`search_tools` with keywords (e.g., "github issue")
+3. Agent이 결과를 검토하고 통화합니다.`load_tool` with the tool name
+4. 로드된 Tool는 다음 차례에 사용할 수 있게 됩니다.
+5. Agent는 로드된 Tool를 정상적으로 사용합니다.
+
+## 단일 단계 검색`autoLoad` {/* #single-step-discovery-with-autoload */}
+
+세트`search.autoLoad` to `true` to skip the separate load step. The tools returned by `search_tools` are activated immediately, and the `load_tool` meta-tool isn't exposed. This removes one model turn per discovery, which lowers token usage and latency, and works the same across providers.
+
+```typescript
+const toolSearch = new ToolSearchProcessor({
+  tools: allTools,
+  search: {
+    topK: 3,
+    autoLoad: true,
+  },
+})
+```
+
+와 함께`autoLoad` the workflow becomes:
+
+1. Agent가 사용자 메시지를 받습니다.
+2. Agent 통화`search_tools` with keywords
+3. 매칭 Tool는 자동으로 활성화되어 다음 턴에 사용할 수 있게 됩니다.
+4. Agent이 Tool를 정상적으로 사용합니다.
+
+모든 경기가 활성화되므로 계속해서`topK` small (for example, `3`) to avoid adding tools the agent didn't need. Activated tools are appended after existing tools, which keeps the cached prompt prefix stable for providers that support prompt caching.
+
+## 로드된 Tool 보관 {/* #loaded-tool-storage */}
+
+그만큼`storage` option controls where the set of loaded tools is tracked. The default is `'in-memory'`. The `'context'` store is opt-in.
+
+### `'in-memory'`(기본) {/* #in-memory-default */}
+
+로드된 Tool는 스레드당 Memory 내 맵에서 추적되며 TTL 기반 정리는`ttl` option (default one hour). This is the original behavior:
+
+* Memory 구성이 필요하지 않습니다.
+* 프로세스를 다시 시작하면 상태가 손실됩니다.
+* 스레드 ID가 없는 요청은 단일 스레드를 공유합니다.`'default'` entry.
+
+사용`clearState`, `clearAllState`, `getStateStats`, and `cleanupNow` to inspect or reset this store.
+
+### `'context'` {/* #context */}
+
+로드된 상태는 대화 메시지에서 파생됩니다. Tool는 로드되는 동안 로드됩니다.`search_tools` or `load_tool` result naming it remains in the messages. This mode:
+
+* Memory 구성이 필요하지 않습니다.
+* 다시 시작해도 안전합니다. 지속 가능한 기록은 지속되는 메시지 기록입니다.
+* 해당 결과가 더 이상 메시지에 없으면 Tool를 자동으로 디로드합니다.
+
+```typescript
+import { ToolSearchProcessor } from '@mastra/core/processors'
+
+const toolSearch = new ToolSearchProcessor({
+  tools: allTools,
+  storage: 'context',
+})
+```
+
+로드 Tool는 두 모드 모두에서 캐시 친화적입니다. 로드는 추가 전용이므로 캐시된 Prompt 접두사는 Prompt 캐싱을 지원하는 공급자에 대해 안정적으로 유지됩니다.
+
+Tool를 언로드하면 Model에 전송된 Tool 정의가 변경되어 캐시된 접두사가 이동하고 다음 차례에서 캐시 적중 대신 캐시 쓰기를 지불하게 됩니다. ~ 안에`'in-memory'` mode this happens when a thread's state is evicted by `ttl`. In `'context'` mode it happens when a tool's discovery result is no longer present in the messages (for example, when older messages are trimmed). The tool de-loads, and the model must search for it again before reuse. This is expected: removing an unused tool trades one cache write for a smaller prefix on later turns.
+
+## 다른 프로세서와 결합 {/* #combining-with-other-processors */}
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { ToolSearchProcessor, TokenLimiter } from '@mastra/core/processors'
+
+const agent = new Agent({
+  id: 'my-agent',
+  name: 'my-agent',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  inputProcessors: [
+    new ToolSearchProcessor({
+      tools: allTools,
+      search: { topK: 5 },
+    }),
+    // Place TokenLimiter last to ensure context fits
+    new TokenLimiter(127000),
+  ],
+})
+```
+
+## 관련된 {/* #related */}
+
+* [프로세서](/docs/agents/processors)
+* [Tool 사용](/docs/agents/using-tools)

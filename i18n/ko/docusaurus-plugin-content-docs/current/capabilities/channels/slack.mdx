@@ -1,0 +1,305 @@
+---
+title: "슬랙 | 채널"
+description: "Slack 채널에서 응답하고 채널 어댑터를 통해 직접 메시지를 보내도록 Mastra Agent를 구성합니다."
+packages:
+  - "@mastra/core"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# 느슨하게
+
+사람들이 공유 채널 스레드나 다이렉트 메시지로 메시지를 보낼 수 있도록 Slack에 Agent를 추가하세요. 누군가 메시지를 보내면 Mastra는 일반 Agent 파이프라인을 통해 Agent를 실행하고 응답을 다시 Slack으로 스트리밍합니다. Slack 어댑터는 Slack AI 표시기와 대화형 카드를 자동으로 처리합니다.
+
+## 설치 {/* #installation */}
+
+Chat SDK에서 Slack 어댑터를 설치합니다.
+
+```bash npm2yarn
+npm install @chat-adapter/slack
+```
+
+추가하다`createSlackAdapter()` to the agent's `channels.adapters` object:
+
+```typescript title="src/mastra/agents/your-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { createSlackAdapter } from '@chat-adapter/slack'
+
+export const yourAgent = new Agent({
+  id: 'your-agent',
+  name: 'Your Agent',
+  instructions: 'Help people plan tasks, answer questions, and coordinate work in Slack.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_OPUS__',
+  channels: {
+    adapters: {
+      slack: createSlackAdapter(),
+    },
+  },
+})
+```
+
+## Slack 앱 만들기 {/* #create-a-slack-app */}
+
+Agent를 연결하려면 실행하려는 작업 공간에서 Slack 앱을 생성하세요. Slack 앱은 Slack의 Agent 표시, 해당 기능 및 수신하는 이벤트를 제어합니다.
+
+이 가이드에서는[manifest](https://docs.slack.dev/app-manifests/configuring-apps-with-app-manifests/#creating_manifests): a configuration file that creates the Slack app settings for you. This is the fastest path when you are adding your agent to your own workspace. It doesn't cover the platform OAuth flow where other workspaces install your agent.
+
+매니페스트에서 Slack 앱을 만듭니다.
+
+1. 열려 있는[api.slack.com/apps](https://api.slack.com/apps).
+2. 선택하다**Create an app**.
+3. 선택하다**From a manifest**.
+4. Agent를 실행해야 하는 작업공간을 선택하세요.
+5. 이 매니페스트를 붙여넣은 다음 선택하세요.**Create**. Slack accepts JSON or YAML, so use whichever tab matches the format shown in the app creation modal:
+
+<Tabs>
+  <TabItem value="json" label="JSON">
+    ```json
+    {
+      "display_information": {
+        "name": "mastra-agent"
+      },
+      "features": {
+        "app_home": {
+          "home_tab_enabled": false,
+          "messages_tab_enabled": true,
+          "messages_tab_read_only_enabled": false
+        },
+        "bot_user": {
+          "display_name": "mastra-agent",
+          "always_online": true
+        }
+      },
+      "oauth_config": {
+        "scopes": {
+          "bot": [
+            "im:write",
+            "app_mentions:read",
+            "channels:history",
+            "channels:read",
+            "chat:write",
+            "users:read",
+            "im:read",
+            "im:history"
+          ]
+        },
+        "pkce_enabled": false
+      },
+      "settings": {
+        "event_subscriptions": {
+          "request_url": "https://<YOUR-PUBLIC-URL>/api/agents/<YOUR-AGENT-ID>/channels/slack/webhook",
+          "bot_events": ["app_mention", "message.channels", "message.im"]
+        },
+        "interactivity": {
+          "is_enabled": true,
+          "request_url": "https://<YOUR-PUBLIC-URL>/api/agents/<YOUR-AGENT-ID>/channels/slack/webhook"
+        },
+        "org_deploy_enabled": false,
+        "socket_mode_enabled": false,
+        "token_rotation_enabled": false,
+        "is_mcp_enabled": false
+      }
+    }
+    ```
+  </TabItem>
+
+  <TabItem value="yaml" label="YAML">
+    ```yaml
+    display_information:
+      name: mastra-agent
+    features:
+      app_home:
+        home_tab_enabled: false
+        messages_tab_enabled: true
+        messages_tab_read_only_enabled: false
+      bot_user:
+        display_name: mastra-agent
+        always_online: true
+    oauth_config:
+      scopes:
+        bot:
+          - im:write
+          - app_mentions:read
+          - channels:history
+          - channels:read
+          - chat:write
+          - users:read
+          - im:read
+          - im:history
+      pkce_enabled: false
+    settings:
+      event_subscriptions:
+        request_url: https://<YOUR-PUBLIC-URL>/api/agents/<YOUR-AGENT-ID>/channels/slack/webhook
+        bot_events:
+          - app_mention
+          - message.channels
+          - message.im
+      interactivity:
+        is_enabled: true
+        request_url: https://<YOUR-PUBLIC-URL>/api/agents/<YOUR-AGENT-ID>/channels/slack/webhook
+      org_deploy_enabled: false
+      socket_mode_enabled: false
+      token_rotation_enabled: false
+      is_mcp_enabled: false
+    ```
+  </TabItem>
+</Tabs>
+
+이 매니페스트는 다음을 구성합니다.
+
+* `display_information.name`그리고`features.bot_user.display_name`: Set your agent's name in Slack. You can update it at any time. Remember to reinstall the app after changing names or permissions.
+* `app_home.messages_tab_enabled`그리고`app_home.messages_tab_read_only_enabled`: Enable direct messages from the Slack app's **Messages** tab.
+* `always_online`: Slack 봇 사용자를 항상 사용 가능한 상태로 표시합니다.
+* `oauth_config.scopes.bot`: 봇이 존재하는 채널에 메시지를 게시하고 읽을 수 있는 권한을 부여합니다. 또한 사용자 조회와 함께 멘션 및 직접 메시지도 다룹니다.
+* `event_subscriptions`: 웹후크에 보낼 메시지 이벤트를 Slack에 알려줍니다.
+* `interactivity`: 대화형 카드를 활성화하고 Slack에게 카드 작업을 보낼 위치를 알려줍니다.
+
+앱이 생성된 후 엽니다.**Install App**, select **Install to Workspace**, and approve the requested scopes.
+
+## Slack 자격 증명 설정 {/* #set-slack-credentials */}
+
+Mastra에서 Slack 자격 증명을 설정하면 Slack 요청을 확인하고 메시지를 Slack으로 다시 보낼 수 있습니다.
+
+Slack 앱 설정에서 다음 값을 복사하세요.
+
+* **기본정보** > **App Credentials** > **Signing Secret**
+* **OAuth 및 권한** > **Bot User OAuth Token**
+
+Mastra 환경에서 설정하십시오.
+
+```bash title=".env"
+SLACK_SIGNING_SECRET=your-signing-secret
+SLACK_BOT_TOKEN=xoxb-your-bot-token
+```
+
+Mastra는 이러한 환경 변수를 자동으로 읽습니다.
+
+## 웹훅 경로 구성 {/* #configure-the-webhook-route */}
+
+Slack은 웹후크를 통해 채널 활동을 Mastra로 보냅니다. 웹후크는 새 메시지, 멘션, 사용자의 대화형 카드 선택 등 어떤 일이 발생할 때 Slack이 호출하는 HTTP 엔드포인트입니다.
+
+Mastra는 Agent에 대한 Slack 웹훅 경로를 자동으로 등록합니다.
+
+```text
+/api/agents/<YOUR-AGENT-ID>/channels/slack/webhook
+```
+
+공개 Mastra 서버 URL과 생성된 경로에서 웹훅 URL을 빌드합니다.
+
+```text
+https://<YOUR-PUBLIC-URL>/api/agents/<YOUR-AGENT-ID>/channels/slack/webhook
+```
+
+Slack은 다음으로 이벤트를 보낼 수 없습니다.`localhost`. For local development, keep the Mastra dev server running and expose `http://localhost:4111` with a tunnel before you save the request URL in Slack.
+
+다음과 같은 터널을 사용하십시오.`cloudflared` or `ngrok` for local development:
+
+```bash npm2yarn
+npx cloudflared tunnel --url http://localhost:4111
+```
+
+생성된 터널 호스트를 다음과 같이 사용합니다.`<YOUR-PUBLIC-URL>`, for example:
+
+```text
+https://abc123.trycloudflare.com/api/agents/your-agent/channels/slack/webhook
+```
+
+Slack에서 요청 URL을 업데이트합니다.
+
+1. Slack 앱 설정에서 다음을 엽니다.**Event Subscriptions**.
+2. 바꾸다**Request URL** with the final webhook URL.
+3. 선택하다**Save Changes**.
+4. 열려 있는**Interactivity & Shortcuts**.
+5. 바꾸다**Request URL** with the same webhook URL.
+6. 선택하다**Save Changes**.
+7. Slack에서 앱을 다시 설치하라는 메시지가 표시되면 다음을 엽니다.**OAuth & Permissions** and select **Reinstall to Workspace**.
+
+## Slack에서 사용해 보세요 {/* #try-it-in-slack */}
+
+Slack 봇 사용자와 다이렉트 메시지를 열고 메시지를 보냅니다. 매니페스트에 다음이 포함되어 있기 때문에 직접 메시지가 작동합니다.`message.im` event and `im:*` scopes.
+
+채널에서 Agent를 사용하려면 먼저 Slack 봇 사용자를 초대하세요.
+
+```text
+/invite @your-bot-name
+```
+
+채널에서 봇을 언급하세요.
+
+```text
+@your-bot-name What can you help me with?
+```
+
+Agent는 스레드에서 응답합니다. 응답 내용은 Agent에 구성된 Model, 지침, Memory 및 Tool에 따라 다릅니다.
+
+## 입증 {/* #authentication */}
+
+Slack 어댑터에는 기본 제공 사용자 허용 목록이 없습니다. 앱이 설치되면 워크스페이스에 있는 누구나 Agent에게 다이렉트 메시지를 보내거나 Agent가 멤버인 채널에서 언급하여 Agent와 대화할 수 있습니다. Slack은 서명 비밀을 사용하여 각 요청을 확인하고 Mastra는 웹훅이 수신하는 모든 유효한 메시지에 대해 Agent를 실행합니다.
+
+액세스를 제어하는 ​​주요 메커니즘은 채널 멤버십입니다. 봇은 다이렉트 메시지와 초대된 채널에서만 이벤트를 수신하므로 봇이 속한 채널 집합에 따라 봇에 접근할 수 있는 사람이 정의됩니다. 봇이 응답하지 않아야 하는 채널에 접근하지 못하게 하고 채널에서 제거하여 액세스를 차단하세요.
+
+더 세밀하게 제어하려면 발신자의 신원을 확인하세요. 모든 요청은 채널에서 보낸 사람의 Slack 사용자 ID를 전달합니다.[request context](#request-context), so you can allow or deny specific users in an input processor or tool before the agent acts.
+
+### 서버 인증 {/* #server-authentication */}
+
+Slack 웹훅 경로는 Mastra의 경로에서 제외됩니다.[server authentication](/docs/server/auth). Slack can't send a bearer token, so Mastra registers the channel webhook as a public route and verifies each request with the Slack signing secret instead. This holds even when you enable a provider like [`MastraAuthSimple`](/docs/server/auth/simple-auth): the rest of your API stays protected, but the webhook route relies on the signing secret rather than your server auth. Keep `SLACK_SIGNING_SECRET` set so the adapter can reject requests that Slack didn't sign.
+
+### 외부 채널 {/* #external-channels */}
+
+공유채널([Slack Connect](https://slack.com/connect)) let people from other workspaces join a conversation. If a workspace member adds the bot to a shared channel, everyone in that channel can talk to the agent, including external members outside your organization. Anyone who can reach the agent can also reach the tools and data it has access to.
+
+공유 채널이나 외부 채널에 봇을 추가하는 것은 해당 참가자에게 Agent에 대한 액세스 권한을 부여하는 것으로 간주됩니다. 그 전에 Agent의 Tool와 데이터가 외부 구성원에게 노출되어도 안전한지 확인하고, Agent이 응답하는 사람을 제한해야 하는 경우 발신자의 사용자 ID를 차단하세요.
+
+## 요청 컨텍스트 {/* #request-context */}
+
+모든 메시지에서 Mastra는 채널 컨텍스트 개체를[request context](/docs/server/request-context) under the `channel` key. It carries the sender's Slack display name and user ID, the bot's own identity, and details about where the message came from. Read it from an input processor or a tool to identify the user or branch on the conversation type:
+
+```typescript title="src/mastra/tools/whoami.ts"
+import { createTool } from '@mastra/core/tools'
+import type { ChannelContext } from '@mastra/core/channels'
+import { z } from 'zod'
+
+export const whoami = createTool({
+  id: 'whoami',
+  description: 'Return the Slack identity of the current user',
+  inputSchema: z.object({}),
+  execute: async (_input, context) => {
+    const channel = context?.requestContext?.get('channel') as ChannelContext | undefined
+
+    return {
+      platform: channel?.platform,
+      userId: channel?.userId,
+      userName: channel?.userName,
+      isDM: channel?.isDM,
+    }
+  },
+})
+```
+
+채널 컨텍스트에는 다음이 포함됩니다.
+
+* `botMention`, `botUserId`, and `botUserName`: The bot's own identity on Slack.
+* `channelId`그리고`threadId`: The Slack channel and thread the message arrived on.
+* `isDM`: 메시지가 다이렉트 메시지인지 여부입니다.
+* `platform`: 플랫폼 식별자,`slack` for this adapter.
+* `userId`그리고`userName`: The sender's Slack user ID and display name.
+
+Mastra는 또한 이 컨텍스트를 짧은 시스템 메시지로 변환합니다. Agent는 플랫폼과 자체 신원은 물론 대화가 다이렉트 메시지인지 공개 채널인지도 알아냅니다. 보다[thread context](/docs/capabilities/channels/overview#thread-context) in the channels overview for how to change that behavior.
+
+## 프로덕션 배포 {/* #production-deployment */}
+
+Mastra 서버를 배포할 때 Slack 앱 설정의 두 요청 URL을 모두 프로덕션 웹후크 URL로 업데이트하세요. 로컬 개발에 사용되는 터널 URL은 임시 URL이며 터널이 다시 시작되면 변경됩니다.
+
+서버리스 플랫폼의 채널에는 다음이 필요할 수 있습니다.`waitUntil` and shared pub/sub configuration so background responses and thread leases work across short-lived instances. See [serverless deployment](/docs/capabilities/channels/overview#serverless-deployment) in the channels overview.
+
+### 유휴 서버 {/* #idle-servers */}
+
+플랫폼 서버는 트래픽을 수신하지 않을 때 유휴 상태로 축소되며 이는 Slack에 적합합니다. 멘션이나 다이렉트 메시지와 같은 다음 이벤트는 웹훅 요청을 전달하여 서버를 깨우고 서버는 요청 처리를 재개합니다. 서버가 유휴 상태가 된 후 첫 번째 응답은 시작하는 동안 조금 더 오래 걸릴 수 있으며 이는 예상된 것입니다. Slack은 다음을 기대합니다.`200` acknowledgement within 3 seconds and retries the event up to three times when delivery fails or times out, so a very slow cold start may take a retry before the agent responds. Subsequent messages respond at normal speed while the server stays warm.
+
+## 관련된 {/* #related */}
+
+* [채널 개요](/docs/capabilities/channels/overview)
+* [더](/docs/capabilities/channels/other-adapters)
+* [채널 참조](/reference/agents/channels)
+* [배포 개요](/docs/deployment/overview)

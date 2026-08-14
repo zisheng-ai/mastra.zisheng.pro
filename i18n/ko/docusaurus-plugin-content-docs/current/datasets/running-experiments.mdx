@@ -1,0 +1,471 @@
+---
+title: "실험 실행 | 데이터 세트"
+description: "채점 및 결과 추적을 통해 Agent 또는 Workflow에 대한 실험을 실행하세요."
+packages:
+  - '@mastra/core'
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# 실험 진행 중
+
+**추가된 항목:** `@mastra/core@1.4.0`
+
+실험은 대상(Agent, Workflow 또는 채점자)을 통해 데이터세트의 모든 항목을 실행한 다음 선택적으로 출력에 점수를 매깁니다. LLM 심사위원 자체를 평가하려면 채점자를 대상으로 사용하세요. 기본적으로 결과는 스토리지에 유지되므로 다양한 Prompt, Model 또는 코드 변경 사항에 걸쳐 실행을 비교할 수 있습니다.
+
+<Inject>
+  **AI Agent의 경우:**&#xB2EC;리다`npx mastra api experiment run dataset_123 '{"name":"translation-baseline"}'` to start an experiment directly instead of opening Studio or writing a temporary script. Use a dataset ID returned by `npx mastra api dataset list` in place of the sample ID. The command requires a running Mastra server with dataset storage and registered experiment targets; start the local server with `npx mastra dev`, 또는 연결 가능한 서버의 기본 URL을 다음과 함께 전달합니다.`--url`. 달리다`npx mastra api experiment run --schema`다른 입력을 구성하기 전에 Model을 호출할 수 있으므로 실험을 시작하기 전에 사용자 승인을 받으세요. 마스트라의 스킬을 설치하세요.`npx skills add mastra-ai/skills --skill mastra`완전한 API CLI 검색, 타겟팅, 스키마, 인증 및 오류 처리 지침을 제공합니다.
+</Inject>
+
+## 기초실험 {/* #basic-experiment */}
+
+부르다[`startExperiment()`](/reference/datasets/startExperiment) with a target and scorers:
+
+```typescript title="src/mastra/experiments/basic.ts"
+import { mastra } from '../index'
+
+const dataset = await mastra.datasets.get({ id: 'translation-dataset-id' })
+
+const summary = await dataset.startExperiment({
+  name: 'gpt-5.1-baseline',
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  scorers: ['accuracy', 'fluency'],
+})
+
+console.log(summary.status) // 'completed' | 'failed'
+console.log(summary.succeededCount) // number of items that ran successfully
+console.log(summary.failedCount) // number of items that failed
+```
+
+`startExperiment()`모든 항목이 완료될 때까지 차단됩니다. 실행 후 잊어버리기(Fire-and-forget) 실행에 대해서는 다음을 참조하세요.[async experiments](#async-experiments).
+
+## 사진관 {/* #studio */}
+
+다음에서 실험을 실행할 수도 있습니다.[Studio](/docs/studio/overview). After you've added a dataset item, open it and select **Run Experiment** and configure the target, scorers, and options.
+
+실험을 실행한 후,**Experiments** tab shows all runs for that dataset (with status, counts, and timestamps). Select an experiment to see per-item results, scores, and execution traces.
+
+에서**Experiments** tab, select **Compare** and choose two or more experiments to compare their scores and results side by side.
+
+## 실험대상 {/* #experiment-targets */}
+
+등록된 Agent, Workflow 또는 채점자를 대상으로 실험을 지정할 수 있습니다.
+
+### 등록된 대리점 {/* #registered-agent */}
+
+Mastra 인스턴스에 등록된 Agent를 가리킵니다.
+
+```typescript title="src/mastra/experiments/agent-target.ts"
+const summary = await dataset.startExperiment({
+  name: 'agent-v2-eval',
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  scorers: ['accuracy'],
+})
+```
+
+각 항목의`input` is passed directly to `agent.generate()`, so it must be a `string`, `string[]`, or `CoreMessage[]`.
+
+#### Memory 지원 Agent {/* #memory-enabled-agents */}
+
+대상 Agent에 자체 Memory가 있고 요청 컨텍스트에 리소스 ID(`MASTRA_RESOURCE_ID_KEY`, set by auth middleware, the experiment or item `requestContext`, or the Studio **Run Experiment** form), the experiment runner injects a fresh memory thread for each item. A resource id in the request context means "run as this resource": each item's conversation persists as a thread under that resource, and retried items get a new thread per attempt so earlier failed attempts can't leak into the retry's context.
+
+주입된 스레드에는 태그가 지정되어 실행에 다시 매핑할 수 있습니다. 스레드 메타데이터는`experimentId` and the dataset item's id as `experimentItemId`. No thread title is generated for them.
+
+스레드는 호출자의 리소스에 속하므로 리소스 범위 Memory는 실행 중에 해당 리소스의 상태를 읽고 쓰는 기능을 모두 수행합니다.
+
+* 리소스 범위 작업 Memory 업데이트는 리소스에 유지되며 실행의 이후 항목은 이전 항목의 업데이트를 참조합니다.
+* 리소스 범위 의미론적 회상은 리소스의 이전 대화를 실험에 표면화할 수 있으며, 실험 기록은 해당 리소스의 이후 대화에서 회상 가능해집니다.
+
+이는 실제 사용자의 누적된 컨텍스트에 대해 Agent를 평가하려는 경우에 유용합니다. 실제 사용자 상태를 다루는 실험 실행을 원하지 않으면 대신 전용 평가 리소스 ID를 사용하여 실험을 실행하세요.
+
+다음과 같은 경우 스레드 주입을 건너뜁니다.
+
+* 요청 컨텍스트도 설정되는 경우`MASTRA_THREAD_ID_KEY`, the runner uses that thread as-is, so every item (and retry) shares the same conversation.
+* Agent에 Memory가 없거나 요청 컨텍스트에 리소스 ID가 없는 경우 실행은 Memory가 없으며 아무것도 지속되지 않습니다.
+
+### 등록된 Workflow {/* #registered-workflow */}
+
+Mastra 인스턴스에 등록된 Workflow를 가리킵니다.
+
+```typescript title="src/mastra/experiments/workflow-target.ts"
+const summary = await dataset.startExperiment({
+  name: 'workflow-eval',
+  targetType: 'workflow',
+  targetId: 'translation-workflow',
+  scorers: ['accuracy'],
+})
+```
+
+Workflow는 각 항목의`input` as its trigger data.
+
+### 등록된 득점자 {/* #registered-scorer */}
+
+LLM 심사위원을 실제 사실과 비교하여 평가하려면 채점자를 지정하세요.
+
+```typescript title="src/mastra/experiments/scorer-target.ts"
+const summary = await dataset.startExperiment({
+  name: 'judge-accuracy-eval',
+  targetType: 'scorer',
+  targetId: 'accuracy',
+})
+```
+
+득점원은 각 항목의`input` and `groundTruth`. LLM-based judges can drift over time as underlying models change, so it's important to periodically realign them against known-good labels. A dataset gives you a stable benchmark to detect that drift.
+
+## 채점 결과 {/* #scoring-results */}
+
+채점자는 각 항목의 목표 실행 후에 자동으로 실행됩니다. 합격 득점자 인스턴스 또는 등록된 득점자 ID:
+
+<Tabs>
+  <TabItem value="ids" label="Scorer IDs">
+    ```typescript
+    // Reference scorers registered on the Mastra instance
+    const summary = await dataset.startExperiment({
+      name: 'with-registered-scorers',
+      targetType: 'agent',
+      targetId: 'translation-agent',
+      scorers: ['accuracy', 'fluency'],
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="instances" label="Scorer instances">
+    ```typescript
+    import { createAnswerRelevancyScorer } from '@mastra/evals/scorers/prebuilt'
+
+    const relevancy = createAnswerRelevancyScorer({ model: '__GATEWAY_OPENAI_MODEL_MINI__' })
+
+    const summary = await dataset.startExperiment({
+      name: 'with-scorer-instances',
+      targetType: 'agent',
+      targetId: 'translation-agent',
+      scorers: [relevancy],
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+각 항목의 결과에는 득점자별 점수가 포함됩니다.
+
+```typescript
+for (const item of summary.results) {
+  console.log(item.itemId, item.output)
+  for (const score of item.scores) {
+    console.log(`  ${score.scorerName}: ${score.score} — ${score.reason}`)
+  }
+}
+```
+
+방문[Scorers overview](/docs/evals/overview) for details on available and custom scorers.
+
+## 실행당 제어 지속성 {/* #control-persistence-per-run */}
+
+사용`persistence` to skip storage writes for a specific run. Experiment records and score records can be disabled independently:
+
+```typescript title="src/mastra/experiments/no-persistence.ts"
+const summary = await dataset.startExperiment({
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  scorers: ['accuracy'],
+  persistence: {
+    experiments: 'none',
+    scores: 'none',
+  },
+})
+```
+
+표적과 득점원은 여전히 ​​달리고 있으며,`startExperiment()` still returns the item results and scores in `summary`. The settings are independent. For example, set only `scores: 'none'` to persist the experiment and its item results without creating score records.
+
+생략된 설정의 기본값은 다음과 같습니다.`'default'`, which preserves the standard storage behavior. This policy only controls experiment and score records created by the run. It doesn't disable storage used by the target, such as agent memory, vectors, observability, or custom tool storage.
+
+언제`startExperimentAsync()` runs with `experiments: 'none'`, it doesn't persist an experiment record, progress updates, or item results. Score persistence remains controlled separately by `persistence.scores`. Without an experiment event observer, the run is fire-and-forget, and the experiment API can't report whether it completed or failed.
+
+동기 사용`startExperiment()` when the caller needs the returned summary. An experiment event observer can receive lifecycle events and the terminal summary.
+
+## 실험 이벤트 관찰 {/* #observe-experiment-events */}
+
+사용`onEvent` to receive versioned, JSON-safe lifecycle events while an experiment runs. This works with `startExperiment()`, `startExperimentAsync()`, and `runExperiment()`.
+
+```typescript title="src/mastra/experiments/observe.ts"
+import type { ExperimentEvent } from '@mastra/core/datasets'
+
+const events: ExperimentEvent[] = []
+
+await dataset.startExperimentAsync({
+  task: async ({ input }) => processItem(input),
+  persistence: { experiments: 'none' },
+  onEvent: async event => {
+    events.push(event)
+    await publishEvent(event)
+  },
+})
+```
+
+관찰자는 다음과 같은 이벤트 유형을 수신합니다.
+
+* `experiment.run.started`: 실행, 대상, 해결된 데이터 세트 버전 및 항목 수를 식별합니다.
+* `experiment.item.completed`: 점수, 오류, 재시도 횟수, Tool 모의 세부 정보 및 안정적인 항목 ID를 포함하여 채점 후 커밋된 항목 결과를 보고합니다.
+* `experiment.run.finished`: 최종 결과 및 요약 카운터를 보고합니다.
+
+Mastra는 다음 이벤트를 전달하기 전에 각 관찰자 호출을 기다립니다. 이 직렬화된 전달은 배압을 적용하고 이벤트를 보장합니다.`sequence` values match delivery order, while item execution can remain concurrent.
+
+관찰자가 던지거나 거부하면 Mastra는 남은 실행을 중단하고 거부합니다.`runExperiment()` with a `MastraError` whose `id` is `EXPERIMENT_EVENT_OBSERVER_FAILED`. It doesn't send a terminal event through the failed observer. For `startExperimentAsync()`, the method has already returned when a detached observer fails, so handle delivery failures inside the observer when the caller needs direct error reporting.
+
+그만큼`experiment.run.finished` event is awaited before Mastra persists the final experiment status. Treat the event as the authoritative terminal signal when experiment persistence is disabled, but don't use it as a read-after-write signal for storage.
+
+내보낸 이벤트 유형은 다음과 같습니다.`ExperimentEvent`, `ExperimentRunStartedEvent`, `ExperimentItemCompletedEvent`, and `ExperimentRunFinishedEvent`. Use the discriminated `type` field to narrow an event before reading event-specific properties.
+
+## Tool 모의 {/* #tool-mocks */}
+
+실험에서 부작용 Tool를 호출하는 Agent를 실행할 때 정적 Tool 모의를 개별 데이터 세트 항목에 연결하여 실행을 결정적으로 만듭니다. 실험 중에 모의 Tool는 실행되는 대신 선언된 출력을 반환합니다. 항목에 대한 모의가 없는 Tool는 기본적으로 실시간으로 실행됩니다.
+
+모의 항목은 데이터 세트 항목에 있으므로 행 버전을 지정하고 테스트 사례와 함께 이동합니다. 각 모의는 Tool 이름, 예상되는 인수 및 반환할 출력을 선언합니다.
+
+```typescript title="src/mastra/experiments/tool-mocks.ts"
+await dataset.addItem({
+  input: 'What is the weather in Seattle?',
+  toolMocks: [
+    {
+      toolName: 'getWeather',
+      args: { city: 'Seattle' },
+      output: { temperature: 60, conditions: 'rainy' },
+    },
+  ],
+})
+```
+
+Tool 모의가 지원됩니다.`agent` targets only.
+
+### 선언되지 않은 Tool 차단 {/* #block-undeclared-tools */}
+
+세트`unmockedToolPolicy: 'deny'` on an experiment to block every tool call that doesn't have a mock. This is useful when a live call could cause side effects:
+
+```typescript
+const summary = await dataset.startExperiment({
+  targetType: 'agent',
+  targetId: 'weather-agent',
+  unmockedToolPolicy: 'deny',
+})
+```
+
+기본 정책은 다음과 같습니다.`'allow'`. You can override the experiment policy on an individual stored or inline item:
+
+```typescript
+await dataset.addItem({
+  input: 'What is the weather in Seattle?',
+  unmockedToolPolicy: 'allow',
+})
+```
+
+항목 값이 실험 값보다 우선합니다. 다음과 같은 거부된 통화가 실패합니다.`TOOL_MOCK_NOT_DECLARED` before the tool executes. The failure isn't retried or added to `liveCalls`.
+
+### 매칭과 소비 {/* #matching-and-consumption */}
+
+인수는 엄격하게 일치합니다. 객체 키 순서는 무시되고 배열 순서는 상당하며 유형 강제도 없습니다. 모의는 Agent가 모의와 완전히 동일한 인수를 사용하여 Tool를 호출하는 경우에만 제공됩니다.`args`.
+
+항목이 동일한 Tool 및 인수에 대해 여러 모의 항목을 선언하면 순서대로 사용되며 첫 번째 호출은 첫 번째 모의 항목을 가져오고 다음 호출은 두 번째 모의 항목을 가져오는 식으로 진행됩니다. 주문은 다음과 같이 추적됩니다.`(toolName, args)` group and is independent across different arguments.
+
+### 매칭 모드 {/* #matching-mode */}
+
+기본적으로 각 모의 모형은 해당 항목과 엄격하게 일치합니다.`args`. Set `matchArgs: 'ignore'` to match on the tool name only, the mock's `args` aren't compared and the next unconsumed mock for that tool is served regardless of how the agent called it:
+
+```typescript
+const subAgentMock = {
+  toolName: 'agent-balanceAgent',
+  args: { prompt: 'look up the balance for YJ' },
+  output: { text: "YJ's balance is $100." },
+  matchArgs: 'ignore',
+}
+```
+
+이는 Tool의 인수에 잡음이 많거나 Model에 의해 생성된 경우 유용합니다. 가장 일반적인 경우는 조롱입니다.**sub-agent's response**: a delegated sub-agent is exposed to the parent as an `agent-<name>` tool, and its arguments include an LLM-authored `prompt` plus runtime-injected fields. Mocking `agent-<name>` returns the canned response in place of running the sub-agent and its inner tools. When you create a mock from a trace, sub-agent delegation calls are derived with `matchArgs: 'ignore'` automatically. You can change it to `'strict'` to pin the exact arguments.
+
+### 실패 {/* #failures */}
+
+모의 구성을 위반하면 Tool 호출이 항목에 실패합니다.
+
+* `TOOL_MOCK_MISMATCH`: 모의 일치 항목이 없는 인수를 사용하여 Tool가 호출되었습니다.
+* `TOOL_MOCK_EXHAUSTED`: 일치하는 모든 모의가 이미 소비되었습니다.
+* `TOOL_MOCK_NOT_DECLARED`: Tool에는 모의가 없으며 효과적입니다.`unmockedToolPolicy` is `'deny'`.
+
+이러한 오류가 발생하면 Agent 실행이 즉시 중단되므로 Model은 모의되지 않은 부작용 Tool를 포함하여 라이브로 실행될 추가 Tool를 계속해서 호출할 수 없습니다. 이러한 실패는 결정적이므로 재시도되지 않습니다. 선언되었으나 한 번도 사용되지 않은 모의품은 아이템 실패가 아니며, 소비되지 않은 것으로 보고됩니다.
+
+모의 차단이 활성화된 동안 Agent의 Tool는 순차적으로 실행되므로 반복됩니다.`(toolName, args)` mocks are consumed in the provider's call order. Interception is active when the item declares mocks or its effective `unmockedToolPolicy` is `'deny'`.
+
+### 진단 {/* #diagnostics */}
+
+각 항목 결과에는`toolMockReport` describing what the run did with the item's mocks:
+
+```typescript
+for (const item of summary.results) {
+  const report = item.toolMockReport
+  if (!report) continue
+
+  console.log(report.served) // mocks matched and returned
+  console.log(report.unconsumed) // mocks declared but never used
+  console.log(report.liveCalls) // undeclared tools allowed to run live
+  console.log(report.failure) // the first deterministic mock failure, if any
+}
+```
+
+\~ 안에[Studio](/docs/studio/overview), edit a dataset item to author tool mocks as a JSON array, and open an experiment result to see the same report.
+
+### 제한사항 {/* #limitations */}
+
+* **모의 통화를 위한 Tool 범위가 없습니다.**&#xBAA8;의 호출은 Tool가 실행되기 전에 출력을 반환하므로 Tool 범위를 생성하지 않습니다. 따라서 저장된 추적으로 뒷받침되는 궤적 채점자는 모의 Tool 호출을 볼 수 없습니다. Agent의 메시지 출력으로 대체되는 궤적 추출은 계속해서 이를 확인하므로 Observability 구성에 따라 궤적 점수가 달라질 수 있습니다.
+* **스토리지 지원.**&#xB3C4;구 모의 및 Tool 모의 보고서는 LibSQL, PostgreSQL, MongoDB, Spanner 어댑터에 의해 유지됩니다. MySQL 어댑터는 이를 지원하지 않으며 Tool 모의 또는 Tool 모의 보고서를 전달하는 쓰기를 거부합니다. 모든 데이터 세트 스토리지 어댑터는 지속됩니다.`unmockedToolPolicy`.
+
+## 비동기 실험 {/* #async-experiments */}
+
+`startExperiment()`모든 항목이 완료될 때까지 차단됩니다. 장기 실행 데이터세트의 경우 다음을 사용하세요.[`startExperimentAsync()`](/reference/datasets/startExperimentAsync) to start the experiment in the background:
+
+```typescript title="src/mastra/experiments/async.ts"
+const { experimentId, status } = await dataset.startExperimentAsync({
+  name: 'large-dataset-run',
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  scorers: ['accuracy'],
+})
+
+console.log(experimentId) // UUID
+console.log(status) // 'pending'
+```
+
+다음을 사용하여 완료 여부를 폴링합니다.[`getExperiment()`](/reference/datasets/getExperiment):
+
+```typescript
+let experiment = await dataset.getExperiment({ experimentId })
+
+while (experiment.status === 'pending' || experiment.status === 'running') {
+  await new Promise(resolve => setTimeout(resolve, 5000))
+  experiment = await dataset.getExperiment({ experimentId })
+}
+
+console.log(experiment.status) // 'completed' | 'failed'
+```
+
+## 구성 옵션 {/* #configuration-options */}
+
+### 동시성 {/* #concurrency */}
+
+병렬로 실행되는 항목 수를 제어합니다(기본값: 5).
+
+```typescript
+const summary = await dataset.startExperiment({
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  maxConcurrency: 10,
+})
+```
+
+### 시간 초과 및 재시도 {/* #timeouts-and-retries */}
+
+항목별 제한 시간(밀리초) 및 재시도 횟수를 설정합니다.
+
+```typescript
+const summary = await dataset.startExperiment({
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  itemTimeout: 30_000, // 30 seconds per item
+  maxRetries: 2, // retry failed items up to 2 times
+})
+```
+
+재시도에는 지수 백오프가 사용됩니다. 중단 오류는 다시 시도되지 않습니다.
+
+### 실험 중단 {/* #aborting-an-experiment */}
+
+통과`AbortSignal` to cancel a running experiment:
+
+```typescript
+const controller = new AbortController()
+
+// Cancel after 60 seconds
+setTimeout(() => controller.abort(), 60_000)
+
+const summary = await dataset.startExperiment({
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  signal: controller.signal,
+})
+```
+
+나머지 항목은 요약에서 건너뛴 것으로 표시됩니다.
+
+### 데이터 세트 버전 고정 {/* #pinning-a-dataset-version */}
+
+데이터세트의 특정 스냅샷에 대해 실행합니다.
+
+```typescript
+const summary = await dataset.startExperiment({
+  targetType: 'agent',
+  targetId: 'translation-agent',
+  version: 3, // use items from dataset version 3
+})
+```
+
+## 결과 보기 {/* #viewing-results */}
+
+### 실험 나열 {/* #listing-experiments */}
+
+```typescript
+const { experiments, pagination } = await dataset.listExperiments({
+  page: 0,
+  perPage: 10,
+})
+
+for (const exp of experiments) {
+  console.log(`${exp.name} — ${exp.status} (${exp.succeededCount}/${exp.totalItems})`)
+}
+```
+
+### 실험 세부정보 {/* #experiment-details */}
+
+```typescript
+const experiment = await dataset.getExperiment({
+  experimentId: 'exp-abc-123',
+})
+
+console.log(experiment.status)
+console.log(experiment.startedAt)
+console.log(experiment.completedAt)
+```
+
+:::팁\[📹 보기]
+
+보다[Mastra datasets and experiments workflow](https://www.youtube.com/watch?v=R6pjAdGhxhQ) to see how datasets and experiments help improve reliability.
+
+:::
+
+### 품목 수준 결과 {/* #item-level-results */}
+
+```typescript
+const { results, pagination } = await dataset.listExperimentResults({
+  experimentId: 'exp-abc-123',
+  page: 0,
+  perPage: 50,
+})
+
+for (const result of results) {
+  console.log(result.itemId, result.output, result.error)
+}
+```
+
+## 요약 이해 {/* #understanding-the-summary */}
+
+`startExperiment()`반환합니다`ExperimentSummary` with counts and per-item results:
+
+* `completedWithErrors`~이다`true` when the experiment finished but some items failed.
+* 다음을 통해 취소된 상품`signal` appear in `skippedCount`.
+
+방문[`startExperiment` reference](/reference/datasets/startExperiment) for the full parameter and return type documentation.
+
+## 관련된 {/* #related */}
+
+* [데이터 세트 개요](/docs/datasets/overview)
+* [득점자 개요](/docs/evals/overview)
+* [`startExperiment` 참조](/reference/datasets/startExperiment)
+* [`listExperimentResults` 참조](/reference/datasets/listExperimentResults)

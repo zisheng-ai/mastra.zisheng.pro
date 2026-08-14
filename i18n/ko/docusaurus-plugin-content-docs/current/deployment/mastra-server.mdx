@@ -1,0 +1,166 @@
+---
+title: "Mastra 서버 배포 | 전개"
+description: "Mastra 서버를 구축하고 배포하는 방법을 알아보세요."
+packages:
+  - "@mastra/deployer"
+---
+
+# Mastra 서버 배포
+
+Mastra는 Node.js, Bun 또는 Deno를 지원하는 모든 플랫폼에서 실행할 수 있는 독립형 Node.js 서버로 애플리케이션을 컴파일합니다.
+
+:::팁
+
+이 가이드에서는 다음에서 생성된 독립 실행형 서버를 배포하는 방법을 다룹니다.`mastra build`. If you need to integrate Mastra into an existing Express or Hono application, see [Server Adapters](/docs/server/server-adapters)대신에.
+
+:::
+
+## 애플리케이션 구축 {/* #building-your-application */}
+
+프로젝트 루트에서 빌드 명령을 실행합니다.
+
+```bash
+mastra build
+```
+
+이것은`.mastra` directory containing your production-ready server. Read the [`mastra build`](/reference/cli/mastra#mastra-build) reference for all available flags.
+
+## 빌드 출력 {/* #build-output */}
+
+구축 후 Mastra는 다음 구조를 생성합니다.
+
+```
+.mastra/
+├── .build/                # Intermediate build artifacts (module maps, analysis)
+└── output/
+    ├── index.mjs          # Server entry point
+    ├── mastra.mjs         # Your bundled Mastra configuration
+    ├── tools.mjs          # Aggregated tool exports
+    ├── tools/             # Individual tool bundles
+    ├── package.json       # Production dependencies
+    ├── node_modules/      # Installed dependencies
+    ├── .npmrc             # Copied from your project (if present)
+    ├── public/            # Static assets (if src/mastra/public exists)
+    └── playground/        # Studio UI (if --studio flag used)
+```
+
+그만큼`output` directory is self-contained. You can copy it to any server and run it directly.
+
+## 서버 실행 {/* #running-the-server */}
+
+Mastra CLI를 사용하여 서버를 시작합니다.
+
+```bash
+mastra start
+```
+
+또는 Node.js로 직접 실행하세요.
+
+```bash
+node .mastra/output/index.mjs
+```
+
+그만큼`mastra start` command provides additional features:
+
+* 다음에서 환경 변수를 로드합니다.`.env.production` and `.env`
+* 누락된 모듈에 대한 유용한 오류 메시지 제공
+* 정상적인 종료를 위해 프로세스 신호를 처리합니다.
+
+읽기[`mastra start`](/reference/cli/mastra#mastra-start) reference for all available flags.
+
+## 빌드 구성 {/* #build-configuration */}
+
+### 빌드 시간 구성 {/* #build-time-configuration */}
+
+마스트라는 다음을 읽는다.`bundler`, `deployer`, and `server` options while it builds your application. Keep those options as direct properties of the object passed to `new Mastra()` so the build can extract them.
+
+다음 항목 파일 형태가 작동합니다.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+
+export const mastra = new Mastra({
+  bundler: {
+    externals: ['sharp'],
+  },
+  server: {
+    port: 4111,
+  },
+})
+```
+
+각 옵션의 값은 변수, 가져오기 또는 함수 호출에서 나올 수 있습니다. 옵션 자체는 직접 속성으로 유지되어야 합니다. 팩토리 호출이나 객체 확산 뒤에 빌드 타임 옵션을 숨기지 마세요.
+
+```typescript title="src/mastra/index.ts"
+const options = {
+  bundler: {
+    externals: ['sharp'],
+  },
+}
+
+// These patterns prevent Mastra from extracting `bundler` during the build.
+export const mastra = new Mastra(createMastraOptions())
+export const otherMastra = new Mastra({ ...options })
+```
+
+Mastra가 옵션을 추출할 수 없는 경우 해당 옵션에 대한 기본 빌드 동작을 사용합니다. 참조[configuration reference](/reference/configuration) for the available `bundler`, `deployer`, and `server` settings.
+
+### 공용 폴더 {/* #public-folder */}
+
+만약`public` folder exists in your Mastra directory (`src/mastra/public`), its contents are copied to the output directory during build. These files are served as static assets by the server.
+
+### 마스트라 구성 {/* #mastra-configuration */}
+
+빌드 프로세스는 Mastra 인스턴스의 구성을 따릅니다. CORS, 시간 초과, 미들웨어와 같은 서버 동작에 대해서는 다음을 참조하세요.[server overview](/docs/server/mastra-server). For all available options, see the [configuration reference](/reference/configuration).
+
+## 빌드 프로세스 {/* #build-process */}
+
+빌드는 다음 단계를 따릅니다.
+
+1. **항목 파일을 찾습니다**: 찾다`index.ts` or `index.js` in your Mastra directory.
+2. **Tool 발견**: 일치하는 Tool 파일을 검색합니다.`{mastraDir}/tools/**/*.{js,ts}`, excluding test files.
+3. **종속성을 분석합니다.**: 번들로 제공할 패키지와 외부에 설치할 패키지를 결정합니다.
+4. **번들 코드**: 트리 쉐이킹 및 선택적 소스 맵과 함께 롤업을 사용합니다.
+5. **서버 생성**: Hono 기반 HTTP 서버를 다음과 같이 생성합니다.`index.mjs`.
+6. **종속성을 설치합니다.**: 실행`npm install` in the output directory.
+7. **자산 복사**: 사본`public` folder and `.npmrc` if present.
+
+## 환경변수 {/* #environment-variables */}
+
+| 변수 | 설명 |
+| - | - |
+|`PORT` | Server port (default: `4111`) |
+| `MASTRA_STUDIO_PATH` | Path to Studio build directory (default: `./playground`) |
+| `MASTRA_SKIP_DOTENV` | Skip loading `.env` files when set |
+| `NODE_OPTIONS` | Node.js options (e.g., `--max-old-space-size=4096` for build memory issues) |
+
+## 서버 엔드포인트 {/* #server-endpoints */}
+
+구축된 서버는 상태 확인, Agent, Workflow 등에 대한 엔드포인트를 노출합니다.
+
+| 엔드포인트 | 설명 |
+| - | - |
+|`GET /health` | Health check endpoint, returns `200 OK` |
+| `GET /api/openapi.json` | OpenAPI specification (if `server.build.openAPIDocs` is enabled). |
+| `GET /swagger-ui` | Interactive API documentation (if `server.build.swaggerUI` is enabled) |
+
+이 목록은 완전한 것이 아닙니다. 모든 엔드포인트를 보려면 다음을 실행하세요.`mastra dev` and visit `http://localhost:4111/swagger-ui`.
+
+고유한 엔드포인트를 추가하려면 다음을 참조하세요.[Custom API Routes](/docs/server/custom-api-routes).
+
+## 문제 해결 {/* #troubleshooting */}
+
+### 빌드 중 Memory 오류 {/* #memory-errors-during-build */}
+
+당신이 만난다면`JavaScript heap out of memory` errors:
+
+```bash
+NODE_OPTIONS="--max-old-space-size=4096" mastra build
+```
+
+## 관련된 {/* #related */}
+
+* [서버 개요](/docs/server/mastra-server): 서버 동작, 미들웨어, 인증 구성
+* [서버 어댑터](/docs/server/server-adapters): 대신 Express나 Hono를 사용하세요.`mastra build`
+* [사용자 정의 API 경로](/docs/server/custom-api-routes): 사용자 정의 HTTP 엔드포인트 추가
+* [구성 참조](/reference/configuration): 전체 구성 옵션

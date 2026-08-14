@@ -1,0 +1,215 @@
+---
+title: "참조: IFGAProvider | 인증"
+description: "Mastra FGA(세밀한 권한 부여)를 위한 리소스에 대해 사용자 및 시스템 행위자에게 권한을 부여하는 IFGAProvider 인터페이스에 대한 API 참조입니다."
+packages:
+  - "@mastra/core"
+---
+
+# IFGA 제공자
+
+그만큼`IFGAProvider`인터페이스는 FGA(Fine-grained Authorization) 제공자를 정의합니다. Mastra는 이를 호출하여 사용자 또는 시스템 행위자가 특정 리소스에 대한 권한을 수행할 수 있는지 여부를 결정합니다. WorkOS 인증과 같은 FGA 백엔드에 Mastra를 연결하려면 이를 구현하세요.
+
+Mastra가 FGA를 시행하는 개념, 구성 및 수명 주기 지점은 다음을 참조하세요.[Fine-grained authorization](/docs/server/auth/fga).
+
+## 사용예 {/* #usage-example */}
+
+다음 예제에서는 최소 공급자를 구현합니다.`require` throws to deny, and `check` returns a boolean.
+
+```typescript title="src/mastra/fga.ts"
+import { FGADeniedError } from '@mastra/core/auth/ee'
+import type { FGACheckParams, IFGAProvider, MastraFGAPermissionInput } from '@mastra/core/auth/ee'
+
+class MyFGAProvider implements IFGAProvider {
+  async check(user: any, params: FGACheckParams): Promise<boolean> {
+    // Your authorization logic.
+    return true
+  }
+
+  async require(user: any, params: FGACheckParams): Promise<void> {
+    if (!(await this.check(user, params))) {
+      throw new FGADeniedError(user, params.resource, params.permission)
+    }
+  }
+
+  async filterAccessible<T extends { id: string }>(
+    user: any,
+    resources: T[],
+    resourceType: string,
+    permission: MastraFGAPermissionInput,
+  ): Promise<T[]> {
+    return resources
+  }
+}
+```
+
+## 행동 양식 {/* #methods */}
+
+### `check(user, params)` {/* #checkuser-params */}
+
+여부를 반환합니다.`user` has the permission on the resource. Use it for non-throwing checks, such as filtering or conditional UI.
+
+보고:`Promise<boolean>`
+
+### `require(user, params)` {/* #requireuser-params */}
+
+던지기`FGADeniedError` when `user` lacks the permission. Mastra calls this at its [enforcement points](/docs/server/auth/fga#enforcement-points).
+
+보고:`Promise<void>`
+
+### `filterAccessible(user, resources, resourceType, permission)` {/* #filteraccessibleuser-resources-resourcetype-permission */}
+
+다음의 하위 집합을 반환합니다.`resources` that `user` can access with `permission`.
+
+보고:`Promise<T[]>`
+
+### `requireActor(actor, params)` {/* #requireactoractor-params */}
+
+자율 또는 예약 Agent와 같은 비사용자 시스템 행위자에게 권한을 부여합니다. 선택 과목.
+
+시스템 액터는 사용자 중심을 건너뜁니다.`require()` path, so implement `requireActor` to enforce per-agent least privilege for them. Throw `FGADeniedError` to deny. When a provider doesn't implement `requireActor`, Mastra preserves the trusted-actor bypass (allow after the tenant-scope check), so adding the method remains backward compatible.
+
+대하다`actor.permissions` as an untrusted claim. Resolve the agent's authoritative grants from a trusted source keyed by `actor.agentId`, rather than trusting the inline values. See [System actors](/docs/server/auth/fga#system-actors).
+
+```typescript
+import { FGADeniedError } from '@mastra/core/auth/ee'
+import type { ActorSignal, FGACheckParams, IFGAProvider } from '@mastra/core/auth/ee'
+
+class MyFGAProvider implements IFGAProvider {
+  // ...check, require, filterAccessible...
+
+  async requireActor(actor: ActorSignal, params: FGACheckParams): Promise<void> {
+    const agentId = actor === true ? undefined : actor.agentId
+    // Resolve the agent's authoritative grants from a trusted source keyed by agentId.
+    const granted = await this.grantsForAgent(agentId)
+    const required = Array.isArray(params.permission) ? params.permission : [params.permission]
+    if (!required.some(permission => granted.includes(permission))) {
+      throw new FGADeniedError(null, params.resource, params.permission)
+    }
+  }
+}
+```
+
+보고:`Promise<void>`
+
+## 구성 속성 {/* #configuration-properties */}
+
+선택적 속성은 경로 범위 및 시작 유효성 검사를 제어합니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'requireForProtectedRoutes',
+  type: 'boolean',
+  isOptional: true,
+  defaultValue: 'false',
+  description:
+    'When true, protected routes without route-level FGA metadata or resolver output are denied instead of allowed through.',
+},
+{
+  name: 'auditProtectedRoutes',
+  type: "boolean | 'warn' | 'error'",
+  isOptional: true,
+  defaultValue: 'false',
+  description:
+    "Audits protected routes that lack built-in FGA metadata. Use true or 'warn' to log a startup warning, 'error' to fail startup, or false to disable.",
+},
+{
+  name: 'resolveRouteFGA',
+  type: 'FGARouteResolver',
+  isOptional: true,
+  description:
+    'Derives resource type, resource ID, and permission from the route, parsed params, and request context.',
+},
+{
+  name: 'validatePermissions',
+  type: '(permissions: MastraFGAPermissionInput[]) => void | Promise<void>',
+  isOptional: true,
+  description:
+    'Startup validation for provider-specific permission mappings. Throw when a permission Mastra may emit is not mapped.',
+},
+]}
+/>
+
+## 매개변수 {/* #parameters */}
+
+그만큼`params` argument passed to `check`, `require`, and `requireActor`.
+
+<PropertiesTable
+  content={[
+{
+  name: 'resource',
+  type: '{ type: string; id: string }',
+  description: 'The resource being accessed.',
+},
+{
+  name: 'permission',
+  type: 'MastraFGAPermissionInput | MastraFGAPermissionInput[]',
+  description:
+    'The permission(s) being checked. When an array is provided, the actor needs any one of the listed permissions.',
+},
+{
+  name: 'context',
+  type: 'FGACheckContext',
+  isOptional: true,
+  description:
+    'Provider-specific context for resource resolution, including the owning resourceId, the request context, and action metadata.',
+},
+]}
+/>
+
+## `ActorSignal` {/* #actorsignal */}
+
+인증된 최종 사용자가 아닌 신뢰할 수 있는 비사용자 행위자가 건 호출을 식별합니다. 그것은`true` (the anonymous system shorthand) or an object that names the acting agent and carries the grants a provider can enforce.
+
+<PropertiesTable
+  content={[
+{
+  name: 'actorKind',
+  type: "'system'",
+  description: 'Marks the object form of the signal.',
+},
+{
+  name: 'agentId',
+  type: 'string',
+  isOptional: true,
+  description:
+    'Identity of the acting system agent. Unlike the check resource (the target), this names the actor itself, so a provider can enforce per-agent least privilege.',
+},
+{
+  name: 'permissions',
+  type: 'MastraFGAPermissionInput[]',
+  isOptional: true,
+  description:
+    "Permission grants claimed for this actor. This is an untrusted, self-asserted hint; a provider enforcing real least privilege resolves the agent's authoritative grants from a trusted source keyed by agentId rather than trusting these values.",
+},
+{
+  name: 'scope',
+  type: 'Record<string, string>',
+  isOptional: true,
+  description: 'Additional provider-specific scope for the actor, for example tenant or environment.',
+},
+{
+  name: 'sourceWorkflow',
+  type: 'string',
+  isOptional: true,
+  description: 'Name of the workflow that started the actor run, when applicable.',
+},
+]}
+/>
+
+## `FGADeniedError` {/* #fgadeniederror */}
+
+승인 확인이 거부되면 발생합니다.`require` and `requireActor` throw it to deny, and Mastra surfaces it as an HTTP `403`.
+
+```typescript
+import { FGADeniedError } from '@mastra/core/auth/ee'
+
+throw new FGADeniedError(user, { type: 'agent', id: 'reporter' }, 'agents:execute')
+// Optional fourth argument: a reason string included in the error message.
+```
+
+## 관련된 {/* #related */}
+
+* [세분화된 승인](/docs/server/auth/fga)
+* [시스템 액터](/docs/server/auth/fga#system-actors)
+* [WorkOS 인증](/reference/auth/workos)

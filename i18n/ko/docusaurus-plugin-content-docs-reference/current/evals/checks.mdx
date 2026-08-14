@@ -1,0 +1,323 @@
+---
+title: "참조: 빠른 확인 | 평가"
+description: "빠른 확인을 위한 API 참조, 텍스트 일치, Tool 사용 및 Tool 주문과 같은 일반적인 주장을 위한 제로 LLM 구성 가능 마이크로 채점자입니다."
+packages:
+  - "@mastra/evals"
+---
+
+# 빠른 점검
+
+Quick Checks는 일반적인 어설션을 위한 LLM이 없는 구성 가능한 마이크로 점수 측정기입니다. 그들은 기존에 연결`scorers: [...]`득점자가 사용되는 모든 곳의 배열:`runEvals`, 라이브 채점, 실험 및 Studio.
+
+내부적으로는 표준입니다.`createScorer()` instances, so they have the same observability, storage, and pipeline integration as any other scorer.
+
+## 사용예 {/* #usage-example */}
+
+```typescript title="src/evals/weather-checks.ts"
+import { checks } from '@mastra/evals/checks'
+import { runEvals } from '@mastra/core/evals'
+import { myAgent } from '../agents'
+
+const result = await runEvals({
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  target: myAgent,
+  scorers: [
+    checks.includes('sunny'),
+    checks.calledTool('get_weather'),
+    checks.toolOrder(['get_weather', 'summarize']),
+    checks.noToolErrors(),
+  ],
+})
+
+console.log(result.scores)
+```
+
+## 텍스트 확인 {/* #text-checks */}
+
+### `checks.includes(expected, options?)` {/* #checksincludesexpected-options */}
+
+Agent의 출력 텍스트에 예상된 하위 문자열이 포함되어 있으면 1점을 받고, 그렇지 않으면 0점을 얻습니다.
+
+```typescript
+checks.includes('sunny')
+checks.includes('Sunny', { ignoreCase: false })
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'expected',
+  type: 'string',
+  description: 'Substring to search for in the output.',
+},
+{
+  name: 'options.ignoreCase',
+  type: 'boolean',
+  isOptional: true,
+  defaultValue: 'true',
+  description: 'Case-insensitive matching.',
+},
+]}
+/>
+
+보고:`1` if found, `0` otherwise.
+
+### `checks.excludes(unwanted, options?)` {/* #checksexcludesunwanted-options */}
+
+Agent의 출력 텍스트에 하위 문자열이 포함되어 있지 않으면 1점을 받고, 그렇지 않으면 0점을 얻습니다.
+
+```typescript
+checks.excludes('error')
+checks.excludes('Error', { ignoreCase: false })
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'unwanted',
+  type: 'string',
+  description: 'Substring that must not appear in the output.',
+},
+{
+  name: 'options.ignoreCase',
+  type: 'boolean',
+  isOptional: true,
+  defaultValue: 'true',
+  description: 'Case-insensitive matching.',
+},
+]}
+/>
+
+보고:`1` if absent, `0` otherwise.
+
+### `checks.equals(expected, options?)` {/* #checksequalsexpected-options */}
+
+선택적 정규화 후 출력 텍스트가 예상 문자열과 정확히 일치하면 1점을 얻습니다.
+
+```typescript
+checks.equals('Hello, world!')
+checks.equals('Hello', { ignoreCase: false })
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'expected',
+  type: 'string',
+  description: 'Exact string the output must match.',
+},
+{
+  name: 'options.ignoreCase',
+  type: 'boolean',
+  isOptional: true,
+  defaultValue: 'true',
+  description: 'Case-insensitive matching.',
+},
+]}
+/>
+
+보고:`1` if equal, `0` otherwise.
+
+### `checks.matches(pattern, options?)` {/* #checksmatchespattern-options */}
+
+출력이 정규식과 일치하면 1점을 얻습니다.
+
+```typescript
+checks.matches(/\d+°[FC]/)
+checks.matches(/^hello$/, { exact: true })
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'pattern',
+  type: 'RegExp',
+  description: 'Regular expression to test against the output.',
+},
+{
+  name: 'options.exact',
+  type: 'boolean',
+  isOptional: true,
+  defaultValue: 'false',
+  description: 'Anchor the pattern to match the entire output (adds ^ and $).',
+},
+]}
+/>
+
+보고:`1` if matched, `0` otherwise.
+
+### `checks.similarity(expected, options?)` {/* #checkssimilarityexpected-options */}
+
+주사위 계수를 사용하여 출력과 예상 문자열 사이의 문자열 유사성 점수(0-1)를 반환합니다. 언제`threshold` is set, returns binary 1/0 instead.
+
+```typescript
+checks.similarity('Sunny, 72°F')
+checks.similarity('Sunny, 72°F', { threshold: 0.7 })
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'expected',
+  type: 'string',
+  description: 'Reference string to compare against.',
+},
+{
+  name: 'options.threshold',
+  type: 'number',
+  isOptional: true,
+  description: 'Minimum similarity score (0-1) to return 1. When omitted, returns the raw similarity score.',
+},
+{
+  name: 'options.ignoreCase',
+  type: 'boolean',
+  isOptional: true,
+  defaultValue: 'true',
+  description: 'Case-insensitive comparison.',
+},
+]}
+/>
+
+반환: 원시 유사성 점수(0-1) 또는 이진수`1`/`0` when `threshold` is set.
+
+## Tool 호출 확인 {/* #tool-call-checks */}
+
+### `checks.calledTool(toolName, options?)` {/* #checkscalledtooltoolname-options */}
+
+Agent가 지정된 Tool를 필요한 횟수 이상 호출하면 1점을 얻습니다.
+
+```typescript
+checks.calledTool('get_weather')
+checks.calledTool('search', { times: 2 })
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'toolName',
+  type: 'string',
+  description: 'Name of the tool to look for.',
+},
+{
+  name: 'options.times',
+  type: 'number',
+  isOptional: true,
+  defaultValue: '1',
+  description: 'Minimum number of times the tool must be called.',
+},
+]}
+/>
+
+보고:`1` if called at least `times` times, `0` otherwise.
+
+### `checks.didNotCall(toolName)` {/* #checksdidnotcalltoolname */}
+
+Agent가 지정된 Tool를 호출하지 않은 경우 1점을 얻습니다.
+
+```typescript
+checks.didNotCall('delete_user')
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'toolName',
+  type: 'string',
+  description: 'Name of the tool that must not appear.',
+},
+]}
+/>
+
+보고:`1` if the tool wasn't called, `0` otherwise.
+
+### `checks.toolOrder(expectedOrder)` {/* #checkstoolorderexpectedorder */}
+
+Tool가 지정된 순서로 호출되면 1점을 얻습니다. 편안한 매칭을 사용합니다. 예상되는 Tool 간의 다른 Tool 호출이 허용됩니다.
+
+```typescript
+checks.toolOrder(['search', 'summarize', 'respond'])
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'expectedOrder',
+  type: 'string[]',
+  description: 'Tool names in the expected calling sequence. Must appear as a subsequence of the actual tool calls.',
+},
+]}
+/>
+
+보고:`1` if the expected order is satisfied, `0` otherwise.
+
+### `checks.maxToolCalls(max)` {/* #checksmaxtoolcallsmax */}
+
+Agent가 다음 이상을 사용하지 않은 경우 1점을 얻습니다.`max` tool calls.
+
+```typescript
+checks.maxToolCalls(5)
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'max',
+  type: 'number',
+  description: 'Maximum number of tool calls allowed.',
+},
+]}
+/>
+
+보고:`1` if within the limit, `0` otherwise.
+
+### `checks.usedNoTools()` {/* #checksusednotools */}
+
+Agent이 Tool 호출을 전혀 하지 않은 경우 1점을 얻습니다.
+
+```typescript
+checks.usedNoTools()
+```
+
+보고:`1` if no tools were called, `0` otherwise.
+
+### `checks.noToolErrors()` {/* #checksnotoolerrors */}
+
+어떤 Tool 호출에서도 오류 상태가 발생하지 않으면 1점을 얻습니다. 두 가지 오류 결과를 모두 감지합니다(`result.error` present) and incomplete tool calls (`state === 'call'`).
+
+```typescript
+checks.noToolErrors()
+```
+
+보고:`1` if all tool calls succeeded, `0` otherwise.
+
+## 다른 채점자와 수표 결합 {/* #combining-checks-with-other-scorers */}
+
+동일한 LLM 기반 및 코드 기반 채점자를 사용하여 구성을 확인합니다.`scorers` array:
+
+```typescript title="src/evals/combined-eval.ts"
+import { checks } from '@mastra/evals/checks'
+import { createAnswerRelevancyScorer } from '@mastra/evals/scorers/prebuilt'
+import { runEvals } from '@mastra/core/evals'
+import { myAgent } from '../agents'
+
+const result = await runEvals({
+  data: [{ input: 'What is the weather in Brooklyn?' }],
+  target: myAgent,
+  scorers: [
+    // Zero-LLM checks
+    checks.includes('Brooklyn'),
+    checks.calledTool('get_weather'),
+    checks.noToolErrors(),
+    // LLM-based scorer
+    createAnswerRelevancyScorer({ model: '__GATEWAY_OPENAI_MODEL_MINI__' }),
+  ],
+})
+```
+
+## 관련된 {/* #related */}
+
+* [빠른 검사 개요](/docs/evals/quick-checks)
+* [내장 득점자](/docs/evals/built-in-scorers)
+* [`createScorer()`참조](/reference/evals/create-scorer)
+* [`runEvals()`참조](/reference/evals/run-evals)
+* [맞춤 채점자](/docs/evals/custom-scorers)

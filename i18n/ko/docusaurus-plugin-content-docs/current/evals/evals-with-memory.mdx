@@ -1,0 +1,154 @@
+---
+title: "Memory를 사용한 평가 | 평가"
+description: "runEvals 및 데이터 세트 실험을 사용하여 스레드 범위의 관찰 Memory를 포함하여 Memory 지원 Agent에 대해 채점자를 실행합니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+---
+
+# Memory를 사용한 평가
+
+Memory를 사용하는 Agent`thread`관찰 Memory를 포함한 범위에는 런타임 시 스레드 ID가 필요합니다. 평가가 Agent 없이 Agent를 호출하면 다음이 표시됩니다.
+
+```
+ObservationalMemory (scope: 'thread') requires a threadId, but none was found in RequestContext or MessageList.
+```
+
+이 페이지에서는 Memory 지원 Agent에 대해 Mastra 평가를 실행하기 위한 세 가지 작업 패턴, 각 경로가 지원하는 항목 및 선택할 항목을 다룹니다. 세 가지 접근 방식 모두에 대한 완전한 실행 가능 재현이 제공됩니다.[`examples/evals-with-memory`](https://github.com/mastra-ai/mastra/tree/main/examples/evals-with-memory).
+
+## 언제 어떤 접근법을 사용해야 하는가 {/* #when-to-use-which-approach */}
+
+| 목표 | 접근 |
+| - | - |
+| 모든 항목에 걸쳐 하나의 공유 대화 |[`runEvals` with global `targetOptions.memory`](#shared-thread-with-runevals) |
+| One independent thread per item, focused CI loop | [`runEvals` per item](#per-item-threads-with-runevals) |
+| Per-item threads driven by a stored `Dataset` | [`dataset.startExperiment`인라인 작업으로](#dataset-experiments-with-an-inline-task) |
+
+사전 시딩`RequestContext` with `MastraMemory` **isn't** a supported way to drive memory into an agent. Thread resolution reads `args.memory.thread`, `RequestContext.MastraMemory`로 채워집니다`prepare-memory-step`Agent가 이미 스레드를 해결한 후입니다.
+
+## 다음과 공유된 스레드`runEvals` {/* #shared-thread-with-runevals */}
+
+`runEvals`받아들인다`targetOptions`, which is forwarded to `agent.generate()`. Passing `memory: { thread, resource }` runs every data item against the same thread, useful for testing recall across a multi-turn conversation.
+
+```typescript title="src/mastra/agents/support-agent.test.ts"
+import { runEvals } from '@mastra/core/evals'
+import { supportAgent } from './support-agent'
+import { recallScorer } from '../scorers/recall-scorer'
+
+const memory = await supportAgent.getMemory()
+await memory!.createThread({ threadId: 'eval-thread', resourceId: 'ci-user' })
+
+const result = await runEvals({
+  target: supportAgent,
+  scorers: [recallScorer],
+  targetOptions: {
+    memory: { thread: 'eval-thread', resource: 'ci-user' },
+  },
+  data: [
+    { input: 'My order number is 12345' },
+    { input: 'What is my order number?', groundTruth: '12345' },
+  ],
+})
+```
+
+`targetOptions`~이다**global per call**. No per-item override on `RunEvalsDataItem` is available today.
+
+## 항목별 스레드`runEvals` {/* #per-item-threads-with-runevals */}
+
+각 데이터 항목에 자체 스레드(공통 CI 모양)가 필요한 경우 다음을 호출합니다.`runEvals` once per item with a unique `targetOptions.memory` and aggregate the scores yourself.
+
+```typescript title="src/mastra/agents/support-agent.test.ts"
+import { randomUUID } from 'node:crypto'
+import { runEvals } from '@mastra/core/evals'
+import { supportAgent } from './support-agent'
+import { recallScorer } from '../scorers/recall-scorer'
+
+const memory = await supportAgent.getMemory()
+const resourceId = 'ci-user'
+
+const items = [
+  { input: 'Cats are mammals', groundTruth: 'mammals' },
+  { input: 'Dogs are mammals too', groundTruth: 'mammals' },
+]
+
+// `runEvals` returns `{ scores: Record<string, number>; summary: { totalItems } }`.
+const scores: number[] = []
+for (const item of items) {
+  const threadId = `eval-${randomUUID()}`
+  await memory!.createThread({ threadId, resourceId, title: item.input })
+
+  const result = await runEvals({
+    target: supportAgent,
+    scorers: [recallScorer],
+    targetOptions: { memory: { thread: threadId, resource: resourceId } },
+    data: [item],
+  })
+
+  scores.push(result.scores[recallScorer.id])
+}
+
+const average = scores.reduce((a, b) => a + b, 0) / scores.length
+```
+
+:::참고
+평가판을 실행하기 전에 스레드를 생성하십시오. 관찰 기억`thread` scope reads from a record that must already exist.
+:::
+
+## 인라인 작업을 사용한 데이터 세트 실험 {/* #dataset-experiments-with-an-inline-task */}
+
+`dataset.startExperiment({ target: agent })` **doesn't** forward a `memory` option to the agent, only `requestContext`. To run a stored dataset against a memory-enabled agent, use an inline `task` function and stash `{ threadId, resourceId }` in each item's `metadata`. The scorer pipeline still runs as normal.
+
+```typescript title="src/mastra/evals/dataset-experiment.ts"
+import { randomUUID } from 'node:crypto'
+import { mastra } from '../index'
+import { supportAgent } from '../agents/support-agent'
+import { recallScorer } from '../scorers/recall-scorer'
+
+const memory = await supportAgent.getMemory()
+const resourceId = 'ci-user'
+
+const items = [
+  { input: 'Cats are mammals', groundTruth: 'mammals', thread: `ds-${randomUUID()}` },
+  { input: 'Dogs are mammals too', groundTruth: 'mammals', thread: `ds-${randomUUID()}` },
+]
+
+for (const it of items) {
+  await memory!.createThread({ threadId: it.thread, resourceId, title: it.input })
+}
+
+const dataset = await mastra.datasets.create({
+  name: 'support-recall',
+  description: 'Per-item memory via inline task + item metadata',
+})
+
+await dataset.addItems({
+  items: items.map(it => ({
+    input: it.input,
+    groundTruth: it.groundTruth,
+    metadata: { threadId: it.thread, resourceId },
+  })),
+})
+
+const summary = await dataset.startExperiment({
+  scorers: [recallScorer],
+  task: async ({ input, metadata }) => {
+    const { threadId, resourceId: rid } = (metadata ?? {}) as {
+      threadId: string
+      resourceId: string
+    }
+    const result = await supportAgent.generate(input as string, {
+      memory: { thread: threadId, resource: rid },
+    })
+    return result.text
+  },
+})
+```
+
+인라인`task` receives the item's `metadata`, so each row can drive its own thread without changing the agent or any scorer. Visit [runEvals reference](/reference/evals/run-evals) and [Dataset reference](/reference/datasets/dataset) for full configuration.
+
+## 관련된 {/* #related */}
+
+* [CI의 득점자 실행](/docs/evals/running-in-ci)
+* [실험 진행 중](/docs/datasets/running-experiments)
+* [관찰 기억](/docs/memory/observational-memory)
+* [runEvals API 참조](/reference/evals/run-evals)

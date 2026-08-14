@@ -1,0 +1,155 @@
+---
+title: "참조: LeaseProvider | PubSub"
+description: "LeaseProvider에 대한 API 참조는 분산 임대 계약 Mastra의 신호 계층이 프로세스 전체에서 단일 소유자를 선택하는 데 사용합니다."
+packages:
+  - "@mastra/core"
+---
+
+# 임대 공급자
+
+`LeaseProvider`이벤트 전달과 별도로 분산 임대 계약입니다([`PubSub`](/reference/pubsub/base)). 마스트라의[신호 레이어](/docs/long-running-agents/signals)이를 사용하여 여러 프로세스(예: 서버리스 호출)에서 리소스(가장 일반적으로 스레드 키)에 대한 단일 소유자를 선택합니다. 소유자는 Agent 스트림을 깨우고 실행하는 프로세스이므로 다른 프로세스는 경쟁 실행을 시작하는 대신 후속 작업을 여기에 라우팅합니다.
+
+임대는 pub/sub와는 별개의 문제입니다. 백엔드 구현`LeaseProvider` only when it can actually coordinate a lock, such as Redis via atomic `SET`/Lua, or an in-memory map for single-process. Backends that can't lease omit it; the signals runtime feature-detects the capability and falls back to a no-op provider, preserving single-process behavior.
+
+내장[`RedisStreamsPubSub`](/reference/pubsub/redis-streams) implements `LeaseProvider`, which is what enables signals to coordinate across instances in distributed and serverless deployments.
+
+## 사용예 {/* #usage-example */}
+
+당신은 건설하지 않습니다`LeaseProvider` directly. Configure a pub/sub backend that implements it (such as `RedisStreamsPubSub`) on the `Mastra` constructor, and the signals runtime uses it automatically for cross-process coordination.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RedisStreamsPubSub } from '@mastra/redis-streams'
+
+export const mastra = new Mastra({
+  // RedisStreamsPubSub implements both PubSub and LeaseProvider
+  pubsub: new RedisStreamsPubSub({
+    url: process.env.REDIS_URL,
+  }),
+})
+```
+
+커스텀 백엔드에서 임대를 구현하려면 아래 메서드를 구현하세요. 신호 런타임은 기능을 구조적으로 감지하여(패키지 경계를 넘어 작동함) 모든 메소드가 존재할 때만 이를 사용합니다.
+
+```typescript title="src/mastra/pubsub.ts"
+import { PubSub } from '@mastra/core/events'
+import type { LeaseProvider } from '@mastra/core/events'
+
+export class CustomPubSub extends PubSub implements LeaseProvider {
+  async acquireLease(key: string, owner: string, ttlMs: number) {
+    // Atomically claim the lease, or report the current holder.
+    return { acquired: true, owner }
+  }
+
+  // ...getLeaseOwner, releaseLease, renewLease, transferLease
+}
+```
+
+## 행동 양식 {/* #methods */}
+
+### 임대 {/* #leasing */}
+
+#### `acquireLease(key, owner, ttlMs)` {/* #acquireleasekey-owner-ttlms */}
+
+키에 대한 임대를 원자적으로 획득하려고 시도합니다. 보고`{ acquired: true, owner }` if the caller claimed the lease, or `{ acquired: false, owner }` where `owner` is the current holder, so the caller can route follow-up work to them. The same owner can call `acquireLease` idempotently to renew or re-claim.
+
+```typescript
+const result = await pubsub.acquireLease('thread:abc', runId, 15000)
+
+if (result.acquired) {
+  // This process owns the thread, so wake and run the agent.
+} else {
+  // result.owner holds the lease, so route the signal to them.
+}
+```
+
+보고:`Promise<{ acquired: boolean; owner?: string }>`
+
+<PropertiesTable
+  content={[
+{
+  name: 'key',
+  type: 'string',
+  description: 'The lease key, such as a thread key.',
+},
+{
+  name: 'owner',
+  type: 'string',
+  description:
+    'Identifier for the owner, such as a `runId`. The same owner can call `acquireLease` idempotently to renew or release.',
+},
+{
+  name: 'ttlMs',
+  type: 'number',
+  description: 'Time-to-live in milliseconds for the lease.',
+},
+]}
+/>
+
+#### `getLeaseOwner(key)` {/* #getleaseownerkey */}
+
+임대의 현재 소유자를 읽거나`undefined` if no lease is held.
+
+```typescript
+const owner = await pubsub.getLeaseOwner('thread:abc')
+```
+
+보고:`Promise<string | undefined>`
+
+#### `releaseLease(key, owner)` {/* #releaseleasekey-owner */}
+
+임대를 해제합니다. 호출자가 현재 소유자가 아닌 경우에는 아무 작업도 수행할 수 없습니다. 구현은 해제하기 전에 원자적으로 소유권을 확인하므로 다른 소유자에 의한 동시 갱신이 방해받지 않습니다.
+
+```typescript
+await pubsub.releaseLease('thread:abc', runId)
+```
+
+보고:`Promise<void>`
+
+#### `renewLease(key, owner, ttlMs)` {/* #renewleasekey-owner-ttlms */}
+
+소유한 기존 임대를 갱신합니다.`owner`, extending its TTL. Returns `true` if the renewal succeeded and the caller still owns the lease, or `false` if the lease was lost (TTL expired or another owner took it).
+
+```typescript
+const stillOwned = await pubsub.renewLease('thread:abc', runId, 15000)
+
+if (!stillOwned) {
+  // Lost the lease, so stop renewing and let the new owner take over.
+}
+```
+
+보고:`Promise<boolean>`
+
+#### `transferLease(key, fromOwner, toOwner, ttlMs)` {/* #transferleasekey-fromowner-toowner-ttlms */}
+
+보유 임대를 원자적으로 이전합니다.`fromOwner` to `toOwner` and refreshes its TTL without releasing the key in between. This gap-free primitive lets a follow-up owner take over the same key immediately after the current owner finishes. For example, a queued follow-up run can take over when a thread run completes. A naive release-then-acquire briefly leaves the key empty. A racing process could then win the freed lease and start a competing run.
+
+보고`true` if `fromOwner` still held the lease and ownership moved to `toOwner`, or `false` if the lease was already lost, in which case the caller should fall back to a fresh `acquireLease`.
+
+```typescript
+const transferred = await pubsub.transferLease('thread:abc', currentRunId, nextRunId, 15000)
+
+if (!transferred) {
+  // Lease was lost, so acquire fresh instead.
+  await pubsub.acquireLease('thread:abc', nextRunId, 15000)
+}
+```
+
+보고:`Promise<boolean>`
+
+:::경고
+원자적으로 전송을 수행할 수 없는 백엔드는 최선의 노력으로 전송을 구현해야 합니다.`releaseLease(fromOwner)` followed by `acquireLease(toOwner)`, and document that the swap is non-atomic, since a racing process can win the key in the gap. Keeping the method required means callers have a single code path and atomicity is an explicit per-backend decision.
+:::
+
+## 능력 탐지 {/* #capability-detection */}
+
+신호 런타임이 감지합니다.`LeaseProvider` structurally rather than with `instanceof`, so detection works even when a separately published backend resolves a different copy of `@mastra/core`. A value is treated as a `LeaseProvider` when it exposes all five methods (`acquireLease`, `getLeaseOwner`, `releaseLease`, `renewLease`, `transferLease`).
+
+구성된 Pub/Sub 백엔드가 구현되지 않는 경우`LeaseProvider`, the runtime falls back to an always-win no-op provider. Every caller wins its own lease race, and release, renew, and transfer are inert, which preserves the expected single-process behavior.
+
+## 관련된 {/* #related */}
+
+* [PubSub](/reference/pubsub/base): 임대와는 별도로 이벤트 배송 계약
+* [RedisStreamsPubSub](/reference/pubsub/redis-streams): 구현하는 내장 백엔드`LeaseProvider`
+* [신호](/docs/long-running-agents/signals): 프로세스 전반에 걸쳐 스레드 실행을 조정하기 위해 임대를 사용하는 런타임
+* [채널](/docs/capabilities/channels/overview): 임대를 사용하여 서버리스 및 다중 인스턴스 배포에서 Agent 실행을 조정합니다.

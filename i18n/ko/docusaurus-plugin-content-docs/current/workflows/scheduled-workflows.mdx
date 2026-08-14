@@ -1,0 +1,190 @@
+---
+title: "예약된 Workflow | Workflow"
+description: "Workflow 정의에서 '일정' 필드를 선언하여 크론 일정에 따라 Workflow를 실행합니다."
+packages:
+  - "@mastra/core"
+---
+
+# 예약된 Workflow
+
+선언하다`schedule`필드를 입력하면 Mastra는 사용자가 지정한 cron에서 이를 실행합니다. 동일한 Workflow를 직접 호출할 수 있습니다.`workflow.start()`, 예약된 실행 및 수동 실행은 단일 실행 경로를 공유합니다.
+
+## 빠른 시작 {/* #quickstart */}
+
+다음 Workflow는 뉴욕 시간으로 매일 오전 9시에 실행됩니다. 등록하세요`Mastra` as you would any other workflow, the scheduler picks it up automatically.
+
+```typescript title="src/mastra/workflows/daily-report.ts"
+import { createWorkflow, createStep } from '@mastra/core/workflows'
+import { z } from 'zod'
+
+const sendReport = createStep({
+  id: 'send-report',
+  inputSchema: z.object({ userId: z.string() }),
+  outputSchema: z.object({ ok: z.boolean() }),
+  execute: async ({ inputData }) => {
+    // ...send the report for inputData.userId
+    return { ok: true }
+  },
+})
+
+export const dailyReport = createWorkflow({
+  id: 'daily-report',
+  inputSchema: z.object({ userId: z.string() }),
+  outputSchema: z.object({ ok: z.boolean() }),
+  schedule: {
+    cron: '0 9 * * *',
+    timezone: 'America/New_York',
+    inputData: { userId: 'system' },
+  },
+})
+  .then(sendReport)
+  .commit()
+```
+
+별도의 "일정 등록" 호출은 발생하지 않습니다. 스케줄러가 읽습니다.`schedule` straight off the workflow when `Mastra` boots.
+
+## 무엇`schedule` changes {/* #what-schedule-changes */}
+
+선언하는 Workflow`schedule` is auto-promoted to the **evented execution engine**. The public API (`workflow.start()`, `workflow.startAsync()`, `streamLegacy()`, `resume()`)은 변경되지 않았습니다.`EventedWorkflow extends Workflow`일치하는 서명으로 각 메서드를 재정의합니다. 코드에서는 예약된 실행과 수동 실행을 구별할 수 없습니다.
+
+프로모션에는 한 가지 실질적인 의미가 있습니다. 이벤트 실행에는 동시 업데이트를 지원하는 스토리지 어댑터가 필요합니다. 예를 들어`@mastra/libsql`. If your adapter doesn't, `createRun()` throws a clear error pointing at the `schedule` field. Switch adapters or remove the schedule.
+
+## 단일 일정 {/* #single-schedule */}
+
+객체를 전달합니다.`schedule` for a workflow that fires on one cadence:
+
+```typescript title="src/mastra/workflows/daily-report.ts"
+const dailyReport = createWorkflow({
+  id: 'daily-report',
+  schedule: {
+    cron: '0 9 * * *',
+    timezone: 'America/New_York',
+    inputData: { userId: 'system' },
+  },
+  // ...
+})
+```
+
+전지:
+
+* `cron`(필수): 5, 6, 7부분으로 구성된 크론 표현식입니다. Workflow 생성 시 검증됩니다.
+* `timezone`(선택 사항): IANA 시간대(예:`America/New_York`. Defaults to the host's local timezone. Set this explicitly in production so fire times don't depend on server locale.
+* `inputData`(선택 사항): 모든 실행 시 Workflow의 입력으로 전달되는 페이로드입니다.
+* `initialState`(선택 사항): 실행의 초기 상태입니다.
+* `requestContext`(선택 사항): 실행에 첨부된 요청 컨텍스트입니다.
+* `metadata`(선택 사항): 일정 행과 함께 지속되는 임의의 메타데이터입니다.
+
+## 여러 일정 {/* #multiple-schedules */}
+
+여러 케이던스에서 동일한 Workflow를 실행하려면 배열을 전달하세요. 각 항목에는 고유한 마구간이 필요합니다.`id`:
+
+```typescript title="src/mastra/workflows/status-check.ts"
+const statusCheck = createWorkflow({
+  id: 'status-check',
+  schedule: [
+    { id: 'morning', cron: '0 9 * * *', inputData: { window: 'morning' } },
+    { id: 'evening', cron: '0 18 * * *', inputData: { window: 'evening' } },
+  ],
+  // ...
+})
+```
+
+각 항목은 독립적인 일정 행을 생성하고 자체 크론에서 실행되며 Studio 일정 보기에 별도로 표시됩니다.
+
+## Studio에서 일정 보기 {/* #viewing-schedules-in-studio */}
+
+Studio 표면 일정은 Workflow 내부의 탭이 아닌 최상위 영역으로 표시됩니다.
+
+* **모든 일정**: 열려 있는`/workflows/schedules` for a cross-workflow list. Each row shows the workflow id, cron, next fire, and the most recent run's status, so the list answers "is anything broken?" at a glance.
+* **Workflow로 필터링됨**: 추가`?workflowId=<id>` to scope the list to a single workflow, for example `/workflows/schedules?workflowId=daily-report`.
+* **일정 세부정보**: 열려는 행을 선택하세요.`/workflows/schedules/:scheduleId`. The page shows schedule metadata and **Pause** / **Resume** controls, followed by the full trigger history.
+
+Workflow의 헤더에는 다음이 포함됩니다.**Schedules** action when the workflow has at least one schedule:
+
+* 하나의 일정이 일치하면 작업이 해당 세부 정보 페이지로 바로 연결됩니다.
+* 여러 일정: 작업은 다음 위치의 Workflow 필터링 목록에 연결됩니다.`/workflows/schedules?workflowId=<id>`.
+* 일정 없음: 작업이 숨겨집니다.
+
+### 트리거 기록 {/* #trigger-history */}
+
+모든 화재는 실행 ID, 예약 시간, 실제 화재 시간 및 게시 상태가 포함된 트리거 행을 기록합니다. 일정 세부 정보 페이지는 각 트리거를 해당 Workflow 실행에 연결하고 다음을 표시합니다.
+
+* 실행 상태(`running`, `success`, `failed`, `suspended`, `canceled`) as a badge.
+* 실행의 시작 시간 및 기간입니다.
+* 실행의 전체 그래프 보기에 대한 링크는 다음과 같습니다.`/workflows/:workflowId/graph/:runId`.
+* 에이`pending` badge for triggers whose run record hasn't been written yet, due to a race between trigger publish and run snapshot.
+* 에이`publish failed` badge with the publish error when the scheduler couldn't enqueue the run at all.
+
+비종료 상태의 트리거는 패널이 터미널 상태에 도달할 때까지 5초마다 폴링하도록 합니다. 목록에는 페이지가 매겨져 있으므로 장기 실행 일정은 수천 개의 행을 앞에 로드하지 않습니다.
+
+## 런타임 시 일정 일시 중지 {/* #pausing-a-schedule-at-runtime */}
+
+프로덕션 환경에서 예약된 Workflow가 잘못 실행되는 경우 데이터베이스를 다시 배포하거나 직접 편집할 필요가 없습니다. SDK에서 일시중지합니다.
+
+```typescript
+import { MastraClient } from '@mastra/client-js'
+
+const client = new MastraClient({ baseUrl: 'http://localhost:4111' })
+
+// Schedule ids are derived from the workflow id: `wf_<workflowId>` for a
+// single declarative schedule, or `wf_<workflowId>__<scheduleId>` when you
+// declare multiple schedules per workflow as an array.
+await client.pauseSchedule('wf_daily-report')
+// ...investigate, ship a fix, then:
+await client.resumeSchedule('wf_daily-report')
+```
+
+Studio에서 일정 세부정보 페이지를 열고**Pause** or **Resume** in the header.
+
+알아야 할 몇 가지 규칙:
+
+* 일시정지는 지속됩니다. 상태는 일정 테이블에 기록되며 프로세스를 다시 시작하고 재배포해도 유지됩니다. 선언적 구성 upsert는 변경하는 경우에도 사용자가 설정한 상태를 덮어쓰지 않습니다.`cron`, `timezone`, or other fields.
+* 다시 계산 재개`nextFireAt` from now. A schedule paused for a week doesn't fire seven backlogged runs the moment you resume it. It fires on the next regular cron tick.
+* 다음으로 일시중지 해제`resumeSchedule` or the **Resume** button in Studio. Editing the workflow's `schedule` config doesn't unpause a paused row.
+* 일시 중지와 재개는 멱등원입니다. 이미 일시 중지된 일정에 대해 일시 중지를 호출하는 것은 작동하지 않습니다.
+* 이 작업 재정의는 기존 일정을 제어합니다. 코드에서 선언적 일정을 작성합니다. 선언적 일정은 다음을 통해 코드에서 생성, 삭제 및 편집됩니다.`schedule` field on `createWorkflow`. To create schedules imperatively at runtime instead, use the unified [`mastra.schedules`](/docs/long-running-agents/schedules) service with a `workflowId`.
+
+기본 HTTP 경로는 다음과 같습니다.`POST /api/schedules/:scheduleId/pause` and `POST /api/schedules/:scheduleId/resume`. Both require the `schedules:write` permission.
+
+## 변경 사항을 적용하여 재배포 {/* #redeploying-with-changes */}
+
+변경할 때`schedule` config and redeploy, Mastra diffs the existing schedule row against the new config:
+
+* 만약에`cron` or `timezone` changed, `nextFireAt` is recomputed.
+* 을 텐데`inputData`, `initialState`, or `metadata` changed, the row is patched in place and the next fire time is preserved.
+* 사용자가 설정한 상태(예: 다음을 통해 일시중지됨)`client.pauseSchedule`) and fire history are never overwritten.
+
+Workflow에서 일정 항목 제거`schedule` array deletes its row on the next boot.
+
+## 배포 토폴로지 {/* #deployment-topology */}
+
+내장된 스케줄러는 다음을 사용합니다.`setInterval` tick loop to poll the schedules table and claim due rows. It dispatches workflow runs through the in-process pubsub. It assumes a long-lived host process.
+
+### 장기 호스트(권장) {/* #long-lived-host-recommended */}
+
+Fly Machines, Railway, Render, AWS ECS, GKE 또는 자체 서버와 같은 대상을 배포하면 크론 틱 사이에 Mastra 프로세스가 활성 상태로 유지됩니다. 일정은 추가 설정 없이 작동됩니다. 프로덕션 배포의 경우 스케줄러를 다음과 같이 실행할 수 있습니다.[dedicated worker process](/docs/deployment/workers#scheduler-worker) to isolate it from the API layer.
+
+### 서버리스 플랫폼 {/* #serverless-platforms */}
+
+Vercel, Netlify, AWS Lambda 및 Cloudflare Workers와 같은 서비스로서의 기능 플랫폼은 각 요청 후에 프로세스를 종료합니다. 틱 루프는 두 번째 틱을 얻지 못하기 때문에 코드에 선언된 일정은 현재 내장된 스케줄러가 있는 이러한 플랫폼에서 실행되지 않습니다.
+
+이러한 플랫폼에서는 다음을 사용합니다.[`@mastra/inngest`](#inngest-workflows) instead. Inngest is serverless-native and holds the cron state for you.
+
+## 수집 Workflow {/* #inngest-workflows */}
+
+그만큼`schedule` field documented on this page drives Mastra's built-in scheduler. If you use `@mastra/inngest`, scheduled workflows are configured through Inngest's own `cron` field on `createFunction` and fire on Inngest's scheduler instead.
+
+실제적인 의미:
+
+* 수집 일정은 Studio에 표시되지 않습니다.`/workflows/schedules` view.
+* Workflow 헤더**Schedules** action doesn't show for Inngest workflows.
+* `client.pauseSchedule`그리고`client.resumeSchedule` don't control Inngest schedules.
+
+Ingest 일정을 관리하세요.[Inngest dashboard](https://www.inngest.com/docs/guides/scheduled-functions). Use Mastra schedules when you want Mastra to own scheduling end to end.
+
+## 관련된 {/* #related */}
+
+* [Workflow 개요](/docs/workflows/overview)
+* [일시중단 및 재개](/docs/workflows/suspend-and-resume)
+* [노동자](/docs/deployment/workers):[scheduler worker](/docs/deployment/workers#scheduler-worker) runs cron schedules in a dedicated process
+* [Agent 일정](/docs/long-running-agents/schedules): 크론 일정에 따라 Workflow 대신 Agent를 실행하고 다음을 통해 런타임에 두 일정 유형을 모두 관리합니다.`mastra.schedules`.

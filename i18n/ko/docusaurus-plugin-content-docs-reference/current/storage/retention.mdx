@@ -1,0 +1,328 @@
+---
+title: "참조: 스토리지 보존(프룬) | 저장"
+description: "Mastra 스토리지의 보존 정책 및 prune()에 대한 API 참조입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/libsql"
+  - "@mastra/pg"
+---
+
+# 보관 유지
+
+기본적으로 스토리지는 무제한으로 늘어납니다. 보존은 선택 가능한 연령 기반 정리 시스템입니다. 테이블별로 선언합니다.`maxAge`정책`retention`구성한 다음 호출하세요.`storage.prune()`구성된 기간보다 오래된 행을 삭제합니다. 구성하지 않은 모든 항목은 영원히 유지되므로 선택하기 전까지는 동작이 변경되지 않습니다.
+
+`prune()`행을 삭제합니다. 이는 성장을 제한하며 대규모 테이블(일괄 처리, 제한, 재개 가능, 취소 가능)에 대해 실행하는 것이 안전합니다. 절대로 디스크를 회수하지 않습니다. SQLite/libSQL에서는 해제된 페이지가 향후 쓰기에서 재사용되므로 파일 크기는 더 이상 커지지 않지만 디스크는 OS에 다시 전달됩니다(예:`VACUUM`) is left to the underlying database and the operator to manage.
+
+고정 커버**growth tables** only: tables that accumulate rows unbounded as a side effect of normal operation (conversation history, telemetry, job and run records, schedule fire history, event feeds). User-authored artifacts and config (agents, skills, workspaces, prompt blocks, datasets, schedule definitions, channel installations, and so on) grow with user intent and are edited or deleted explicitly, so they're not valid retention keys.
+
+참조 구현은 다음과 같습니다.[libSQL](/reference/storage/libsql), [PostgreSQL](/reference/storage/postgresql), and [MongoDB](/reference/storage/mongodb). Other adapters keep rows forever until they implement retention.
+
+## 사용예 {/* #usage-example */}
+
+선언하다`retention` on any `MastraCompositeStore` (or an adapter that extends it, such as `LibSQLStore`), then call `prune()` from your own scheduler.
+
+```typescript title="src/mastra/index.ts"
+import { LibSQLStore } from '@mastra/libsql'
+
+const storage = new LibSQLStore({
+  id: 'mastra-storage',
+  url: 'file:./mastra.db',
+  retention: {
+    memory: {
+      messages: { maxAge: '30d' },
+      threads: { maxAge: '90d', batchSize: 500 },
+    },
+    observability: {
+      spans: { maxAge: '7d' },
+    },
+  },
+})
+
+// Wire this to your own cron/scheduler: Mastra never runs it for you.
+const results = await storage.prune()
+```
+
+`retention`완전히 입력되었습니다. 키는 실제 도메인 키여야 하며, 각 테이블 키는 도메인이 보존 자격이 있다고 선언한 키여야 합니다. 객체를 저장소 구성에 직접 전달하면 유형이 확인됩니다. 독립형으로 빌드하는 경우 다음을 사용하십시오.`satisfies RetentionConfig` so unknown domains or tables are compile errors:
+
+```typescript
+import type { RetentionConfig } from '@mastra/core/storage'
+
+const retention = {
+  memory: {
+    messages: { maxAge: '30d' }, // ok
+    bogus: { maxAge: '30d' }, // Error: not a memory retention table
+  },
+  bogusDomain: {}, // Error: not a storage domain
+} satisfies RetentionConfig
+```
+
+## 보관 구성 {/* #retention-config */}
+
+설정`retention` field on the store config.
+
+<PropertiesTable
+  content={[
+{
+  name: 'retention',
+  type: 'RetentionConfig',
+  isOptional: true,
+  description: 'Per-domain, per-table age policies. Unset domains and tables are kept forever.',
+  properties: [
+    {
+      type: 'RetentionConfig',
+      parameters: [
+        {
+          name: '[domain]',
+          type: 'Record<TableKey, TableRetentionPolicy>',
+          isOptional: true,
+          description:
+            "A real storage domain key (e.g. `memory`, `observability`). Maps that domain's retention-eligible table keys to their policies.",
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+### 테이블보존정책 {/* #tableretentionpolicy */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'maxAge',
+  type: 'Duration',
+  description:
+    "Maximum age to keep rows. Rows whose anchor timestamp is strictly older than `Date.now() - maxAge` are eligible for deletion. A number is milliseconds, or a string with a unit suffix: `ms`, `s`, `m`, `h`, `d`, `w` (e.g. `'30d'`, `'12h'`).",
+},
+{
+  name: 'batchSize',
+  type: 'number',
+  isOptional: true,
+  defaultValue: '1000',
+  description:
+    'Rows deleted per batch. Each batch is its own transaction, which bounds lock duration and WAL growth on large tables.',
+},
+]}
+/>
+
+### 보존 적격 테이블 {/* #retention-eligible-tables */}
+
+각 도메인은 해당 테이블 중 수명을 정리할 수 있는 테이블과 비교를 고정하는 타임스탬프 열을 선언합니다. 앵커는 이렇게 선택됩니다`maxAge` means what you'd expect for that data. Append-only logs use creation time, and live state uses last activity. Jobs and runs use completion time, so in-flight work is never pruned.
+
+| 도메인 | 테이블 키 | 앵커 컬럼 |`maxAge` measures |
+| - | - | - | - |
+| `memory` | `threads` | `createdAt` | Thread age |
+| `memory` | `messages` | `createdAt` | Message age |
+| `memory` | `resources` | `createdAt`| 자원연령 |
+|`threadState` | `threadState` | `updatedAt`| 비활성: 여전히 활성 상태인 스레드의 상태가 유지됩니다. |
+|`observability` | `spans` | `startedAt`| 스팬 연령 |
+|`observability` | `metrics` | `timestamp`| 측정항목 이벤트 기간(v-next에만 해당) |
+|`observability` | `logs` | `timestamp`| 로그 이벤트 기간(v-next에만 해당) |
+|`observability` | `scores` | `timestamp`| 점수 이벤트 연령(v-next에만 해당) |
+|`observability` | `feedback` | `timestamp`| 피드백 이벤트 기간(v-next에만 해당) |
+|`scores` | `scorers` | `createdAt`| 점수 기록 연령 |
+|`workflows` | `workflowSnapshot` | `updatedAt`| 비활성, 일시 중단 또는 장기 실행 Workflow가 유지됨 |
+|`backgroundTasks` | `backgroundTasks` | `completedAt`| 완료 이후 시간, 진행 중인 작업(`NULL`)은 절대 가지치기되지 않습니다 |
+|`experiments` | `experiments` | `completedAt`| 완료 이후 시간, 실행 중인 실험은 절대 정리되지 않습니다 |
+|`notifications` | `notifications` | `createdAt`| 알림 연령 |
+|`harness` | `sessions` | `createdAt`| 세션 기록 연령 |
+|`schedules` | `triggers` | `actual_fire_at`| 화재 역사 시대(epoch-ms 열) |
+
+:::메모
+
+* 기억`observational_memory` table has no timestamp anchor, so it can't be age-pruned and isn't a valid retention key.
+* 실험은 전체 단위로 정리됩니다. 오래된 실험의 결과 행은 함께 삭제되므로(결과는 상위 항목과 함께 계단식으로 표시됨) 실행이 부분적으로 삭제된 상태로 남지 않습니다. 보관은 별도로 하지 않습니다.`results` key.
+* 을 위한`schedules`, the growth table is the fire history (`schedule_triggers`, one row per fire): schedule definitions are config and aren't pruned.
+* PostgreSQL에서 타임스탬프 앵커는 시간대 인식 미러 열을 사용합니다(예:`createdAtZ`, `completedAtZ`).
+* LibSQL 및 PostgreSQL은 다음을 제외한 위의 모든 도메인을 지원합니다.`harness`, which PostgreSQL doesn't implement. MongoDB supports all except `threadState` and `harness`.
+* v-next PostgreSQL Observability 도메인은 일별로 분할된 테이블에 신호 이벤트를 저장합니다(`spans`, `metrics`, `logs`, `scores`, `feedback`). For it, `prune()` drops whole day partitions (or TimescaleDB chunks) that are entirely older than the cutoff instead of deleting rows: effective level of detail is one day, and a partition is only dropped once its entire day is past `maxAge`. `PruneResult.deleted` reports the number of rows in the dropped partitions.
+
+:::
+
+## 행동 양식 {/* #methods */}
+
+### 보유 {/* #retention */}
+
+#### `prune(options?)` {/* #pruneoptions */}
+
+구성된 것보다 오래된 행을 삭제합니다.`maxAge` across every domain that has a policy in `retention`. Returns one `PruneResult` per table touched. With no `retention` configured it's a no-op returning `[]`.
+
+`prune()`수백만 개의 행이 있는 테이블에서 안전하도록 설계되었습니다. 제한된 일괄 처리 청크(각 일괄 처리는 자체 트랜잭션임)로 삭제하므로 긴 잠금이 필요하지 않거나 트랜잭션 로그가 부풀어오르지 않습니다. 결코 실행되지 않습니다`VACUUM`.
+
+통과하다`options.retention` to replace the configured policies for that call only: for example to skip a domain (keep chat history) or prune more aggressively than the standing config. The store's configured `retention` is unchanged.
+
+앵커 열 인덱스는 처음에 느리게 생성됩니다.`prune()` call for each table with a policy (never at `init()`) so deployments that don't configure retention pay no extra index write or disk overhead. The first prune of an existing large table pays a one-time index build. Subsequent prunes reuse the index.
+
+```typescript
+const results = await storage.prune({
+  maxRows: 50_000, // cap work this call
+  pauseMs: 50, // breathe between batches
+})
+
+for (const r of results) {
+  console.log(`${r.domain}.${r.table}: deleted ${r.deleted}, done=${r.done}`)
+}
+
+// One-off pass with different policies (configured retention untouched):
+await storage.prune({
+  retention: {
+    observability: { spans: { maxAge: '1d' } },
+  },
+})
+```
+
+보고:`Promise<PruneResult[]>`
+
+##### 정리 옵션 {/* #pruneoptions-1 */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'maxBatches',
+  type: 'number',
+  isOptional: true,
+  description:
+    "Maximum delete batches per table per call. When reached, that table's result is returned with `done: false`.",
+},
+{
+  name: 'maxRows',
+  type: 'number',
+  isOptional: true,
+  description:
+    "Maximum rows deleted per table per call. When reached, that table's result is returned with `done: false`.",
+},
+{
+  name: 'pauseMs',
+  type: 'number',
+  isOptional: true,
+  description: 'Delay in milliseconds between batches, to avoid starving live traffic.',
+},
+{
+  name: 'signal',
+  type: 'AbortSignal',
+  isOptional: true,
+  description:
+    'Cooperative cancellation. The batch loop checks it between batches and stops cleanly, returning partial results with `done: false`.',
+},
+{
+  name: 'retention',
+  type: 'RetentionConfig',
+  isOptional: true,
+  description:
+    "Replaces the store's configured retention policies for this call only — e.g. to skip a domain or prune more aggressively. The configured `retention` is unchanged.",
+},
+]}
+/>
+
+##### 정리결과 {/* #pruneresult */}
+
+각 결과는 한 테이블의 진행 상황을 설명합니다.
+
+```typescript
+interface PruneResult {
+  domain: string // e.g. 'memory'
+  table: string // physical table name, e.g. 'mastra_messages'
+  deleted: number // rows deleted during this call
+  done: boolean // false => eligible rows remain; call prune() again
+}
+```
+
+## 일정에 따라 정리 실행 {/* #running-prune-on-a-schedule */}
+
+`prune()`내장된 스케줄러가 없습니다. 실행 시기를 직접 결정하세요. 제한되어 있으므로 단일 호출로 모든 항목을 삭제할 수는 없습니다. 어떤 결과가 나왔을 때`done: false`, eligible rows remain and you call again on the next tick. This keeps each invocation short and lets a large backlog drain over several runs.
+
+```typescript
+// Runs on your own cron (node-cron, a workflow schedule, an external job, etc.).
+async function retentionTick() {
+  const results = await storage.prune({ maxRows: 100_000, pauseMs: 25 })
+  const incomplete = results.filter(r => !r.done)
+  if (incomplete.length) {
+    // Rows remain; the next scheduled tick will continue where this one stopped.
+    console.log(
+      'retention still draining:',
+      incomplete.map(r => `${r.domain}.${r.table}`),
+    )
+  }
+}
+```
+
+다음을 사용하여 장기간 실행되는 정리를 취소할 수도 있습니다.`AbortSignal`: the loop stops between batches and returns partial results with `done: false`, so the next run resumes cleanly.
+
+## MongoDB TTL 인덱스(프룬 대체) {/* #mongodb-ttl-indexes-alternative-to-prune */}
+
+MongoDB는 네이티브를 제공합니다[TTL (Time-To-Live) indexes](https://www.mongodb.com/docs/manual/core/index-ttl/) that automatically delete expired documents without requiring manual `prune()` calls. This is a database-level feature that runs as a background thread.
+
+:::note\[TTL과 prune()을 사용하는 경우]
+
+**다음과 같은 경우 MongoDB TTL 인덱스를 사용하세요.**
+
+* 유지 관리가 필요 없는 자동화된 삭제를 원합니다.
+* 보관 기간은 고정되어 있습니다(예: "항상 30일").
+* 데이터베이스 기반 솔루션을 선호합니다.
+
+**사용`prune()` when:**
+
+* 삭제 시기를 세밀하게 제어해야 합니다.
+* 업무 시간 동안 삭제 비율을 제한하고 싶습니다.
+* 재개 가능하고 취소 가능한 정리 작업이 필요합니다.
+* 여러 데이터베이스가 포함된 복합 스토리지를 사용하고 있습니다.
+
+두 가지 접근 방식 모두 유효합니다. TTL이 더 간단합니다.`prune()` gives more control.
+:::
+
+### MongoDB에서 TTL 인덱스 설정 {/* #setting-up-ttl-indexes-on-mongodb */}
+
+TTL 색인은 날짜 필드에서 작동합니다. MongoDB는 60초마다 인덱스를 확인하고 날짜 필드 + TTL 기간 \< 현재 시간인 문서를 삭제합니다.
+
+```typescript
+import { MongoDBStore } from '@mastra/mongodb'
+
+const storage = new MongoDBStore({
+  id: 'mongodb-storage',
+  uri: process.env.MONGODB_URI!,
+  dbName: process.env.MONGODB_DB_NAME!,
+  indexes: [
+    // Messages expire after 30 days
+    {
+      collection: 'mastra_messages',
+      keys: { createdAt: 1 },
+      options: { expireAfterSeconds: 30 * 24 * 60 * 60 }, // 30 days
+    },
+    // Threads expire after 90 days
+    {
+      collection: 'mastra_threads',
+      keys: { createdAt: 1 },
+      options: { expireAfterSeconds: 90 * 24 * 60 * 60 }, // 90 days
+    },
+    // Spans expire after 7 days
+    {
+      collection: 'mastra_ai_spans',
+      keys: { startedAt: 1 },
+      options: { expireAfterSeconds: 7 * 24 * 60 * 60 }, // 7 days
+    },
+  ],
+})
+```
+
+:::팁
+TTL 인덱스는 문서가 만료된 직후 문서를 삭제하지만(백그라운드 스레드는 ~60초마다 실행됨) 정확한 타이밍은 보장되지 않습니다. 정확하고 즉각적인 정리를 위해 다음을 사용하세요.`prune()` instead.
+:::
+
+## 디스크 회수 중 {/* #reclaiming-disk */}
+
+`prune()`행을 삭제하지만 데이터베이스 파일을 축소하지는 않습니다. SQLite/libSQL에서 해제된 페이지는 사용 가능 목록에 추가되고 향후 쓰기에서 재사용되므로 파일 크기가 더 이상 커지지 않습니다. 대부분의 사용자에게는 이 방법만으로도 무한한 크기 증가 문제가 해결됩니다.
+
+여유 공간을 OS에 다시 전달하는 것은 Mastra가 관리하지 않는 별도의 문제입니다. 특별히 파일을 축소해야 하는 경우 기본 데이터베이스의 압축을 실행합니다(예:`VACUUM` on self-hosted libSQL) yourself in a maintenance window. A full `VACUUM` locks the file and needs roughly twice the file size in free disk. On PostgreSQL, autovacuum reclaims dead tuples for reuse automatically; a manual `VACUUM FULL` is only needed if you must return disk to the OS.
+
+MongoDB의 경우 삭제된 문서는 향후 삽입 시 재사용됩니다. 디스크 공간을 확보하려면 다음을 실행하세요.[`db.runCommand({ compact: "collection_name" })`](https://www.mongodb.com/docs/manual/reference/command/compact/) during a maintenance window.
+
+:::참고\[libSQL 및 Turso][Turso Cloud](/reference/storage/libsql) manages storage compaction for you, so there's nothing to reclaim manually. This applies only to self-hosted libSQL files.
+:::
+
+## 관련된 {/* #related */}
+
+* [libSQL 스토리지](/reference/storage/libsql)
+* [PostgreSQL 스토리지](/reference/storage/postgresql)
+* [복합 스토리지](/reference/storage/composite)
+* [스토리지 개요](/reference/storage/overview)

@@ -1,0 +1,191 @@
+---
+title: "참고: 답변 유사성 득점자 | 평가"
+description: "CI/CD 테스트에 대한 실제 답변과 Agent 출력을 비교하는 Mastra의 답변 유사성 점수 측정기에 대한 문서입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+# 답변 유사성 득점자
+
+그만큼`createAnswerSimilarityScorer()`함수는 Agent의 출력이 정답과 얼마나 유사한지 평가하는 채점자를 생성합니다. 이 채점기는 답변이 예상되고 시간이 지남에 따라 일관성을 보장하려는 CI/CD 테스트 시나리오를 위해 특별히 설계되었습니다.
+
+## 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'model',
+  type: 'LanguageModel',
+  required: true,
+  description: 'The language model used to evaluate semantic similarity between outputs and ground truth.',
+},
+{
+  name: 'options',
+  type: 'AnswerSimilarityOptions',
+  required: false,
+  description: 'Configuration options for the scorer.',
+  properties: [
+    {
+      type: 'AnswerSimilarityOptions',
+      parameters: [
+        {
+          name: 'requireGroundTruth',
+          type: 'boolean',
+          required: false,
+          defaultValue: 'true',
+          description:
+            'Whether to require ground truth for evaluation. If false, missing ground truth returns score 0.',
+        },
+        {
+          name: 'semanticThreshold',
+          type: 'number',
+          required: false,
+          defaultValue: '0.8',
+          description: 'Weight for semantic matches vs exact matches (0-1).',
+        },
+        {
+          name: 'exactMatchBonus',
+          type: 'number',
+          required: false,
+          defaultValue: '0.2',
+          description: 'Additional score bonus for exact matches (0-1).',
+        },
+        {
+          name: 'missingPenalty',
+          type: 'number',
+          required: false,
+          defaultValue: '0.15',
+          description: 'Penalty per missing key concept from ground truth.',
+        },
+        {
+          name: 'contradictionPenalty',
+          type: 'number',
+          required: false,
+          defaultValue: '1.0',
+          description: 'Penalty for contradictory information. High value ensures wrong answers score near 0.',
+        },
+        {
+          name: 'extraInfoPenalty',
+          type: 'number',
+          required: false,
+          defaultValue: '0.05',
+          description: 'Mild penalty for extra information not present in ground truth (capped at 0.2).',
+        },
+        {
+          name: 'scale',
+          type: 'number',
+          required: false,
+          defaultValue: '1',
+          description: 'Score scaling factor.',
+        },
+      ],
+    },
+  ],
+},
+]}
+/>
+
+이 함수는 MastraScorer 클래스의 인스턴스를 반환합니다. 그만큼`.run()` method accepts the same input as other scorers (see the [MastraScorer reference](./mastra-scorer)), but **진실이 필요하다**실행 개체에 제공됩니다.
+
+## `.run()`보고 {/* #run-returns */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'runId',
+  type: 'string',
+  description: 'The id of the run (optional).',
+},
+{
+  name: 'score',
+  type: 'number',
+  description:
+    'Similarity score between 0-1 (or 0-scale if custom scale used). Higher scores indicate better similarity to ground truth.',
+},
+{
+  name: 'reason',
+  type: 'string',
+  description: 'Human-readable explanation of the score with actionable feedback.',
+},
+{
+  name: 'preprocessStepResult',
+  type: 'object',
+  description: 'Extracted semantic units from output and ground truth.',
+},
+{
+  name: 'analyzeStepResult',
+  type: 'object',
+  description: 'Detailed analysis of matches, contradictions, and extra information.',
+},
+{
+  name: 'preprocessPrompt',
+  type: 'string',
+  description: 'The prompt used for semantic unit extraction.',
+},
+{
+  name: 'analyzePrompt',
+  type: 'string',
+  description: 'The prompt used for similarity analysis.',
+},
+{
+  name: 'generateReasonPrompt',
+  type: 'string',
+  description: 'The prompt used for generating the explanation.',
+},
+]}
+/>
+
+## 채점 세부정보 {/* #scoring-details */}
+
+채점자는 다단계 프로세스를 사용합니다.
+
+1. **발췌**: 출력과 Ground Truth를 의미 단위로 분해합니다.
+2. **분석하다**: 단위를 비교하고 일치, 모순, 격차를 식별합니다.
+3. **점수**: 모순에 대한 페널티를 적용하여 가중 유사성을 계산합니다.
+4. **이유**: 사람이 읽을 수 있는 설명을 생성합니다.
+
+점수 계산:`max(0, base_score - contradiction_penalty - missing_penalty - extra_info_penalty) × scale`
+
+## 예 {/* #example */}
+
+다양한 시나리오에서 Agent 응답이 실제와 유사한지 평가합니다.
+
+```typescript title="src/example-answer-similarity.ts"
+import { runEvals } from '@mastra/core/evals'
+import { createAnswerSimilarityScorer } from '@mastra/evals/scorers/prebuilt'
+import { myAgent } from './agent'
+
+const scorer = createAnswerSimilarityScorer({ model: '__GATEWAY_OPENAI_MODEL__' })
+
+const result = await runEvals({
+  data: [
+    {
+      input: 'What is 2+2?',
+      groundTruth: '4',
+    },
+    {
+      input: 'What is the capital of France?',
+      groundTruth: 'The capital of France is Paris',
+    },
+    {
+      input: 'What are the primary colors?',
+      groundTruth: 'The primary colors are red, blue, and yellow',
+    },
+  ],
+  scorers: [scorer],
+  target: myAgent,
+  onItemComplete: ({ scorerResults }) => {
+    console.log({
+      score: scorerResults[scorer.id].score,
+      reason: scorerResults[scorer.id].reason,
+    })
+  },
+})
+
+console.log(result.scores)
+```
+
+자세한 내용은`runEvals`, see the [runEvals reference](/reference/evals/run-evals).
+
+이 득점자를 Agent에 추가하려면 다음을 참조하세요.[Scorers overview](/docs/evals/overview#adding-scorers-to-agents) guide.

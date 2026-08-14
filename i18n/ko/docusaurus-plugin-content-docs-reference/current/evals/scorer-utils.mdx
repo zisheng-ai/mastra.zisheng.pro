@@ -1,0 +1,549 @@
+---
+title: "참조: Scorer 유틸리티 | 평가"
+description: "득점자 실행 입력 및 출력(텍스트 콘텐츠, 추론, 시스템 메시지 및 Tool 호출 포함)에서 데이터를 추출하기 위한 유틸리티 기능입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/evals"
+---
+
+# 득점자 유틸리티
+
+Mastra는 득점자 실행 입력 및 출력에서 ​​데이터를 추출하고 처리하는 데 도움이 되는 유틸리티 기능을 제공합니다. 이러한 유틸리티는 다음과 같은 경우에 특히 유용합니다.`preprocess`커스텀 스코어러 단계.
+
+## 수입 {/* #import */}
+
+```typescript
+import {
+  getAssistantMessageFromRunOutput,
+  getReasoningFromRunOutput,
+  getUserMessageFromRunInput,
+  getSystemMessagesFromRunInput,
+  getCombinedSystemPrompt,
+  extractToolCalls,
+  extractInputMessages,
+  extractAgentResponseMessages,
+  compareTrajectories,
+  createTrajectoryTestRun,
+} from '@mastra/evals/scorers/utils'
+```
+
+궤적 추출 기능은 다음에서 사용할 수 있습니다.`@mastra/core/evals`:
+
+```typescript
+import {
+  extractTrajectory,
+  extractWorkflowTrajectory,
+  extractTrajectoryFromTrace,
+} from '@mastra/core/evals'
+```
+
+## 메시지 추출 {/* #message-extraction */}
+
+### `getAssistantMessageFromRunOutput` {/* #getassistantmessagefromrunoutput */}
+
+실행 출력의 첫 번째 보조 메시지에서 텍스트 콘텐츠를 추출합니다.
+
+```typescript
+const scorer = createScorer({
+  id: 'my-scorer',
+  description: 'My scorer',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    const response = getAssistantMessageFromRunOutput(run.output)
+    return { response }
+  })
+  .generateScore(({ results }) => {
+    return results.preprocessStepResult?.response ? 1 : 0
+  })
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'output',
+  type: 'ScorerRunOutputForAgent',
+  isOptional: true,
+  description: 'The scorer run output (array of MastraDBMessage)',
+},
+]}
+/>
+
+**보고:** `string | undefined` - The assistant message text, or undefined if no assistant message is found.
+
+### `getUserMessageFromRunInput` {/* #getusermessagefromruninput */}
+
+실행 입력의 첫 번째 사용자 메시지에서 텍스트 콘텐츠를 추출합니다.
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const userMessage = getUserMessageFromRunInput(run.input);
+  return { userMessage };
+})
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'input',
+  type: 'ScorerRunInputForAgent',
+  isOptional: true,
+  description: 'The scorer run input containing input messages',
+},
+]}
+/>
+
+**보고:** `string | undefined` - The user message text, or undefined if no user message is found.
+
+### `extractInputMessages` {/* #extractinputmessages */}
+
+모든 입력 메시지에서 텍스트 콘텐츠를 배열로 추출합니다.
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const allUserMessages = extractInputMessages(run.input);
+  return { conversationHistory: allUserMessages.join("\n") };
+})
+```
+
+**보고:** `string[]` - Array of text strings from each input message.
+
+### `extractAgentResponseMessages` {/* #extractagentresponsemessages */}
+
+모든 어시스턴트 응답 메시지에서 텍스트 콘텐츠를 배열로 추출합니다.
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const allResponses = extractAgentResponseMessages(run.output);
+  return { allResponses };
+})
+```
+
+**보고:** `string[]` - Array of text strings from each assistant message.
+
+## 추론 추출 {/* #reasoning-extraction */}
+
+### `getReasoningFromRunOutput` {/* #getreasoningfromrunoutput */}
+
+실행 출력에서 ​​추론 텍스트를 추출합니다. 이는 다음과 같은 추론 Model의 응답을 평가할 때 특히 유용합니다.`deepseek-reasoner` that produce chain-of-thought reasoning.
+
+추론은 두 위치에 저장될 수 있습니다.
+
+1. `content.reasoning`- 메시지 내용의 문자열 필드
+2. `content.parts`- 부품으로`type: 'reasoning'` containing `details`
+
+```typescript
+import {
+  getReasoningFromRunOutput,
+  getAssistantMessageFromRunOutput,
+} from '@mastra/evals/scorers/utils'
+
+const reasoningQualityScorer = createScorer({
+  id: 'reasoning-quality',
+  name: 'Reasoning Quality',
+  description: 'Evaluates the quality of model reasoning',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    const reasoning = getReasoningFromRunOutput(run.output)
+    const response = getAssistantMessageFromRunOutput(run.output)
+    return { reasoning, response }
+  })
+  .analyze(({ results }) => {
+    const { reasoning } = results.preprocessStepResult || {}
+    return {
+      hasReasoning: !!reasoning,
+      reasoningLength: reasoning?.length || 0,
+      hasStepByStep: reasoning?.includes('step') || false,
+    }
+  })
+  .generateScore(({ results }) => {
+    const { hasReasoning, reasoningLength } = results.analyzeStepResult || {}
+    if (!hasReasoning) return 0
+    // Score based on reasoning length (normalized to 0-1)
+    return Math.min(reasoningLength / 500, 1)
+  })
+  .generateReason(({ results, score }) => {
+    const { hasReasoning, reasoningLength } = results.analyzeStepResult || {}
+    if (!hasReasoning) {
+      return 'No reasoning was provided by the model.'
+    }
+    return `Model provided ${reasoningLength} characters of reasoning. Score: ${score}`
+  })
+```
+
+<PropertiesTable
+  content={[
+{
+  name: 'output',
+  type: 'ScorerRunOutputForAgent',
+  isOptional: true,
+  description: 'The scorer run output (array of MastraDBMessage)',
+},
+]}
+/>
+
+**보고:** `string | undefined` - The reasoning text, or undefined if no reasoning is present.
+
+## 시스템 메시지 추출 {/* #system-message-extraction */}
+
+### `getSystemMessagesFromRunInput` {/* #getsystemmessagesfromruninput */}
+
+표준 시스템 메시지와 태그가 지정된 시스템 메시지(Memory 지침과 같은 특수 Prompt)를 모두 포함하여 실행 입력에서 모든 시스템 메시지를 추출합니다.
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const systemMessages = getSystemMessagesFromRunInput(run.input);
+  return { 
+    systemPromptCount: systemMessages.length,
+    systemPrompts: systemMessages 
+  };
+})
+```
+
+**보고:** `string[]` - Array of system message strings.
+
+### `getCombinedSystemPrompt` {/* #getcombinedsystemprompt */}
+
+모든 시스템 메시지를 이중 줄 바꿈으로 결합된 단일 Prompt 문자열로 결합합니다.
+
+```typescript prettier:false
+.preprocess(({ run }) => {
+  const fullSystemPrompt = getCombinedSystemPrompt(run.input);
+  return { fullSystemPrompt };
+})
+```
+
+**보고:** `string` - Combined system prompt string.
+
+## Tool 호출 추출 {/* #tool-call-extraction */}
+
+### `extractToolCalls` {/* #extracttoolcalls */}
+
+Tool 이름, 호출 ID 및 메시지 배열에서의 해당 위치를 포함하여 실행 출력에서 ​​모든 Tool 호출에 대한 정보를 추출합니다.
+
+```typescript
+const toolUsageScorer = createScorer({
+  id: 'tool-usage',
+  description: 'Evaluates tool usage patterns',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    const { tools, toolCallInfos } = extractToolCalls(run.output)
+    return {
+      toolsUsed: tools,
+      toolCount: tools.length,
+      toolDetails: toolCallInfos,
+    }
+  })
+  .generateScore(({ results }) => {
+    const { toolCount } = results.preprocessStepResult || {}
+    // Score based on appropriate tool usage
+    return toolCount > 0 ? 1 : 0
+  })
+```
+
+**보고:**
+
+```typescript prettier:false
+{
+  tools: string[];           // Array of tool names
+  toolCallInfos: ToolCallInfo[];  // Detailed tool call information
+}
+```
+
+어디`ToolCallInfo` is:
+
+```typescript
+type ToolCallInfo = {
+  toolName: string // Name of the tool
+  toolCallId: string // Unique call identifier
+  messageIndex: number // Index in the output array
+  invocationIndex: number // Index within message's tool invocations
+}
+```
+
+## 테스트 유틸리티 {/* #test-utilities */}
+
+이러한 유틸리티는 채점자 개발을 위한 테스트 데이터를 생성하는 데 도움이 됩니다.
+
+### `createTestMessage` {/* #createtestmessage */}
+
+생성`MastraDBMessage` object for testing purposes.
+
+```typescript
+import { createTestMessage } from '@mastra/evals/scorers/utils'
+
+const userMessage = createTestMessage({
+  content: 'What is the weather?',
+  role: 'user',
+})
+
+const assistantMessage = createTestMessage({
+  content: 'The weather is sunny.',
+  role: 'assistant',
+  toolInvocations: [
+    {
+      toolCallId: 'call-1',
+      toolName: 'weatherTool',
+      args: { location: 'London' },
+      result: { temp: 20 },
+      state: 'result',
+    },
+  ],
+})
+```
+
+### `createAgentTestRun` {/* #createagenttestrun */}
+
+채점자 테스트를 위한 완전한 테스트 실행 개체를 생성합니다.
+
+```typescript
+import { createAgentTestRun, createTestMessage } from '@mastra/evals/scorers/utils'
+
+const testRun = createAgentTestRun({
+  inputMessages: [createTestMessage({ content: 'Hello', role: 'user' })],
+  output: [createTestMessage({ content: 'Hi there!', role: 'assistant' })],
+})
+
+// Run your scorer with the test data
+const result = await myScorer.run({
+  input: testRun.input,
+  output: testRun.output,
+})
+```
+
+## 궤적 유틸리티 {/* #trajectory-utilities */}
+
+### `extractTrajectory` {/* #extracttrajectory */}
+
+추출`Trajectory` from agent output messages (`MastraDBMessage[]`). Converts tool invocations into `ToolCallStep` objects. The `runEvals` pipeline calls this automatically for trajectory scorers: you only need it for direct testing.
+
+에서 사용 가능`@mastra/core/evals`.
+
+```typescript
+import { extractTrajectory } from '@mastra/core/evals'
+
+const trajectory = extractTrajectory(agentOutputMessages)
+// trajectory.steps — ToolCallStep[] extracted from toolInvocations
+// trajectory.rawOutput — the original MastraDBMessage[] array
+```
+
+**보고:** `Trajectory`: Contains `steps: TrajectoryStep[]`, `totalDurationMs`, and `rawOutput`.
+
+### `extractWorkflowTrajectory` {/* #extractworkflowtrajectory */}
+
+추출`Trajectory` from workflow step results. Converts `StepResult` records into `WorkflowStepStep` objects, respecting the execution path ordering.
+
+에서 사용 가능`@mastra/core/evals`.
+
+```typescript
+import { extractWorkflowTrajectory } from '@mastra/core/evals'
+
+const trajectory = extractWorkflowTrajectory(
+  workflowResult.steps, // Record<string, StepResult>
+  workflowResult.stepExecutionPath, // string[] (optional)
+)
+// trajectory.steps — WorkflowStepStep[] in execution order
+```
+
+**보고:** `Trajectory`: Contains `steps: TrajectoryStep[]`, `totalDurationMs`, and `rawWorkflowResult`.
+
+### `extractTrajectoryFromTrace` {/* #extracttrajectoryfromtrace */}
+
+계층 구조를 구축합니다.`Trajectory` from observability trace spans (`SpanRecord[]`). Reconstructs the parent-child span tree and maps each span to the appropriate `TrajectoryStep` discriminated union type with nested `children`.
+
+이는 저장 공간이 있는 경우 선호되는 추출 방법입니다. 그만큼`runEvals` pipeline calls this automatically when the target's `Mastra` instance has a configured storage backend. It produces richer trajectories than `extractTrajectory` or `extractWorkflowTrajectory` because it captures the full execution tree, including nested agent runs, tool calls, and model generations.
+
+에서 사용 가능`@mastra/core/evals`.
+
+```typescript
+import { extractTrajectoryFromTrace } from '@mastra/core/evals'
+
+// After fetching a trace from the observability store
+const traceData = await observabilityStore.getTrace({ traceId })
+const trajectory = extractTrajectoryFromTrace(traceData.spans, rootSpanId)
+// trajectory.steps — hierarchical TrajectoryStep[] with children
+```
+
+**매개변수:**
+
+* `spans` (`SpanRecord[]`): Array of span records from a trace query.
+* `rootSpanId` (`string`, optional): Span ID to use as the starting point. When omitted, uses spans with no parent.
+
+**보고:** `Trajectory`: Contains `steps: TrajectoryStep[]` with recursive `children` and `totalDurationMs`.
+
+#### 스팬 유형 매핑 {/* #span-type-mapping */}
+
+| 스팬 유형 | 궤적 단계 유형 | 추출된 주요 필드 |
+| - | - | - |
+|`TOOL_CALL` | `tool_call` | `toolArgs`, `toolResult`, `success` |
+| `MCP_TOOL_CALL` | `mcp_tool_call` | `toolArgs`, `toolResult`, `mcpServer`, `success` |
+| `MODEL_GENERATION` | `model_generation` | `modelId`, `promptTokens`, `completionTokens`, `finishReason` |
+| `AGENT_RUN` | `agent_run` | `agentId` (from entity ID) |
+| `WORKFLOW_RUN` | `workflow_run` | `workflowId` (from entity ID) |
+| `WORKFLOW_STEP` | `workflow_step` | `output` |
+| `WORKFLOW_CONDITIONAL` | `workflow_conditional` | `conditionCount`, `selectedSteps` |
+| `WORKFLOW_PARALLEL` | `workflow_parallel` | `branchCount`, `parallelSteps` |
+| `WORKFLOW_LOOP` | `workflow_loop` | `loopType`, `totalIterations` |
+| `WORKFLOW_SLEEP` | `workflow_sleep` | `sleepDurationMs`, `sleepType` |
+| `WORKFLOW_WAIT_EVENT` | `workflow_wait_event` | `eventName`, `eventReceived` |
+| `PROCESSOR_RUN` | `processor_run` | `processorId` |
+
+유형이 있는 범위`GENERIC`, `MODEL_STEP`, `MODEL_CHUNK`, and `WORKFLOW_CONDITIONAL_EVAL` are skipped as noise.
+
+### `compareTrajectories` {/* #comparetrajectories */}
+
+실제 궤적과 예상 궤적을 비교하고 자세한 비교 결과를 반환합니다. 내부적으로 사용됨`createTrajectoryAccuracyScorerCode`.
+
+그만큼`expected` parameter accepts either a `Trajectory` (actual trajectory) or `{ steps: ExpectedStep[] }`. When using `ExpectedStep[]`, you can match by name only or by name + stepType. You can also include data for comparison. See [Expected steps](/reference/evals/trajectory-accuracy#expected-steps) for details.
+
+```typescript
+import { compareTrajectories } from '@mastra/evals/scorers/utils'
+
+// Using ExpectedStep[] (recommended for expectations)
+// Data fields (e.g. toolArgs) are auto-compared when present on expected steps
+const result = compareTrajectories(
+  actualTrajectory,
+  { steps: [{ name: 'search' }, { name: 'summarize', stepType: 'tool_call' }] },
+  { allowRepeatedSteps: true },
+)
+// result.score — 0.0 to 1.0
+// result.missingSteps — step names not found
+// result.extraSteps — unexpected step names
+// result.outOfOrderSteps — steps found but in wrong order
+```
+
+**보고:** `TrajectoryComparisonResult`
+
+### `createTrajectoryTestRun` {/* #createtrajectorytestrun */}
+
+궤적 채점자를 위한 테스트 실행 개체를 만듭니다. 래핑`Trajectory` into the expected `ScorerRun` format.
+
+```typescript
+import { createTrajectoryTestRun } from '@mastra/evals/scorers/utils'
+
+const run = createTrajectoryTestRun({
+  steps: [
+    { stepType: 'tool_call', name: 'search', toolArgs: { q: 'test' } },
+    { stepType: 'tool_call', name: 'summarize' },
+  ],
+})
+
+const result = await trajectoryScorer.run(run)
+```
+
+### `checkTrajectoryEfficiency` {/* #checktrajectoryefficiency */}
+
+단계, 토큰 및 기간 예산에 대해 궤적 효율성을 평가합니다. 또한 중복 호출을 감지합니다(동일한 인수를 가진 동일한 Tool).
+
+```typescript
+import { checkTrajectoryEfficiency } from '@mastra/evals/scorers/utils'
+
+const result = checkTrajectoryEfficiency(trajectory, {
+  maxSteps: 5,
+  maxTotalTokens: 2000,
+  maxTotalDurationMs: 5000,
+  noRedundantCalls: true,
+})
+// result.score — 1.0 if within all budgets, lower with penalties
+// result.redundantCalls — duplicate tool+args combos
+// result.overStepBudget — true if maxSteps exceeded
+// result.overTokenBudget — true if maxTotalTokens exceeded
+// result.overDurationBudget — true if maxTotalDurationMs exceeded
+```
+
+**보고:** `TrajectoryEfficiencyResult`
+
+### `checkTrajectoryBlacklist` {/* #checktrajectoryblacklist */}
+
+궤적에 금지된 Tool나 Tool 호출 순서가 포함되어 있는지 확인합니다.
+
+```typescript
+import { checkTrajectoryBlacklist } from '@mastra/evals/scorers/utils'
+
+const result = checkTrajectoryBlacklist(trajectory, {
+  blacklistedTools: ['deleteAll', 'admin-override'],
+  blacklistedSequences: [['escalate', 'admin-override']],
+})
+// result.score — 1.0 if no violations, 0.0 if any found
+// result.violatedTools — blacklisted tools that were called
+// result.violatedSequences — blacklisted sequences that were detected
+```
+
+**보고:** `TrajectoryBlacklistResult`
+
+### `analyzeToolFailures` {/* #analyzetoolfailures */}
+
+재시도, 대체, 인수 수정을 포함한 Tool 오류 패턴을 감지합니다.
+
+```typescript
+import { analyzeToolFailures } from '@mastra/evals/scorers/utils'
+
+const result = analyzeToolFailures(trajectory, {
+  maxRetriesPerTool: 2,
+})
+// result.score — 1.0 if no failure patterns, lower if patterns detected
+// result.patterns — detected patterns (retry, fallback, arg_correction)
+```
+
+**보고:** `ToolFailureAnalysisResult`
+
+## 완전한 예 {/* #complete-example */}
+
+다음은 여러 유틸리티를 함께 사용하는 방법을 보여주는 전체 예입니다.
+
+```typescript
+import { createScorer } from '@mastra/core/evals'
+import {
+  getAssistantMessageFromRunOutput,
+  getReasoningFromRunOutput,
+  getUserMessageFromRunInput,
+  getCombinedSystemPrompt,
+  extractToolCalls,
+} from '@mastra/evals/scorers/utils'
+
+const comprehensiveScorer = createScorer({
+  id: 'comprehensive-analysis',
+  name: 'Comprehensive Analysis',
+  description: 'Analyzes all aspects of an agent response',
+  type: 'agent',
+})
+  .preprocess(({ run }) => {
+    // Extract all relevant data
+    const userMessage = getUserMessageFromRunInput(run.input)
+    const response = getAssistantMessageFromRunOutput(run.output)
+    const reasoning = getReasoningFromRunOutput(run.output)
+    const systemPrompt = getCombinedSystemPrompt(run.input)
+    const { tools, toolCallInfos } = extractToolCalls(run.output)
+
+    return {
+      userMessage,
+      response,
+      reasoning,
+      systemPrompt,
+      toolsUsed: tools,
+      toolCount: tools.length,
+    }
+  })
+  .generateScore(({ results }) => {
+    const { response, reasoning, toolCount } = results.preprocessStepResult || {}
+
+    let score = 0
+    if (response && response.length > 0) score += 0.4
+    if (reasoning) score += 0.3
+    if (toolCount > 0) score += 0.3
+
+    return score
+  })
+  .generateReason(({ results, score }) => {
+    const { response, reasoning, toolCount } = results.preprocessStepResult || {}
+
+    const parts = []
+    if (response) parts.push('provided a response')
+    if (reasoning) parts.push('included reasoning')
+    if (toolCount > 0) parts.push(`used ${toolCount} tool(s)`)
+
+    return `Score: ${score}. The agent ${parts.join(', ')}.`
+  })
+```

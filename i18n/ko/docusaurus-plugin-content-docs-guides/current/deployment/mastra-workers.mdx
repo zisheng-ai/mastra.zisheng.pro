@@ -1,0 +1,616 @@
+---
+title: "Mastra 작업자 배포 | 전개"
+description: "독립적인 확장, 이벤트 내구성 및 프로세스 격리를 위해 Mastra 작업자를 별도의 프로세스로 배포하는 방법을 알아보세요."
+---
+
+import Steps from "@site/src/components/Steps";
+import StepItem from "@site/src/components/StepItem";
+import Tabs from '@theme/Tabs'
+import TabItem from '@theme/TabItem'
+
+# Mastra 작업자 배포
+
+달리다[Mastra workers](/docs/deployment/workers)별도의 프로세스로 분리되어 API와 독립적으로 오케스트레이션, 예약 및 백그라운드 작업을 확장할 수 있습니다. 이 가이드에서는 Docker Compose 또는 Kubernetes를 사용하여 완전히 분할된 배포를 안내합니다.
+
+:::정보
+이 가이드에서는 작업자를 자체 컨테이너로 분할하는 방법을 다룹니다. API와 함께 프로세스 내에서 실행할 작업자만 필요한 경우 다음을 참조하세요.[Workers](/docs/deployment/workers). No extra setup is required.
+:::
+
+## 시작하기 전에 {/* #before-you-begin */}
+
+다음이 필요합니다.
+
+* 에이[Mastra application](/guides/getting-started/quickstart)
+* [도커](https://docs.docker.com/get-docker/)그리고[Docker Compose](https://docs.docker.com/compose/), or a [Kubernetes](https://kubernetes.io/docs/setup/) cluster with [`kubectl`](https://kubernetes.io/docs/tasks/tools/)
+* 분산형 PubSub 백엔드:[Redis](https://redis.io/) for [`RedisStreamsPubSub`](/reference/pubsub/redis-streams), or a [Google Cloud](https://cloud.google.com/) project for [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub)
+* 모든 컨테이너에서 연결할 수 있는 공유 데이터베이스입니다. 보다[supported storage backends](/reference/workers/overview#supported-storage-backends) for the full list.
+
+:::경고
+기본 인Memory PubSub는 프로세스 전체에 이벤트를 전달할 수 없습니다. 작업자를 별도의 컨테이너로 분할하기 전에 분산형 PubSub 백엔드를 구성해야 합니다.
+:::
+
+## 공유 인프라 구성 {/* #configure-shared-infrastructure */}
+
+포인트`Mastra` instance at a distributed PubSub backend and a shared database. Use environment variables so the same image runs in every container.
+
+<Tabs>
+  <TabItem value="redis" label="Redis Streams + PostgreSQL">
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core/mastra'
+    import { RedisStreamsPubSub } from '@mastra/redis-streams'
+    import { PostgresStore } from '@mastra/pg'
+
+    export const mastra = new Mastra({
+      storage: new PostgresStore({
+        connectionString: process.env.DATABASE_URL!,
+      }),
+      pubsub: new RedisStreamsPubSub({
+        url: process.env.REDIS_URL!,
+      }),
+    })
+    ```
+  </TabItem>
+
+  <TabItem value="gcp" label="Google Cloud Pub/Sub + LibSQL">
+    ```typescript title="src/mastra/index.ts"
+    import { Mastra } from '@mastra/core/mastra'
+    import { GoogleCloudPubSub } from '@mastra/google-cloud-pubsub'
+    import { LibSQLStore } from '@mastra/libsql'
+
+    export const mastra = new Mastra({
+      storage: new LibSQLStore({
+        url: process.env.DATABASE_URL!,
+      }),
+      pubsub: new GoogleCloudPubSub({
+        projectId: process.env.GCP_PROJECT_ID!,
+      }),
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+어느[supported storage backend](/reference/workers/overview#supported-storage-backends) works. Swap the storage adapter for your preferred database.
+
+## 배포 {/* #deploy */}
+
+<Steps>
+  <StepItem>
+    Mastra 애플리케이션을 구축하세요. 출력은 모든 컨테이너에서 실행됩니다.
+
+    ```bash
+    mastra build
+    ```
+
+    이는 독립형을 생성합니다.`.mastra/output/` directory. See [Deploy a Mastra server](/docs/deployment/mastra-server) for details on the build output.
+  </StepItem>
+
+  <StepItem>
+    사전 빌드된 출력을 복사하고 프로덕션 종속성을 설치하는 Dockerfile을 만듭니다.
+
+    ```dockerfile title="app/Dockerfile"
+    FROM node:22-alpine
+
+    WORKDIR /app
+
+    COPY .mastra/output/package.json .mastra/output/.npmrc* ./
+    RUN npm install --omit=dev
+
+    COPY .mastra/output/ .
+
+    EXPOSE 4111
+    CMD ["node", "index.mjs"]
+    ```
+  </StepItem>
+
+  <StepItem>
+    완전히 분할된 토폴로지를 정의합니다. 설정에서는 데이터베이스, PubSub 백엔드, API 서버, 작업자 3개 등 6개의 서비스를 실행합니다. 각 작업자는 서로 다른 이미지로 동일한 이미지를 실행합니다.`MASTRA_WORKERS` value to control which worker starts.
+
+    API 세트`MASTRA_WORKERS: "false"` to disable all event processing. The orchestration worker sets `MASTRA_STEP_EXECUTION_URL` to point step execution requests at the API's internal URL. See [step execution URL](#step-execution-url) for details.
+
+    모든 서비스는`MASTRA_WORKER_AUTH_TOKEN`. Workers include this token in requests to the API so the API can verify the caller is a trusted internal service. See [worker authentication](/docs/server/auth/workers) for details.
+
+    <Tabs>
+      <TabItem value="docker-compose" label="Docker Compose">
+        ```yaml title="docker-compose.yml"
+        services:
+          postgres:
+            image: postgres:16-alpine
+            environment:
+              POSTGRES_USER: mastra
+              POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+              POSTGRES_DB: mastra
+            ports:
+              - '5432:5432'
+            volumes:
+              - pgdata:/var/lib/postgresql/data
+            healthcheck:
+              test: ['CMD-SHELL', 'pg_isready -U mastra']
+              interval: 5s
+              timeout: 3s
+              retries: 5
+
+          redis:
+            image: redis:7-alpine
+            ports:
+              - '6379:6379'
+            healthcheck:
+              test: ['CMD', 'redis-cli', 'ping']
+              interval: 5s
+              timeout: 3s
+              retries: 5
+
+          api:
+            build: ./app
+            ports:
+              - '4111:4111'
+            environment:
+              DATABASE_URL: postgres://mastra:${POSTGRES_PASSWORD}@postgres:5432/mastra
+              REDIS_URL: redis://redis:6379
+              MASTRA_WORKERS: 'false'
+              MASTRA_WORKER_AUTH_TOKEN: ${MASTRA_WORKER_AUTH_TOKEN}
+            depends_on:
+              postgres:
+                condition: service_healthy
+              redis:
+                condition: service_healthy
+            healthcheck:
+              test: ['CMD', 'wget', '-qO-', 'http://localhost:4111/api/agents']
+              interval: 5s
+              timeout: 3s
+              retries: 5
+
+          orchestration-worker:
+            build: ./app
+            environment:
+              DATABASE_URL: postgres://mastra:${POSTGRES_PASSWORD}@postgres:5432/mastra
+              REDIS_URL: redis://redis:6379
+              MASTRA_WORKERS: orchestration
+              MASTRA_STEP_EXECUTION_URL: http://api:4111/api
+              MASTRA_WORKER_AUTH_TOKEN: ${MASTRA_WORKER_AUTH_TOKEN}
+            depends_on:
+              api:
+                condition: service_healthy
+
+          scheduler-worker:
+            build: ./app
+            environment:
+              DATABASE_URL: postgres://mastra:${POSTGRES_PASSWORD}@postgres:5432/mastra
+              REDIS_URL: redis://redis:6379
+              MASTRA_WORKERS: scheduler
+              MASTRA_WORKER_AUTH_TOKEN: ${MASTRA_WORKER_AUTH_TOKEN}
+            depends_on:
+              api:
+                condition: service_healthy
+
+          background-task-worker:
+            build: ./app
+            environment:
+              DATABASE_URL: postgres://mastra:${POSTGRES_PASSWORD}@postgres:5432/mastra
+              REDIS_URL: redis://redis:6379
+              MASTRA_WORKERS: backgroundTasks
+              MASTRA_WORKER_AUTH_TOKEN: ${MASTRA_WORKER_AUTH_TOKEN}
+            depends_on:
+              api:
+                condition: service_healthy
+
+        volumes:
+          pgdata:
+        ```
+
+        만들기`.env` file next to your `docker-compose.yml`:
+
+        ```bash title=".env"
+        POSTGRES_PASSWORD=your-secure-password
+        MASTRA_WORKER_AUTH_TOKEN=your-shared-secret-token
+        ```
+
+        :::참고
+        애플리케이션에 필요한 다른 환경 변수(예:[model provider](/models/providers) API key).
+        :::
+      </TabItem>
+
+      <TabItem value="kubernetes" label="Kubernetes">
+        연결 문자열을 사용하여 네임스페이스와 비밀을 만듭니다.
+
+        ```yaml title="k8s/namespace.yaml"
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: mastra-workers
+        ```
+
+        ```bash
+        kubectl apply -f k8s/namespace.yaml
+        kubectl create secret generic mastra-secrets -n mastra-workers \
+          --from-literal=POSTGRES_PASSWORD='your-password' \
+          --from-literal=DATABASE_URL='postgresql://mastra:your-password@postgres:5432/mastra' \
+          --from-literal=REDIS_URL='redis://redis:6379' \
+          --from-literal=MASTRA_WORKER_AUTH_TOKEN='your-shared-token'
+        ```
+
+        :::참고
+        애플리케이션에 필요한 다른 환경 변수를 추가합니다(예:[model provider](/models/providers) API key) to the Secret or as additional `--from-literal` entries.
+        :::
+
+        클러스터가 가져올 수 있는 레지스트리에 Docker 이미지를 빌드하고 푸시합니다.
+
+        ```bash
+        docker build -t your-registry/mastra-workers:latest ./app
+        docker push your-registry/mastra-workers:latest
+        ```
+
+        데이터베이스, PubSub 백엔드, API, 작업자 3개에 배포 및 서비스를 적용합니다. 아래 예에서는 클러스터 내 Postgres 및 Redis를 사용합니다. 프로덕션에서는 관리형 서비스(예: Amazon RDS, Cloud SQL, ElastiCache, Memorystore)를 사용합니다.
+
+        ```yaml title="k8s/postgres.yaml"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: postgres
+          namespace: mastra-workers
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: postgres
+          template:
+            metadata:
+              labels:
+                app: postgres
+            spec:
+              containers:
+                - name: postgres
+                  image: postgres:16-alpine
+                  ports:
+                    - containerPort: 5432
+                  env:
+                    - name: POSTGRES_USER
+                      value: mastra
+                    - name: POSTGRES_PASSWORD
+                      valueFrom:
+                        secretKeyRef:
+                          name: mastra-secrets
+                          key: POSTGRES_PASSWORD
+                    - name: POSTGRES_DB
+                      value: mastra
+                  volumeMounts:
+                    - name: pgdata
+                      mountPath: /var/lib/postgresql/data
+              volumes:
+                - name: pgdata
+                  emptyDir: {}
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: postgres
+          namespace: mastra-workers
+        spec:
+          selector:
+            app: postgres
+          ports:
+            - port: 5432
+              targetPort: 5432
+        ```
+
+        :::주의
+        위의 Postgres 예제에서는 다음을 사용합니다.`emptyDir` for storage, which means data is lost when the pod restarts. In production, replace it with a `PersistentVolumeClaim` or use a managed database service.
+        :::
+
+        ```yaml title="k8s/redis.yaml"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: redis
+          namespace: mastra-workers
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: redis
+          template:
+            metadata:
+              labels:
+                app: redis
+            spec:
+              containers:
+                - name: redis
+                  image: redis:7-alpine
+                  args: ['--appendonly', 'yes']
+                  ports:
+                    - containerPort: 6379
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: redis
+          namespace: mastra-workers
+        spec:
+          selector:
+            app: redis
+          ports:
+            - port: 6379
+              targetPort: 6379
+        ```
+
+        ```yaml title="k8s/api.yaml"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: api
+          namespace: mastra-workers
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: api
+          template:
+            metadata:
+              labels:
+                app: api
+            spec:
+              containers:
+                - name: api
+                  image: your-registry/mastra-workers:latest
+                  ports:
+                    - containerPort: 4111
+                  env:
+                    - name: MASTRA_WORKERS
+                      value: 'false'
+                  envFrom:
+                    - secretRef:
+                        name: mastra-secrets
+                  readinessProbe:
+                    httpGet:
+                      path: /api/agents
+                      port: 4111
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                  livenessProbe:
+                    httpGet:
+                      path: /api/agents
+                      port: 4111
+                    initialDelaySeconds: 15
+                    periodSeconds: 10
+                  resources:
+                    requests:
+                      cpu: 500m
+                      memory: 512Mi
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: api
+          namespace: mastra-workers
+        spec:
+          selector:
+            app: api
+          ports:
+            - port: 4111
+              targetPort: 4111
+        ```
+
+        ```yaml title="k8s/orchestration-worker.yaml"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: orchestration-worker
+          namespace: mastra-workers
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: orchestration-worker
+          template:
+            metadata:
+              labels:
+                app: orchestration-worker
+            spec:
+              containers:
+                - name: worker
+                  image: your-registry/mastra-workers:latest
+                  env:
+                    - name: MASTRA_WORKERS
+                      value: orchestration
+                    - name: MASTRA_STEP_EXECUTION_URL
+                      value: http://api:4111/api
+                  envFrom:
+                    - secretRef:
+                        name: mastra-secrets
+                  resources:
+                    requests:
+                      cpu: 250m
+                      memory: 256Mi
+        ```
+
+        ```yaml title="k8s/scheduler-worker.yaml"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: scheduler-worker
+          namespace: mastra-workers
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: scheduler-worker
+          template:
+            metadata:
+              labels:
+                app: scheduler-worker
+            spec:
+              containers:
+                - name: worker
+                  image: your-registry/mastra-workers:latest
+                  env:
+                    - name: MASTRA_WORKERS
+                      value: scheduler
+                  envFrom:
+                    - secretRef:
+                        name: mastra-secrets
+                  resources:
+                    requests:
+                      cpu: 250m
+                      memory: 256Mi
+        ```
+
+        ```yaml title="k8s/background-task-worker.yaml"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: background-task-worker
+          namespace: mastra-workers
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: background-task-worker
+          template:
+            metadata:
+              labels:
+                app: background-task-worker
+            spec:
+              containers:
+                - name: worker
+                  image: your-registry/mastra-workers:latest
+                  env:
+                    - name: MASTRA_WORKERS
+                      value: backgroundTasks
+                  envFrom:
+                    - secretRef:
+                        name: mastra-secrets
+                  resources:
+                    requests:
+                      cpu: 250m
+                      memory: 256Mi
+        ```
+
+        모든 매니페스트를 적용하고 API가 준비될 때까지 기다립니다.
+
+        ```bash
+        kubectl apply -f k8s/
+        kubectl wait -n mastra-workers --for=condition=ready pod -l app=api --timeout=90s
+        kubectl wait -n mastra-workers --for=condition=ready pod -l app=orchestration-worker --timeout=60s
+        kubectl wait -n mastra-workers --for=condition=ready pod -l app=scheduler-worker --timeout=60s
+        kubectl wait -n mastra-workers --for=condition=ready pod -l app=background-task-worker --timeout=60s
+        ```
+      </TabItem>
+    </Tabs>
+  </StepItem>
+
+  <StepItem>
+    스택이 실행 중이고 API가 응답하는지 확인합니다.
+
+    <Tabs>
+      <TabItem value="docker-compose-verify" label="Docker Compose">
+        ```bash
+        docker compose up -d
+        docker compose ps
+        curl http://localhost:4111/api/agents
+        ```
+      </TabItem>
+
+      <TabItem value="kubernetes-verify" label="Kubernetes">
+        ```bash
+        kubectl get pods -n mastra-workers
+        kubectl port-forward -n mastra-workers svc/api 4111:4111
+        ```
+
+        별도의 터미널에서:
+
+        ```bash
+        curl http://localhost:4111/api/agents
+        ```
+
+        Agent의 JSON 목록은 API와 작업자가 실행 중인지 확인합니다.
+      </TabItem>
+    </Tabs>
+  </StepItem>
+</Steps>
+
+## 단계 실행 URL {/* #step-execution-url */}
+
+완전히 분할된 배포에서 오케스트레이션 작업자는 API와 별도의 컨테이너에서 실행됩니다. Workflow 이벤트를 처리할 때 HTTP를 통해 단계 실행을 API에 위임합니다.
+
+세트`MASTRA_STEP_EXECUTION_URL` to the API's internal URL, including the `/api` prefix:
+
+```bash
+MASTRA_STEP_EXECUTION_URL=http://api:4111/api
+```
+
+오케스트레이션 작업자가 다음을 보냅니다.`POST` request to `${MASTRA_STEP_EXECUTION_URL}/workflows/:workflowId/runs/:runId/steps/execute` for each step. The API resolves the workflow and executes the step locally.
+
+이 변수가 없으면 오케스트레이션 작업자는 진행 중인 단계를 실행하려고 시도합니다. 이는 작업자가 API와 함께 실행될 때 작동하지만 작업자가 전체 Mastra 런타임에 액세스할 수 없는 분할 배포에서는 실패합니다.
+
+## 스케일링 {/* #scaling */}
+
+오케스트레이션 및 백그라운드 작업 작업자는 수평으로 확장해도 안전합니다. PubSub 소비자 그룹은 인스턴스 전체에 이벤트를 배포하므로 각 이벤트는 한 번 처리됩니다.
+
+<Tabs>
+  <TabItem value="docker-compose-scale" label="Docker Compose">
+    ```bash
+    docker compose up -d --scale orchestration-worker=3
+    docker compose up -d --scale background-task-worker=2
+    ```
+  </TabItem>
+
+  <TabItem value="kubernetes-scale" label="Kubernetes">
+    ```bash
+    kubectl scale deployment/orchestration-worker -n mastra-workers --replicas=3
+    kubectl scale deployment/background-task-worker -n mastra-workers --replicas=2
+    ```
+
+    자동 크기 조정을 위해 HorizonPodAutoscaler를 추가합니다.
+
+    ```yaml title="k8s/hpa.yaml"
+    apiVersion: autoscaling/v2
+    kind: HorizontalPodAutoscaler
+    metadata:
+      name: orchestration-worker
+      namespace: mastra-workers
+    spec:
+      scaleTargetRef:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: orchestration-worker
+      minReplicas: 1
+      maxReplicas: 10
+      metrics:
+        - type: Resource
+          resource:
+            name: cpu
+            target:
+              type: Utilization
+              averageUtilization: 70
+    ```
+
+    :::참고
+    CPU 기반 자동 확장에는 다음이 필요합니다.[metrics-server](https://github.com/kubernetes-sigs/metrics-server) running in the cluster. Managed clusters like GKE, EKS, and AKS include it by default.
+    :::
+  </TabItem>
+</Tabs>
+
+API는 로드 밸런서 뒤에서 수평으로 확장할 수도 있습니다.
+
+**스케줄러 작업자를 확장하지 마세요.**&#xC815;확히 하나의 인스턴스를 실행합니다. 동일한 스토리지를 폴링하는 여러 스케줄러는 동일한 일정에 대해 중복 이벤트를 발생시킵니다.
+
+## 충돌 복구 {/* #crash-recovery */}
+
+분산 PubSub 백엔드가 확인되지 않은 이벤트를 지속하므로 작업자가 충돌로부터 복구됩니다.
+
+* **오케스트레이션 작업자**: 대기 중인 이벤트는 PubSub 백엔드에 유지됩니다. 작업자가 다시 시작되면 중단된 부분부터 다시 시작됩니다.
+* **스케줄러 작업자**: 이벤트가 영구적으로 누락되지 않습니다. 스케줄러는 중단된 시점이 아닌 재시작 시 현재 시간부터 다음 실행 시간을 계산합니다.
+* **단계 실행 중 API**: 오케스트레이션 작업자의 HTTP 요청이 실패합니다. 이벤트가 취소되고 다음 시도에서 다시 전달됩니다.
+
+:::경고
+단계가 이미 실행 중인 동안(예: 절전 모드 중) API가 충돌하면 해당 단계의 작업이 손실됩니다. Workflow 실행이 계속 중단될 수 있습니다.`running` state. Mastra doesn't yet have automatic timeout-based recovery for this scenario.
+:::
+
+## 관련된 {/* #related */}
+
+* [노동자](/docs/deployment/workers): 워커란 무엇이며 언제 사용해야 하는가
+* [작업자 인증](/docs/server/auth/workers): 작업자와 API 간 통신 보안
+* [근로자 참조](/reference/workers/overview): 모든 작업자 유형에 대한 구성 세부정보
+* [CLI 참조](/reference/cli/mastra#mastra-worker-build): `mastra worker build` and `mastra worker start`
+* [PubSub](/docs/server/pubsub): 이벤트 전달 백엔드
+* [Mastra 서버 배포](/docs/deployment/mastra-server): 빌드 출력 및 서버 구성
+* [Kubernetes에 Mastra 배포](/guides/deployment/kubernetes): 내구성 있는 Agent를 사용한 다중 포드 배포

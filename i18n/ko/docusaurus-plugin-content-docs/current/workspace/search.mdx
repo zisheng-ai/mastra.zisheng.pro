@@ -1,0 +1,292 @@
+---
+title: "검색 및 색인화 | 작업공간"
+description: "BM25 키워드 검색, 벡터 의미 검색 또는 하이브리드 모드를 위한 작업 공간 콘텐츠를 색인화합니다."
+packages:
+  - "@mastra/core"
+---
+
+# 검색 및 인덱싱
+
+**추가된 항목:** `@mastra/core@1.1.0`
+
+검색을 통해 Agent은 인덱싱된 작업 공간 파일에서 관련 콘텐츠를 찾을 수 있습니다. Agent가 질문에 답하거나 정보를 찾아야 하는 경우 모든 파일을 읽는 대신 색인된 콘텐츠를 검색할 수 있습니다.
+
+## 작동 원리 {/* #how-it-works */}
+
+작업공간 검색에는 인덱싱과 쿼리라는 두 단계가 있습니다.
+
+### 인덱싱 {/* #indexing */}
+
+콘텐츠를 검색하려면 먼저 색인을 생성해야 합니다. 문서를 색인화하는 경우:
+
+* 콘텐츠가 토큰화됩니다(검색 가능한 용어로 분할됨).
+* BM25의 경우: 용어 빈도 및 문서 통계가 계산됩니다.
+* 벡터의 경우: 콘텐츠는 삽입 기능을 사용하여 삽입되고 벡터 저장소에 저장됩니다.
+
+색인화된 각 문서에는 다음이 포함됩니다.
+
+* **ID**- 고유 식별자(일반적으로 파일 경로)
+* **콘텐츠**- 텍스트 내용
+* **메타데이터**- 문서와 함께 저장된 선택적 키-값 데이터
+
+### 쿼리 중 {/* #querying */}
+
+검색할 때:
+
+1. 쿼리는 인덱싱과 동일한 토큰화/포함을 사용하여 처리됩니다.
+2. 문서는 쿼리와의 관련성을 기준으로 점수가 매겨집니다.
+3. 결과는 점수에 따라 순위가 매겨지고 일치하는 콘텐츠와 함께 반환됩니다.
+
+작업 공간은 BM25 키워드 검색, 벡터 의미 검색, 그리고 두 가지를 결합한 하이브리드 검색이라는 세 가지 검색 모드를 지원합니다.
+
+## BM25 키워드 검색 {/* #bm25-keyword-search */}
+
+BM25는 용어 빈도와 문서 길이를 기준으로 문서의 점수를 매깁니다. 정확한 일치 및 특정 용어에 적합합니다.
+
+```typescript title="src/mastra/workspaces.ts"
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  // highlight-next-line
+  bm25: true,
+})
+```
+
+사용자 정의 BM25 매개변수의 경우(`k1` is term frequency saturation, `b` is document length normalization):
+
+```typescript title="src/mastra/workspaces.ts"
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  bm25: {
+    k1: 1.5,
+    b: 0.75,
+  },
+})
+```
+
+## 벡터 검색 {/* #vector-search */}
+
+벡터 검색은 임베딩을 사용하여 의미상 유사한 콘텐츠를 찾습니다. 벡터 저장 및 임베더 기능이 필요합니다.
+
+```typescript title="src/mastra/workspaces.ts"
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+import { PineconeVector } from '@mastra/pinecone'
+import { embed } from 'ai'
+import { openai } from '@ai-sdk/openai'
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  vectorStore: new PineconeVector({
+    apiKey: process.env.PINECONE_API_KEY,
+    index: 'workspace-index',
+  }),
+  embedder: async (text: string) => {
+    const { embedding } = await embed({
+      model: openai.embedding('text-embedding-3-small'),
+      value: text,
+    })
+    return embedding
+  },
+})
+```
+
+### 일괄 임베딩 {/* #batch-embedding */}
+
+위의 임베더는 한 번에 하나의 텍스트를 가져옵니다. 수백 개의 파일이 있는 작업 영역을 인덱싱하면 공급자를 수백 번 호출하므로 속도가 느리고 비용이 많이 듭니다.
+
+공급자가 일괄 처리를 지원하는 경우(예: OpenAI의`embedMany`), pass an embedder that takes an array of texts and accepts many embeddings back in one call. To opt in, set a `batch: true` property on the function. Mastra checks for that property at runtime and switches to the batched path.
+
+다음 예에서는 단일 텍스트 임베더를 일괄 처리된 임베더로 바꿉니다. embedder 함수는 배열을 가져와 동일한 순서로 임베딩 배열을 반환하며 두 가지 추가 속성도 전달합니다.
+
+* `batch: true`: 함수를 일괄 처리 가능으로 표시합니다. 이 속성이 없으면 Mastra는 한 번에 하나의 텍스트를 호출합니다.
+* `maxBatchSize`: 공급자가 한 번의 호출로 허용하는 가장 큰 배열입니다. Mastra는 더 큰 요청을 이 크기의 청크로 분할하여 병렬로 보냅니다. 이를 공급자의 문서화된 제한(예: OpenAI의 경우 2048, Cohere의 경우 96, Voyage의 경우 128)으로 설정합니다. 하나의 요청으로 보류 중인 모든 텍스트를 보내려면 이를 생략하세요.
+
+```typescript title="src/mastra/workspaces.ts"
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace'
+import { PineconeVector } from '@mastra/pinecone'
+import { embedMany } from 'ai'
+import { openai } from '@ai-sdk/openai'
+
+const model = openai.embedding('text-embedding-3-small')
+
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  vectorStore: new PineconeVector({
+    apiKey: process.env.PINECONE_API_KEY,
+    index: 'workspace-index',
+  }),
+  embedder: Object.assign(
+    async (texts: string[]) => {
+      const { embeddings } = await embedMany({ model, values: texts })
+      return embeddings
+    },
+    { batch: true as const, maxBatchSize: 2048 },
+  ),
+})
+```
+
+`Object.assign`을 추가합니다`batch` and `maxBatchSize` properties to the embedder function. Mastra reads them as metadata and never passes them to the provider.
+
+단일 텍스트 삽입은 여전히 ​​작동합니다. 함수 서명`(text: string) => Promise<number[]>` is unchanged, so existing code keeps running without modification.
+
+## 하이브리드 검색 {/* #hybrid-search */}
+
+키워드 일치와 의미론적 이해를 결합하는 하이브리드 모드를 활성화하려면 BM25와 벡터 검색을 모두 구성하세요.
+
+```typescript title="src/mastra/workspaces.ts"
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  bm25: true,
+  vectorStore: pineconeVector,
+  embedder: embedderFn,
+})
+```
+
+## 맞춤 색인 이름 {/* #custom-index-name */}
+
+기본적으로 검색 색인 이름은 작업공간 ID에서 파생됩니다. 사용자 정의 이름을 설정하려면 다음을 사용하십시오.`searchIndexName`:
+
+```typescript
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  bm25: true,
+  // highlight-next-line
+  searchIndexName: 'my_workspace_vectors',
+})
+```
+
+인덱스 이름은 유효한 SQL 식별자여야 합니다. 문자나 밑줄로 시작하고 문자, 숫자 또는 표시만 포함하고 최대 63자여야 합니다.
+
+## 콘텐츠 인덱싱 {/* #indexing-content */}
+
+### 수동 인덱싱 {/* #manual-indexing */}
+
+사용`workspace.index()` to add content to the search index programmatically. The file paths become document IDs. You can also pass metadata for each document.
+
+```typescript
+// Basic indexing
+await workspace.index('/docs/guide.md', 'Content of the guide...')
+
+// Index with metadata for filtering or context
+await workspace.index('/docs/api.md', apiDocContent, {
+  metadata: {
+    category: 'api',
+    version: '2.0',
+  },
+})
+```
+
+수동 인덱싱은 다음과 같은 경우에 유용합니다.
+
+* 파일에서 제공되지 않은 콘텐츠(예: 데이터베이스 레코드, API 응답)를 색인화하고 있습니다.
+* 색인을 생성하기 전에 콘텐츠를 사전 처리하거나 청크하려는 경우
+* 문서에 맞춤 메타데이터를 추가해야 합니다.
+
+### 자동 인덱싱 {/* #auto-indexing */}
+
+구성`autoIndexPaths` to automatically index files when the workspace initializes. Each entry can be a directory path (indexed recursively) or a glob pattern for selective indexing.
+
+```typescript
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  bm25: true,
+  autoIndexPaths: ['docs', 'support/faq'],
+})
+
+await workspace.init()
+```
+
+언제`init()` is called, all matching files are read and indexed for search. The file path becomes the document ID.
+
+Glob 패턴을 사용하면 특정 파일 형식을 색인화할 수 있습니다.
+
+```typescript
+const workspace = new Workspace({
+  filesystem: new LocalFilesystem({ basePath: './workspace' }),
+  bm25: true,
+  // highlight-next-line
+  autoIndexPaths: ['docs/**/*.md', 'support/**/*.txt'],
+})
+```
+
+## 수색 {/* #searching */}
+
+사용`workspace.search()` to find relevant content. Results are ranked by relevance score.
+
+```typescript
+const results = await workspace.search('password reset')
+
+for (const result of results) {
+  console.log(`${result.id}: ${result.score}`)
+  console.log(result.content)
+}
+```
+
+### 검색 옵션 {/* #search-options */}
+
+다음 옵션을 사용하여 검색 동작을 사용자 정의할 수 있습니다.
+
+```typescript
+const results = await workspace.search('authentication flow', {
+  topK: 10,
+  mode: 'hybrid',
+  minScore: 0.5,
+  vectorWeight: 0.5,
+})
+```
+
+| 옵션 | 설명 |
+| - | - |
+|`topK` | Maximum number of results to return. Default: 5 |
+| `mode` | Search mode: `'bm25'`, `'vector'`, or `'hybrid'`. Defaults to the best available mode based on configuration. |
+| `minScore` | Filter out results below this score threshold (0-1). |
+| `vectorWeight` | In hybrid mode, how much to weight vector scores vs BM25. 0 = all BM25, 1 = all vector, 0.5 = equal. |
+
+### 검색결과 {/* #search-results */}
+
+각 결과에는 다음이 포함됩니다.
+
+```typescript
+interface SearchResult {
+  id: string // Document ID (typically file path)
+  content: string // The matching content
+  score: number // Relevance score (0-1)
+  lineRange?: {
+    // Lines where the match was found
+    start: number
+    end: number
+  }
+  metadata?: Record<string, unknown> // Metadata stored with the document
+  scoreDetails?: {
+    // Score breakdown (hybrid mode only)
+    vector?: number
+    bm25?: number
+  }
+}
+```
+
+**점수 이해:**
+
+* 점수 범위는 0에서 1까지이며, 1이 완벽한 일치를 나타냅니다.
+* BM25 점수는 결과 집합에서 가장 일치하는 항목을 기준으로 정규화됩니다.
+* 벡터 점수는 쿼리와 문서 임베딩 간의 코사인 유사성을 나타냅니다.
+* 하이브리드 모드에서는 점수가 다음을 사용하여 결합됩니다.`vectorWeight` parameter
+
+### 각 모드를 사용하는 경우 {/* #when-to-use-each-mode */}
+
+| 모드 | | 쿼리 예 |
+| - | - | - |
+|`bm25` | Exact terms, technical queries, code | "useState hook", "404 error", "config.yaml" |
+| `vector` | Conceptual queries, natural language | "how to handle user authentication", "best practices for error handling" |
+| `hybrid` | General search, unknown query types | Most agent use cases |
+
+## Agent Tool {/* #agent-tools */}
+
+작업 영역에서 검색을 구성하면 Agent는 콘텐츠 검색 및 인덱싱을 위한 Tool를 받습니다. 보다[workspace class reference](/reference/workspace/workspace-class#search-tools) for details.
+
+## 관련된 {/* #related */}
+
+* [작업공간 개요](/docs/workspace/overview)
+* [RAG 개요](/guides/rag/overview)
+* [작업공간 클래스 참조](/reference/workspace/workspace-class)

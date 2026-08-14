@@ -1,0 +1,128 @@
+---
+title: "목표 | 장기 실행 Agent"
+description: "실행 루프에서 판단되는 Agent에 지속 가능한 목표를 설정하여 목표가 완료되거나 실행 예산이 소진될 때까지 Agent가 계속 작업할 수 있도록 하는 방법을 알아보세요."
+packages:
+  - "@mastra/core"
+  - "@mastra/memory"
+---
+
+# 목표
+
+**추가된 항목:** `@mastra/core@1.42.0`
+
+:::실험적
+
+목표 기능은 베타 단계에 있으며 베타 상태가 종료될 때까지 부 버전에서 주요 변경 사항이 적용됩니다.
+
+:::
+
+목표는 내구성이 있는 스레드 범위의 목표입니다. 즉, 판사 Model이 만족했다고 결정하거나 실행 예산이 소진될 때까지 Agent가 루프 반복을 통해 계속 작업하는 지속적인 명령입니다.
+
+목표는 스레드 상태에서 유지되므로 이미 실행 중인 차례 도중에 새 메시지가 도착하는 경우에도 재로드 후에도 유지되고 루프 내에서 평가됩니다.
+
+목표는 목표와 동일한 기계를 기반으로 구축됩니다.[`isTaskComplete`](/docs/capabilities/subagents): an LLM-as-judge scores the agent's output each iteration and gates the loop. The difference is that a goal is **durable** (stored in thread state, not passed per call) and is set and updated through `Agent` methods rather than per-`stream()` options.
+
+## 목표를 사용해야 하는 경우 {/* #when-to-use-goals */}
+
+모든 호출에 성공 기준을 다시 제공하지 않고 Agent가 여러 반복 및 메시지에서 단일 목표를 향해 계속 작업하도록 하려는 경우 목표를 사용합니다.
+
+* 판사가 완료했다고 말할 때까지 Agent가 추구해야 하는 지속적인 목표입니다.
+* 중간 실행 메시지에서 계속되어야 하는 작업(실시간 실행으로 전달된 메시지는 여전히 목표에 대해 판단됩니다).
+* 스레드를 다시 로드하거나 프로세스를 다시 시작해도 지속되어야 하는 목표입니다.
+
+단일 내에서 일회성 완료 확인을 위해`stream()` call, use [`isTaskComplete`](/docs/capabilities/subagents) instead.
+
+## 빠른 시작 {/* #quickstart */}
+
+목표에는 구성이 필요합니다.[storage](/docs/storage/overview) backend and a memory-backed thread. Add a `goal` config to the agent, a judge model is required for the goal to do anything, then set an objective for a thread:
+
+```typescript title="src/mastra/agents/worker.ts" {8-11}
+import { Agent } from '@mastra/core/agent'
+
+const worker = new Agent({
+  id: 'worker',
+  name: 'worker',
+  instructions: 'You complete software tasks end to end.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory,
+  goal: {
+    judge: '__GATEWAY_OPENAI_MODEL_MINI__',
+    maxRuns: 50,
+  },
+})
+
+// Set the durable objective for a thread.
+await worker.setObjective('Add and test a /health endpoint', {
+  threadId,
+  resourceId,
+})
+
+// The objective is judged each iteration until it's complete or maxRuns is hit.
+const stream = await worker.stream('Start working on the goal', {
+  memory: { thread: threadId, resource: resourceId },
+})
+```
+
+그만큼`goal` config auto-registers the state-signal projection, so the model always sees the current objective as `<current-objective>` in its context without extra setup.
+
+## 목표 단계의 작동 방식 {/* #how-the-goal-step-works */}
+
+목표 단계는 Agent 실행 루프 내에서 바로 실행됩니다.`isTaskComplete`. On a real candidate answer it scores the conversation against the objective and gates the loop:
+
+* **만족하지 않음, 예산이 남음**→ 루프가 계속됩니다. 평가별 피드백이 주입되어 Agent가 반복됩니다.
+* **만족하는**→ 루프가 중지되고 목표가 표시됩니다.`done`.
+* **예산 소진** (`runsUsed >= maxRuns`) → the loop stops and the objective is marked `paused`. Raise `maxRuns`, then resume the objective to continue.
+
+이 단계는 다음과 동일한 게이팅인 백그라운드 작업, 중간 Tool 루프 및 작업 Memory 전용 반복에 대해 무작동입니다.`isTaskComplete`.
+
+**판사 Model은 활성화 스위치입니다.**&#xC2EC;판이 해결하지 못한 경우(목표별 재정의나 Agent의 결정 모두)`goal.judge`), the goal step performs no scoring or budget consumption and emits no `goal` chunk.
+
+효과적인 설정은 목표별 기록 값으로 결정 → Agent`goal` config → built-in default (`maxRuns` `50`, a default judge prompt).
+
+기본적으로 이 단계에서는 다음을 반환하는 내장된 LLM-as-judge 채점기를 사용합니다.`1` when the objective is achieved and `0` otherwise. Supply your own scorer with `goal.scorer` to customize judging.
+
+```typescript title="src/mastra/agents/worker.ts"
+const worker = new Agent({
+  id: 'worker',
+  name: 'worker',
+  instructions: 'You complete software tasks end to end.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory,
+  goal: {
+    // A resolver function lets you inject provider credentials and read the
+    // current judge selection at runtime; returning `undefined` keeps the
+    // goal step a no-op.
+    judge: ({ requestContext }) => resolveJudgeModel(requestContext),
+    maxRuns: 30,
+    prompt: 'Only mark the goal complete when tests pass.',
+  },
+})
+```
+
+각 평가는 입력된`goal` stream chunk (`GoalEvaluationPayload`: `objective`, `iteration`, `maxRuns`, `passed`, `status`, `results`, `reason`, `duration`, `timedOut`, `maxRunsReached`, `suppressFeedback`) so a UI can show goal progress mid-run.
+
+## 목표 관리 {/* #managing-the-objective */}
+
+다음을 사용하여 스레드의 목표를 제어합니다.`Agent` methods. All of them no-op when the run isn't memory-backed (they require storage and a `threadId`):
+
+```typescript title="src/mastra/objective.ts"
+// Read the current objective record.
+const record = await worker.getObjective({ threadId })
+
+// Update options on the active objective (only provided fields are written;
+// unset fields fall back to the agent's `goal` config).
+await worker.updateObjectiveOptions({ threadId, maxRuns: 100 })
+
+// Drop the objective.
+await worker.clearObjective({ threadId })
+```
+
+목표 기록에는 선택사항이 포함됩니다.`activeDurationMs` value for user interfaces that display active pursuit time. Mastra advances this value while an agent runs toward an active objective and checkpoints it when the run ends or waits for tool approval. Missing values represent zero, and the duration measures agent execution rather than the goal's wall-clock age.
+
+목표별 값은 다음에 의해 작성됩니다.`setObjective` / `updateObjectiveOptions` take precedence over the agent's `goal` config, and that precedence is remembered in thread state. See the [`GoalEvaluationPayload` in the ChunkType reference](/reference/streaming/ChunkType) for the full goal chunk shape.
+
+## 관련된 {/* #related */}
+
+* [감독 Agent](/docs/capabilities/subagents): `isTaskComplete` and the rubric scorer
+* [신호 제공자](/docs/long-running-agents/signal-providers): 목표가 맥락에 어떻게 투영되는지
+* [Memory 저장](/docs/storage/overview): 스토리지 백엔드 목표에 필요한

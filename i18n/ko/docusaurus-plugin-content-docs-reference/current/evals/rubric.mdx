@@ -1,0 +1,188 @@
+---
+title: "참고: 루브릭 채점자 | 평가"
+description: "Mastra의 루브릭 채점자에 대한 문서입니다. 기준 체크리스트에 따라 Agent 출력의 등급을 매기고 기준별 피드백이 포함된 이진 평결을 반환하는 판사로서의 LLM 채점자는 isTaskComplete 루프를 구동하도록 설계되었습니다."
+packages:
+  - "@mastra/evals"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# 루브릭 채점자
+
+**추가된 항목:** `@mastra/evals@1.3.0`
+
+그만큼`createRubricScorer()` function creates an LLM-as-judge scorer that grades an agent's output against a rubric (a checklist of criteria). It returns a **binary**점수:`1`모든 필수 기준이 충족되는 경우에만, 그렇지 않으면`0`. 그만큼`reason`상담사가 수정해야 할 사항을 정확히 알 수 있도록 각 기준의 결과를 나열합니다.
+
+이 득점자는[`isTaskComplete`](/reference/streaming/agents/stream). Because `isTaskComplete` treats `score === 1` as "task complete" and injects the `reason` back into the conversation as feedback, the agent keeps iterating until the rubric is satisfied (or `maxSteps` is reached).
+
+## 매개변수 {/* #parameters */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'model',
+  type: 'MastraModelConfig',
+  description:
+    'The language model used to grade the output against the rubric. A smaller, cheaper model is usually sufficient for grading.',
+  required: true,
+},
+{
+  name: 'criteria',
+  type: 'RubricCriterion[] | string',
+  description:
+    'The rubric to grade against. A string is treated as a newline-delimited checklist (each line becomes a required criterion). If omitted, the rubric is read at run time from a `rubric` value on request/additional context; if none resolves, the scorer is a no-op and returns 1.',
+  required: false,
+  children: [
+    {
+      name: 'description',
+      type: 'string',
+      description: 'What the output must satisfy, e.g. "All tests pass" or "Includes a recommendations section".',
+      required: true,
+    },
+    {
+      name: 'required',
+      type: 'boolean',
+      description:
+        'Whether this criterion must be satisfied for the task to be complete. Defaults to true. Optional criteria are graded and reported but do not gate completion.',
+      required: false,
+    },
+    {
+      name: 'id',
+      type: 'string',
+      description: 'Optional stable identifier for the criterion.',
+      required: false,
+    },
+  ],
+},
+{
+  name: 'options',
+  type: 'RubricScorerOptions',
+  description: 'Configuration options for the scorer',
+  required: false,
+  children: [
+    {
+      name: 'scale',
+      type: 'number',
+      description:
+        'Scale factor applied to the score (default: 1). Only relevant for standalone evals — isTaskComplete gates on a score equal to 1.',
+      required: false,
+    },
+  ],
+},
+]}
+/>
+
+## `.run()`보고 {/* #run-returns */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'score',
+  type: 'number',
+  description: '1 when every required criterion is satisfied, otherwise 0 (multiplied by scale).',
+},
+{
+  name: 'reason',
+  type: 'string',
+  description:
+    'A per-criterion explanation listing which criteria are met or unmet and why. This is the text that isTaskComplete injects back into the conversation as feedback.',
+},
+]}
+/>
+
+## isTaskComplete와 함께 사용 {/* #usage-with-istaskcomplete */}
+
+루브릭을 한 번 정의하고 채점자를 첨부합니다.`isTaskComplete`, and the agent self-corrects until the rubric is satisfied:
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+// highlight-next-line
+import { createRubricScorer } from '@mastra/evals/scorers/prebuilt'
+
+const supervisor = new Agent({
+  id: 'supervisor',
+  instructions: `You coordinate research and writing using specialized agents. Delegate to research-agent for facts, then writing-agent for content.`,
+  model: '__GATEWAY_OPENAI_MODEL__',
+  agents: { researchAgent, writingAgent },
+})
+
+// highlight-start
+const rubricScorer = createRubricScorer({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  criteria: [
+    { description: 'The response includes an analysis section' },
+    { description: 'The response includes concrete recommendations' },
+  ],
+})
+// highlight-end
+
+const stream = await supervisor.stream('Research AI in education', {
+  maxSteps: 10,
+  // highlight-start
+  isTaskComplete: {
+    scorers: [rubricScorer],
+    strategy: 'all',
+  },
+  // highlight-end
+})
+```
+
+## 문자열 루브릭 {/* #string-rubric */}
+
+개행으로 구분된 문자열은 공통 목록 마커(`-`, `*`, `1.`) stripped. Every line becomes a required criterion:
+
+```typescript
+const rubricScorer = createRubricScorer({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  criteria: `- All tests pass in the test suite
+- The function is named find_duplicates and accepts a single list argument`,
+})
+```
+
+## 선택적 기준 {/* #optional-criteria */}
+
+게이팅 완료 없이 등급을 매기고 보고하려면 기준을 선택 사항으로 표시합니다.
+
+```typescript
+const rubricScorer = createRubricScorer({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+  criteria: [
+    { description: 'Includes an analysis section', required: true },
+    { description: 'Includes citations', required: false },
+  ],
+})
+```
+
+## 실행당 동적 루브릭 {/* #dynamic-rubric-per-run */}
+
+아니오`criteria` is passed to the factory, the scorer resolves a `rubric` value from the run's request context, additional context, or input. This lets a single scorer instance grade different rubrics per run without rebuilding it:
+
+```typescript
+const rubricScorer = createRubricScorer({
+  model: '__GATEWAY_OPENAI_MODEL_MINI__',
+})
+
+await supervisor.stream('Write find_duplicates', {
+  isTaskComplete: { scorers: [rubricScorer] },
+  requestContext: {
+    rubric: '- All tests pass\n- The function is named find_duplicates',
+  },
+})
+```
+
+루브릭이 해결되지 않으면 채점자는 반환합니다.`1` and doesn't gate the loop.
+
+## 채점 세부정보 {/* #scoring-details */}
+
+득점원은 두 단계로 진행됩니다.
+
+1. **등급**: 판사 Model은 각 기준을 독립적으로 평가하고 기준별 평결을 반환합니다(`satisfied` / not) with reasoning.
+2. **점수**: 결과는`1` only when every required criterion is `satisfied`, otherwise `0`. If no criteria are marked required, all criteria are treated as required.
+
+그만큼`reason` summarizes the result and lists each criterion with its verdict, so a failing grade gives the agent targeted, useful feedback rather than a generic "try again".
+
+## 관련된 {/* #related */}
+
+* [스트림()의 isTaskComplete](/reference/streaming/agents/stream)
+* [감독 Agent](/docs/capabilities/subagents)
+* [createScorer](/reference/evals/create-scorer)

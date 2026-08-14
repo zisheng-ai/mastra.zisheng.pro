@@ -1,0 +1,312 @@
+---
+title: "민감한 데이터 필터 | 프로세서 | Observability"
+description: "자동 데이터 수정을 통해 추적의 민감한 정보를 보호하세요."
+packages:
+  - "@mastra/observability"
+---
+
+# 민감한 데이터 필터
+
+민감한 데이터 필터는 내보내기 전 처리 파이프라인 중에 추적에서 중요한 정보를 수정하는 스팬 프로세서입니다. 이렇게 하면 비밀번호, API 키, 토큰 및 기타 기밀 데이터가 애플리케이션을 벗어나지 않거나 관찰 플랫폼에 저장되지 않습니다.
+
+## 기본 구성 {/* #default-configuration */}
+
+민감한 데이터 필터는 권장 관찰 구성에 포함되어 있습니다.
+
+```ts title="src/mastra/index.ts"
+import {
+  Observability,
+  MastraStorageExporter,
+  MastraPlatformExporter,
+  SensitiveDataFilter,
+} from '@mastra/observability'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'mastra',
+        exporters: [new MastraStorageExporter(), new MastraPlatformExporter()],
+        spanOutputProcessors: [
+          new SensitiveDataFilter(), // Redacts sensitive fields before export
+        ],
+      },
+    },
+  }),
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+})
+```
+
+기본 구성을 사용하면 필터는 다음과 같은 일반적인 민감한 필드 이름을 수정합니다.
+
+* `password`
+* `token`
+* `secret`
+* `key`
+* `apikey`
+* `auth`
+* `authorization`
+* `bearer`
+* `bearertoken`
+* `jwt`
+* `credential`
+* `clientsecret`
+* `privatekey`
+* `refresh`
+* `ssn`
+
+:::메모
+
+필드 일치는 대소문자를 구분하지 않으며 구분 기호를 정규화합니다. 예를 들어,`api-key`, `api_key`, and `Api Key` are all treated as `apikey`.
+
+:::
+
+## 작동 원리 {/* #how-it-works */}
+
+민감한 데이터 필터 프로세스는 수출자에게 전송되기 전에 다음을 통해 검사합니다.
+
+* **속성**- 스팬 메타데이터 및 속성
+* **메타데이터**- 스팬에 연결된 커스텀 메타데이터
+* **입력**- Agent, Tool 및 LLM으로 전송된 데이터
+* **산출**- 대응 및 결과
+* **오류 정보**- 스택 추적 및 오류 세부 정보
+
+민감한 필드가 감지되면 해당 값이 다음으로 대체됩니다.`[REDACTED]` by default. The filter handles nested objects, arrays, and circular references safely.
+
+## 맞춤 구성 {/* #custom-configuration */}
+
+수정되는 필드와 수정 표시 방법을 사용자 정의할 수 있습니다.
+
+```ts title="src/mastra/index.ts"
+import { SensitiveDataFilter, MastraStorageExporter, Observability } from '@mastra/observability'
+
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      production: {
+        serviceName: 'my-service',
+        exporters: [new MastraStorageExporter()],
+        spanOutputProcessors: [
+          new SensitiveDataFilter({
+            // Add custom sensitive fields
+            sensitiveFields: [
+              // Default fields
+              'password',
+              'token',
+              'secret',
+              'key',
+              'apikey',
+              // Custom fields for your application
+              'creditCard',
+              'bankAccount',
+              'routingNumber',
+              'email',
+              'phoneNumber',
+              'dateOfBirth',
+            ],
+            // Custom redaction token
+            redactionToken: '***SENSITIVE***',
+            // Redaction style
+            redactionStyle: 'full', // or 'partial'
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+## 교정 스타일 {/* #redaction-styles */}
+
+필터는 두 가지 수정 스타일을 지원합니다.
+
+### 전체 교정(기본값) {/* #full-redaction-default */}
+
+전체 값을 고정 토큰으로 바꿉니다.
+
+```jsonc prettier:false
+// Before
+{
+  "apiKey": "sk-abc123xyz789def456",
+  "userId": "user_12345"
+}
+
+// After
+{
+  "apiKey": "[REDACTED]",
+  "userId": "user_12345"
+}
+```
+
+### 부분 편집 {/* #partial-redaction */}
+
+전체 값을 노출하지 않고 디버깅하는 데 유용한 첫 번째와 마지막 3자를 표시합니다.
+
+```ts
+new SensitiveDataFilter({
+  redactionStyle: 'partial',
+})
+```
+
+```json prettier:false
+// Before
+{
+  "apiKey": "sk-abc123xyz789def456",
+  "creditCard": "4111111111111111"
+}
+
+// After
+{
+  "apiKey": "sk-…456",
+  "creditCard": "411…111"
+}
+```
+
+정보 유출을 방지하기 위해 7자보다 짧은 값은 완전히 수정됩니다.
+
+## 필드 일치 규칙 {/* #field-matching-rules */}
+
+필터는 지능형 필드 일치를 사용합니다.
+
+1. **대소문자를 구분하지 않음**: `APIKey`, `apikey`, and `ApiKey` are all matched
+2. **구분 기호에 구애받지 않음**: `api-key`, `api_key`, and `apiKey` are treated identically
+3. **정확한 일치**: 정규화 후 필드는 정확히 일치해야 합니다.
+   * `token`성냥`token`, `Token`, `TOKEN`
+   * `token`일치하지 않습니다`promptTokens` or `tokenCount`
+
+## 중첩 객체 처리 {/* #nested-object-handling */}
+
+필터는 중첩된 구조를 재귀적으로 처리합니다.
+
+```json prettier:false
+// Before
+{
+  "user": {
+    "id": "12345",
+    "credentials": {
+      "password": "SuperSecret123!",
+      "apiKey": "sk-production-key"
+    }
+  },
+  "config": {
+    "auth": {
+      "jwt": "eyJhbGciOiJIUzI1NiIs..."
+    }
+  }
+}
+
+// After
+{
+  "user": {
+    "id": "12345",
+    "credentials": {
+      "password": "[REDACTED]",
+      "apiKey": "[REDACTED]"
+    }
+  },
+  "config": {
+    "auth": {
+      "jwt": "[REDACTED]"
+    }
+  }
+}
+```
+
+## 성능 고려사항 {/* #performance-considerations */}
+
+민감한 데이터 필터는 가볍고 효율적으로 설계되었습니다.
+
+* **동기 처리**: 비동기 작업이 없으며 지연 시간에 미치는 영향이 최소화됩니다.
+* **순환 참조 처리**: 복잡한 객체 그래프를 안전하게 처리합니다.
+* **오류 복구**: 필터링이 실패하면 필드가 충돌이 아닌 오류 표시로 대체됩니다.
+
+## 필터 비활성화 {/* #disabling-the-filter */}
+
+민감한 데이터 필터링을 비활성화해야 하는 경우(프로덕션에는 권장되지 않음):
+
+```ts title="src/mastra/index.ts"
+export const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      debug: {
+        serviceName: 'debug-service',
+        spanOutputProcessors: [], // No processors, including no SensitiveDataFilter
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
+})
+```
+
+:::경고
+
+통제된 환경에서만 민감한 데이터 필터링을 비활성화하세요. 외부 서비스나 공유 저장소로 추적을 보낼 때 이 기능을 비활성화하지 마십시오.
+
+:::
+
+## 일반적인 사용 사례 {/* #common-use-cases */}
+
+### 의료 애플리케이션 {/* #healthcare-applications */}
+
+```ts
+new SensitiveDataFilter({
+  sensitiveFields: [
+    // HIPAA-related fields
+    'ssn',
+    'socialSecurityNumber',
+    'medicalRecordNumber',
+    'mrn',
+    'healthInsuranceNumber',
+    'diagnosisCode',
+    'icd10',
+    'prescription',
+    'medication',
+  ],
+})
+```
+
+### 금융 서비스 {/* #financial-services */}
+
+```ts
+new SensitiveDataFilter({
+  sensitiveFields: [
+    // PCI compliance fields
+    'creditCard',
+    'ccNumber',
+    'cardNumber',
+    'cvv',
+    'cvc',
+    'securityCode',
+    'expirationDate',
+    'expiry',
+    'bankAccount',
+    'accountNumber',
+    'routingNumber',
+    'iban',
+    'swift',
+  ],
+})
+```
+
+## 오류 처리 {/* #error-handling */}
+
+필터가 필드를 처리하는 동안 오류가 발생하면 해당 필드를 안전한 오류 표시기로 바꿉니다.
+
+```json
+{
+  "problematicField": {
+    "error": {
+      "processor": "sensitive-data-filter"
+    }
+  }
+}
+```
+
+결과적으로 처리 오류로 인해 추적 내보내기가 차단되지 않거나 애플리케이션 충돌이 발생합니다.
+
+## 관련된 {/* #related */}
+
+* [SensitiveDataFilter API](/reference/observability/tracing/processors/sensitive-data-filter)

@@ -1,0 +1,404 @@
+---
+title: "참조: Amazon S3 벡터 스토어 | 벡터"
+description: "Amazon S3 벡터(미리 보기)를 사용하여 벡터 검색을 제공하는 Mastra의 S3Vectors 클래스에 대한 설명서입니다."
+packages:
+  - "@mastra/s3vectors"
+---
+
+# Amazon S3 벡터 스토어
+
+그만큼`S3Vectors`클래스는 다음을 사용하여 벡터 검색을 제공합니다.[Amazon S3 벡터(미리 보기)](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors.html). 벡터를 저장합니다.**벡터 양동이**유사성 검색을 수행합니다.**벡터 인덱스**, JSON 기반 메타데이터 필터 포함.
+
+:::경고
+
+Amazon S3 벡터는 미리 보기 서비스입니다. 미리 보기 기능은 예고 없이 변경되거나 제거될 수 있으며 AWS SLA가 적용되지 않습니다. 동작, 한도, 지역별 가용성은 언제든지 변경될 수 있습니다. 이 라이브러리는 AWS와 보조를 맞추기 위해 주요 변경 사항을 도입할 수 있습니다.
+
+:::
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/s3vectors@latest
+```
+
+## 사용예 {/* #usage-example */}
+
+```typescript
+import { S3Vectors } from '@mastra/s3vectors'
+
+const store = new S3Vectors({
+  vectorBucketName: process.env.S3_VECTORS_BUCKET_NAME!, // e.g. "my-vector-bucket"
+  clientConfig: {
+    region: process.env.AWS_REGION!, // credentials use the default AWS provider chain
+  },
+  // Optional: mark large/long-text fields as non-filterable at index creation time
+  nonFilterableMetadataKeys: ['content'],
+})
+
+// Create an index (names are normalized: "_" → "-" and lowercased)
+await store.createIndex({
+  indexName: 'my_index',
+  dimension: 1536,
+  metric: 'cosine', // "euclidean" also supported; "dotproduct" is NOT supported
+})
+
+// Upsert vectors (ids auto-generated if omitted). Date values in metadata are serialized to epoch ms.
+const ids = await store.upsert({
+  indexName: 'my_index',
+  vectors: [
+    [0.1, 0.2 /* … */],
+    [0.3, 0.4 /* … */],
+  ],
+  metadata: [
+    {
+      text: 'doc1',
+      genre: 'documentary',
+      year: 2023,
+      createdAt: new Date('2024-01-01'),
+    },
+    { text: 'doc2', genre: 'comedy', year: 2021 },
+  ],
+})
+
+// Query with metadata filters (implicit AND is canonicalized)
+const results = await store.query({
+  indexName: 'my-index',
+  queryVector: [0.1, 0.2 /* … */],
+  topK: 10, // Service-side limits may apply (commonly 30)
+  filter: { genre: { $in: ['documentary', 'comedy'] }, year: { $gte: 2020 } },
+  includeVector: false, // set true to include raw vectors (may trigger a secondary fetch)
+})
+
+// Clean up resources (closes the underlying HTTP handler)
+await store.disconnect()
+```
+
+## 생성자 옵션 {/* #constructor-options */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'vectorBucketName',
+  type: 'string',
+  description: 'Target S3 Vectors vector bucket name.',
+},
+{
+  name: 'clientConfig',
+  type: 'S3VectorsClientConfig',
+  isOptional: true,
+  description: 'AWS SDK v3 client options (e.g., `region`, `credentials`).',
+},
+{
+  name: 'nonFilterableMetadataKeys',
+  type: 'string[]',
+  isOptional: true,
+  description:
+    'Metadata keys that should NOT be filterable (applied to the index at creation time). Use this for large text fields like `content`.',
+},
+]}
+/>
+
+## 행동 양식 {/* #methods */}
+
+### `createIndex()` {/* #createindex */}
+
+구성된 벡터 버킷에 새 벡터 인덱스를 생성합니다. 인덱스가 이미 존재하는 경우 호출은 스키마의 유효성을 검사하고 작동하지 않습니다(기존 지표 및 차원은 유지됨).
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description:
+    'Logical index name. Normalized internally: underscores are replaced with hyphens and the name is lowercased.',
+},
+{
+  name: 'dimension',
+  type: 'number',
+  description: 'Vector dimension (must match your embedding model)',
+},
+{
+  name: 'metric',
+  type: "'cosine' | 'euclidean'",
+  isOptional: true,
+  defaultValue: 'cosine',
+  description: 'Distance metric for similarity search. `dotproduct` is not supported by S3 Vectors.',
+},
+]}
+/>
+
+### `upsert()` {/* #upsert */}
+
+벡터를 추가하거나 대체합니다(전체 레코드 넣기). 만약에`ids` aren't provided, UUIDs are generated.
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Name of the index to upsert into',
+},
+{
+  name: 'vectors',
+  type: 'number[][]',
+  description: 'Array of embedding vectors',
+},
+{
+  name: 'metadata',
+  type: 'Record<string, any>[]',
+  isOptional: true,
+  description: 'Metadata for each vector',
+},
+{
+  name: 'ids',
+  type: 'string[]',
+  isOptional: true,
+  description: 'Optional vector IDs (auto-generated if not provided)',
+},
+]}
+/>
+
+### `query()` {/* #query */}
+
+선택적 메타데이터 필터링을 사용하여 최근접 이웃을 검색합니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Name of the index to query',
+},
+{
+  name: 'queryVector',
+  type: 'number[]',
+  description: 'Query vector to find similar vectors',
+},
+{
+  name: 'topK',
+  type: 'number',
+  isOptional: true,
+  defaultValue: '10',
+  description: 'Number of results to return',
+},
+{
+  name: 'filter',
+  type: 'S3VectorsFilter',
+  isOptional: true,
+  description:
+    'JSON-based metadata filter supporting `$and`, `$or`, `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`.',
+},
+{
+  name: 'includeVector',
+  type: 'boolean',
+  isOptional: true,
+  defaultValue: 'false',
+  description: 'Whether to include vectors in the results',
+},
+]}
+/>
+
+:::메모
+
+결과에는 다음이 포함됩니다`score = 1/(1 + distance)` so that higher is better while preserving the underlying distance ranking.
+
+:::
+
+### `describeIndex()` {/* #describeindex */}
+
+인덱스에 대한 정보를 반환합니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Index name to describe.',
+},
+]}
+/>
+
+보고:
+
+```typescript
+interface IndexStats {
+  dimension: number
+  count: number // computed via ListVectors pagination (O(n))
+  metric: 'cosine' | 'euclidean'
+}
+```
+
+### `deleteIndex()` {/* #deleteindex */}
+
+인덱스와 해당 데이터를 삭제합니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Index to delete.',
+},
+]}
+/>
+
+### `listIndexes()` {/* #listindexes */}
+
+구성된 벡터 버킷의 모든 인덱스를 나열합니다.
+
+보고:`Promise<string[]>`
+
+### `updateVector()` {/* #updatevector */}
+
+인덱스 내의 특정 ID에 대한 벡터 또는 메타데이터를 업데이트합니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Index containing the vector.',
+},
+{
+  name: 'id',
+  type: 'string',
+  description: 'ID to update.',
+},
+{
+  name: 'update',
+  type: 'object',
+  description: 'Update data containing vector and/or metadata',
+},
+{
+  name: 'update.vector',
+  type: 'number[]',
+  isOptional: true,
+  description: 'New vector data to update',
+},
+{
+  name: 'update.metadata',
+  type: 'Record<string, any>',
+  isOptional: true,
+  description: 'New metadata to update',
+},
+]}
+/>
+
+### `deleteVector()` {/* #deletevector */}
+
+ID별로 특정 벡터를 삭제합니다.
+
+<PropertiesTable
+  content={[
+{
+  name: 'indexName',
+  type: 'string',
+  description: 'Index containing the vector.',
+},
+{
+  name: 'id',
+  type: 'string',
+  description: 'ID to delete.',
+},
+]}
+/>
+
+### `disconnect()` {/* #disconnect */}
+
+기본 AWS SDK HTTP 핸들러를 닫아 소켓을 확보합니다.
+
+## 응답 유형 {/* #response-types */}
+
+쿼리 결과는 다음 형식으로 반환됩니다.
+
+```typescript
+interface QueryResult {
+  id: string
+  score: number // 1/(1 + distance)
+  metadata: Record<string, any>
+  vector?: number[] // Only included if includeVector is true
+}
+```
+
+## 필터 구문 {/* #filter-syntax */}
+
+S3 벡터는 연산자 및 값 유형의 엄격한 하위 집합을 지원합니다. Mastra 필터 번역기:
+
+* **암시적 AND를 정규화합니다.**: `{a:1,b:2}` → `{ $and: [{a:1},{b:2}] }`.
+* **날짜 값을 정규화합니다.**&#xC22B;자 비교 및 ​​배열 요소에 대한 획기적인 ms입니다.
+* **날짜를 허용하지 않습니다.**&#xB3D9;등한 위치에 (`field: value` or `$eq/$ne`). Equality values must be **string | number | boolean**.
+* **거부**평등의 경우 null/정의되지 않음.**array equality** isn't supported (use `$in`/`$nin`).
+* 오&#xC9C1;**`$and` / `$or`** are allowed as top-level logical operators.
+* 논리 연산자에는 다음이 포함되어야 합니다.**field conditions** (not direct operators).
+
+**지원되는 연산자:**
+
+* **논리:** `$and`, `$or` (non-empty arrays)
+* **기초적인:** `$eq`, `$ne` (string | number | boolean)
+* **숫자:** `$gt`, `$gte`, `$lt`, `$lte` (number or `Date` → epoch ms)
+* **정렬:** `$in`, `$nin` (non-empty arrays of string | number | boolean; `Date` → epoch ms)
+* **요소:** `$exists` (boolean)
+
+**지원되지 않음/허용되지 않음(거부됨):** `$not`, `$nor`, `$regex`, `$all`, `$elemMatch`, `$size`, `$text`, etc.
+
+**예:**
+
+```typescript prettier:false
+// Implicit AND
+{ genre: { $in: ["documentary", "comedy"] }, year: { $gte: 2020 } }
+
+// Explicit logicals and ranges
+{
+  $and: [
+    { price: { $gte: 100, $lte: 1000 } },
+    { $or: [{ stock: { $gt: 0 } }, { preorder: true }] }
+  ]
+}
+
+// Dates in range (converted to epoch ms)
+{ timestamp: { $gt: new Date("2024-01-01T00:00:00Z") } }
+```
+
+:::메모
+
+설정하면`nonFilterableMetadataKeys` at index creation, those keys are stored but **can't** be used in filters.
+
+:::
+
+## 오류 처리 {/* #error-handling */}
+
+상점에서는 포착할 수 있는 입력된 오류를 발생시킵니다.
+
+```typescript
+try {
+  await store.query({
+    indexName: 'index-name',
+    queryVector: queryVector,
+  })
+} catch (error) {
+  if (error instanceof VectorStoreError) {
+    console.log(error.code) // 'connection_failed' | 'invalid_dimension' | etc
+    console.log(error.details) // Additional error context
+  }
+}
+```
+
+## 환경변수 {/* #environment-variables */}
+
+앱을 연결할 때 일반적인 환경 변수:
+
+* `S3_VECTORS_BUCKET_NAME`: 귀하의 S3**vector bucket** name (used to populate `vectorBucketName`).
+* `AWS_REGION`: S3 벡터 버킷의 AWS 리전입니다.
+* **AWS 자격 증명**: 표준 AWS SDK 공급자 체인을 통해(`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE`, etc.).
+
+## 모범 사례 {/* #best-practices */}
+
+* 측정항목(`cosine` or `euclidean`) to match your embedding model. `dotproduct` isn't supported.
+* 유지하다**filterable** metadata small and structured (string/number/boolean). Store large text (e.g., `content`) as **non-filterable**.
+* 사용**dotted paths** for nested metadata and explicit `$and`/`$or` for complex logic.
+* 전화를 피하세요`describeIndex()` on hot paths. `count` is computed with paginated `ListVectors` (**O(n)**).
+* 사용`includeVector: true` only when you need raw vectors.
+
+## 관련된 {/* #related */}
+
+* [메타데이터 필터](../rag/metadata-filters)

@@ -1,0 +1,170 @@
+---
+title: "네스트JS | 프레임워크"
+description: "Mastra 및 NestJS 시작하기"
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# NestJS 프로젝트에 Mastra 통합
+
+이 가이드에서는 Mastra 및 NestJS를 사용하여 Tool 호출 AI Agent를 구축합니다. 그만큼[NestJS server adapter](/reference/server/nestjs-adapter)Mastra의 Agent 및 Workflow 경로를 NestJS 모듈로 등록하므로 기존 NestJS 애플리케이션 내에서 실행됩니다.
+
+## 시작하기 전에 {/* #before-you-begin */}
+
+* 지원되는 API 키가 필요합니다.[model provider](/models). If you don't have a preference, use [OpenAI](/models/providers/openai).
+* Node.js 설치`v22.13.0` or later
+* NestJS Express 플랫폼(`@nestjs/platform-express`)
+
+## 새 NestJS 앱 만들기(선택 사항) {/* #create-a-new-nestjs-app-optional */}
+
+NestJS 앱이 이미 있는 경우 다음 단계로 건너뜁니다.
+
+다음 명령을 실행하여 새 NestJS 앱을 만듭니다.
+
+```bash npm2yarn
+npx @nestjs/cli new mastra-nest
+```
+
+그러면 다음과 같은 프로젝트가 생성됩니다.`mastra-nest`, but you can replace it with any name you want.
+
+## 마스트라 초기화 {/* #initialize-mastra */}
+
+NestJS 프로젝트 디렉터리로 이동합니다.
+
+```bash
+cd mastra-nest
+```
+
+달리다[`mastra init`](/reference/cli/mastra#mastra-init). When prompted, choose a provider (e.g. OpenAI) and enter your key:
+
+```bash npm2yarn
+npx mastra@latest init
+```
+
+이것은`src/mastra` folder with an example weather agent and the following files:
+
+* `index.ts`- Memory를 포함한 마스트라 구성
+* `tools/weather-tool.ts`- 특정 위치의 날씨를 가져오는 Tool
+* `agents/weather-agent.ts`- Tool를 사용하는 Prompt가 있는 기상 요원
+
+당신은 통과할 것이다`src/mastra/index.ts` file to the NestJS adapter in the next step.
+
+## 서버 어댑터 추가 {/* #add-server-adapter */}
+
+NestJS 서버 어댑터 패키지를 설치합니다.
+
+```bash npm2yarn
+npm install @mastra/nestjs@latest
+```
+
+열려 있는`src/app.module.ts` and register `MastraModule`:
+
+```typescript title="src/app.module.ts"
+import { Module } from '@nestjs/common'
+import { MastraModule } from '@mastra/nestjs'
+import { mastra } from './mastra'
+
+@Module({
+  imports: [
+    MastraModule.register({
+      mastra,
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+:::메모
+
+`MastraModule`범용 컨트롤러를 등록합니다(`@All('*')`). If it's imported before your app modules, it can intercept unrelated routes and return 404s. To avoid conflicts, import `MastraModule` last or mount it under a dedicated prefix (e.g., `/api/v1/mastra`).
+
+:::
+
+## Agent 테스트 {/* #test-your-agent */}
+
+기본적으로 Mastra의 엔드포인트는`/api` subpath and use your agent/workflow IDs. The default `weather-agent` created by `mastra init` is available at `/api/agents/weather-agent`.
+
+NestJS 서버를 시작합니다.
+
+```bash npm2yarn
+npm run start
+```
+
+별도의 터미널 창에서 다음을 사용하십시오.`curl` to ask the weather agent:
+
+```bash
+curl -X POST http://localhost:3000/api/agents/weather-agent/generate -H "Content-Type: application/json" -d "{\"messages\":[{\"role\":\"user\",\"content\":\"What is the weather like in Seoul?\"}]}"
+```
+
+## 자신의 서비스에 Mastra를 사용하세요 {/* #use-mastra-in-your-own-services */}
+
+이 모듈은 NestJS 서비스에서 Mastra에 액세스하는 두 가지 방법을 내보냅니다.`MastraService` wrapper and the `MASTRA` injection token.
+
+### 마스트라서비스 {/* #mastraservice */}
+
+`MastraService`일반적인 작업을 위한 편리한 메서드가 포함된 주입 가능한 래퍼입니다.
+
+```typescript title="src/agent.service.ts"
+import { Injectable } from '@nestjs/common'
+import { MastraService } from '@mastra/nestjs'
+
+@Injectable()
+export class AgentService {
+  constructor(private readonly mastraService: MastraService) {}
+
+  async chat(agentId: string, message: string) {
+    const agent = this.mastraService.getAgent(agentId)
+    return agent.generate({
+      messages: [{ role: 'user', content: message }],
+    })
+  }
+
+  async runWorkflow(workflowId: string, input: Record<string, unknown>) {
+    const workflow = this.mastraService.getWorkflow(workflowId)
+    return workflow.start({ inputData: input })
+  }
+}
+```
+
+`MastraService`노출:
+
+* `getMastra()`: 기본을 반환합니다.`Mastra` instance
+* `getAgent(id)`: 약칭`mastra.getAgent(id)`
+* `getWorkflow(id)`: 약칭`mastra.getWorkflow(id)`
+* `getOptions()`: 모듈 구성을 반환합니다.
+* `isShuttingDown`: `true` after graceful shutdown begins
+
+### 마스트라 토큰 {/* #mastra-token */}
+
+당신이 필요로하는 경우`Mastra` instance directly (e.g., to access storage, memory, or other core APIs), inject it with the `MASTRA` token:
+
+```typescript title="src/memory.service.ts"
+import { Injectable, Inject } from '@nestjs/common'
+import { MASTRA } from '@mastra/nestjs'
+import type { Mastra } from '@mastra/core/mastra'
+
+@Injectable()
+export class MemoryService {
+  constructor(@Inject(MASTRA) private readonly mastra: Mastra) {}
+
+  async getThreadMessages(threadId: string) {
+    const memory = this.mastra.getMemory()
+    return memory?.getMessages({ threadId })
+  }
+}
+```
+
+두 접근 방식 모두 동일한 싱글톤을 사용합니다.`Mastra` instance registered by `MastraModule`.
+
+## 다음 단계 {/* #next-steps */}
+
+이제 NestJS 내에서 작동하는 Mastra Agent가 실행됩니다. 프로젝트를 확장하려면:
+
+* [Agent 개요](/docs/agents/overview)
+* [Tool 사용](/docs/agents/using-tools)
+* [Agent Memory](/docs/memory/overview)
+
+NestJS 통합에 대한 자세한 내용은 다음을 참조하세요.
+
+* [NestJS 어댑터 참조](/reference/server/nestjs-adapter)

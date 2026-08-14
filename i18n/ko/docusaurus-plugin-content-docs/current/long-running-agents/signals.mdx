@@ -1,0 +1,440 @@
+---
+title: "신호 | 장기 실행 Agent"
+description: "실시간 메시지와 컨텍스트를 Mastra Agent 스레드로 보내는 방법을 알아보세요."
+packages:
+  - "@mastra/core"
+  - "@mastra/client-js"
+---
+
+# 신호
+
+**추가된 항목:** `@mastra/core@1.39.0`
+
+:::실험적
+
+이 기능은 베타 버전입니다. API가 안정될 때까지 주요 버전 변경 없이 주요 변경 사항이 발생할 수 있습니다.
+
+:::
+
+신호는 스레드를 통해 Agent와 상호작용하는 방법입니다. 모든 상호작용을 시작하는 대신`agent.stream()`, subscribe to a thread and send messages or signals. Mastra either wakes the agent when the thread is idle or drops input into the running agent loop, or alternatively queues input for the next turn.
+
+사용자가 작성한 입력에는 메시지 API를 사용하세요. 사용`sendSignal()` for lower-level system context, such as background task notifications, policy reminders, or processor-generated context.
+
+:::팁\[📹 보기]
+
+보다[Mastra signals overview](https://www.youtube.com/watch?v=7It2y89TVP4) to see how signals wake and steer long-running agents.
+
+:::
+
+## 신호를 사용해야 하는 경우 {/* #when-to-use-signals */}
+
+Agent 스레드에 원본 외부의 새로운 입력이나 컨텍스트가 필요할 때 신호를 사용하세요.`stream()` call. Signals are useful when users send follow-up messages while a run is active, when background systems need to add context to a thread, or when external events should wake, update, or notify the agent.
+
+사용`sendMessage()` and `queueMessage()` for user-authored input. Use `sendSignal()` for lower-level system context. Use `sendStateSignal()` for durable state lanes, and use `sendNotificationSignal()` when an external event should create a durable notification inbox record.
+
+## 빠른 시작 {/* #quickstart */}
+
+Agent를 만들고 스레드를 구독한 다음 해당 스레드에 메시지를 보냅니다. 메시지가 Agent를 깨우거나 실행 중인 루프에 들어갈 때 구독은 활성 스트림을 수신합니다.
+
+```typescript title="src/mastra/signals.ts"
+import { Agent } from '@mastra/core/agent'
+
+const agent = new Agent({
+  id: 'support-agent',
+  name: 'Support Agent',
+  instructions: 'Help the user compare options.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+})
+
+const thread = {
+  resourceId: 'user_123',
+  threadId: 'thread_456',
+}
+
+const subscription = await agent.subscribeToThread(thread)
+
+await agent.sendMessage('Compare that with the previous option.', thread)
+
+for await (const chunk of subscription.stream) {
+  console.log(chunk)
+}
+```
+
+스레드에 실행 중인 Agent 스트림이 있는 경우`sendMessage()` becomes new input inside that agent loop. When the thread is idle, Mastra starts a stream with the message as the first input.
+
+## 메시지 입력 {/* #message-input */}
+
+### 지금 메시지 보내기 {/* #send-a-message-now */}
+
+사용`sendMessage()` when the user expects the active agent to see the message immediately.
+
+```typescript title="src/mastra/signals.ts"
+agent.sendMessage(
+  {
+    contents: 'Use the latest customer note too.',
+    attributes: { name: 'Jane', sentFrom: 'slack' },
+  },
+  {
+    resourceId: 'user_123',
+    threadId: 'thread_456',
+  },
+)
+```
+
+Model은 XML로 래핑된 사용자 입력으로 특성 메시지를 받습니다.
+
+```xml
+<user name="Jane" sentFrom="slack">Use the latest customer note too.</user>
+```
+
+속성이 없는 메시지는 일반 사용자 입력으로 전송됩니다.
+
+### 다음 차례를 위해 메시지 대기열에 넣기 {/* #queue-a-message-for-the-next-turn */}
+
+사용`queueMessage()` when a user sends a follow-up but the active model call should finish first. Mastra waits for the active run to complete, then starts a new run on the same thread.
+
+```typescript title="src/mastra/signals.ts"
+agent.queueMessage('Also check whether the tests need updates.', {
+  resourceId: 'user_123',
+  threadId: 'thread_456',
+})
+```
+
+스레드가 유휴 상태일 때,`queueMessage()` starts a run immediately. When the thread is active, it preserves turn order by starting a new run after the active run completes.
+
+## 신호 컨텍스트 {/* #signal-context */}
+
+### 낮은 수준의 신호 동작 제어 {/* #control-low-level-signal-behavior */}
+
+사용`sendSignal()` when you need to send system-generated context instead of user-authored input. For external events, use `type: 'notification'`. By default, Mastra delivers signals to active runs and wakes idle threads. Use `ifActive.behavior` and `ifIdle.behavior` to change that behavior.
+
+```typescript title="src/mastra/signals.ts"
+const result = agent.sendSignal(
+  {
+    type: 'notification',
+    contents: 'GitHub CI failed on PR #123: 3 tests failed.',
+  },
+  {
+    resourceId: 'user_123',
+    threadId: 'thread_456',
+    ifIdle: {
+      behavior: 'persist',
+    },
+  },
+)
+
+await result.persisted
+```
+
+통과하다`ifIdle.streamOptions` when the idle wake-up stream needs options such as model settings, tools, or runtime context. Visit [`Agent.sendSignal()` reference](/reference/agents/agent#sendsignalsignal-options) for `ifActive`, `ifIdle`, branch attributes, and `streamOptions`.
+
+### 알림 컨텍스트 보내기 {/* #send-notification-context */}
+
+신호에는 의미가 있습니다`type` and an LLM-facing `tagName`. Use `type` to describe the signal category. Use `tagName` to control the XML tag the model sees.
+
+외부 이벤트의 경우 다음을 사용하세요.`type: 'notification'`. Reactive signals are reserved for processor- or runtime-generated context, such as policy guidance, background task results, and auto-loaded instructions.
+
+```typescript title="src/mastra/signals.ts"
+agent.sendSignal(
+  {
+    type: 'notification',
+    contents: 'PR #123 has a new review comment from User X about the API surface.',
+    attributes: {
+      source: 'github',
+      pr: '123',
+    },
+  },
+  {
+    resourceId: 'user_123',
+    threadId: 'thread_456',
+  },
+)
+```
+
+Model은 다음과 같은 컨텍스트로 신호를 수신합니다.
+
+```xml
+<notification source="github" pr="123">PR #123 has a new review comment from User X about the API surface.</notification>
+```
+
+XML 안전 사용`tagName` and attribute names. They can contain letters, numbers, shows, periods, and hyphens. They must start with a letter or underscore.
+
+#### 스토리지 지원 {/* #storage-support */}
+
+풍부한 Memory와 신호 Workflow우를 지원하는 스토리지 어댑터에서 알림 받은 편지함 스토리지를 사용할 수 있습니다.[libSQL](/reference/storage/libsql), [PostgreSQL](/reference/storage/postgresql), and [MongoDB](/reference/storage/mongodb). These adapters expose notification records through `getStore('notifications')`.
+
+### 프로세서 컨텍스트 보내기 {/* #send-processor-context */}
+
+프로세서는 실행 중에 반응 신호를 보낼 수 있습니다. 처리자는 채팅 기록을 검사하고 특정 트리거에 반응하며 동일한 컨텍스트를 두 번 이상 전송하지 않아야 합니다.
+
+다음 예는 다음을 삽입하는 프로세서를 보여줍니다.`AGENTS.md` instructions after a tool call reads an `AGENTS.md` file.
+
+```typescript title="src/mastra/processors/agents-md-reminder.ts"
+import type { Processor, ProcessInputStepArgs } from '@mastra/core/processors'
+
+export const agentsMdReminderProcessor: Processor = {
+  id: 'agents-md-reminder',
+  async processInputStep({ messageList, sendSignal }: ProcessInputStepArgs) {
+    const messages = messageList.get.all.db()
+    const agentsMdPath = findAgentsMdPathFromToolCalls(messages)
+
+    if (!agentsMdPath || hasAlreadySentAgentsMdReminder(messages, agentsMdPath)) {
+      return messageList
+    }
+
+    await sendSignal?.({
+      type: 'reactive',
+      contents: readAgentsMdInstructions(agentsMdPath),
+      attributes: {
+        type: 'dynamic-agents-md',
+        path: agentsMdPath,
+      },
+      metadata: {
+        path: agentsMdPath,
+      },
+    })
+
+    return messageList
+  },
+}
+```
+
+반응 신호의 기본값은 다음과 같습니다.`tagName: 'system-reminder'`, so the model receives this context as
+
+```xml
+<system-reminder type="dynamic-agents-md" path="packages/ui/AGENTS.md">
+  $agentsMdFileContents
+</system-reminder>
+```
+
+대기 중`sendSignal()` preserves stream echo ordering when a subscribed thread is active.
+
+### 조건부 속성 {/* #conditional-attributes */}
+
+사용`ifActive.attributes` and `ifIdle.attributes` to tag input with context that depends on whether the agent is active or idle at delivery time. Top-level `attributes` always apply, and Mastra merges the selected branch's `attributes` into them when the input is accepted. Visit [`Agent.sendMessage()` reference](/reference/agents/agent#sendmessagemessage-options) and [`Agent.sendSignal()` reference](/reference/agents/agent#sendsignalsignal-options) for branch-specific attributes.
+
+## 상태 및 알림 신호 {/* #state-and-notification-signals */}
+
+### 상태 신호 {/* #state-signals */}
+
+상태 신호는 명명된 스레드 범위 컨텍스트 레인을 노출합니다. 브라우저 상태, 편집기 상태 또는 백그라운드 감시자 결과와 같이 시간이 지남에 따라 변경되는 지속 가능한 컨텍스트에 사용하세요.
+
+사용`sendStateSignal()` when an external producer detects a state change. Each state signal identifies a state lane, a producer-owned cache key, and whether the update is a snapshot or delta.
+
+```typescript title="src/mastra/browser-watcher.ts"
+await agent.sendStateSignal(
+  {
+    id: 'browser',
+    mode: 'snapshot',
+    cacheKey: 'browser:https://example.com:3-tabs',
+    contents: 'Browser is open. Active tab URL: https://example.com. 3 open tabs.',
+    value: {
+      activeUrl: 'https://example.com',
+      tabCount: 3,
+      open: true,
+    },
+  },
+  {
+    resourceId: 'user_123',
+    threadId: 'thread_456',
+  },
+)
+```
+
+Mastra는 상태 신호를 수락하면 스레드에 압축 추적 메타데이터를 저장합니다. 생산자가 같은 내용을 보내면`cacheKey` and mode again while that state is still current, Mastra skips the duplicate.
+
+사용`computeStateSignal()` when a processor owns a state lane. Mastra calls it once per model input step after `processInputStep()`. Visit [`Agent.sendStateSignal()` reference](/reference/agents/agent#sendstatesignalstate-options) for state signal fields and return values.
+
+```typescript title="src/mastra/processors/browser-state.ts"
+import type { ComputeStateSignalArgs, Processor } from '@mastra/core/processors'
+
+export const browserStateProcessor: Processor = {
+  id: 'browser-state',
+  stateId: 'browser',
+  computeStateSignal(args: ComputeStateSignalArgs) {
+    const browser = readCurrentBrowserState()
+    const previous = readMostRecentBrowserState(args.activeStateSignals)
+    const changed = previous ? diffBrowserState(previous, browser) : browser
+    const shouldRefreshSnapshot = Boolean(args.lastSnapshot && !args.contextWindow.hasSnapshot)
+
+    if (previous && Object.keys(changed).length === 0 && !shouldRefreshSnapshot) {
+      return
+    }
+
+    const isDelta = Boolean(previous && !shouldRefreshSnapshot)
+
+    return {
+      mode: isDelta ? 'delta' : 'snapshot',
+      cacheKey: stableBrowserStateCacheKey(browser),
+      contents: isDelta ? describeBrowserDelta(changed) : describeBrowserSnapshot(browser),
+      value: browser,
+      ...(isDelta ? { delta: changed } : {}),
+    }
+  },
+}
+```
+
+마스트라 패스`lastSnapshot` and `deltasSinceSnapshot` into `computeStateSignal()`. It resolves them from message history when the current message list doesn't contain the latest snapshot. The processor still owns merge and diff logic.
+
+`contextWindow.hasSnapshot`활성 메시지 창에 이 상태 레인에 대한 스냅샷이 이미 포함되어 있는지 여부를 프로세서에 알려줍니다. 그렇다면`false`, return a fresh `snapshot` so the model sees the current state even after older state messages are trimmed from the context window.
+
+내장된 브라우저 컨텍스트 프로세서는 다음과 같은 상태를 내보냅니다.`browser` id with snapshot and delta modes.
+
+### 알림 신호 {/* #notification-signals */}
+
+알림 신호는 GitHub 활동, 이메일, Slack 멘션, CI 상태, 사건, 녹음 또는 다이렉트 메시지와 같은 외부 이벤트를 나타냅니다. 사용`agent.sendNotificationSignal()` when the event should create a durable inbox record.
+
+알림 전달에는 두 단계가 있습니다. 진입하는 동안,`agent.sendNotificationSignal()` stores a notification record and resolves the agent's delivery policy. During dispatch, Mastra consumes due records and emits full notification or summary signals.
+
+기본 배달 정책은 우선순위를 인식합니다. 긴급 알림은 즉시 전달되는 반면, 우선순위가 낮은 알림은 요약으로 일괄 처리되거나 스레드가 유휴 상태가 될 때까지 기다릴 수 있습니다. 방문하다[`Agent.sendNotificationSignal()` reference](/reference/agents/agent#sendnotificationsignalnotification-options) for notification fields, [`Agent` constructor reference](/reference/agents/agent#constructor-parameters) for `notifications.deliveryPolicy` configuration, and [`createNotificationInboxTool()` reference](/reference/signals/create-notification-inbox-tool) for inbox tool actions.
+
+```typescript title="src/mastra/notifications.ts"
+await agent.sendNotificationSignal(
+  {
+    source: 'github',
+    kind: 'ci-status',
+    priority: 'high',
+    summary: 'CI failed on main: 3 tests failed.',
+    payload: {
+      repository: 'acme/app',
+      branch: 'main',
+    },
+    dedupeKey: 'github:acme/app:main:ci',
+  },
+  {
+    resourceId: 'user_123',
+    threadId: 'thread_456',
+  },
+)
+```
+
+Model은 컨텍스트로 전체 알림을 받습니다.
+
+```xml
+<notification source="github" type="ci-status" priority="high" status="delivered">CI failed on main: 3 tests failed.</notification>
+```
+
+알림 요약은 받은 편지함 기록이 대기 중임을 Model에 알려줍니다.
+
+```xml
+<notification-summary pending="10">github: 3, email: 5, slack: 2</notification-summary>
+```
+
+Mastra가 요약을 내보낼 때 삭제됩니다.`summaryAt` and sets `summarySignalId` on each summarized record. The records stay pending and readable. When Mastra emits a full notification, it sets `deliveredSignalId` and marks the record `delivered`. If the inbox tool reads a notification first, it can inject the full notification signal and mark the record `seen`, which prevents duplicate full delivery.
+
+일부 알림이 다른 발송 창이나 요약 롤업을 기다려야 하는 경우 Agent에 대한 배달 정책을 구성합니다. 지연된 알림 및 요약 롤업이 자동으로 전달되어야 하는 경우 Mastra 수준에서 예약된 발송을 활성화합니다. 방문하다[`Agent` constructor reference](/reference/agents/agent#constructor-parameters) for `notifications.deliveryPolicy` and [`Mastra` class reference](/reference/core/mastra-class#constructor-parameters) for runtime notification dispatch configuration.
+
+#### 알림 받은 편지함 Tool {/* #notification-inbox-tool */}
+
+사용`createNotificationInboxTool()` to give agents one tool for inbox actions instead of many CRUD tools. Use `read` after a `<notification-summary>` signal when the agent needs the full records behind the summary. The notification contents are delivered as signals, not as normal tool output. Visit [`createNotificationInboxTool()` reference](/reference/signals/create-notification-inbox-tool) for the setup example, input schema, and action behavior.
+
+`sendNotificationSignal()`다음과 같은 스토리지 도메인이 필요합니다.`notifications` support. Use `sendSignal({ type: 'notification' })` only for lower-level notification-shaped context that should bypass inbox storage.
+
+## 분산 및 서버리스 배포 {/* #distributed-and-serverless-deployments */}
+
+신호 좌표는 게시/구독 백엔드를 통해 실행됩니다. 구현하는 백엔드에 신호가 도착하면`LeaseProvider`, Mastra acquires a lease on the target thread so a single process owns the conversation at a time, then either wakes the agent or routes the input into the running loop. Backends without leasing fall back to a no-op that always grants ownership, which is fine in a single process but not across instances.
+
+기본 Memory 내 게시/구독은 인스턴스 경계를 ​​넘을 수 없습니다. Vercel과 같은 서버리스 플랫폼이나 다중 인스턴스 배포에서는 후속 신호가 Agent를 실행하는 인스턴스가 아닌 다른 인스턴스로 라우팅될 수 있습니다.
+
+공유 게시/구독이 없으면 해당 인스턴스는 활성 실행에 도달할 수 없으며 자체적으로 시작되므로 원래 실행은 그대로 유지되고 스레드는 두 번 처리됩니다.
+
+Redis Streams가 지원하는 공유 게시/구독을 구성합니다.`Mastra` instance so leases and signals coordinate across instances:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { RedisStreamsPubSub } from '@mastra/redis-streams'
+
+export const mastra = new Mastra({
+  agents: { agent },
+  pubsub: new RedisStreamsPubSub({
+    url: process.env.REDIS_URL,
+    keyPrefix: 'mastra:my-app',
+  }),
+})
+```
+
+`RedisStreamsPubSub`이벤트 전달 계약과 분산 임대를 모두 구현하므로 단일 백엔드가 인스턴스 간 신호 전달 및 임대 소유권을 처리합니다. Vercel의 관리형 Redis 통합과 Upstash Redis는 모두 잘 작동합니다. 분산 게시/구독이 필요한 경우에 대한 자세한 내용은 다음을 참조하세요.[PubSub guide](/docs/server/pubsub) and the [`RedisStreamsPubSub` reference](/reference/pubsub/redis-streams).
+
+## 호환성 및 API {/* #compatibility-and-apis */}
+
+### 호환성 {/* #compatibility */}
+
+Mastra는 여전히 다음과 같은 레거시 신호 페이로드를 허용합니다.`type: 'user-message'` and `type: 'system-reminder'`. It normalizes them internally to the new category and tag shape:
+
+* `type: 'user-message'`: 정규화`type: 'user'` and `tagName: 'user'`
+* `type: 'system-reminder'`: 정규화`type: 'reactive'` and `tagName: 'system-reminder'`
+
+기존에 저장된 신호 행과 이전 클라이언트는 호환성 계층을 통해 계속 로드됩니다. 새 클라이언트는 서버가 이를 지원할 때 메시지 경로를 호출합니다. React의 스레드 신호 경로는 레거시로 돌아갑니다.`/signals` route when it detects an older server. Visit [Agent signals reference](/reference/agents/agent#thread-signals) for the full message, signal, and subscription types.
+
+### Tool 호출 승인 {/* #approve-tool-calls */}
+
+Tool 승인을 위해 구독된 실행이 일시 중지되면 구독 기본 메서드를 사용하여 Tool 호출을 승인하거나 거부합니다. 재개된 청크는 기존 스레드 구독을 통해 도착합니다. 방문하다[`client.getAgent().sendToolApproval()` reference](/reference/client-js/agents#sendtoolapproval) and [server agent routes](/reference/server/routes#subscription-tool-approval-routes) for request and response shapes.
+
+### HTTP 경로 사용 {/* #use-http-routes */}
+
+HTTP를 통해 직접 Mastra를 호출하는 경우 다음을 사용하세요.`POST /api/agents/:agentId/send-message` for immediate messages and `POST /api/agents/:agentId/queue-message` for next-turn messages. For subscription-native tool approval, use `POST /api/agents/:agentId/send-tool-approval`. See [Server routes reference](/reference/server/routes#agent-message-routes) for request and response schemas.
+
+### 클라이언트 SDK 사용 {/* #use-the-client-sdk */}
+
+JavaScript 클라이언트는 스레드 신호 API를 노출합니다.
+
+사용`subscribeToThread()` before sending thread input so the client can render the stream that receives the input or wakes in response to it.
+
+```typescript title="src/app/chat.ts"
+const agent = client.getAgent('supportAgent')
+
+const subscription = await agent.subscribeToThread({
+  resourceId: 'user_123',
+  threadId: 'thread_456',
+})
+
+await agent.sendMessage({
+  message: 'Show the shorter version.',
+  resourceId: 'user_123',
+  threadId: 'thread_456',
+})
+
+await subscription.processDataStream({
+  onChunk: chunk => {
+    console.log(chunk)
+  },
+  reconnect: true,
+})
+```
+
+사용`reconnect: true` for long-lived subscriptions. Visit [`client.getAgent().subscribeToThread()` reference](/reference/client-js/agents#subscribetothread) for reconnect options.
+
+### 맞춤형 SSE 구독을 유지하세요 {/* #keep-custom-sse-subscriptions-alive */}
+
+스레드 구독을 위해 자체 SSE(서버 전송 이벤트) 엔드포인트를 노출하는 경우 스트림이 유휴 상태인 동안 주기적인 하트비트 프레임을 보냅니다. 이렇게 하면 다음 신호나 Model 청크가 도착하기 전에 브라우저, 프록시 및 로드 밸런서가 연결을 닫는 것을 방지할 수 있습니다.
+
+다음 예에서는 25초마다 SSE 주석을 보냅니다.
+
+```typescript title="src/api/subscribe.ts"
+const heartbeat = setInterval(() => {
+  controller.enqueue(encoder.encode(': keep-alive\n\n'))
+}, 25_000)
+
+request.signal.addEventListener('abort', () => {
+  clearInterval(heartbeat)
+})
+```
+
+클라이언트 측 재연결 논리와 함께 하트비트를 사용합니다. 하트비트는 유휴 연결 끊김을 줄이는 반면 네트워크 또는 런타임이 여전히 스트림을 닫을 때 다시 연결을 복구합니다.
+
+## 관련된 {/* #related */}
+
+* [`Agent.sendMessage()`](/reference/agents/agent#sendmessagemessage-options)
+* [`Agent.queueMessage()`](/reference/agents/agent#queuemessagemessage-options)
+* [`Agent.sendSignal()`](/reference/agents/agent#sendsignalsignal-options)
+* [`Agent.sendStateSignal()`](/reference/agents/agent#sendstatesignalstate-options)
+* [`Agent.subscribeToThread()`](/reference/agents/agent#subscribetothreadoptions)
+* [`createNotificationInboxTool()`](/reference/signals/create-notification-inbox-tool)
+* [`client.getAgent().sendMessage()`](/reference/client-js/agents#sendmessage)
+* [`client.getAgent().queueMessage()`](/reference/client-js/agents#queuemessage)
+* [`client.getAgent().sendSignal()`](/reference/client-js/agents#sendsignal)
+* [서버 Agent 경로](/reference/server/routes#agent-message-routes)
+* [`client.getAgent().subscribeToThread()`](/reference/client-js/agents#subscribetothread)
+* [`client.getAgent().sendToolApproval()`](/reference/client-js/agents#sendtoolapproval)
+* [`RedisStreamsPubSub`](/reference/pubsub/redis-streams)
+* 📹 [Mastra signals workshop](https://www.youtube.com/watch?v=KLg6uFKz9aw\&t=3020s)

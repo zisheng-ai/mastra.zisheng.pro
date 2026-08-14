@@ -1,0 +1,155 @@
+---
+title: "동적 Workflow우 | Workflow"
+description: "JSON 정의에서 Workflow를 생성, 유지, 업데이트 및 실행합니다."
+packages:
+  - "@mastra/core"
+---
+
+# 동적 Workflow우
+
+:::실험적
+
+이 기능은 베타 버전입니다. API가 안정될 때까지 주요 버전 변경 없이 주요 변경 사항이 발생할 수 있습니다.
+
+:::
+
+동적 Workflow는 코드 대신 데이터로 표현되는 Workflow 정의입니다. 정의는 Workflow의 스키마와 단계 그래프를 설명하는 JSON 문서입니다. Mastra는 정의의 유효성을 검사하고 이를 실행 가능한 Workflow로 등록한 다음 프로세스를 다시 시작해도 유지되도록 스토리지에 유지합니다.
+
+정의에는 JavaScript 클로저가 포함되어 있지 않으므로 JSON을 생성할 수 있는 모든 것(HTTP 클라이언트, LLM, 시각적 편집기 또는 자체 Tool)으로 Workflow를 작성할 수 있습니다. 일단 등록되면 동적 Workflow는 코드 정의 Workflow와 동일한 실행 API를 통해 실행됩니다.
+
+## 동적 Workflow를 사용해야 하는 경우 {/* #when-to-use-dynamic-workflows */}
+
+사용자, Agent, 시각적 편집기 또는 외부 시스템이 애플리케이션 코드를 변경하거나 다시 배포하지 않고 Workflow를 생성해야 하는 경우 동적 Workflow를 사용합니다.
+
+계속해서 Workflow를 정의하세요.[`createWorkflow()`](/docs/workflows/overview) when the workflow belongs in your application source or needs custom step functions. Dynamic workflows can invoke agents, tools, and workflows that are already registered on the `Mastra` instance.
+
+## 빠른 시작 {/* #quickstart */}
+
+다음 예에서는 Tool를 등록하고 동적 Workflow에서 호출합니다. 그런 다음 Workflow를 실행합니다.`LibSQLStore` persists the definition in `mastra.db`, so Mastra can restore it after a restart.
+
+```typescript title="src/dynamic-workflow.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { createTool } from '@mastra/core/tools'
+import { LibSQLStore } from '@mastra/libsql'
+import { z } from 'zod'
+
+const greetingTool = createTool({
+  id: 'create-greeting',
+  description: 'Create a greeting for a name',
+  inputSchema: z.object({
+    name: z.string(),
+  }),
+  outputSchema: z.object({
+    message: z.string(),
+  }),
+  execute: async ({ name }) => ({
+    message: `Hello, ${name}!`,
+  }),
+})
+
+const mastra = new Mastra({
+  storage: new LibSQLStore({
+    id: 'mastra-storage',
+    url: 'file:./mastra.db',
+  }),
+  tools: { 'create-greeting': greetingTool },
+})
+
+await mastra.addDynamicWorkflow({
+  id: 'greeting-workflow',
+  description: 'Create a greeting for the supplied name',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+    },
+    required: ['name'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      message: { type: 'string' },
+    },
+    required: ['message'],
+  },
+  graph: [
+    {
+      type: 'tool',
+      id: 'greet',
+      toolId: 'create-greeting',
+    },
+  ],
+})
+
+const workflow = mastra.getWorkflow('greeting-workflow')
+const run = await workflow.createRun()
+const result = await run.start({
+  inputData: { name: 'Ada' },
+})
+
+if (result.status === 'success') {
+  console.log(result.result.message)
+}
+```
+
+Workflow가 인쇄됩니다.`Hello, Ada!`. Calling [`addDynamicWorkflow()`](/reference/core/addDynamicWorkflow) validates the definition before it changes storage or the live workflow registry.
+
+정의는 JSON 왕복을 유지해야 하므로 JSON 스키마를 사용합니다. 그만큼`graph` describes which registered components to invoke and how data moves between them. See the [dynamic workflow definition reference](/reference/workflows/dynamic-workflow-definition) for every field and graph entry.
+
+## 정의 빌드 및 업데이트 {/* #build-and-update-definitions */}
+
+정의는 JSON을 생성하는 모든 소스에서 나올 수 있습니다. 예를 들어 API 경로는 시각적 편집기에서 생성된 정의를 수락하고 이를 직접 등록할 수 있습니다.
+
+```typescript
+const definition = await request.json()
+await mastra.addDynamicWorkflow(definition)
+```
+
+### 종속성을 먼저 등록하세요. {/* #register-dependencies-first */}
+
+참조된 구성 요소를 동일한 항목에 등록합니다.`Mastra` instance before adding the dynamic workflow. Agent and nested workflow entries use their intrinsic IDs. A tool entry uses its key from the `Mastra` `tools` object, so the quickstart registers the tool under `create-greeting` before referencing that key with `toolId`.
+
+사용`mapping` entry when one step's output doesn't match the next step's input. Mapping entries can read data from the workflow input and previous step results, along with workflow state and request context. The [definition reference](/reference/workflows/dynamic-workflow-definition#mapping-steps) lists the supported mapping descriptors.
+
+### Workflow 바꾸기 {/* #replace-a-workflow */}
+
+동일한 정의를 사용하여 새 정의를 추가하세요.`id` to replace the persisted definition and live registration:
+
+```typescript
+await mastra.addDynamicWorkflow(updatedDefinition)
+```
+
+새로운 실행에서는 업데이트된 그래프를 사용합니다. 이미 시작된 실행은 원래 그래프로 계속됩니다.
+
+### 중첩된 Workflow를 함께 추가 {/* #add-nested-workflows-together */}
+
+루트 Workflow가 아직 등록되지 않은 도우미 Workflow를 참조하는 경우 다음을 사용하여 전체 세트를 추가하세요.[`addDynamicWorkflows()`](/reference/core/addDynamicWorkflows):
+
+```typescript
+await mastra.addDynamicWorkflows([rootDefinition, helperDefinition])
+```
+
+Mastra는 번들을 하나의 단위로 검증하고 종속성에서 등록 순서를 결정합니다. 유효성 검증이 실패하면 어떤 정의도 등록되지 않습니다.
+
+### HTTP를 통해 정의 관리 {/* #manage-definitions-over-http */}
+
+애플리케이션은 다음에 직접 액세스할 필요가 없습니다.`Mastra` instance to manage dynamic workflows. Use one of these interfaces:
+
+* [클라이언트 SDK Workflow API](/reference/client-js/workflows): 부르다`upsertDynamicWorkflow()` from a JavaScript or TypeScript client.
+* [서버 경로](/reference/server/routes): 정의를 다음으로 보냅니다.`POST /api/stored/workflows`.
+
+인증된 서버에서 동적 Workflow 관리에는 다음이 필요합니다.`stored-workflows:read` and `stored-workflows:write` permissions. Running the registered workflow requires `workflows:execute`.
+
+### 지속 정의 {/* #persist-definitions */}
+
+저장된 정의는 다음을 사용합니다.`workflowDefinitions` storage domain. On startup, Mastra loads active definitions from storage and registers them in dependency order.
+
+이 도메인을 지원하는 스토리지 어댑터가 없으면`addDynamicWorkflow()` still registers the workflow in memory, but the definition is lost when the process restarts. See the [storage reference](/reference/storage/overview) for adapter support.
+
+## 관련된 {/* #related */}
+
+* [동적 Workflow 정의](/reference/workflows/dynamic-workflow-definition)
+* [`Mastra.addDynamicWorkflow()`](/reference/core/addDynamicWorkflow)
+* [`Mastra.addDynamicWorkflows()`](/reference/core/addDynamicWorkflows)
+* [클라이언트 SDK Workflow API](/reference/client-js/workflows)
+* [서버 경로](/reference/server/routes)

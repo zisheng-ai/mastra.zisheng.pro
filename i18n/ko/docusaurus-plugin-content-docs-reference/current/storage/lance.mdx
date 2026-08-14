@@ -1,0 +1,142 @@
+---
+title: "참고: LanceDB 스토리지 | 저장"
+description: "Mastra의 LanceDB 스토리지 구현에 대한 문서입니다."
+packages:
+  - "@mastra/core"
+  - "@mastra/lance"
+---
+
+# LanceDB 스토리지
+
+LanceDB 스토리지 구현은 LanceDB 데이터베이스 시스템을 사용하여 기존 데이터 스토리지와 벡터 작업을 모두 처리하는 데 탁월한 고성능 스토리지 솔루션을 제공합니다.
+
+:::경고\[관측성이 지원되지 않음]
+
+LanceDB 스토리지**doesn't support the observability domain**. Traces from the `MastraStorageExporter`LanceDB에 지속될 수 없으며[스튜디오의](/docs/studio/overview)관측 가능성 기능은 유일한 스토리지 제공자인 LanceDB에서는 작동하지 않습니다. Observability을 활성화하려면 다음을 사용하세요.[복합 스토리지](/reference/storage/composite#specialized-storage-for-observability)Observability 데이터를 ClickHouse와 같은 지원되는 Provider로 라우팅합니다.
+
+:::
+
+## 설치 {/* #installation */}
+
+```bash npm2yarn
+npm install @mastra/lance@latest
+```
+
+## 용법 {/* #usage */}
+
+### 기본 저장소 사용량 {/* #basic-storage-usage */}
+
+```typescript
+import { LanceStorage } from '@mastra/lance'
+
+// Connect to a local database
+const storage = await LanceStorage.create('my-storage', '/path/to/db')
+
+// Connect to a LanceDB cloud database
+const storage = await LanceStorage.create('my-storage', 'db://host:port')
+
+// Connect to a cloud database with custom options
+const storage = await LanceStorage.create('my-storage', 's3://bucket/db', {
+  storageOptions: { timeout: '60s' },
+})
+```
+
+## 매개변수 {/* #parameters */}
+
+### `LanceStorage.create()` {/* #lancestoragecreate */}
+
+<PropertiesTable
+  content={[
+{
+  name: 'name',
+  type: 'string',
+  description: 'Name identifier for the storage instance',
+  isOptional: false,
+},
+{
+  name: 'uri',
+  type: 'string',
+  description: 'URI to connect to the LanceDB database. Can be a local path, cloud DB URL, or S3 bucket URL',
+  isOptional: false,
+},
+{
+  name: 'options',
+  type: 'ConnectionOptions',
+  description: 'Connection options for LanceDB, such as timeout settings, authentication, etc.',
+  isOptional: true,
+},
+]}
+/>
+
+## 추가 참고사항 {/* #additional-notes */}
+
+### 스키마 관리 {/* #schema-management */}
+
+LanceStorage 구현은 스키마 생성 및 업데이트를 자동으로 처리합니다. 이는 Mastra의 스키마 유형을 LanceDB에서 내부적으로 사용되는 Apache Arrow 데이터 유형에 매핑합니다.
+
+* `text`, `uuid` → Utf8
+* `int`, `integer` → Int32
+* `float`→ 플로트32
+* `jsonb`, `json` → Utf8 (serialized)
+* `binary`→ 바이너리
+
+### 초기화 {/* #initialization */}
+
+Mastra 클래스에 스토리지를 전달하면,`init()` is called automatically before any storage operation:
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { LanceStorage } from '@mastra/lance'
+
+const storage = await LanceStorage.create('my-storage', '/path/to/db')
+
+const mastra = new Mastra({
+  storage, // init() is called automatically
+})
+```
+
+Mastra 없이 직접 저장소를 사용하는 경우 다음을 호출해야 합니다.`init()` explicitly to create the tables:
+
+```typescript
+import { LanceStorage } from '@mastra/lance'
+
+const storage = await LanceStorage.create('my-storage', '/path/to/db')
+
+// Required when using storage directly
+await storage.init()
+
+// Access domain-specific stores via getStore()
+const memoryStore = await storage.getStore('memory')
+const thread = await memoryStore?.getThreadById({ threadId: '...' })
+```
+
+:::경고
+만약에`init()` isn't called, tables won't be created and storage operations will fail silently or throw errors.
+:::
+
+### 배포 옵션 {/* #deployment-options */}
+
+LanceDB 스토리지는 다양한 배포 시나리오에 맞게 구성될 수 있습니다.
+
+* **지역 개발**: 개발 및 테스트를 위해 로컬 파일 경로를 사용합니다.
+  ```
+  /path/to/db
+  ```
+* **클라우드 배포**: 호스팅된 LanceDB 인스턴스에 연결
+  ```
+  db://host:port
+  ```
+* **S3 스토리지**: 대용량 클라우드 스토리지를 위해 Amazon S3를 사용하세요.
+  ```
+  s3://bucket/db
+  ```
+
+### 테이블 관리 {/* #table-management */}
+
+LanceStorage는 테이블 관리 방법을 제공합니다.
+
+* 커스텀 스키마로 테이블 생성
+* 테이블 삭제
+* 테이블 지우기(모든 레코드 삭제)
+* 키별로 레코드 로드
+* 단일 및 일괄 레코드 삽입

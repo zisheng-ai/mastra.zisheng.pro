@@ -1,0 +1,214 @@
+---
+title: "참조: OtelBridge | Observability"
+description: "추적 및 로그를 위한 OpenTelemetry 브리지"
+packages:
+  - "@mastra/core"
+  - "@mastra/langfuse"
+  - "@mastra/observability"
+  - "@mastra/otel-bridge"
+---
+
+import PropertiesTable from "@site/src/components/PropertiesTable";
+
+# 오텔브릿지
+
+:::경고
+
+OpenTelemetry Bridge는 현재**experimental**. APIs and configuration options may change in future releases.
+
+:::
+
+Mastra 추적과 OpenTelemetry 인프라 간의 양방향 통합을 지원합니다. Mastra 작업을 위한 기본 OTEL 범위를 생성하고 활성 OTEL 범위에서 컨텍스트를 상속합니다. 또한 Mastra 로그 이벤트를 전 세계적으로 등록된 OTEL로 전달합니다.`LoggerProvider`, emitting each log under the OTEL context of the originating Mastra span so trace-log correlation works automatically.
+
+## 건설자 {/* #constructor */}
+
+```typescript
+new OtelBridge()
+```
+
+## 행동 양식 {/* #methods */}
+
+### `executeInContext` {/* #executeincontext */}
+
+```typescript prettier:false
+executeInContext<T>(spanId: string, fn: () => Promise<T>): Promise<T>
+```
+
+Mastra 범위의 OTEL 컨텍스트 내에서 비동기 기능을 실행합니다. 함수 내부에서 실행되는 OTEL 계측 코드는 올바른 상위 관계를 갖게 됩니다.
+
+<PropertiesTable
+  props={[
+{
+  name: 'spanId',
+  type: 'string',
+  description: 'The ID of the Mastra span to use as context',
+  required: true,
+},
+{
+  name: 'fn',
+  type: '() => Promise<T>',
+  description: 'The async function to execute within the span context',
+  required: true,
+},
+]}
+/>
+
+**보고:** `Promise<T>` - The result of the function execution.
+
+### `executeInContextSync` {/* #executeincontextsync */}
+
+```typescript prettier:false
+executeInContextSync<T>(spanId: string, fn: () => T): T
+```
+
+Mastra 범위의 OTEL 컨텍스트 내에서 동기 기능을 실행합니다.
+
+<PropertiesTable
+  props={[
+{
+  name: 'spanId',
+  type: 'string',
+  description: 'The ID of the Mastra span to use as context',
+  required: true,
+},
+{
+  name: 'fn',
+  type: '() => T',
+  description: 'The synchronous function to execute within the span context',
+  required: true,
+},
+]}
+/>
+
+**보고:** `T` - The result of the function execution.
+
+### `onLogEvent` {/* #onlogevent */}
+
+```typescript prettier:false
+async onLogEvent(event: LogEvent): Promise<void>
+```
+
+전 세계적으로 등록된 OTEL로 Mastra 로그 이벤트를 전달합니다.`LoggerProvider`. Trace correlation is resolved in this order:
+
+1. 로그에 다음이 포함된 경우`spanId` the bridge has an OTEL span for, the log is emitted under that span's stored OTEL context.
+2. 그렇지 않은 경우 로그가 전달되면`traceId` and `spanId`, those IDs are attached to the emitted log record's `SpanContext`.
+3. 그렇지 않으면 현재 활성화된 OTEL 컨텍스트에서 로그가 내보내집니다.
+
+그렇지 않은 경우`LoggerProvider` is registered globally, emission is a silent no-op.
+
+<PropertiesTable
+  props={[
+{
+  name: 'event',
+  type: 'LogEvent',
+  description: 'The Mastra log event to forward, as delivered by the observability bus',
+  required: true,
+},
+]}
+/>
+
+### `flush` {/* #flush */}
+
+```typescript prettier:false
+async flush(): Promise<void>
+```
+
+지원하는 경우 전역 OTEL 추적 프로그램 공급자 및 로거 공급자를 강제로 플러시합니다.`forceFlush`. Useful in serverless environments where you need to drain telemetry before the runtime terminates.
+
+### `shutdown` {/* #shutdown */}
+
+```typescript prettier:false
+async shutdown(): Promise<void>
+```
+
+브리지를 종료하고 리소스를 정리합니다. 제대로 닫히지 않은 모든 범위를 종료합니다.
+
+## 사용 예 {/* #usage-examples */}
+
+### 기본 사용법 {/* #basic-usage */}
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { Observability } from '@mastra/observability'
+import { OtelBridge } from '@mastra/otel-bridge'
+
+const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-service',
+        bridge: new OtelBridge(),
+      },
+    },
+  }),
+  agents: { myAgent },
+})
+```
+
+### 수출업체와 결합 {/* #combined-with-exporters */}
+
+브릿지는 수출업체와 함께 사용될 수 있습니다. 브리지는 OTEL 컨텍스트를 처리하는 반면 내보내기는 데이터를 추가 대상으로 보냅니다.
+
+```typescript
+import { Mastra } from '@mastra/core'
+import { Observability, MastraStorageExporter } from '@mastra/observability'
+import { OtelBridge } from '@mastra/otel-bridge'
+import { LangfuseExporter } from '@mastra/langfuse'
+
+const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: 'my-service',
+        bridge: new OtelBridge(), // Handles OTEL context
+        exporters: [
+          new MastraStorageExporter(), // Studio access
+          new LangfuseExporter({
+            // Additional destination
+            publicKey: process.env.LANGFUSE_PUBLIC_KEY,
+            secretKey: process.env.LANGFUSE_SECRET_KEY,
+          }),
+        ],
+      },
+    },
+  }),
+})
+```
+
+## `OpenTelemetry`설정 요구 사항 {/* #opentelemetry-setup-requirements */}
+
+OtelBridge가 작동하려면 활성 OpenTelemetry SDK가 필요합니다. 브리지는 OTEL의 주변 컨텍스트에서 읽습니다.
+
+참조[OtelBridge Guide](/docs/observability/integrations/bridges/otel#configuration) for complete setup instructions, including how to configure OTEL instrumentation and run your application.
+
+## 태그 지원 {/* #tags-support */}
+
+OtelBridge는 분류 및 필터링을 위한 추적 태깅을 지원합니다. 태그는 루트 스팬에만 적용되며`mastra.tags` attribute on native OTEL spans.
+
+### 용법 {/* #usage */}
+
+```typescript
+const result = await agent.generate('Hello', {
+  tracingOptions: {
+    tags: ['production', 'experiment-v2', 'user-request'],
+  },
+})
+```
+
+### 태그가 저장되는 방법 {/* #how-tags-are-stored */}
+
+태그는 JSON 문자열 배열로 저장됩니다.`mastra.tags` span attribute:
+
+```json
+{
+  "mastra.tags": "[\"production\",\"experiment-v2\",\"user-request\"]"
+}
+```
+
+이 형식은 모든 OTEL 호환 백엔드 및 수집기와의 호환성을 보장합니다.
+
+## 관련된 {/* #related */}
+
+* [오텔브릿지 가이드](/docs/observability/integrations/bridges/otel): 예시가 포함된 설정 가이드
+* [추적 개요](/docs/observability/tracing/overview): 일반적인 추적 개념
+* [OtelExporter 참조](/reference/observability/tracing/exporters/otel): 추적 전송을 위한 OTEL 내보내기
