@@ -25,6 +25,7 @@ test.describe('Localized site navigation', () => {
   test('language switching keeps the current route and persists the choice', async ({ page, isMobile }) => {
     test.skip(isMobile, 'The desktop locale dropdown is used for this navigation check')
 
+    await page.addInitScript(() => window.localStorage.setItem('mastra-preferred-locale', 'zh-CN'))
     await page.goto('/models')
     await page.getByRole('button', { name: '简体中文' }).click()
 
@@ -39,5 +40,25 @@ test.describe('Localized site navigation', () => {
     await page.goto('/')
     await expect(page).toHaveURL(/\/en\/?$/)
     await expect(page.locator('html')).toHaveAttribute('lang', 'en')
+  })
+
+  test('uses the browser language on a first visit and otherwise defaults to Simplified Chinese', async ({ browser }) => {
+    const japaneseContext = await browser.newContext({ locale: 'ja-JP' })
+    const japanesePage = await japaneseContext.newPage()
+
+    await japanesePage.goto('/docs')
+    await expect(japanesePage).toHaveURL(/\/ja\/docs\/?$/)
+    await expect
+      .poll(() => japanesePage.evaluate(() => window.localStorage.getItem('mastra-preferred-locale')))
+      .toBe('ja')
+    await japaneseContext.close()
+
+    const unsupportedContext = await browser.newContext({ locale: 'de-DE' })
+    const unsupportedPage = await unsupportedContext.newPage()
+
+    await unsupportedPage.goto('/docs')
+    await expect(unsupportedPage).toHaveURL(/\/docs\/?$/)
+    await expect(unsupportedPage.locator('html')).toHaveAttribute('lang', 'zh-CN')
+    await unsupportedContext.close()
   })
 })

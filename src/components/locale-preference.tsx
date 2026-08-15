@@ -9,6 +9,23 @@ function joinLocalePath(baseUrl: string, pathname: string): string {
   return `${normalizedBaseUrl}${pathnameSuffix}`
 }
 
+function getBrowserLocale(localeConfigs: Record<string, { htmlLang: string }>): string | undefined {
+  const supportedLocales = Object.keys(localeConfigs)
+  const browserLocales = [...navigator.languages, navigator.language].filter(Boolean)
+
+  for (const browserLocale of browserLocales) {
+    const normalizedBrowserLocale = browserLocale.toLowerCase()
+    const exactMatch = supportedLocales.find(locale => locale.toLowerCase() === normalizedBrowserLocale)
+    if (exactMatch) return exactMatch
+
+    const language = normalizedBrowserLocale.split('-')[0]
+    const languageMatch = supportedLocales.find(locale => locale.toLowerCase() === language)
+    if (languageMatch) return languageMatch
+  }
+
+  return undefined
+}
+
 export function LocalePreference() {
   const {
     i18n: { currentLocale, localeConfigs },
@@ -39,7 +56,14 @@ export function LocalePreference() {
       const storedLocale = window.localStorage.getItem(STORAGE_KEY)
 
       if (!storedLocale || !localeConfigs[storedLocale]) {
-        window.localStorage.setItem(STORAGE_KEY, currentLocale)
+        const browserLocale = getBrowserLocale(localeConfigs)
+
+        if (currentLocale === rootLocale && browserLocale && browserLocale !== currentLocale) {
+          const targetPath = joinLocalePath(localeConfigs[browserLocale].baseUrl, window.location.pathname)
+          window.location.replace(`${targetPath}${window.location.search}${window.location.hash}`)
+        } else {
+          window.localStorage.setItem(STORAGE_KEY, currentLocale)
+        }
       } else if (currentLocale !== rootLocale) {
         // An explicit locale URL always wins over an older saved preference.
         window.localStorage.setItem(STORAGE_KEY, currentLocale)
