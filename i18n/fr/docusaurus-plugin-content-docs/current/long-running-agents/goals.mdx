@@ -1,6 +1,6 @@
 ---
-title: "Goals | Long-running agents"
-description: Learn how to set a durable objective on an agent that's judged in the execution loop, so the agent keeps working until the goal is complete or the run budget is exhausted.
+title: "Goals | Agents de longue durée"
+description: Découvrez comment définir un objectif durable sur un agent, évalué dans la boucle d’exécution afin que l’agent continue jusqu’à ce que l’objectif soit atteint ou que le budget d’exécution soit épuisé.
 packages:
   - "@mastra/core"
   - "@mastra/memory"
@@ -12,29 +12,29 @@ packages:
 
 :::experimental
 
-The Goals feature is in beta stage and subject to breaking changes in minor versions until it graduates from its beta status.
+La fonctionnalité Goals est au stade bêta et peut subir des changements cassants dans les versions mineures jusqu’à la fin de ce statut bêta.
 
 :::
 
-A goal is a durable, thread-scoped objective: a standing instruction the agent keeps working toward across loop iterations until a judge model decides it's satisfied or a run budget is exhausted.
+Un goal est un objectif durable, limité à un thread : une instruction permanente vers laquelle l’agent continue de travailler au fil des itérations de boucle, jusqu’à ce qu’un modèle juge décide qu’il est atteint ou que le budget d’exécution soit épuisé.
 
-The objective is persisted in thread state, so it survives reloads and is evaluated in-loop, even when a new message arrives in the middle of an already-running turn.
+L’objectif est conservé dans l’état du thread ; il survit donc aux rechargements et est évalué dans la boucle, même lorsqu’un nouveau message arrive au milieu d’un tour déjà en cours.
 
-Goals build on the same machinery as [`isTaskComplete`](/docs/capabilities/subagents): an LLM-as-judge scores the agent's output each iteration and gates the loop. The difference is that a goal is **durable** (stored in thread state, not passed per call) and is set and updated through `Agent` methods rather than per-`stream()` options.
+Goals s’appuie sur les mêmes mécanismes que [`isTaskComplete`](/docs/capabilities/subagents) : un LLM utilisé comme juge évalue la sortie de l’agent à chaque itération et contrôle la boucle. La différence est qu’un goal est **durable**, car stocké dans l’état du thread plutôt que transmis à chaque appel, et qu’il est défini et mis à jour par les méthodes d’`Agent` plutôt que par des options propres à `stream()`.
 
-## When to use goals
+## Quand utiliser Goals
 
-Use a goal when you want an agent to keep working toward a single objective across many iterations and messages, without re-supplying the success criteria on every call:
+Utilisez un goal lorsque vous souhaitez qu’un agent continue de travailler sur un objectif unique à travers de nombreuses itérations et de nombreux messages, sans redonner les critères de réussite à chaque appel :
 
-- A standing objective the agent should pursue until a judge says it's done.
-- Work that should continue across mid-run messages (a message delivered into a live run is still judged against the goal).
-- An objective that must persist across thread reloads or process restarts.
+- Un objectif permanent que l’agent doit poursuivre jusqu’à ce qu’un juge le déclare terminé.
+- Un travail qui doit se poursuivre malgré des messages reçus en cours d’exécution, car un message transmis à une exécution active reste évalué par rapport au goal.
+- Un objectif qui doit persister malgré les rechargements de thread ou les redémarrages de processus.
 
-For a one-off completion check within a single `stream()` call, use [`isTaskComplete`](/docs/capabilities/subagents) instead.
+Pour un contrôle ponctuel d’achèvement dans un seul appel à `stream()`, utilisez plutôt [`isTaskComplete`](/docs/capabilities/subagents).
 
 ## Quickstart
 
-Goals require a configured [storage](/docs/storage/overview) backend and a memory-backed thread. Add a `goal` config to the agent, a judge model is required for the goal to do anything, then set an objective for a thread:
+Goals nécessite un backend de [stockage](/docs/storage/overview) configuré et un thread soutenu par la mémoire. Ajoutez une configuration `goal` à l’agent ; un modèle juge est requis pour que le goal puisse agir, puis définissez un objectif pour un thread :
 
 ```typescript title="src/mastra/agents/worker.ts" {8-11}
 import { Agent } from '@mastra/core/agent'
@@ -63,23 +63,23 @@ const stream = await worker.stream('Start working on the goal', {
 })
 ```
 
-The `goal` config auto-registers the state-signal projection, so the model always sees the current objective as `<current-objective>` in its context without extra setup.
+La configuration `goal` enregistre automatiquement la projection de signal d’état ; le modèle voit donc toujours l’objectif actuel sous la forme `<current-objective>` dans son contexte, sans configuration supplémentaire.
 
-## How the goal step works
+## Fonctionnement de l’étape de goal
 
-A goal step runs inside the agentic execution loop, right after `isTaskComplete`. On a real candidate answer it scores the conversation against the objective and gates the loop:
+Une étape de goal s’exécute dans la boucle d’exécution agentique, juste après `isTaskComplete`. Sur une véritable réponse candidate, elle évalue la conversation par rapport à l’objectif et contrôle la boucle :
 
-- **Not satisfied, budget remaining** → the loop continues. Per-evaluation feedback is injected so the agent iterates.
-- **Satisfied** → the loop stops and the objective is marked `done`.
-- **Budget exhausted** (`runsUsed >= maxRuns`) → the loop stops and the objective is marked `paused`. Raise `maxRuns`, then resume the objective to continue.
+- **Non atteint, budget restant** → la boucle continue. Un retour par évaluation est injecté afin que l’agent itère.
+- **Atteint** → la boucle s’arrête et l’objectif est marqué `done`.
+- **Budget épuisé** (`runsUsed >= maxRuns`) → la boucle s’arrête et l’objectif est marqué `paused`. Augmentez `maxRuns`, puis reprenez l’objectif pour continuer.
 
-The step is a no-op for background-task, mid-tool-loop, and working-memory-only iterations, the same gating as `isTaskComplete`.
+Cette étape est sans effet pour les itérations de tâche d’arrière-plan, au milieu d’une boucle de tool et limitées à la mémoire de travail, avec le même contrôle que `isTaskComplete`.
 
-**The judge model is the activation switch.** If no judge resolves (neither the per-objective override nor the agent's `goal.judge`), the goal step performs no scoring or budget consumption and emits no `goal` chunk.
+**Le modèle juge est le commutateur d’activation.** Si aucun juge n’est résolu, ni par remplacement propre à l’objectif ni par `goal.judge` de l’agent, l’étape de goal n’effectue aucune évaluation, ne consomme aucun budget et n’émet aucun chunk `goal`.
 
-Effective settings resolve as per-objective record value → agent `goal` config → built-in default (`maxRuns` `50`, a default judge prompt).
+Les paramètres effectifs sont résolus selon cet ordre : valeur de l’enregistrement propre à l’objectif → configuration `goal` de l’agent → valeur intégrée par défaut, soit `maxRuns` `50` et un prompt de juge par défaut.
 
-By default the step uses a built-in LLM-as-judge scorer that returns `1` when the objective is achieved and `0` otherwise. Supply your own scorer with `goal.scorer` to customize judging.
+Par défaut, l’étape utilise un scorer intégré de type LLM-as-judge, qui renvoie `1` lorsque l’objectif est atteint et `0` dans le cas contraire. Fournissez votre propre scorer avec `goal.scorer` pour personnaliser le jugement.
 
 ```typescript title="src/mastra/agents/worker.ts"
 const worker = new Agent({
@@ -99,11 +99,11 @@ const worker = new Agent({
 })
 ```
 
-Each evaluation emits a typed `goal` stream chunk (`GoalEvaluationPayload`: `objective`, `iteration`, `maxRuns`, `passed`, `status`, `results`, `reason`, `duration`, `timedOut`, `maxRunsReached`, `suppressFeedback`) so a UI can show goal progress mid-run.
+Chaque évaluation émet un chunk de stream `goal` typé (`GoalEvaluationPayload` : `objective`, `iteration`, `maxRuns`, `passed`, `status`, `results`, `reason`, `duration`, `timedOut`, `maxRunsReached`, `suppressFeedback`) afin qu’une interface puisse afficher la progression du goal en cours d’exécution.
 
-## Managing the objective
+## Gérer l’objectif
 
-Control the objective for a thread with `Agent` methods. All of them no-op when the run isn't memory-backed (they require storage and a `threadId`):
+Contrôlez l’objectif d’un thread avec les méthodes d’`Agent`. Elles sont toutes sans effet lorsque l’exécution n’est pas soutenue par la mémoire, car elles exigent un stockage et un `threadId` :
 
 ```typescript title="src/mastra/objective.ts"
 // Read the current objective record.
@@ -117,12 +117,12 @@ await worker.updateObjectiveOptions({ threadId, maxRuns: 100 })
 await worker.clearObjective({ threadId })
 ```
 
-Objective records include an optional `activeDurationMs` value for user interfaces that display active pursuit time. Mastra advances this value while an agent runs toward an active objective and checkpoints it when the run ends or waits for tool approval. Missing values represent zero, and the duration measures agent execution rather than the goal's wall-clock age.
+Les enregistrements d’objectif incluent une valeur facultative `activeDurationMs` destinée aux interfaces qui affichent le temps de poursuite active. Mastra fait progresser cette valeur pendant qu’un agent s’exécute vers un objectif actif et la sauvegarde lorsque l’exécution se termine ou attend l’approbation d’un tool. Les valeurs manquantes représentent zéro, et la durée mesure l’exécution de l’agent plutôt que l’âge réel du goal.
 
-Per-objective values written by `setObjective` / `updateObjectiveOptions` take precedence over the agent's `goal` config, and that precedence is remembered in thread state. See the [`GoalEvaluationPayload` in the ChunkType reference](/reference/streaming/ChunkType) for the full goal chunk shape.
+Les valeurs propres à l’objectif écrites par `setObjective` / `updateObjectiveOptions` ont priorité sur la configuration `goal` de l’agent, et cette priorité est mémorisée dans l’état du thread. Consultez [`GoalEvaluationPayload` dans la référence ChunkType](/reference/streaming/ChunkType) pour la forme complète du chunk de goal.
 
 ## Related
 
-- [Supervisor agents](/docs/capabilities/subagents): `isTaskComplete` and the rubric scorer
-- [Signal providers](/docs/long-running-agents/signal-providers): how the objective is projected into context
-- [Memory storage](/docs/storage/overview): the storage backend goals require
+- [Agents superviseurs](/docs/capabilities/subagents) : `isTaskComplete` et le rubric scorer
+- [Providers de signal](/docs/long-running-agents/signal-providers) : comment l’objectif est projeté dans le contexte
+- [Stockage de mémoire](/docs/storage/overview) : le backend de stockage requis par Goals
