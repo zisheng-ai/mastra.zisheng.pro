@@ -1,53 +1,53 @@
 ---
-title: "Deploy Mastra to Kubernetes | Deployment"
-description: "Deploy a Mastra application across multiple pods on Kubernetes with shared pub/sub and storage."
+title: "Déployer Mastra sur Kubernetes | Déploiement"
+description: "Déployez une application Mastra sur plusieurs pods Kubernetes avec un système pub/sub et un stockage partagés."
 ---
 
 import Steps from "@site/src/components/Steps";
 import StepItem from "@site/src/components/StepItem";
 
-# Deploy Mastra to Kubernetes
+# Déployer Mastra sur Kubernetes
 
-Run a Mastra application across multiple pods on [Kubernetes](https://kubernetes.io/), so it scales horizontally behind a load balancer. Because each pod is a separate process, the pods must share a pub/sub backend and a database, otherwise work started on one pod is invisible to the others.
+Exécutez une application Mastra sur plusieurs pods [Kubernetes](https://kubernetes.io/) afin qu'elle puisse évoluer horizontalement derrière un équilibreur de charge. Chaque pod constituant un processus distinct, les pods doivent partager un service pub/sub et une base de données ; sans cela, les opérations démarrées sur un pod restent invisibles aux autres.
 
 :::info
-This guide covers deploying the [Mastra server](/docs/server/mastra-server). If you're using a [server adapter](/docs/server/server-adapters) or [web framework](/docs/deployment/web-framework), deploy the way you normally would for that framework.
+Ce guide explique comment déployer le [serveur Mastra](/docs/server/mastra-server). Si vous utilisez un [adaptateur de serveur](/docs/server/server-adapters) ou un [framework web](/docs/deployment/web-framework), suivez votre procédure habituelle de déploiement pour celui-ci.
 :::
 
 :::warning
-Multi-pod support relies on [durable agents](/docs/long-running-agents/durable-agents), which are currently in **beta**. APIs may change in minor versions. Read [Known limitations](#known-limitations) before you rely on this in production.
+La prise en charge de plusieurs pods repose sur les [agents durables](/docs/long-running-agents/durable-agents), actuellement en **bêta**. Les API peuvent évoluer dans les versions mineures. Consultez les [limitations connues](#known-limitations) avant d'utiliser cette configuration en production.
 :::
 
-## Before you begin
+## Avant de commencer {/* #before-you-begin */}
 
-You'll need:
+Vous aurez besoin des éléments suivants :
 
-- A [Mastra application](/guides/getting-started/quickstart)
-- A [Kubernetes](https://kubernetes.io/docs/setup/) cluster and [`kubectl`](https://kubernetes.io/docs/tasks/tools/)
-- A container registry your cluster can pull from
-- A shared [Redis](https://redis.io/) instance, reachable from every pod
-- A shared [PostgreSQL](https://www.postgresql.org/) database, reachable from every pod
+- Une [application Mastra](/guides/getting-started/quickstart)
+- Un cluster [Kubernetes](https://kubernetes.io/docs/setup/) et [`kubectl`](https://kubernetes.io/docs/tasks/tools/)
+- Un registre de conteneurs auquel votre cluster peut accéder pour télécharger des images
+- Une instance [Redis](https://redis.io/) partagée, accessible depuis chaque pod
+- Une base de données [PostgreSQL](https://www.postgresql.org/) partagée, accessible depuis chaque pod
 
-## Why multiple pods need shared infrastructure
+## Pourquoi plusieurs pods nécessitent une infrastructure partagée {/* #why-multiple-pods-need-shared-infrastructure */}
 
-A single pod keeps run state in its own memory. With one pod that's fine, because every request reaches the same process. Across pods it breaks: a browser might stream from pod A while the user's next request is routed to pod B, and pod B has no record of the run on pod A.
+Un pod unique conserve l'état d'exécution dans sa propre mémoire. Cela fonctionne avec un seul pod, car chaque requête atteint le même processus. Avec plusieurs pods, ce fonctionnement n'est plus assuré : un navigateur peut recevoir un flux depuis le pod A, tandis que la requête suivante de l'utilisateur est acheminée vers le pod B, qui ne possède aucune trace de l'exécution sur le pod A.
 
-Redis and Postgres close that gap:
+Redis et Postgres assurent la continuité entre les pods :
 
-- **Pub/sub** carries events between pods. When an event is published on one pod, the others receive it. Mastra uses [`RedisStreamsPubSub`](/reference/pubsub/redis-streams), which also provides the per-thread leasing that keeps a single pod as the owner of a conversation at a time. See [PubSub](/docs/server/pubsub).
-- **Storage** persists run state. [Durable agents](/docs/long-running-agents/durable-agents) save each run as a workflow snapshot, so any pod can resume a run from the database after a restart or when a request is routed elsewhere.
+- Le système **pub/sub** transmet les événements entre les pods. Lorsqu'un événement est publié sur un pod, les autres le reçoivent. Mastra utilise [`RedisStreamsPubSub`](/reference/pubsub/redis-streams), qui fournit également un mécanisme de bail par fil de discussion garantissant qu'un seul pod est propriétaire d'une conversation à la fois. Consultez la page [PubSub](/docs/server/pubsub).
+- Le **stockage** conserve l'état d'exécution. Les [agents durables](/docs/long-running-agents/durable-agents) enregistrent chaque exécution sous forme d'instantané de Workflow, ce qui permet à n'importe quel pod de reprendre une exécution depuis la base de données après un redémarrage ou lorsqu'une requête est acheminée ailleurs.
 
-## Configure shared infrastructure
+## Configurer l'infrastructure partagée {/* #configure-shared-infrastructure */}
 
-Point the `Mastra` instance at Redis and Postgres. Read the connection details from environment variables so the same image runs in every pod.
+Configurez l'instance `Mastra` pour utiliser Redis et Postgres. Lisez les informations de connexion depuis des variables d'environnement afin que la même image puisse s'exécuter dans chaque pod.
 
-Install the backends:
+Installez les services requis :
 
 ```bash npm2yarn
 npm install @mastra/redis-streams @mastra/pg @mastra/redis ioredis
 ```
 
-Configure pub/sub, storage, and a shared cache on the `Mastra` instance:
+Configurez le système pub/sub, le stockage et un cache partagé sur l'instance `Mastra` :
 
 ```typescript title="src/mastra/index.ts"
 import { Mastra } from '@mastra/core'
@@ -73,13 +73,13 @@ export const mastra = new Mastra({
 })
 ```
 
-The `cache` is what makes resumable streams work across pods. A reconnecting client replays missed events from this cache, so it must be shared. The default in-memory cache only serves replays within one process.
+Le `cache` permet aux flux pouvant être repris de fonctionner entre plusieurs pods. Lorsqu'un client se reconnecte, il récupère dans ce cache les événements manqués ; celui-ci doit donc être partagé. Le cache en mémoire utilisé par défaut ne permet de récupérer les événements qu'au sein d'un même processus.
 
-## Use durable agents
+## Utiliser des agents durables {/* #use-durable-agents */}
 
-A plain [`Agent`](/docs/agents/overview) keeps its stream and approval state in one pod's memory, so those don't survive a request landing on another pod. A [durable agent](/docs/long-running-agents/durable-agents) runs the agentic loop inside a workflow and persists its state, so any pod can observe or resume the same run.
+Un [`Agent`](/docs/agents/overview) standard conserve son flux et son état d'approbation dans la mémoire d'un seul pod. Ces données ne sont donc plus disponibles si une requête arrive sur un autre pod. Un [agent durable](/docs/long-running-agents/durable-agents) exécute la boucle agentique au sein d'un Workflow et conserve son état, ce qui permet à n'importe quel pod d'observer ou de reprendre la même exécution.
 
-Wrap the agent with `createDurableAgent()`:
+Encapsulez l'agent avec `createDurableAgent()` :
 
 ```typescript title="src/mastra/agents/assistant.ts"
 import { Agent } from '@mastra/core/agent'
@@ -95,17 +95,17 @@ const agent = new Agent({
 export const durableAssistant = createDurableAgent({ agent })
 ```
 
-Register the durable agent with the `Mastra` instance above. Its run state now lives in Postgres and its events flow through Redis, so the run is reachable from every pod.
+Enregistrez l'agent durable auprès de l'instance `Mastra` ci-dessus. Son état d'exécution est désormais stocké dans Postgres et ses événements transitent par Redis ; l'exécution est donc accessible depuis chaque pod.
 
-## Deploy
+## Déployer {/* #deploy */}
 
 <Steps>
   <StepItem>
-    Build and containerize the Mastra server, then push the image to your registry. Follow the [Mastra server](/docs/server/mastra-server) guide for the build, and ensure the server reads `process.env.PORT` and listens on `0.0.0.0`.
+    Compilez et conteneurisez le serveur Mastra, puis envoyez l'image vers votre registre. Suivez le guide du [serveur Mastra](/docs/server/mastra-server) pour la compilation et vérifiez que le serveur lit `process.env.PORT` et écoute sur `0.0.0.0`.
   </StepItem>
 
   <StepItem>
-    Store the shared connection strings as a Secret:
+    Stockez les chaînes de connexion partagées dans un Secret :
 
     ```bash
     kubectl create secret generic mastra-secrets \
@@ -115,7 +115,7 @@ Register the durable agent with the `Mastra` instance above. Its run state now l
   </StepItem>
 
   <StepItem>
-    Apply a Deployment that runs the image, reading the shared Secret. Start with one replica so the first pod creates the database schema on its own, then scale up in the next step:
+    Appliquez un Deployment qui exécute l'image en lisant le Secret partagé. Commencez avec un seul réplicat afin que le premier pod crée lui-même le schéma de la base de données, puis augmentez le nombre de réplicats à l'étape suivante :
 
     ```yaml title="deployment.yaml"
     apiVersion: apps/v1
@@ -155,13 +155,13 @@ Register the durable agent with the `Mastra` instance above. Its run state now l
                   memory: 512Mi
     ```
 
-    The `resources.requests.cpu` value is required for the HorizontalPodAutoscaler below. Kubernetes calculates CPU utilization as usage divided by the requested amount, so without a CPU request the autoscaler can't compute a target and won't scale.
+    La valeur `resources.requests.cpu` est requise pour le HorizontalPodAutoscaler ci-dessous. Kubernetes calcule l'utilisation du processeur en divisant la consommation par la quantité demandée. Sans demande de ressources CPU, le mécanisme de mise à l'échelle automatique ne peut pas calculer de cible et n'ajuste pas le nombre de réplicats.
 
     ```bash
     kubectl apply -f deployment.yaml
     ```
 
-    Once the first pod is ready, scale up:
+    Une fois le premier pod prêt, augmentez le nombre de réplicats :
 
     ```bash
     kubectl wait --for=condition=available deployment/mastra
@@ -169,12 +169,12 @@ Register the durable agent with the `Mastra` instance above. Its run state now l
     ```
 
     :::note
-    Every replica runs the same image and connects to the same Redis and Postgres. That shared infrastructure, not the pod count, is what lets runs cross pods.
+    Chaque réplicat exécute la même image et se connecte aux mêmes instances Redis et Postgres. C'est cette infrastructure partagée, et non le nombre de pods, qui permet aux exécutions de passer d'un pod à l'autre.
     :::
   </StepItem>
 
   <StepItem>
-    Expose the Deployment with a Service:
+    Exposez le Deployment à l'aide d'un Service :
 
     ```yaml title="service.yaml"
     apiVersion: v1
@@ -195,7 +195,7 @@ Register the durable agent with the `Mastra` instance above. Its run state now l
   </StepItem>
 
   <StepItem>
-    Scale the replicas automatically with a HorizontalPodAutoscaler:
+    Ajustez automatiquement le nombre de réplicats à l'aide d'un HorizontalPodAutoscaler :
 
     ```yaml title="hpa.yaml"
     apiVersion: autoscaling/v2
@@ -223,40 +223,40 @@ Register the durable agent with the `Mastra` instance above. Its run state now l
     ```
 
     :::note
-    CPU-based autoscaling needs the [metrics-server](https://github.com/kubernetes-sigs/metrics-server) running in the cluster. Managed clusters like GKE, EKS, and AKS include it. Local clusters like kind and minikube don't, so enable it there first (for example, `minikube addons enable metrics-server`).
+    La mise à l'échelle automatique fondée sur l'utilisation du processeur nécessite que le [metrics-server](https://github.com/kubernetes-sigs/metrics-server) s'exécute dans le cluster. Les clusters gérés tels que GKE, EKS et AKS l'incluent. Ce n'est pas le cas des clusters locaux comme kind et minikube : vous devez donc d'abord l'y activer (par exemple avec `minikube addons enable metrics-server`).
     :::
   </StepItem>
 
   <StepItem>
-    Verify the pods are running:
+    Vérifiez que les pods sont en cours d'exécution :
 
     ```bash
     kubectl get pods -l app=mastra
     ```
 
-    Forward the service in one terminal. This command stays in the foreground:
+    Redirigez le port du service dans un terminal. Cette commande reste exécutée au premier plan :
 
     ```bash
     kubectl port-forward service/mastra 8080:80
     ```
 
-    In a second terminal, call the API:
+    Dans un second terminal, appelez l'API :
 
     ```bash
     curl http://localhost:8080/api/agents
     ```
 
-    A JSON list of your agents means the deployment is serving.
+    Si vous obtenez une liste JSON de vos agents, le déploiement traite correctement les requêtes.
 
     :::warning
-    Set up [authentication](/docs/server/auth) before exposing your endpoints publicly.
+    Configurez l'[authentification](/docs/server/auth) avant d'exposer publiquement vos points de terminaison.
     :::
   </StepItem>
 </Steps>
 
-## Streaming and reconnection
+## Diffusion en continu et reconnexion {/* #streaming-and-reconnection */}
 
-A durable agent publishes stream chunks to a per-run topic through the shared pub/sub. A client that disconnects reconnects by calling `observe()` with the run's ID, and replays the chunks it missed from the shared cache:
+Un agent durable publie les fragments du flux dans un canal propre à chaque exécution par l'intermédiaire du système pub/sub partagé. Après une déconnexion, un client se reconnecte en appelant `observe()` avec l'ID de l'exécution, puis récupère dans le cache partagé les fragments qu'il a manqués :
 
 ```typescript title="src/server/reconnect.ts"
 const { output, cleanup } = await durableAssistant.observe(runId)
@@ -268,15 +268,15 @@ for await (const chunk of output.fullStream) {
 cleanup()
 ```
 
-Because the run state is in Postgres and the events are in Redis, the reconnecting request can be served by any pod, not only the one that started the run. See [Resumable streams](/docs/long-running-agents/durable-agents#resumable-streams).
+Comme l'état d'exécution se trouve dans Postgres et les événements dans Redis, la requête de reconnexion peut être traitée par n'importe quel pod, et pas seulement par celui qui a démarré l'exécution. Consultez la section [Flux pouvant être repris](/docs/long-running-agents/durable-agents#resumable-streams).
 
-Multiple clients can observe the same run at once. Each `observe()` call receives the full stream, so a user watching from two devices, or two people following the same run, stay in sync.
+Plusieurs clients peuvent observer simultanément la même exécution. Chaque appel à `observe()` reçoit l'intégralité du flux : un utilisateur qui le consulte depuis deux appareils, ou deux personnes qui suivent la même exécution, restent donc synchronisés.
 
-## Tool approval across pods
+## Approbation des Tools entre les pods {/* #tool-approval-across-pods */}
 
-A durable agent pauses on a tool call until a human approves it. Because the suspended run is saved to Postgres, the approval can arrive on any pod, not only the one that started the run.
+Un agent durable se met en pause lors de l'appel d'un Tool jusqu'à ce qu'une personne l'approuve. L'exécution suspendue étant enregistrée dans Postgres, l'approbation peut arriver sur n'importe quel pod, et pas seulement sur celui qui a démarré l'exécution.
 
-Start a run that requires approval:
+Démarrez une exécution qui nécessite une approbation :
 
 ```typescript title="src/server/approval.ts"
 const { runId } = await durableAssistant.stream('Delete the archived records', {
@@ -285,26 +285,26 @@ const { runId } = await durableAssistant.stream('Delete the archived records', {
 })
 ```
 
-The run suspends before the tool runs. Approve it later, from any pod:
+L'exécution est suspendue avant le lancement du Tool. Approuvez-la ensuite depuis n'importe quel pod :
 
 ```typescript
 await durableAssistant.resume(runId, { approved: true })
 ```
 
-The pod that handles the approval loads the suspended run from Postgres. It then runs the approved tool and publishes the result over the shared pub/sub, so a client observing the run receives the continuation. See [Tool approval](/docs/long-running-agents/durable-agents#tool-approval).
+Le pod qui traite l'approbation charge l'exécution suspendue depuis Postgres. Il exécute ensuite le Tool approuvé et publie le résultat par l'intermédiaire du système pub/sub partagé, afin qu'un client qui observe l'exécution en reçoive la suite. Consultez la section [Approbation des Tools](/docs/long-running-agents/durable-agents#tool-approval).
 
-## Known limitations
+## Limitations connues {/* #known-limitations */}
 
-- The default in-process setup keeps run state in one pod's memory and doesn't share it across pods. Use [durable agents](/docs/long-running-agents/durable-agents) with shared Redis and Postgres so streaming, approvals, and reconnection work across pods.
-- Cross-pod streaming, approvals, and reconnection require the durable-agent path. A plain agent keeps run state in memory and doesn't resume on another pod.
-- When multiple pods start at once against an uninitialized database, they can race to create the schema and a pod may fail to start. Start with one replica so the schema is created once, then scale up.
-- For a stricter setup, initialize the schema outside the app (for example, a one-off Kubernetes Job) and set `disableInit: true` on the `PostgresStore` in every pod.
+- La configuration en processus utilisée par défaut conserve l'état d'exécution dans la mémoire d'un seul pod et ne le partage pas entre les pods. Utilisez des [agents durables](/docs/long-running-agents/durable-agents) avec des instances Redis et Postgres partagées afin que la diffusion en continu, les approbations et la reconnexion fonctionnent entre les pods.
+- La diffusion en continu, les approbations et la reconnexion entre les pods nécessitent le recours aux agents durables. Un agent standard conserve l'état d'exécution en mémoire et ne peut pas reprendre sur un autre pod.
+- Lorsque plusieurs pods démarrent simultanément avec une base de données non initialisée, ils peuvent tenter de créer le schéma en même temps et l'un d'eux risque de ne pas démarrer. Commencez avec un seul réplicat afin que le schéma ne soit créé qu'une fois, puis augmentez le nombre de réplicats.
+- Pour une configuration plus stricte, initialisez le schéma en dehors de l'application (par exemple à l'aide d'un Job Kubernetes ponctuel) et définissez `disableInit: true` sur le `PostgresStore` de chaque pod.
 
-## Related
+## Pages connexes {/* #related */}
 
 - [PubSub](/docs/server/pubsub)
-- [Durable agents](/docs/long-running-agents/durable-agents)
-- [Workers](/docs/deployment/workers): Split background processing into separate containers on Kubernetes
-- [Worker deployment guide](/guides/deployment/mastra-workers): Full Kubernetes manifests for orchestration, scheduler, and background task workers
-- [Mastra server](/docs/server/mastra-server)
+- [Agents durables](/docs/long-running-agents/durable-agents)
+- [Workers](/docs/deployment/workers) : répartissez le traitement en arrière-plan dans des conteneurs distincts sur Kubernetes
+- [Guide de déploiement des Workers](/guides/deployment/mastra-workers) : manifestes Kubernetes complets pour l'orchestration, le planificateur et les Workers de tâches en arrière-plan
+- [Serveur Mastra](/docs/server/mastra-server)
 - [Présentation du déploiement](/docs/deployment/overview)

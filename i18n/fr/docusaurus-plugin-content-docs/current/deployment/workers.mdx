@@ -1,6 +1,6 @@
 ---
-title: "Workers | Deployment"
-description: "Separate background processing from the API layer by running workflow execution, cron schedules, and background tasks in dedicated worker processes."
+title: "Workers | Déploiement"
+description: "Séparez le traitement en arrière-plan de la couche API en exécutant les Workflows, les planifications cron et les tâches d'arrière-plan dans des processus worker dédiés."
 packages:
   - "@mastra/core"
   - "@mastra/redis-streams"
@@ -16,56 +16,56 @@ import TabItem from '@theme/TabItem'
 
 :::experimental
 
-This feature is in beta. The API is stable enough for production use, but some details may change. See [known limitations](#known-limitations) for current gaps.
+Cette fonctionnalité est en version bêta. L'API est suffisamment stable pour une utilisation en production, mais certains détails peuvent encore évoluer. Consultez les [limitations connues](#known-limitations) pour connaître les lacunes actuelles.
 
 :::
 
-Workers handle background processing outside the request-response cycle. Workflow step execution, cron-based scheduling, and long-running tool calls all run in workers, keeping the API responsive.
+Les workers prennent en charge les traitements en arrière-plan en dehors du cycle requête-réponse. L'exécution des étapes de Workflow, la planification cron et les appels d'outils de longue durée s'exécutent tous dans des workers, ce qui préserve la réactivité de l'API.
 
-By default, workers run in the same process as the API. For production workloads, you can split them into separate processes or containers and scale each one independently.
+Par défaut, les workers s'exécutent dans le même processus que l'API. Pour les charges de production, vous pouvez les répartir dans des processus ou conteneurs distincts et dimensionner chacun indépendamment.
 
-## When to use workers
+## Quand utiliser des workers {/* #when-to-use-workers */}
 
-Workers matter when any of these apply:
+Les workers sont utiles dans les situations suivantes :
 
-- Workflow steps take more than a few seconds and shouldn't block API responses
-- You need event durability so in-flight work survives process restarts
-- Different parts of the system need to scale independently (e.g., more orchestration capacity without more API instances)
-- Background tool calls should run on dedicated compute
+- Les étapes de Workflow durent plus de quelques secondes et ne doivent pas bloquer les réponses de l'API
+- Vous avez besoin d'événements durables afin que le travail en cours survive aux redémarrages des processus
+- Différentes parties du système doivent pouvoir être dimensionnées indépendamment (par exemple, davantage de capacité d'orchestration sans multiplier les instances d'API)
+- Les appels d'outils en arrière-plan doivent s'exécuter sur des ressources de calcul dédiées
 
-If your application handles light traffic and workflows complete fast, the default in-process setup works fine. Skip the worker infrastructure until you need it.
+Si votre application reçoit peu de trafic et que les Workflows se terminent rapidement, la configuration en processus par défaut convient parfaitement. N'ajoutez l'infrastructure de workers que lorsque vous en avez besoin.
 
-## Worker types
+## Types de workers {/* #worker-types */}
 
-Mastra has three built-in worker types. Each handles a specific kind of background processing.
+Mastra fournit trois types de workers intégrés. Chacun gère un type précis de traitement en arrière-plan.
 
-### Orchestration worker
+### Worker d'orchestration {/* #orchestration-worker */}
 
-Subscribes to workflow events on the [PubSub](/docs/server/pubsub) bus and executes workflow steps. Every `workflow.start`, step transition, and lifecycle event flows through this worker.
+Il s'abonne aux événements de Workflow sur le bus [PubSub](/docs/server/pubsub) et exécute les étapes du Workflow. Chaque événement `workflow.start`, transition d'étape et événement de cycle de vie transite par ce worker.
 
-In a split deployment, the orchestration worker pulls events from a distributed PubSub backend and delegates step execution back to the API over HTTP. In-process, it runs steps directly.
+Dans un déploiement réparti, le worker d'orchestration extrait les événements d'un backend PubSub distribué et délègue l'exécution des étapes à l'API via HTTP. En mode intégré au processus, il exécute directement les étapes.
 
-The orchestration worker requires a PubSub backend that supports pull mode (e.g., [`RedisStreamsPubSub`](/reference/pubsub/redis-streams) or [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub)).
+Le worker d'orchestration nécessite un backend PubSub prenant en charge le mode pull (par exemple [`RedisStreamsPubSub`](/reference/pubsub/redis-streams) ou [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub)).
 
-### Scheduler worker
+### Worker de planification {/* #scheduler-worker */}
 
-Polls storage for due cron schedules and publishes `workflow.start` events. It's a producer only, meaning it creates work for the orchestration worker to pick up.
+Il interroge le stockage pour repérer les planifications cron arrivées à échéance et publie des événements `workflow.start`. Il agit uniquement comme producteur : il crée du travail que le worker d'orchestration récupère ensuite.
 
-The scheduler reads declarative `schedule` fields from your workflow definitions automatically. See [Scheduled workflows](/docs/workflows/scheduled-workflows) for how to declare schedules.
+Le planificateur lit automatiquement les champs déclaratifs `schedule` de vos définitions de Workflow. Consultez les [Workflows planifiés](/docs/workflows/scheduled-workflows) pour apprendre à déclarer des planifications.
 
-**Don't run more than one scheduler instance.** Multiple schedulers polling the same storage would fire duplicate events for the same schedule.
+**N'exécutez pas plus d'une instance du planificateur.** Plusieurs planificateurs interrogeant le même stockage déclencheraient des événements en double pour une même planification.
 
-### Background task worker
+### Worker de tâches d'arrière-plan {/* #background-task-worker */}
 
-Executes agent tool calls marked with `background: { enabled: true }`. When an agent invokes a background tool, the API dispatches the task to this worker instead of blocking the response stream.
+Il exécute les appels d'outils d'Agent marqués avec `background: { enabled: true }`. Lorsqu'un Agent invoque un outil d'arrière-plan, l'API transmet la tâche à ce worker au lieu de bloquer le flux de réponse.
 
-The background task worker manages concurrency limits, task lifecycle, and result delivery through the PubSub bus.
+Le worker de tâches d'arrière-plan gère les limites de concurrence, le cycle de vie des tâches et la livraison des résultats via le bus PubSub.
 
-## How workers run
+## Modes d'exécution des workers {/* #how-workers-run */}
 
-### In-process mode (default)
+### Mode intégré au processus (par défaut) {/* #in-process-mode-default */}
 
-With no configuration, Mastra creates and starts workers inside the API process. Events flow through an in-memory PubSub, and everything shares a single Node.js runtime.
+Sans configuration, Mastra crée et démarre les workers au sein du processus de l'API. Les événements transitent par un PubSub en mémoire et tous les composants partagent un même environnement d'exécution Node.js.
 
 ```typescript title="src/mastra/index.ts"
 import { Mastra } from '@mastra/core/mastra'
@@ -76,11 +76,11 @@ export const mastra = new Mastra({
 })
 ```
 
-This setup needs no external infrastructure beyond your storage adapter. It doesn't survive process crashes, and you can't scale individual components.
+Cette configuration ne nécessite aucune infrastructure externe au-delà de votre adaptateur de stockage. Elle ne résiste pas aux arrêts brutaux du processus et ne permet pas de dimensionner les composants séparément.
 
-### Split processes
+### Processus séparés {/* #split-processes */}
 
-To run workers in their own processes, configure a distributed [PubSub](/docs/server/pubsub) backend and use the `MASTRA_WORKERS` environment variable to control which workers start in each process.
+Pour exécuter les workers dans leurs propres processus, configurez un backend [PubSub](/docs/server/pubsub) distribué et utilisez la variable d'environnement `MASTRA_WORKERS` pour déterminer quels workers démarrent dans chaque processus.
 
 <Tabs>
   <TabItem value="redis" label="Redis Streams + PostgreSQL">
@@ -118,38 +118,38 @@ To run workers in their own processes, configure a distributed [PubSub](/docs/se
   </TabItem>
 </Tabs>
 
-Any [supported storage backend](/reference/workers/overview#supported-storage-backends) works. Swap the storage adapter for your preferred database.
+Tout [backend de stockage pris en charge](/reference/workers/overview#supported-storage-backends) convient. Remplacez l'adaptateur de stockage par celui de votre base de données préférée.
 
-Run the same build artifact in multiple containers, each with a different [`MASTRA_WORKERS`](/reference/workers/overview#mastra_workers) value to control which worker starts in each process.
+Exécutez le même artefact de build dans plusieurs conteneurs, chacun avec une valeur [`MASTRA_WORKERS`](/reference/workers/overview#mastra_workers) différente afin de contrôler le worker démarré dans chaque processus.
 
-Split deployments require a distributed PubSub backend ([`RedisStreamsPubSub`](/reference/pubsub/redis-streams) or [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub)), a shared [storage backend](/reference/workers/overview#supported-storage-backends), and network connectivity between the orchestration worker and the API.
+Les déploiements répartis nécessitent un backend PubSub distribué ([`RedisStreamsPubSub`](/reference/pubsub/redis-streams) ou [`GoogleCloudPubSub`](/reference/pubsub/google-cloud-pubsub)), un [backend de stockage](/reference/workers/overview#supported-storage-backends) partagé et une connectivité réseau entre le worker d'orchestration et l'API.
 
-The [worker deployment guide](/guides/deployment/mastra-workers) walks through this setup with Docker Compose and Kubernetes examples.
+Le [guide de déploiement des workers](/guides/deployment/mastra-workers) décrit cette configuration avec des exemples Docker Compose et Kubernetes.
 
-## Network architecture
+## Architecture réseau {/* #network-architecture */}
 
-Workers are internal infrastructure. They're not exposed to end users and don't need their own subdomain, public URL, or inbound HTTP route.
+Les workers font partie de l'infrastructure interne. Ils ne sont pas exposés aux utilisateurs finaux et n'ont besoin ni de leur propre sous-domaine, ni d'une URL publique, ni d'une route HTTP entrante.
 
-In a split deployment:
+Dans un déploiement réparti :
 
-- **The API server is the only public-facing process**: It serves all client HTTP requests, including REST endpoints, agent interactions, workflow triggers, and any custom routes.
-- **Workers connect outbound only**: They pull events from the distributed PubSub backend and read/write to the shared storage database. They don't accept inbound traffic from clients.
-- **The orchestration worker calls the API internally**: It sends step execution requests to the API over the container network using `MASTRA_STEP_EXECUTION_URL`. This is internal service-to-service communication, not a public endpoint.
+- **Le serveur d'API est le seul processus exposé publiquement** : il traite toutes les requêtes HTTP des clients, notamment les points de terminaison REST, les interactions avec les Agents, les déclenchements de Workflow et les routes personnalisées.
+- **Les workers établissent uniquement des connexions sortantes** : ils extraient les événements du backend PubSub distribué et lisent ou écrivent dans la base de données de stockage partagée. Ils n'acceptent aucun trafic entrant provenant des clients.
+- **Le worker d'orchestration appelle l'API en interne** : il envoie les requêtes d'exécution d'étape à l'API sur le réseau des conteneurs au moyen de `MASTRA_STEP_EXECUTION_URL`. Il s'agit d'une communication interne entre services, et non d'un point de terminaison public.
 
-All three worker types (orchestration, scheduler, background task) sit behind the API on a private network. They share access to the PubSub backend and storage database but never receive traffic directly from clients. If a worker-related feature needs an HTTP route (for example, token minting for a voice integration), that route runs on the API server, not on the worker process.
+Les trois types de workers (orchestration, planification et tâche d'arrière-plan) se trouvent derrière l'API sur un réseau privé. Ils partagent l'accès au backend PubSub et à la base de données de stockage, mais ne reçoivent jamais directement de trafic client. Si une fonctionnalité liée aux workers nécessite une route HTTP (par exemple pour émettre des jetons destinés à une intégration vocale), cette route s'exécute sur le serveur d'API, et non dans le processus du worker.
 
-## Known limitations
+## Limitations connues {/* #known-limitations */}
 
-- **No dead-letter queue**: Failed events are nacked and retried, but there's no DLQ for events that fail after all retries.
-- **No built-in health endpoint**: Workers don't expose an HTTP health check. Use container-level liveness probes or process monitoring.
-- **Scheduler is single-instance**: Running multiple scheduler processes causes duplicate schedule fires.
-- **Runs stuck in "running" after API crash**: If the API process crashes while executing a workflow step, the run remains in `running` status with no automatic retry. For [durable agents](/docs/long-running-agents/durable-agents), set `recovery.durableAgents` to `'auto'` in the Mastra config to automatically re-drive orphaned runs on server restart. See [Crash recovery](/docs/long-running-agents/durable-agents#crash-recovery) for details.
+- **Aucune file de lettres mortes** : les événements en échec reçoivent un accusé négatif et sont retentés, mais aucune DLQ ne recueille ceux qui échouent après toutes les tentatives.
+- **Aucun point de terminaison de santé intégré** : les workers n'exposent pas de contrôle de santé HTTP. Utilisez des sondes de vivacité au niveau des conteneurs ou une surveillance des processus.
+- **Le planificateur ne doit avoir qu'une instance** : l'exécution de plusieurs processus de planification déclenche les mêmes planifications en double.
+- **Exécutions bloquées à l'état « running » après un arrêt brutal de l'API** : si le processus de l'API s'interrompt pendant l'exécution d'une étape de Workflow, l'exécution reste à l'état `running` sans nouvelle tentative automatique. Pour les [Agents durables](/docs/long-running-agents/durable-agents), définissez `recovery.durableAgents` sur `'auto'` dans la configuration de Mastra afin de relancer automatiquement les exécutions orphelines au redémarrage du serveur. Consultez la [récupération après incident](/docs/long-running-agents/durable-agents#crash-recovery) pour plus de détails.
 
-## Related
+## Voir aussi {/* #related */}
 
-- [Worker deployment guide](/guides/deployment/mastra-workers): Docker Compose and Kubernetes examples
-- [Worker authentication](/docs/server/auth/workers): Secure worker-to-API communication
-- [Workers reference](/reference/workers/overview): Details about worker environment variables and types, with a list of supported storage backends
-- [CLI reference](/reference/cli/mastra#mastra-worker-build): `mastra worker build` and `mastra worker start`
-- [PubSub](/docs/server/pubsub): Event delivery backends
-- [Scheduled workflows](/docs/workflows/scheduled-workflows): Declare cron schedules on workflows
+- [Guide de déploiement des workers](/guides/deployment/mastra-workers) : exemples Docker Compose et Kubernetes
+- [Authentification des workers](/docs/server/auth/workers) : sécuriser les communications entre les workers et l'API
+- [Référence des workers](/reference/workers/overview) : détails sur les variables d'environnement et les types de workers, avec la liste des backends de stockage pris en charge
+- [Référence de la CLI](/reference/cli/mastra#mastra-worker-build) : `mastra worker build` et `mastra worker start`
+- [PubSub](/docs/server/pubsub) : backends de livraison des événements
+- [Workflows planifiés](/docs/workflows/scheduled-workflows) : déclarer des planifications cron sur les Workflows
