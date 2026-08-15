@@ -17,6 +17,7 @@ const roots = [
   'src/learn/content/ko',
 ]
 const audit = process.argv.includes('--audit')
+const broad = process.argv.includes('--broad')
 
 async function files(directory) {
   const result = []
@@ -33,7 +34,9 @@ function isResidual(value) {
   const words = text.match(/[A-Za-z][A-Za-z'’-]*/g) || []
   const latin = (text.match(/[A-Za-z]/g) || []).length
   const hangul = (text.match(/[가-힣]/g) || []).length
-  return words.length >= 8 && latin > Math.max(35, hangul * 1.5)
+  return broad
+    ? words.length >= 3 && latin > Math.max(12, hangul * 1.2)
+    : words.length >= 8 && latin > Math.max(35, hangul * 1.5)
 }
 
 const documents = []
